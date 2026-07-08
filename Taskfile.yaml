@@ -1,0 +1,101 @@
+version: "3"
+
+set: [errexit, nounset, pipefail]
+shopt: [globstar]
+
+# The .taskfiles/ segmentation is intentional, even where a namespace holds
+# only thin Dagger wrappers -- do not flatten it into this file.
+includes:
+  dagger: ./.taskfiles/dagger/Taskfile.yaml
+  dev: ./.taskfiles/dev/Taskfile.yaml
+  fmt: ./.taskfiles/fmt/Taskfile.yaml
+  gh: ./.taskfiles/gh/Taskfile.yaml
+  git: ./.taskfiles/git/Taskfile.yaml
+  go: ./.taskfiles/go/Taskfile.yaml
+  release: ./.taskfiles/release/Taskfile.yaml
+  security: ./.taskfiles/security/Taskfile.yaml
+
+tasks:
+  default:
+    cmd: task -l
+
+  format:
+    desc: Runs all format and generate targets
+    cmds:
+      - task: go:tidy
+      - task: go:generate
+      - task: go:format
+      - task: fmt:format
+
+  lint:
+    desc: Runs all lint targets
+    deps: [go:lint, go:tidy:check, fmt:lint]
+
+  test:
+    desc: Runs all test targets
+    deps: [go:test]
+
+  docs:
+    desc: Runs all docs targets
+    deps: [go:docs]
+
+  # check is the fast local gate: lint and test invoke their tools straight off
+  # the devbox PATH, so it needs no Dagger engine. check:ci adds the gates whose
+  # tools (Trivy, zizmor, renovate-config-validator, goreleaser) are not on the
+  # devbox PATH and so run through Dagger. check:all is the union -- the full set
+  # CI runs, mirrored by the validate.yaml matrix.
+  check:
+    desc: Runs the local checks using devbox
+    deps: [lint, test]
+
+  check:ci:
+    desc: Runs the Dagger-backed checks
+    deps: [security:scan, gh:lint, release:check]
+
+  check:all:
+    desc: Runs every check, local and Dagger-backed
+    deps: [check, check:ci]
+
+  scan:
+    desc: Scans source dependencies for vulnerabilities
+    cmds:
+      - task: security:scan
+
+  build:
+    desc: Builds binaries via Dagger
+    cmds:
+      - dagger call ci build --output=./dist
+
+  release:
+    desc: Runs full release via Dagger
+    requires:
+      vars: [GITHUB_TOKEN, TAG, REGISTRY_USERNAME, REGISTRY_PASSWORD]
+    cmds:
+      - >-
+        dagger call ci release
+        --github-token=env://GITHUB_TOKEN
+        --registry-username={{.REGISTRY_USERNAME}}
+        --registry-password=env://REGISTRY_PASSWORD
+        --tag={{.TAG}}
+        --output=./dist
+
+  pre-commit:
+    desc: Runs all pre-commit targets
+    cmds:
+      - task: format
+      - task: lint
+      - task: test
+
+  install:
+    desc: Runs all install targets
+    deps: [dev:install, git:hooks:install, install:tfc_archiver]
+
+  install:tfc_archiver:
+    desc: Builds and installs the tfc_archiver binary
+    cmds:
+      - go install ./cmd/tfc_archiver
+
+  clean:
+    desc: Removes build artifacts and caches
+    cmds:
+      - rm -rf dist/ .test/ .task/ .tmp/
