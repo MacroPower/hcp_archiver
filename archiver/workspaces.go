@@ -3,6 +3,7 @@ package archiver
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/hashicorp/go-tfe"
 	"golang.org/x/sync/errgroup"
@@ -89,7 +90,26 @@ func (a *Archiver) collectWorkspaces(
 
 	for _, ws := range workspaces {
 		g.Go(func() error {
-			return wsc.CollectWorkspace(gctx, projectNameFor(names, ws), ws)
+			err := wsc.CollectWorkspace(gctx, projectNameFor(names, ws), ws)
+			if err != nil && gctx.Err() == nil {
+				// Best-effort: a non-cancellation failure (e.g. a transient
+				// list error) for one workspace is logged and does not cancel
+				// the pool, so it never aborts the rest of the organization. A
+				// re-run re-walks the workspace and picks up what it missed.
+				a.logger.LogAttrs(gctx, slog.LevelError, "workspace_archive_error",
+					slog.String("org", orgName),
+					slog.String("workspace", ws.Name),
+					slog.String("error", err.Error()),
+				)
+
+				return nil
+			}
+
+			if err != nil {
+				return fmt.Errorf("collect workspace %q: %w", ws.Name, err)
+			}
+
+			return nil
 		})
 	}
 
