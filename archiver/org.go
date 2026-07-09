@@ -19,20 +19,20 @@ import (
 
 // resolveOrgs resolves the organizations to archive.
 //
-// When cfg names a single organization only that one is archived and list is
+// When cfg names one or more organizations only those are archived and list is
 // never called; otherwise it enumerates every organization the token can see.
 func (a *Archiver) resolveOrgs(ctx context.Context) ([]string, error) {
-	return resolveOrgs(ctx, a.cfg.Organization, func(ctx context.Context) ([]string, error) {
+	return resolveOrgs(ctx, a.cfg.Organizations, func(ctx context.Context) ([]string, error) {
 		return listOrgNames(ctx, a.client)
 	})
 }
 
-// resolveOrgs picks the single named organization, or defers to list when none
-// is named. Factoring the choice out of the client wiring keeps it testable
+// resolveOrgs picks the named organizations, or defers to list when none are
+// named. Factoring the choice out of the client wiring keeps it testable
 // without a network.
-func resolveOrgs(ctx context.Context, org string, list func(context.Context) ([]string, error)) ([]string, error) {
-	if org != "" {
-		return []string{org}, nil
+func resolveOrgs(ctx context.Context, orgs []string, list func(context.Context) ([]string, error)) ([]string, error) {
+	if len(orgs) > 0 {
+		return orgs, nil
 	}
 
 	return list(ctx)

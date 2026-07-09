@@ -54,27 +54,27 @@ func TestResolveOrgs(t *testing.T) {
 	errList := errors.New("list called")
 
 	tests := map[string]struct {
-		org       string
+		orgs      []string
 		listOrgs  []string
 		listErr   error
 		want      []string
 		wantErr   error
 		wantCalls int
 	}{
-		"single named org skips listing": {
-			org:       "acme",
+		"named orgs skip listing": {
+			orgs:      []string{"acme", "globex"},
 			listErr:   errList,
-			want:      []string{"acme"},
+			want:      []string{"acme", "globex"},
 			wantCalls: 0,
 		},
-		"empty org lists every visible org": {
-			org:       "",
+		"empty list enumerates every visible org": {
+			orgs:      nil,
 			listOrgs:  []string{"one", "two"},
 			want:      []string{"one", "two"},
 			wantCalls: 1,
 		},
 		"list error propagates": {
-			org:       "",
+			orgs:      nil,
 			listErr:   errList,
 			wantErr:   errList,
 			wantCalls: 1,
@@ -92,7 +92,7 @@ func TestResolveOrgs(t *testing.T) {
 				return tc.listOrgs, tc.listErr
 			}
 
-			got, err := archiver.ResolveOrgs(t.Context(), tc.org, list)
+			got, err := archiver.ResolveOrgs(t.Context(), tc.orgs, list)
 
 			assert.Equal(t, tc.wantCalls, calls)
 

@@ -55,14 +55,14 @@ type Config struct {
 	Token string
 	// Address is the HCP Terraform API address.
 	Address string
-	// Organization limits the run to a single organization; empty means every
-	// organization the token can see.
-	Organization string
 	// OutputDir is the archive root; pointing at an existing archive makes the
 	// run a resume rather than a fresh start.
 	OutputDir string
 	// ProgressMode selects how the run reports live progress.
 	ProgressMode ProgressMode
+	// Organizations limits the run to the named organizations; an empty list
+	// means every organization the token can see.
+	Organizations []string
 	// ProgressInterval is the cadence at which progress is reported.
 	ProgressInterval time.Duration
 	// WorkspaceConcurrency is the number of workspaces archived concurrently.
@@ -86,7 +86,7 @@ type Config struct {
 // The available options are:
 //   - [WithToken]
 //   - [WithAddress]
-//   - [WithOrganization]
+//   - [WithOrganizations]
 //   - [WithOutputDir]
 //   - [WithProgressMode]
 //   - [WithProgressInterval]
@@ -113,11 +113,11 @@ func WithAddress(address string) Option {
 	}
 }
 
-// WithOrganization limits the run to a single organization. It returns an
-// [Option].
-func WithOrganization(org string) Option {
+// WithOrganizations limits the run to the named organizations. An empty list
+// archives every organization the token can see. It returns an [Option].
+func WithOrganizations(orgs []string) Option {
 	return func(c *Config) {
-		c.Organization = org
+		c.Organizations = orgs
 	}
 }
 

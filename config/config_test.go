@@ -21,7 +21,7 @@ func TestNew_Defaults(t *testing.T) {
 
 	assert.Equal(t, "tok", cfg.Token)
 	assert.Equal(t, config.DefaultAddress, cfg.Address)
-	assert.Empty(t, cfg.Organization)
+	assert.Empty(t, cfg.Organizations)
 	assert.Equal(t, config.DefaultWorkspaceConcurrency, cfg.WorkspaceConcurrency)
 	assert.Equal(t, config.ProgressModeAuto, cfg.ProgressMode)
 	assert.Equal(t, config.DefaultProgressInterval, cfg.ProgressInterval)
@@ -39,7 +39,7 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 		config.WithToken("tok"),
 		config.WithOutputDir("/tmp/archive"),
 		config.WithAddress("https://tfe.example.com"),
-		config.WithOrganization("acme"),
+		config.WithOrganizations([]string{"acme"}),
 		config.WithWorkspaceConcurrency(8),
 		config.WithProgressMode(config.ProgressModeJSON),
 		config.WithProgressInterval(10*time.Second),
@@ -52,7 +52,7 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "https://tfe.example.com", cfg.Address)
-	assert.Equal(t, "acme", cfg.Organization)
+	assert.Equal(t, []string{"acme"}, cfg.Organizations)
 	assert.Equal(t, 8, cfg.WorkspaceConcurrency)
 	assert.Equal(t, config.ProgressModeJSON, cfg.ProgressMode)
 	assert.Equal(t, 10*time.Second, cfg.ProgressInterval)

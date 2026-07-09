@@ -71,7 +71,7 @@ func TestConfigFromArgs(t *testing.T) {
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
 				assert.Equal(t, "https://tfe.example.com", cfg.Address)
-				assert.Equal(t, "acme", cfg.Organization)
+				assert.Equal(t, []string{"acme"}, cfg.Organizations)
 				assert.Equal(t, 8, cfg.WorkspaceConcurrency)
 				assert.Equal(t, config.ProgressModeJSON, cfg.ProgressMode)
 				assert.Equal(t, 10*time.Second, cfg.ProgressInterval)
@@ -87,7 +87,7 @@ func TestConfigFromArgs(t *testing.T) {
 			args:  []string{"--output", "/tmp/a", "--org", "acme"},
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
-				assert.Equal(t, "acme", cfg.Organization)
+				assert.Equal(t, []string{"acme"}, cfg.Organizations)
 			},
 		},
 		"missing output": {

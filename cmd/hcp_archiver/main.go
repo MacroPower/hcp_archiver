@@ -103,6 +103,16 @@ func registerArchiveFlags(cmd *cobra.Command) *archiveFlags {
 	return af
 }
 
+// organizationsFromFlag maps the single --organization value onto the config's
+// organization list: an empty value selects every visible organization.
+func organizationsFromFlag(org string) []string {
+	if org == "" {
+		return nil
+	}
+
+	return []string{org}
+}
+
 // orgAliasNormalizer maps the --org alias onto the canonical --organization
 // flag name.
 func orgAliasNormalizer(_ *pflag.FlagSet, name string) pflag.NormalizedName {
@@ -124,7 +134,7 @@ func (af *archiveFlags) config() (*config.Config, error) {
 
 	return config.New(
 		config.WithAddress(af.address),
-		config.WithOrganization(af.organization),
+		config.WithOrganizations(organizationsFromFlag(af.organization)),
 		config.WithOutputDir(af.output),
 		config.WithProgressMode(mode),
 		config.WithProgressInterval(af.progressInterval),
