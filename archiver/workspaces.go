@@ -39,7 +39,19 @@ func (a *Archiver) collectProjects(
 			return l.Items, l.Pagination, nil
 		})
 	if err != nil {
-		return nil, fmt.Errorf("paginate projects: %w", err)
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("paginate projects: %w", ctx.Err())
+		}
+
+		// Best-effort: a non-cancellation list failure is logged and does not
+		// abort the organization, so the independent registry, stacks, and
+		// audit surfaces still run. A re-run retries the projects.
+		a.logger.LogAttrs(ctx, slog.LevelError, "project_list_error",
+			slog.String("org", orgName),
+			slog.String("error", err.Error()),
+		)
+
+		return map[string]string{}, nil
 	}
 
 	names := make(map[string]string, len(projects))
@@ -82,7 +94,19 @@ func (a *Archiver) collectWorkspaces(
 			return l.Items, l.Pagination, nil
 		})
 	if err != nil {
-		return fmt.Errorf("paginate workspaces: %w", err)
+		if ctx.Err() != nil {
+			return fmt.Errorf("paginate workspaces: %w", ctx.Err())
+		}
+
+		// Best-effort: a non-cancellation list failure is logged and does not
+		// abort the organization, so the remaining collectors still run. A
+		// re-run retries the workspaces.
+		a.logger.LogAttrs(ctx, slog.LevelError, "workspace_list_error",
+			slog.String("org", orgName),
+			slog.String("error", err.Error()),
+		)
+
+		return nil
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
