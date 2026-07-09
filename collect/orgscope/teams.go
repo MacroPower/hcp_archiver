@@ -81,6 +81,9 @@ func (c *Collector) collectTeamNotifications(ctx context.Context, teamID string)
 		) ([]*tfe.NotificationConfiguration, *tfe.Pagination, error) {
 			l, e := tc.NotificationConfigurations.List(ctx, teamID, &tfe.NotificationConfigurationListOptions{
 				ListOptions: o,
+				SubscribableChoice: &tfe.NotificationConfigurationSubscribableChoice{
+					Team: &tfe.Team{ID: teamID},
+				},
 			})
 			if e != nil {
 				return nil, nil, fmt.Errorf("list notification configs: %w", e)
