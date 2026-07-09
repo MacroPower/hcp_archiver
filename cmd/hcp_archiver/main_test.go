@@ -158,6 +158,22 @@ func TestConfigFromArgs(t *testing.T) {
 	}
 }
 
+func TestConfigFromArgs_ConfigFlagBeatsEnv(t *testing.T) {
+	t.Setenv(config.EnvToken, "secret")
+	t.Setenv(config.EnvTokenTFC, "")
+	t.Setenv(config.EnvTokenFallback, "")
+
+	// With both sources set, the --config flag wins over the environment.
+	flagCfg := writeConfigFile(t, "organizations:\n  - from-flag\n")
+	envCfg := writeConfigFile(t, "organizations:\n  - from-env\n")
+	t.Setenv(config.EnvConfigPath, envCfg)
+
+	cfg, err := main.ConfigFromArgs([]string{"--output", "/tmp/a", "--config", flagCfg})
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, []string{"from-flag"}, cfg.Organizations)
+}
+
 // writeConfigFile writes yaml to a temporary file and returns its path.
 func writeConfigFile(t *testing.T, yaml string) string {
 	t.Helper()
