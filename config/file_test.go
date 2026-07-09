@@ -39,6 +39,30 @@ func TestLoadFile(t *testing.T) {
 				assert.Empty(t, file.Organizations)
 			},
 		},
+		"comment-only document keeps defaults": {
+			yaml: "# yaml-language-server: $schema=./config.schema.json\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.Equal(t, config.DefaultAddress, file.Address)
+				assert.Equal(t, config.DefaultWorkspaceConcurrency, file.Concurrency)
+				assert.Empty(t, file.Organizations)
+			},
+		},
+		"explicit null document keeps defaults": {
+			yaml: "null\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.Equal(t, config.DefaultAddress, file.Address)
+				assert.Empty(t, file.Organizations)
+			},
+		},
+		"content alongside a comment document is not a second document": {
+			yaml: "organizations:\n  - acme\n---\n# trailing comment\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.Equal(t, []string{"acme"}, file.Organizations)
+			},
+		},
 		"partial document defaults the rest": {
 			yaml: "organizations:\n  - acme\n",
 			want: func(t *testing.T, file *config.File) {

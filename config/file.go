@@ -109,10 +109,26 @@ func LoadFile(path string) (*File, error) {
 	file := DefaultFile()
 
 	count := 0
+
 	for _, doc := range decoder.Documents() {
-		// An empty document (blank file or comments only, such as a lone schema
-		// directive) has no body and leaves the defaults in place.
+		// A nil body is a truly empty document; decoding one panics, so guard it.
 		if doc.Document().Body == nil {
+			continue
+		}
+
+		// A document that carries no value (blank, comments only such as a lone
+		// schema directive, or an explicit null) decodes to nil and leaves the
+		// defaults in place. Such a document has a non-nil null or comment body
+		// under go-yaml, so probe the decoded value rather than the node type.
+		var probe any
+
+		err = doc.Decode(&probe)
+		if err != nil {
+			//nolint:wrapcheck // WrapError returns a source-annotated niceyaml.Error.
+			return nil, source.WrapError(err)
+		}
+
+		if probe == nil {
 			continue
 		}
 
