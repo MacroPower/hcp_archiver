@@ -2,6 +2,8 @@ package main_test
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -19,8 +21,8 @@ func TestNewRootCmd(t *testing.T) {
 	require.NotNil(t, cmd)
 
 	assert.True(t, cmd.Runnable())
+	assert.NotNil(t, cmd.Flags().Lookup("config"))
 	assert.NotNil(t, cmd.Flags().Lookup("output"))
-	assert.NotNil(t, cmd.Flags().Lookup("organization"))
 	assert.NotNil(t, cmd.Flags().Lookup("progress"))
 
 	var found bool
@@ -35,11 +37,18 @@ func TestNewRootCmd(t *testing.T) {
 }
 
 func TestConfigFromArgs(t *testing.T) {
+	fullConfig := "address: https://tfe.example.com\n" +
+		"organizations:\n  - acme\n  - globex\n" +
+		"concurrency: 8\n" +
+		"scope:\n  stacks: true\n  hyok: true\n  registryDetail: true\n  auditTrail: true\n"
+
 	tcs := map[string]struct {
-		want  func(*testing.T, *config.Config)
-		token string
-		args  []string
-		err   error
+		want       func(*testing.T, *config.Config)
+		token      string
+		configYAML string
+		args       []string
+		configEnv  bool
+		err        error
 	}{
 		"defaults with output and token": {
 			token: "secret",
@@ -49,45 +58,51 @@ func TestConfigFromArgs(t *testing.T) {
 				assert.Equal(t, "/tmp/archive", cfg.OutputDir)
 				assert.Equal(t, "secret", cfg.Token)
 				assert.Equal(t, config.DefaultAddress, cfg.Address)
+				assert.Empty(t, cfg.Organizations)
 				assert.Equal(t, config.DefaultWorkspaceConcurrency, cfg.WorkspaceConcurrency)
 				assert.Equal(t, config.ProgressModeAuto, cfg.ProgressMode)
+				assert.False(t, cfg.Stacks)
 			},
 		},
-		"all flags set": {
+		"per-run flags": {
 			token: "secret",
 			args: []string{
 				"--output", "/tmp/a",
-				"--address", "https://tfe.example.com",
-				"--organization", "acme",
-				"--concurrency", "8",
 				"--progress", "json",
 				"--progress-interval", "10s",
 				"--recheck-absent",
-				"--stacks",
-				"--hyok",
-				"--registry-detail",
-				"--audit-trail",
 			},
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
-				assert.Equal(t, "https://tfe.example.com", cfg.Address)
-				assert.Equal(t, []string{"acme"}, cfg.Organizations)
-				assert.Equal(t, 8, cfg.WorkspaceConcurrency)
 				assert.Equal(t, config.ProgressModeJSON, cfg.ProgressMode)
 				assert.Equal(t, 10*time.Second, cfg.ProgressInterval)
 				assert.True(t, cfg.RecheckAbsent)
+			},
+		},
+		"config file via flag drives archive settings": {
+			token:      "secret",
+			args:       []string{"--output", "/tmp/a"},
+			configYAML: fullConfig,
+			want: func(t *testing.T, cfg *config.Config) {
+				t.Helper()
+				assert.Equal(t, "https://tfe.example.com", cfg.Address)
+				assert.Equal(t, []string{"acme", "globex"}, cfg.Organizations)
+				assert.Equal(t, 8, cfg.WorkspaceConcurrency)
 				assert.True(t, cfg.Stacks)
 				assert.True(t, cfg.HYOK)
 				assert.True(t, cfg.RegistryDetail)
 				assert.True(t, cfg.AuditTrail)
 			},
 		},
-		"org alias maps to organization": {
-			token: "secret",
-			args:  []string{"--output", "/tmp/a", "--org", "acme"},
+		"config file via environment": {
+			token:      "secret",
+			args:       []string{"--output", "/tmp/a"},
+			configYAML: fullConfig,
+			configEnv:  true,
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
-				assert.Equal(t, []string{"acme"}, cfg.Organizations)
+				assert.Equal(t, []string{"acme", "globex"}, cfg.Organizations)
+				assert.Equal(t, 8, cfg.WorkspaceConcurrency)
 			},
 		},
 		"missing output": {
@@ -104,6 +119,11 @@ func TestConfigFromArgs(t *testing.T) {
 			args:  []string{"--output", "/tmp/a", "--progress", "bogus"},
 			err:   config.ErrInvalidProgressMode,
 		},
+		"unreadable config file": {
+			token: "secret",
+			args:  []string{"--output", "/tmp/a", "--config", "/no/such/config.yaml"},
+			err:   config.ErrReadConfig,
+		},
 	}
 
 	for name, tc := range tcs {
@@ -111,8 +131,19 @@ func TestConfigFromArgs(t *testing.T) {
 			t.Setenv(config.EnvToken, tc.token)
 			t.Setenv(config.EnvTokenTFC, "")
 			t.Setenv(config.EnvTokenFallback, "")
+			t.Setenv(config.EnvConfigPath, "")
 
-			cfg, err := main.ConfigFromArgs(tc.args)
+			args := tc.args
+			if tc.configYAML != "" {
+				path := writeConfigFile(t, tc.configYAML)
+				if tc.configEnv {
+					t.Setenv(config.EnvConfigPath, path)
+				} else {
+					args = append(append([]string{}, args...), "--config", path)
+				}
+			}
+
+			cfg, err := main.ConfigFromArgs(args)
 			if tc.err != nil {
 				require.ErrorIs(t, err, tc.err)
 				assert.Nil(t, cfg)
@@ -125,6 +156,16 @@ func TestConfigFromArgs(t *testing.T) {
 			tc.want(t, cfg)
 		})
 	}
+}
+
+// writeConfigFile writes yaml to a temporary file and returns its path.
+func writeConfigFile(t *testing.T, yaml string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+
+	return path
 }
 
 func TestRootHelp(t *testing.T) {

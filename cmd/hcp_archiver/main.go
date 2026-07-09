@@ -12,7 +12,7 @@ import (
 
 	"charm.land/fang/v2"
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
+	"go.jacobcolvin.com/niceyaml/fangs"
 	"go.jacobcolvin.com/x/cobras/log"
 	"go.jacobcolvin.com/x/cobras/profile"
 	"go.jacobcolvin.com/x/version"
@@ -23,20 +23,14 @@ import (
 
 const appName = "hcp_archiver"
 
-// Flag names bound onto the root command.
+// Flag names bound onto the root command. What and how to archive lives in the
+// YAML configuration file; only per-run and operational settings are flags.
 const (
-	flagAddress          = "address"
-	flagOrganization     = "organization"
-	flagOrgAlias         = "org"
+	flagConfig           = "config"
 	flagOutput           = "output"
-	flagConcurrency      = "concurrency"
 	flagProgress         = "progress"
 	flagProgressInterval = "progress-interval"
 	flagRecheckAbsent    = "recheck-absent"
-	flagStacks           = "stacks"
-	flagHYOK             = "hyok"
-	flagRegistryDetail   = "registry-detail"
-	flagAuditTrail       = "audit-trail"
 )
 
 // ErrLogHandler indicates an error occurred while creating a log handler.
@@ -47,6 +41,9 @@ func main() {
 		context.Background(),
 		newRootCmd(),
 		fang.WithVersion(version.GetVersion()),
+		// Preserve the multi-line, source-annotated formatting of a niceyaml
+		// configuration error instead of collapsing it into a single styled block.
+		fang.WithErrorHandler(fangs.ErrorHandler),
 	)
 	if err != nil {
 		os.Exit(1)
@@ -54,19 +51,14 @@ func main() {
 }
 
 // archiveFlags holds the raw flag values bound onto the root command. Its
-// config method resolves them into a validated [config.Config].
+// config method loads the YAML configuration and merges these per-run settings
+// into a validated [config.Config].
 type archiveFlags struct {
-	address          string
-	organization     string
+	configPath       string
 	output           string
 	progress         string
 	progressInterval time.Duration
-	concurrency      int
 	recheckAbsent    bool
-	stacks           bool
-	hyok             bool
-	registryDetail   bool
-	auditTrail       bool
 }
 
 // registerArchiveFlags binds the archive flags onto cmd and returns the
@@ -75,76 +67,64 @@ func registerArchiveFlags(cmd *cobra.Command) *archiveFlags {
 	af := &archiveFlags{}
 	fs := cmd.Flags()
 
-	fs.StringVar(&af.address, flagAddress, config.DefaultAddress,
-		"HCP Terraform API address")
-	fs.StringVar(&af.organization, flagOrganization, "",
-		"organization to archive (empty archives every visible organization)")
+	fs.StringVarP(&af.configPath, flagConfig, "c", "",
+		fmt.Sprintf("path to the YAML configuration file (defaults to $%s)", config.EnvConfigPath))
 	fs.StringVarP(&af.output, flagOutput, "o", "",
 		"archive root directory (required)")
-	fs.IntVar(&af.concurrency, flagConcurrency, config.DefaultWorkspaceConcurrency,
-		"number of workspaces archived concurrently")
 	fs.StringVar(&af.progress, flagProgress, config.DefaultProgressMode.String(),
 		"progress output mode (auto|human|json|quiet)")
 	fs.DurationVar(&af.progressInterval, flagProgressInterval, config.DefaultProgressInterval,
 		"progress reporting cadence")
 	fs.BoolVar(&af.recheckAbsent, flagRecheckAbsent, false,
 		"re-probe objects previously recorded as permanently gone")
-	fs.BoolVar(&af.stacks, flagStacks, false,
-		"archive Stacks")
-	fs.BoolVar(&af.hyok, flagHYOK, false,
-		"archive hold-your-own-key configurations")
-	fs.BoolVar(&af.registryDetail, flagRegistryDetail, false,
-		"archive deeper registry version, platform, and binary detail")
-	fs.BoolVar(&af.auditTrail, flagAuditTrail, false,
-		"archive the audit trail")
-
-	fs.SetNormalizeFunc(orgAliasNormalizer)
 
 	return af
 }
 
-// organizationsFromFlag maps the single --organization value onto the config's
-// organization list: an empty value selects every visible organization.
-func organizationsFromFlag(org string) []string {
-	if org == "" {
-		return nil
-	}
-
-	return []string{org}
-}
-
-// orgAliasNormalizer maps the --org alias onto the canonical --organization
-// flag name.
-func orgAliasNormalizer(_ *pflag.FlagSet, name string) pflag.NormalizedName {
-	if name == flagOrgAlias {
-		name = flagOrganization
-	}
-
-	return pflag.NormalizedName(name)
-}
-
-// config resolves the bound flag values into a validated [config.Config]. The
-// token comes from the environment, so a missing token surfaces here as
-// [config.ErrMissingToken].
+// config loads the YAML configuration and merges the per-run flag values into a
+// validated [config.Config]. The token comes from the environment, so a missing
+// token surfaces here as [config.ErrMissingToken]; a malformed configuration
+// file surfaces as a source-annotated error.
 func (af *archiveFlags) config() (*config.Config, error) {
 	mode, err := config.ParseProgressMode(af.progress)
 	if err != nil {
 		return nil, err
 	}
 
+	file, err := af.loadFile()
+	if err != nil {
+		return nil, err
+	}
+
 	return config.New(
-		config.WithAddress(af.address),
-		config.WithOrganizations(organizationsFromFlag(af.organization)),
+		config.WithAddress(file.Address),
+		config.WithOrganizations(file.Organizations),
+		config.WithWorkspaceConcurrency(file.Concurrency),
+		config.WithStacks(file.Scope.Stacks),
+		config.WithHYOK(file.Scope.HYOK),
+		config.WithRegistryDetail(file.Scope.RegistryDetail),
+		config.WithAuditTrail(file.Scope.AuditTrail),
 		config.WithOutputDir(af.output),
 		config.WithProgressMode(mode),
 		config.WithProgressInterval(af.progressInterval),
-		config.WithWorkspaceConcurrency(af.concurrency),
 		config.WithRecheckAbsent(af.recheckAbsent),
-		config.WithStacks(af.stacks),
-		config.WithHYOK(af.hyok),
-		config.WithRegistryDetail(af.registryDetail),
-		config.WithAuditTrail(af.auditTrail),
 	)
+}
+
+// loadFile resolves the configuration file path from the --config flag, then
+// the environment, and loads it. When neither names a path the built-in
+// defaults are used and no file is read.
+func (af *archiveFlags) loadFile() (*config.File, error) {
+	path := af.configPath
+	if path == "" {
+		path = os.Getenv(config.EnvConfigPath)
+	}
+
+	if path == "" {
+		return config.DefaultFile(), nil
+	}
+
+	return config.LoadFile(path)
 }
 
 // newRootCmd builds the root [*cobra.Command] for the hcp_archiver CLI. Logging
