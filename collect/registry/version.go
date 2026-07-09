@@ -78,11 +78,45 @@ func latestModuleVersion(statuses []tfe.RegistryModuleVersionStatuses) string {
 	return best
 }
 
-// compareVersions orders two dotted version strings, comparing each segment
-// numerically when both parse as integers and lexically otherwise. It returns a
-// negative number when a sorts before b, zero when they are equal, and a
-// positive number when a sorts after b.
+// compareVersions orders two dotted version strings by SemVer-style precedence.
+// It compares the numeric release core segment by segment (numerically when both
+// segments parse as integers, lexically otherwise); when the cores are equal, a
+// version carrying no pre-release outranks one that does, and two pre-releases
+// compare lexically. It returns a negative number when a sorts before b, zero
+// when they are equal, and a positive number when a sorts after b.
 func compareVersions(a, b string) int {
+	aCore, aPre := splitPrerelease(a)
+	bCore, bPre := splitPrerelease(b)
+
+	if c := compareCore(aCore, bCore); c != 0 {
+		return c
+	}
+
+	switch {
+	case aPre == "" && bPre == "":
+		return 0
+	case aPre == "":
+		// A final release outranks its own pre-releases (1.2.0 > 1.2.0-rc1).
+		return 1
+	case bPre == "":
+		return -1
+	default:
+		return strings.Compare(aPre, bPre)
+	}
+}
+
+// splitPrerelease separates a version's numeric release core from its
+// pre-release remainder at the first "-", returning the whole string as the core
+// when it carries no pre-release.
+func splitPrerelease(v string) (core, prerelease string) {
+	core, prerelease, _ = strings.Cut(v, "-")
+
+	return core, prerelease
+}
+
+// compareCore orders two dotted release cores segment by segment, comparing each
+// segment numerically when both parse as integers and lexically otherwise.
+func compareCore(a, b string) int {
 	as := strings.Split(a, ".")
 	bs := strings.Split(b, ".")
 	n := max(len(as), len(bs))

@@ -37,11 +37,13 @@ func TestCompareVersions(t *testing.T) {
 		b    string
 		want int // sign only
 	}{
-		"equal":                     {a: "1.2.3", b: "1.2.3", want: 0},
-		"numeric minor lower":       {a: "1.2.3", b: "1.10.0", want: -1},
-		"numeric major higher":      {a: "2.0.0", b: "1.9.9", want: 1},
-		"different depth, shorter":  {a: "1.2", b: "1.2.1", want: -1},
-		"non-numeric falls to text": {a: "1.2.0-rc2", b: "1.2.0-rc1", want: 1},
+		"equal":                        {a: "1.2.3", b: "1.2.3", want: 0},
+		"numeric minor lower":          {a: "1.2.3", b: "1.10.0", want: -1},
+		"numeric major higher":         {a: "2.0.0", b: "1.9.9", want: 1},
+		"different depth, shorter":     {a: "1.2", b: "1.2.1", want: -1},
+		"two prereleases compare text": {a: "1.2.0-rc2", b: "1.2.0-rc1", want: 1},
+		"release outranks prerelease":  {a: "1.2.0", b: "1.2.0-rc1", want: 1},
+		"prerelease sorts below":       {a: "2.0.0-beta", b: "2.0.0", want: -1},
 	}
 
 	for name, tc := range tests {
@@ -96,6 +98,11 @@ func TestResolveNoCodeVersion(t *testing.T) {
 			pin:      "latest",
 			statuses: []tfe.RegistryModuleVersionStatuses{{Version: "latest"}, {Version: ""}},
 			want:     "",
+		},
+		"a final release wins over its prerelease": {
+			pin:      "latest",
+			statuses: []tfe.RegistryModuleVersionStatuses{{Version: "1.2.0-rc1"}, {Version: "1.2.0"}},
+			want:     "1.2.0",
 		},
 	}
 
