@@ -27,4 +27,13 @@ var (
 
 	// Summary block heading.
 	styleSummaryHead = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7AA2F7"))
+
+	// Filled and empty colors of the bar, shared with the indeterminate marquee
+	// so the two read as one component.
+	barFullColor  = lipgloss.Color("#7AA2F7")
+	barEmptyColor = lipgloss.Color("#3B4261")
+
+	// Moving block and track of the indeterminate marquee.
+	styleBarBlock = lipgloss.NewStyle().Foreground(barFullColor)
+	styleBarTrack = lipgloss.NewStyle().Foreground(barEmptyColor)
 )

@@ -3,6 +3,10 @@ package progress
 import (
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
+
+	tea "charm.land/bubbletea/v2"
+
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 )
 
@@ -39,6 +43,26 @@ func (ps PanelSnapshot) snap() snapshot {
 // spinner shows its first frame.
 func RenderPanel(ps PanelSnapshot) string {
 	m := newTUIModel(nil, nil)
+
+	return m.render(ps.snap())
+}
+
+// RenderPanelAt renders the panel after a window-size message of the given
+// width, exercising the bar resize and line clipping.
+func RenderPanelAt(ps PanelSnapshot, width int) string {
+	m := newTUIModel(nil, nil)
+	m.Update(tea.WindowSizeMsg{Width: width, Height: 24})
+
+	return m.render(ps.snap())
+}
+
+// MarqueeTick advances a fresh model's spinner tick n times and renders ps,
+// exposing the indeterminate marquee's animation to tests.
+func MarqueeTick(ps PanelSnapshot, n int) string {
+	m := newTUIModel(nil, nil)
+	for range n {
+		m.Update(spinner.TickMsg{})
+	}
 
 	return m.render(ps.snap())
 }

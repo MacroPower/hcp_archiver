@@ -465,7 +465,9 @@ func (r *Reporter) summaryBlock(snap snapshot) string {
 
 	head := styleSummaryHead.Render("archive complete")
 
-	counts := "  " + statusCounts(t)
+	// Zero widths keep the summary's counts tight; the live panel pads them so
+	// its columns hold still.
+	counts := "  " + statusCounts(t, 0, 0, 0)
 
 	rest := styleMeta.Render(fmt.Sprintf(
 		"  absent=%d skipped=%d n/a=%d total=%d bytes=%s elapsed=%s",
