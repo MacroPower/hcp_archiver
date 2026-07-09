@@ -155,21 +155,24 @@ A non-zero `errored` is the count to investigate; `forbidden`, `absent`,
 
 ### Configuration surface
 
-- `HCP_TOKEN` / `TFC_TOKEN` / `TFE_TOKEN` (required): the archiving identity's
-  API token.
-- **address**: the API endpoint, defaulting to `https://app.terraform.io`.
-- **organization**: optional; when omitted, every organization the token can
-  see is archived in turn.
-- **output directory**: the archive root. Resume and incremental re-run are
-  implied when the directory already holds an archive.
-- **workspace concurrency**: size of the worker pool over workspaces.
-- **scope toggles** for the heavy or optional surfaces (Stacks, HYOK, and the
-  registry version/platform/binary detail) and the audit trail.
-- **`--progress=auto|human|json|quiet`**: progress format, defaulting to
-  `auto` (human-readable on a TTY, quiet off one), plus a progress-interval
-  knob.
-- **`--recheck-absent`**: re-probe objects previously recorded as permanently
-  gone, for when an operator suspects one has been restored.
+Settings are grouped by how much they vary; see
+[Configuration](#configuration) for the file format.
+
+- **Environment**: `HCP_TOKEN` / `TFC_TOKEN` / `TFE_TOKEN` (required, first
+  non-empty wins) is the archiving identity's API token, and
+  `HCP_ARCHIVER_CONFIG` is the default configuration file path.
+- **Flags**: `--config` / `-c` points at the YAML configuration file;
+  `--output` / `-o` is the archive root (required; resume and incremental
+  re-run are implied when it already holds an archive); `--progress` selects the
+  progress format (`auto|human|json|quiet`, default `auto`: human on a TTY,
+  quiet off one) with a `--progress-interval` knob; and `--recheck-absent`
+  re-probes objects previously recorded as permanently gone.
+- **Configuration file** (every key optional, defaulted per field): `address`
+  (the API endpoint, default `https://app.terraform.io`), `organizations` (a
+  list; empty or omitted archives every organization the token can see in turn),
+  `concurrency` (size of the worker pool over workspaces), and a `scope` block
+  of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
+  `registryDetail`, `auditTrail`), each off by default.
 
 ## Output layout
 
