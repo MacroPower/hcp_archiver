@@ -1,25 +1,30 @@
 // Package config resolves and validates the settings that govern a single
 // archive run, so the rest of the program receives one already-checked value
-// rather than reaching for the environment or flag tree itself.
+// rather than reaching for the environment, a file, or the flag tree itself.
 //
-// The archiving identity is an HCP Terraform API token, read from HCP_TOKEN,
-// TFC_TOKEN, or TFE_TOKEN. The API address defaults to https://app.terraform.io.
-// An empty organization filter means "every organization the token can see",
-// archived in turn. The output directory is the archive root; because resume and
-// incremental re-run are driven by the ledger already on disk, pointing a run
-// at a directory that already holds an archive is what makes it a resume rather
-// than a fresh start.
+// Settings are grouped by how much they vary between runs. The archiving
+// identity is an HCP Terraform API token, a secret read from HCP_TOKEN,
+// TFC_TOKEN, or TFE_TOKEN and never stored in a file. What and how to archive
+// is stable across runs and lives in a YAML [File]: the API address (default
+// https://app.terraform.io), the organizations to archive (empty means every
+// organization the token can see, each in turn), the workspace concurrency, and
+// a set of scope toggles for the heavy or optional surfaces (Stacks,
+// hold-your-own-key configurations, the deeper registry version/platform/binary
+// detail, and the audit trail), each off unless a configuration opts into it.
+// [LoadFile] validates the document against a JSON schema generated from the Go
+// type and reports any violation against the offending source line, so a bad
+// file fails before any network call.
 //
-// Beyond those, a run carries a workspace-concurrency level, a progress mode
-// (auto, human, json, or quiet) with a reporting interval, an absent-recheck
-// toggle that forces re-probing of objects previously recorded as permanently
-// gone, and a set of scope toggles for the heavy or optional surfaces (Stacks,
-// hold-your-own-key configurations, the deeper registry
-// version/platform/binary detail, and the audit trail), each off unless a run
-// opts into it.
+// The per-run settings are supplied separately. The output directory is the
+// archive root, and because resume and incremental re-run are driven by the
+// ledger already on disk, pointing a run at a directory that already holds an
+// archive is what makes it a resume rather than a fresh start. A progress mode
+// (auto, human, json, or quiet) with a reporting interval selects live output,
+// and an absent-recheck toggle forces re-probing of objects previously recorded
+// as permanently gone.
 //
-// Configuration holds plain values and performs no I/O beyond reading the
-// environment, so it stays a leaf: the command layer binds flags into it and
-// the orchestrator maps its fields onto each collaborator, and nothing else
-// needs to know where a setting came from.
+// [Config] is the resolved result. It holds plain values and performs no I/O
+// beyond reading the environment, so it stays a leaf: the command layer merges
+// the file and the flags into it and the orchestrator maps its fields onto each
+// collaborator, and nothing else needs to know where a setting came from.
 package config

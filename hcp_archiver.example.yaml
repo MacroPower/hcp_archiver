@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=./config/config.schema.json
+#
+# hcp_archiver configuration. Copy to hcp_archiver.yaml and edit, then point the
+# tool at it with --config (or set HCP_ARCHIVER_CONFIG). Every key is optional
+# and defaults as shown; the output directory and the API token are supplied by
+# --output and the environment, never here.
+
+# HCP Terraform API address.
+address: https://app.terraform.io
+
+# Organizations to archive. Leave empty (or omit) to archive every organization
+# the token can see, each into its own <output>/<org>/ subtree.
+organizations:
+  - my-org
+
+# Number of workspaces archived concurrently, within HCP's per-token rate limit.
+concurrency: 4
+
+# Heavy or organization-specific surfaces, each off by default. Enable only the
+# ones you want; they add significant time and volume to a run.
+scope:
+  stacks: false
+  hyok: false
+  registryDetail: false
+  auditTrail: false

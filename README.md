@@ -42,33 +42,57 @@ export HCP_TOKEN=...    # an HCP Terraform user, team, or organization token
 hcp_archiver version
 ```
 
-### Archiving an organization
+### Configuration
 
-The only required flag is the output directory; every other setting has a
-default. Point `--organization` (`--org`) at one org and `--output` (`-o`) at
-the archive root:
+What and how to archive lives in a YAML configuration file; only per-run and
+secret settings are flags or environment variables. Point `--config` (`-c`) at
+the file or set `HCP_ARCHIVER_CONFIG`; with neither, the built-in defaults apply
+(every visible organization, default surfaces only, concurrency 4).
 
-```bash
-hcp_archiver --organization my-org --output ./archive
+```yaml
+# yaml-language-server: $schema=./config/config.schema.json
+
+# HCP Terraform API address (the default).
+address: https://app.terraform.io
+
+# Organizations to archive; omit or leave empty for every visible org.
+organizations:
+  - my-org
+
+# Workspaces archived at once, within the per-token rate limit.
+concurrency: 4
+
+# Heavy or org-specific surfaces, each off by default.
+scope:
+  stacks: true
+  hyok: true
+  registryDetail: true
+  auditTrail: true
 ```
 
-Omit `--organization` to archive every organization the token can see, each into
-its own `./archive/<org>/` subtree:
+Every key is optional and defaults as shown. The `yaml-language-server`
+directive gives editors completion and validation from the same schema embedded
+in the binary, so a malformed file is reported with the offending line
+highlighted before any network call. A ready-to-copy
+[`hcp_archiver.example.yaml`](hcp_archiver.example.yaml) sits at the repository
+root.
+
+### Archiving an organization
+
+The only required flag is the output directory. Point `--output` (`-o`) at the
+archive root and `--config` at the file:
+
+```bash
+hcp_archiver --config hcp_archiver.yaml --output ./archive
+```
+
+With no configuration file, or one that names no organizations, every
+organization the token can see is archived, each into its own `./archive/<org>/`
+subtree:
 
 ```bash
 hcp_archiver --output ./archive
 ```
-
-The default surfaces cover the bulk of an organization; the heaviest and most
-org-specific families are opt-in. Enable the ones you want:
-
-```bash
-hcp_archiver -o ./archive --org my-org \
-  --stacks --hyok --registry-detail --audit-trail
-```
-
-Raise `--concurrency` (default 4) to widen the worker pool over workspaces on a
-large organization, within HCP's per-token rate limit.
 
 ### Resuming and re-running
 
@@ -90,8 +114,8 @@ later run under a differently scoped token retries it. Point several tokens at
 the same output directory in turn to accumulate the union of what each can read:
 
 ```bash
-HCP_TOKEN=$team_token hcp_archiver -o ./archive --org my-org
-HCP_TOKEN=$user_token hcp_archiver -o ./archive --org my-org
+HCP_TOKEN=$team_token hcp_archiver -c hcp_archiver.yaml -o ./archive
+HCP_TOKEN=$user_token hcp_archiver -c hcp_archiver.yaml -o ./archive
 ```
 
 Each pass keeps everything already captured and fills in only what its token can

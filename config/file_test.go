@@ -118,6 +118,17 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 	}
 }
 
+func TestLoadFile_Example(t *testing.T) {
+	t.Parallel()
+
+	// The example shipped at the repository root must stay valid against the
+	// schema so a copy of it is a working starting point.
+	file, err := config.LoadFile(filepath.Join("..", "hcp_archiver.example.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, config.DefaultAddress, file.Address)
+	assert.Equal(t, []string{"my-org"}, file.Organizations)
+}
+
 func TestLoadFile_ReadError(t *testing.T) {
 	t.Parallel()
 

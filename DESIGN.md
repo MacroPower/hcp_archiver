@@ -326,18 +326,25 @@ Notes:
     `jsonapi:"primary"` field, which the plain-`json:` audit-trail and pagination
     types lack, so those stay on the `encoding/json` (snake-case) path.
 
-## Config surface (planned)
+## Config surface
 
-- `TFC_TOKEN` / `TFE_TOKEN` (required)
-- address, default `https://app.terraform.io`
-- org (optional; all visible orgs if omitted)
-- output dir (resume/re-run is implied when it already holds an archive)
-- workspace concurrency
-- scope toggles for heavy/optional surfaces (Stacks, HYOK, registry
-  version/platform/binary detail, audit trails)
-- `--progress=auto|human|json|quiet` (default `auto`: human on a TTY, quiet
-  off one) and a progress-interval knob
-- `--recheck-absent` to re-probe `absent-permanently` objects on a re-run
+Settings split by how much they vary. The token is a secret (environment only),
+the output directory and per-run knobs are flags, and everything that describes
+what and how to archive is a YAML file, validated against a JSON schema
+generated from the Go type and embedded in the binary.
+
+- Environment: `HCP_TOKEN`, then `TFC_TOKEN`, then `TFE_TOKEN` (required, first
+  non-empty wins); `HCP_ARCHIVER_CONFIG` for the config file path.
+- Flags: `--config` / `-c` (config path), `--output` / `-o` (archive root;
+  resume/re-run is implied when it already holds an archive),
+  `--progress=auto|human|json|quiet` (default `auto`: human on a TTY, quiet off
+  one) with a progress-interval knob, `--recheck-absent` to re-probe
+  `absent-permanently` objects on a re-run, and the `--log-*` knobs.
+- Config file (all keys optional, defaults applied per field): `address`
+  (default `https://app.terraform.io`), `organizations` (all visible orgs if
+  empty), `concurrency`, and a `scope` block of toggles for the heavy or
+  optional surfaces (Stacks, HYOK, registry version/platform/binary detail,
+  audit trails), each off by default.
 
 ## Packaging
 
