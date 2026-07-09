@@ -1,0 +1,339 @@
+package progress_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/MacroPower/tfc_archiver/config"
+	"github.com/MacroPower/tfc_archiver/manifest"
+	"github.com/MacroPower/tfc_archiver/progress"
+)
+
+// fakeSource is a static [progress.TallySource] for tests.
+type fakeSource struct {
+	tally manifest.Tally
+}
+
+func (f fakeSource) Tally() manifest.Tally {
+	return f.tally
+}
+
+// clockAt returns a clock whose time advances by the values it is given on each
+// call, starting from base.
+func fixedClock(times ...time.Time) func() time.Time {
+	i := 0
+
+	return func() time.Time {
+		t := times[i]
+		if i < len(times)-1 {
+			i++
+		}
+
+		return t
+	}
+}
+
+func TestReporter_HumanLine(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	src := fakeSource{tally: manifest.Tally{
+		Target:          "org/acme",
+		Done:            10,
+		Errored:         2,
+		BytesDownloaded: 2 * 1024 * 1024,
+	}}
+
+	buf := &bytes.Buffer{}
+	r := progress.New(
+		buf,
+		config.ProgressModeHuman,
+		src,
+		progress.WithClock(fixedClock(base, base.Add(10*time.Second))),
+		progress.WithTotal(20),
+	)
+	r.SetPhase("workspaces")
+
+	require.NoError(t, r.Report())
+
+	line := buf.String()
+	assert.True(t, strings.HasSuffix(line, "\n"), "line ends with newline")
+	assert.Contains(t, line, "phase=workspaces")
+	assert.Contains(t, line, "target=org/acme")
+	assert.Contains(t, line, "done=10")
+	assert.Contains(t, line, "errored=2")
+	assert.Contains(t, line, "remaining=8")
+	assert.Contains(t, line, "bytes=2.0 MiB")
+	assert.Contains(t, line, "elapsed=10s")
+	assert.Contains(t, line, "rate=")
+}
+
+func TestReporter_HumanLine_UnknownTotal(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	src := fakeSource{tally: manifest.Tally{Done: 3}}
+
+	buf := &bytes.Buffer{}
+	r := progress.New(
+		buf,
+		config.ProgressModeHuman,
+		src,
+		progress.WithClock(fixedClock(base, base.Add(time.Second))),
+	)
+
+	require.NoError(t, r.Report())
+	assert.NotContains(t, buf.String(), "remaining=")
+}
+
+func TestReporter_JSONLine(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	src := fakeSource{tally: manifest.Tally{
+		Target:            "org/acme",
+		Done:              10,
+		AbsentPermanently: 1,
+		Skipped:           2,
+		Errored:           3,
+		NotApplicable:     4,
+		BytesDownloaded:   1024,
+	}}
+
+	buf := &bytes.Buffer{}
+	r := progress.New(
+		buf,
+		config.ProgressModeJSON,
+		src,
+		progress.WithClock(fixedClock(base, base.Add(4*time.Second))),
+		progress.WithTotal(30),
+	)
+	r.SetPhase("runs")
+
+	require.NoError(t, r.Report())
+
+	out := buf.String()
+	assert.True(t, strings.HasSuffix(out, "\n"), "one line ends with newline")
+	assert.Equal(t, 1, strings.Count(strings.TrimRight(out, "\n"), "\n")+1)
+
+	var line struct {
+		Phase           string  `json:"phase"`
+		Target          string  `json:"target"`
+		Remaining       *int    `json:"remaining"`
+		Done            int     `json:"done"`
+		Errored         int     `json:"errored"`
+		Total           int     `json:"total"`
+		BytesDownloaded int64   `json:"bytesDownloaded"`
+		ElapsedSeconds  float64 `json:"elapsedSeconds"`
+		BytesPerSecond  float64 `json:"bytesPerSecond"`
+		Summary         bool    `json:"summary"`
+	}
+
+	require.NoError(t, json.Unmarshal([]byte(out), &line))
+	assert.Equal(t, "runs", line.Phase)
+	assert.Equal(t, "org/acme", line.Target)
+	assert.Equal(t, 10, line.Done)
+	assert.Equal(t, 3, line.Errored)
+	assert.Equal(t, 20, line.Total)
+	assert.Equal(t, int64(1024), line.BytesDownloaded)
+	assert.InEpsilon(t, 4.0, line.ElapsedSeconds, 1e-9)
+	assert.InEpsilon(t, 256.0, line.BytesPerSecond, 1e-9)
+	assert.False(t, line.Summary)
+	require.NotNil(t, line.Remaining)
+	assert.Equal(t, 10, *line.Remaining)
+}
+
+func TestReporter_Summary(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	src := fakeSource{tally: manifest.Tally{
+		Done:              100,
+		AbsentPermanently: 3,
+		Skipped:           2,
+		Errored:           4,
+		NotApplicable:     1,
+		BytesDownloaded:   5 * 1024 * 1024,
+	}}
+
+	t.Run("human", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		r := progress.New(
+			buf,
+			config.ProgressModeHuman,
+			src,
+			progress.WithClock(fixedClock(base, base.Add(200*time.Second))),
+		)
+
+		require.NoError(t, r.Summary())
+
+		out := buf.String()
+		assert.Contains(t, out, "summary")
+		assert.Contains(t, out, "done=100")
+		assert.Contains(t, out, "absent=3")
+		assert.Contains(t, out, "skipped=2")
+		assert.Contains(t, out, "errored=4")
+		assert.Contains(t, out, "n/a=1")
+		assert.Contains(t, out, "total=110")
+		assert.Contains(t, out, "elapsed=3m20s")
+	})
+
+	t.Run("json", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		r := progress.New(
+			buf,
+			config.ProgressModeJSON,
+			src,
+			progress.WithClock(fixedClock(base, base.Add(200*time.Second))),
+		)
+
+		require.NoError(t, r.Summary())
+
+		var line struct {
+			Summary bool `json:"summary"`
+			Total   int  `json:"total"`
+		}
+
+		require.NoError(t, json.Unmarshal(buf.Bytes(), &line))
+		assert.True(t, line.Summary)
+		assert.Equal(t, 110, line.Total)
+	})
+}
+
+func TestReporter_AutoResolution(t *testing.T) {
+	t.Parallel()
+
+	src := fakeSource{}
+
+	tests := map[string]struct {
+		want config.ProgressMode
+		opts []progress.Option
+	}{
+		"buffer resolves quiet": {want: config.ProgressModeQuiet},
+		"forced tty resolves human": {
+			opts: []progress.Option{progress.WithTTY(true)},
+			want: config.ProgressModeHuman,
+		},
+		"forced no tty resolves quiet": {
+			opts: []progress.Option{progress.WithTTY(false)},
+			want: config.ProgressModeQuiet,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			buf := &bytes.Buffer{}
+			r := progress.New(buf, config.ProgressModeAuto, src, tc.opts...)
+			assert.Equal(t, tc.want, r.Mode())
+		})
+	}
+}
+
+func TestReporter_QuietWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	src := fakeSource{tally: manifest.Tally{Done: 5}}
+	buf := &bytes.Buffer{}
+	r := progress.New(buf, config.ProgressModeQuiet, src)
+
+	require.NoError(t, r.Report())
+	require.NoError(t, r.Summary())
+	assert.Empty(t, buf.String())
+}
+
+func TestReporter_AutoQuietBufferWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	src := fakeSource{tally: manifest.Tally{Done: 5}}
+	buf := &bytes.Buffer{}
+	r := progress.New(buf, config.ProgressModeAuto, src)
+
+	require.Equal(t, config.ProgressModeQuiet, r.Mode())
+	require.NoError(t, r.Report())
+	assert.Empty(t, buf.String())
+}
+
+func TestReporter_Run(t *testing.T) {
+	t.Parallel()
+
+	src := fakeSource{tally: manifest.Tally{Done: 1}}
+	buf := &bytes.Buffer{}
+	r := progress.New(buf, config.ProgressModeHuman, src)
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	done := make(chan error, 1)
+	go func() {
+		done <- r.Run(ctx, time.Millisecond)
+	}()
+
+	cancel()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not stop after cancel")
+	}
+}
+
+func TestReporter_TTYDetection(t *testing.T) {
+	t.Parallel()
+
+	// A regular file is not a character device, so auto resolves to quiet.
+	f, err := os.CreateTemp(t.TempDir(), "progress")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, f.Close()) })
+
+	r := progress.New(f, config.ProgressModeAuto, fakeSource{})
+	assert.Equal(t, config.ProgressModeQuiet, r.Mode())
+}
+
+func TestHumanBytes(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		want string
+		n    int64
+	}{
+		"bytes":      {n: 512, want: "512 B"},
+		"kib":        {n: 2048, want: "2.0 KiB"},
+		"mib":        {n: 3 * 1024 * 1024, want: "3.0 MiB"},
+		"gib":        {n: 5 * 1024 * 1024 * 1024, want: "5.0 GiB"},
+		"zero":       {n: 0, want: "0 B"},
+		"fractional": {n: 1536, want: "1.5 KiB"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			buf := &bytes.Buffer{}
+			src := fakeSource{tally: manifest.Tally{BytesDownloaded: tc.n}}
+			base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+			r := progress.New(
+				buf,
+				config.ProgressModeHuman,
+				src,
+				progress.WithClock(fixedClock(base, base)),
+			)
+
+			require.NoError(t, r.Report())
+			assert.Contains(t, buf.String(), "bytes="+tc.want)
+		})
+	}
+}
