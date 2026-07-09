@@ -105,6 +105,43 @@ func TestReporter_UnitProgressResets(t *testing.T) {
 	assert.Contains(t, buf.String(), "completed=2/8")
 }
 
+func TestReporter_Resumed(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	src := fakeSource{tally: manifest.Tally{Done: 1200, Resumed: true}}
+
+	t.Run("human", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		r := progress.New(buf, config.ProgressModeHuman, src,
+			progress.WithClock(fixedClock(base, base.Add(time.Second))))
+
+		require.NoError(t, r.Report())
+		assert.Contains(t, buf.String(), "resumed=true")
+	})
+
+	t.Run("json", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		r := progress.New(buf, config.ProgressModeJSON, src,
+			progress.WithClock(fixedClock(base, base.Add(time.Second))))
+
+		require.NoError(t, r.Report())
+
+		var line struct {
+			Resumed bool `json:"resumed"`
+			Done    int  `json:"done"`
+		}
+
+		require.NoError(t, json.Unmarshal(buf.Bytes(), &line))
+		assert.True(t, line.Resumed)
+		assert.Equal(t, 1200, line.Done, "counts are cumulative, carried into the resumed run")
+	})
+}
+
 func TestReporter_HumanLine_UnknownTotal(t *testing.T) {
 	t.Parallel()
 

@@ -432,6 +432,10 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 		fmt.Fprintf(&b, " target=%s", t.Target)
 	}
 
+	if t.Resumed {
+		b.WriteString(" resumed=true")
+	}
+
 	fmt.Fprintf(&b, " done=%d errored=%d forbidden=%d", t.Done, t.Errored, t.Forbidden)
 
 	if summary {
@@ -463,7 +467,12 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 func (r *Reporter) summaryBlock(snap snapshot) string {
 	t := snap.tally
 
-	head := styleSummaryHead.Render("archive complete")
+	title := "archive complete"
+	if t.Resumed {
+		title += " (resumed)"
+	}
+
+	head := styleSummaryHead.Render(title)
 
 	// Zero widths keep the summary's counts tight; the live panel pads them so
 	// its columns hold still.
@@ -502,6 +511,7 @@ type jsonLine struct {
 	ElapsedSeconds    float64 `json:"elapsedSeconds"`
 	BytesPerSecond    float64 `json:"bytesPerSecond"`
 	Summary           bool    `json:"summary,omitempty"`
+	Resumed           bool    `json:"resumed,omitempty"`
 }
 
 // writeJSON encodes one snapshot as a compact JSON object followed by a
@@ -523,6 +533,7 @@ func (r *Reporter) writeJSON(snap snapshot, summary bool) error {
 		ElapsedSeconds:    snap.elapsed.Seconds(),
 		BytesPerSecond:    snap.rate,
 		Summary:           summary,
+		Resumed:           t.Resumed,
 	}
 
 	if snap.hasBar() {

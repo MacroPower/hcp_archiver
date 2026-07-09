@@ -42,6 +42,7 @@ type Ledger struct {
 	watermarks    map[string]time.Time
 	completed     map[string]bool
 	counts        map[Status]int
+	cumulative    map[Status]int
 	lastRun       *RunRecord
 	runStartedAt  time.Time
 	lastRunAt     time.Time
@@ -51,6 +52,7 @@ type Ledger struct {
 	runCount      int
 	mu            sync.RWMutex
 	recheckAbsent bool
+	resumed       bool
 }
 
 // Option configures a [Ledger] passed to [Load].
@@ -93,6 +95,7 @@ func Load(path string, opts ...Option) (*Ledger, error) {
 		watermarks: make(map[string]time.Time),
 		completed:  make(map[string]bool),
 		counts:     make(map[Status]int),
+		cumulative: make(map[Status]int),
 		path:       path,
 	}
 
@@ -127,9 +130,23 @@ func Load(path string, opts ...Option) (*Ledger, error) {
 			if e == nil {
 				return nil, fmt.Errorf("%w: entry %q is null", ErrCorruptManifest, relPath)
 			}
+
+			// Reject an unrecognized status rather than seed the cumulative
+			// tally under a key Tally never reads, which would report a resumed
+			// run with a zero total.
+			if !e.Status.Valid() {
+				return nil, fmt.Errorf("%w: entry %q has unknown status %q",
+					ErrCorruptManifest, relPath, e.Status)
+			}
 		}
 
 		l.entries = doc.Entries
+
+		// Seed the cumulative tally from the loaded entries so a resumed run's
+		// counts start from the prior run's settled work rather than from zero.
+		for _, e := range l.entries {
+			l.cumulative[e.Status]++
+		}
 	}
 
 	if doc.HighWaterMarks != nil {
@@ -264,8 +281,10 @@ func (l *Ledger) RecordNotApplicable(relPath string) {
 	})
 }
 
-// record applies status and mutate to the entry at relPath and keeps the tally
-// in step, swapping any status this entry already contributed to the run.
+// record applies status and mutate to the entry at relPath and keeps both
+// tallies in step: the per-run counts swap any status this entry already
+// contributed to the run, and the cumulative counts swap the entry's prior
+// settled status so they always reflect every entry's current state.
 func (l *Ledger) record(relPath string, status Status, mutate func(now time.Time, e *Entry)) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -282,6 +301,12 @@ func (l *Ledger) record(relPath string, status Status, mutate func(now time.Time
 		l.counts[e.Status]--
 	}
 
+	// A pre-existing entry already contributes its old status to the cumulative
+	// tally; move it to the new status. A brand-new entry has none to move.
+	if ok {
+		l.cumulative[e.Status]--
+	}
+
 	e.Status = status
 	e.Attempts++
 
@@ -289,6 +314,7 @@ func (l *Ledger) record(relPath string, status Status, mutate func(now time.Time
 
 	e.counted = true
 	l.counts[status]++
+	l.cumulative[status]++
 }
 
 // HighWaterMark returns the recorded watermark for key, or the zero time when
@@ -358,24 +384,31 @@ func (l *Ledger) SetTarget(target string) {
 }
 
 // Tally returns a snapshot of the live counters.
+//
+// The per-status counts are cumulative across runs (every entry counted by its
+// current status), so a resumed run reflects the prior run's settled work;
+// BytesDownloaded stays per-run.
 func (l *Ledger) Tally() Tally {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
 	return Tally{
 		Target:            l.target,
-		Done:              l.counts[StatusDone],
-		AbsentPermanently: l.counts[StatusAbsentPermanently],
-		Skipped:           l.counts[StatusSkipped],
-		Errored:           l.counts[StatusErrored],
-		Forbidden:         l.counts[StatusForbidden],
-		NotApplicable:     l.counts[StatusNotApplicable],
+		Done:              l.cumulative[StatusDone],
+		AbsentPermanently: l.cumulative[StatusAbsentPermanently],
+		Skipped:           l.cumulative[StatusSkipped],
+		Errored:           l.cumulative[StatusErrored],
+		Forbidden:         l.cumulative[StatusForbidden],
+		NotApplicable:     l.cumulative[StatusNotApplicable],
 		BytesDownloaded:   l.bytes,
+		Resumed:           l.resumed,
 	}
 }
 
 // StartRun opens a new run: it advances the run count and start time and resets
-// the per-run tally so counts and bytes reflect only the new run.
+// the per-run tally so counts and bytes reflect only the new run. It records
+// whether the run resumed prior work, and leaves the cumulative tally intact so
+// a resumed run's reported counts carry the prior run's settled objects.
 func (l *Ledger) StartRun() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -384,6 +417,7 @@ func (l *Ledger) StartRun() {
 	l.runCount++
 	l.lastRunAt = now
 	l.runStartedAt = now
+	l.resumed = len(l.entries) > 0
 	l.counts = make(map[Status]int)
 	l.bytes = 0
 	l.target = ""

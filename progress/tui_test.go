@@ -47,6 +47,17 @@ func TestRenderPanel_Indeterminate(t *testing.T) {
 	golden.RequireEqual(t, []byte(progress.RenderPanel(indeterminatePanel())))
 }
 
+func TestRenderPanel_Resumed(t *testing.T) {
+	t.Parallel()
+
+	// A resumed run tags the end of line one; the cumulative counts already
+	// reflect prior work, so nothing else about the panel changes.
+	panel := barPanel()
+	panel.Tally.Resumed = true
+
+	golden.RequireEqual(t, []byte(progress.RenderPanel(panel)))
+}
+
 // indeterminatePanel is barPanel with the phase's total unknown, so the bar
 // becomes a marquee and the percent goes blank.
 func indeterminatePanel() progress.PanelSnapshot {

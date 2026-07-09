@@ -99,6 +99,20 @@ func TestLoad_Corrupt(t *testing.T) {
 	require.ErrorIs(t, err, manifest.ErrCorruptManifest)
 }
 
+func TestLoad_UnknownStatus(t *testing.T) {
+	t.Parallel()
+
+	// A status outside the recognized set would seed the cumulative tally under a
+	// key the tally never reads, so a resumed run would report a zero total; the
+	// load rejects it instead.
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	doc := `{"version":1,"entries":{"a":{"status":"pending","attempts":1}}}`
+	require.NoError(t, os.WriteFile(path, []byte(doc), 0o600))
+
+	_, err := manifest.Load(path)
+	require.ErrorIs(t, err, manifest.ErrCorruptManifest)
+}
+
 func TestLedger_RoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -276,6 +290,75 @@ func TestLedger_TallyMatchesRecords(t *testing.T) {
 	assert.Equal(t, 1, tally.NotApplicable)
 	assert.Equal(t, int64(42), tally.BytesDownloaded)
 	assert.Equal(t, 7, tally.Total())
+}
+
+func TestLedger_CumulativeAcrossRuns(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "m.json")
+
+	// First run archives two objects and errors a third, then persists.
+	first, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	first.StartRun()
+	assert.False(t, first.Tally().Resumed, "a first run is not a resume")
+
+	first.RecordDone("a", manifest.Signature{Size: 1})
+	first.RecordDone("b", manifest.Signature{Size: 1})
+	first.RecordErrored("c", errors.New("x"), true)
+	require.NoError(t, first.Flush())
+
+	// Second run resumes: the cumulative counts carry the prior settled work
+	// before this run records anything, and the run is marked resumed.
+	second, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	second.StartRun()
+
+	resumed := second.Tally()
+	assert.True(t, resumed.Resumed, "a run over an existing manifest resumes")
+	assert.Equal(t, 2, resumed.Done, "prior done carries over before any record")
+	assert.Equal(t, 1, resumed.Errored)
+	assert.Equal(t, 3, resumed.Total())
+
+	// Retrying the errored object moves it to done in the cumulative counts.
+	second.RecordDone("c", manifest.Signature{Size: 1})
+
+	after := second.Tally()
+	assert.Equal(t, 3, after.Done)
+	assert.Equal(t, 0, after.Errored)
+
+	// The per-run record still reflects only this run's work, not the carryover.
+	summary := second.FinishRun()
+	assert.Equal(t, 1, summary.Totals[manifest.StatusDone], "the run record stays per-run")
+}
+
+func TestLedger_CumulativeReRecordIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "m.json")
+
+	first, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	first.StartRun()
+	first.RecordDone("m", manifest.Signature{Size: 1})
+	// Re-recording the same status within a run must not inflate the count.
+	first.RecordDone("m", manifest.Signature{Size: 2})
+	assert.Equal(t, 1, first.Tally().Done, "re-record keeps the object counted once")
+	require.NoError(t, first.Flush())
+
+	// A resumed run that re-reads the same mutable object (RecordDone again)
+	// must keep the cumulative count at one, not two.
+	second, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	second.StartRun()
+	assert.Equal(t, 1, second.Tally().Done, "carried over once")
+
+	second.RecordDone("m", manifest.Signature{Size: 1})
+	assert.Equal(t, 1, second.Tally().Done, "re-read on resume does not double-count")
 }
 
 func TestLedger_ReRecordSwapsTally(t *testing.T) {

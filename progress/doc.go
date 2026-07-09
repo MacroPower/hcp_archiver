@@ -22,6 +22,13 @@
 // while a phase is determinate. A final summary prints when the run ends: totals
 // per status class, wall time, and anything that errored.
 //
+// The per-status counts are cumulative: they reflect every object the ledger has
+// recorded by its current status, across runs, so a resumed run opens with the
+// objects a prior run already settled rather than climbing from zero. Such a run
+// is tagged "resumed" in every form (a dimmed marker on the panel, resumed=true
+// in logfmt, a resumed field in JSON). The bytes, rate, and elapsed figures stay
+// per-run, since they measure this run's download activity.
+//
 // The reporter only reads the tally the ledger already maintains and formats it,
 // so the per-status counts an operator sees always match what the ledger has
 // recorded.

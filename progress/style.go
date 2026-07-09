@@ -28,6 +28,9 @@ var (
 	// Summary block heading.
 	styleSummaryHead = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7AA2F7"))
 
+	// Resumed tag, dimmed so it reads as an aside.
+	styleResumed = lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("#8A8F98"))
+
 	// Filled and empty colors of the bar, shared with the indeterminate marquee
 	// so the two read as one component.
 	barFullColor  = lipgloss.Color("#7AA2F7")

@@ -157,6 +157,12 @@ func (m *tuiModel) render(snap snapshot) string {
 		fmt.Fprintf(&line1, " %s", styleTarget.Render(snap.tally.Target))
 	}
 
+	// The resumed tag rides at the end of the line so nothing follows it, and it
+	// is fixed for the whole run, so it never causes a mid-run reflow.
+	if snap.tally.Resumed {
+		fmt.Fprintf(&line1, "  %s", styleResumed.Render("(resumed)"))
+	}
+
 	t := snap.tally
 	line2 := fmt.Sprintf("  %s  %s",
 		statusCounts(t, countDoneWidth, countErroredWidth, countForbiddenWidth),

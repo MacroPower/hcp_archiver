@@ -289,9 +289,12 @@ Notes:
   stacks, audit) show a spinner. The per-status counts are derived from the same
   in-memory counters that back the manifest (a single mutex-guarded tally), so
   they and the ledger's own tally never disagree (the on-disk copy trails only by
-  the last unflushed batch). A final summary (totals per status class, wall time,
-  any orgs/workspaces that errored) prints on completion and is also written to
-  the manifest as the run record.
+  the last unflushed batch). Those counts are cumulative across runs (every entry
+  counted by its current status), so a resumed run opens with the objects a prior
+  run already settled rather than climbing from zero, and is tagged `resumed`; the
+  bytes and rate stay per-run. A final summary (totals per status class, wall
+  time, any orgs/workspaces that errored) prints on completion and is also written
+  to the manifest as the run record, which stays per-run.
 
 - **Concurrency**: worker pool over workspaces (default ~4); sequential within a
   workspace. `go-tfe` retries per request on rate limits, but N workers each
