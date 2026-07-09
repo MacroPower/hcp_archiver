@@ -49,7 +49,7 @@ These fall into three general classes, plus platform data.
   (API-only; only its tag bindings enumerate, and only for a known component id).
 - **Retention / version-gated artifacts**, grab whatever is still
   downloadable:
-  - Config version tarballs are retention-limited, and *structurally*
+  - Config version tarballs are retention-limited, and _structurally_
     speculative and many VCS-driven config versions have no downloadable
     tarball at all (only ingress attributes / a VCS ref). So metadata is often
     the only recoverable artifact regardless of age.
@@ -169,6 +169,7 @@ archive/<org>/
 ```
 
 Notes:
+
 - **Everything a project owns nests under `projects/<project-name>/`.** Both
   workspaces and stacks carry a `Project` relation (a workspace with no explicit
   project lands in the org's Default Project), so the tree groups by project
@@ -199,7 +200,7 @@ Notes:
   `.tfstate.json` pulled from `hosted-state-download-url` embeds sensitive
   variable / output / resource values in cleartext; the API redacts them only
   through `StateVersionOutputs` (which we skip). The "metadata-only for every
-  secret" rule is about write-only *config* fields, not state contents.
+  secret" rule is about write-only _config_ fields, not state contents.
 - **Notification configs are polymorphic** across workspace / project / team
   scope, so they are archived at all three levels: in each
   `projects/<name>/workspaces/<ws>/`, in `projects/<name>/`, and in `teams/<id>/`,
@@ -224,8 +225,8 @@ Notes:
   at a bounded cadence and on shutdown, so a kill -9 loses at most the last
   in-flight batch, never the ledger itself.
   - **Restart semantics**: a re-invocation against a non-empty output dir loads
-    the existing manifest and, per object, *skips* `done` and
-    `absent-permanently`, *retries* `errored` and anything absent from the
+    the existing manifest and, per object, _skips_ `done` and
+    `absent-permanently`, _retries_ `errored` and anything absent from the
     ledger. `absent-permanently` is sticky (a 404/410 is not re-requested every
     run); a `--recheck-absent` toggle forces re-probing when the operator
     suspects a since-restored object. Resume and a clean first run are the same
@@ -278,6 +279,7 @@ Notes:
   batch). A final summary line (totals per status class, wall
   time, any orgs/workspaces that errored) prints on completion and is also
   written to the manifest as the run record.
+
 - **Concurrency**: worker pool over workspaces (default ~4); sequential within a
   workspace. `go-tfe` retries per request on rate limits, but N workers each
   paginating and downloading multiply the request rate; use a shared rate
@@ -292,7 +294,7 @@ Notes:
 - **Serialization**: marshal the `go-tfe` structs through their vendored
   `hashicorp/jsonapi` tags (kebab-case), falling back to `encoding/json` only for
   the plain-`json:` audit-trail and pagination types. Most `go-tfe` types are
-  jsonapi *response* structs tagged `jsonapi` (not `json`); kebab output matches
+  jsonapi _response_ structs tagged `jsonapi` (not `json`); kebab output matches
   the public API docs and survives a `go-tfe` field rename better than
   `encoding/json`'s Go-field-name fallback. Caveats the code must handle:
   - **Redact by mutation**: there is no tag-driven omission, so sensitive
@@ -302,7 +304,7 @@ Notes:
     zeroed, so the archive records the secret's existence rather than an empty
     value indistinguishable from a genuinely unset field.
   - **Drop every ephemeral signed URL, by pattern not enumeration.** Match any
-    signed out-of-band URL field: both `*DownloadURL` *and* `*UploadURL`
+    signed out-of-band URL field: both `*DownloadURL` _and_ `*UploadURL`
     (`DownloadURL`, `UploadURL`, `JSONUploadURL`, `SanitizedStateUploadURL`) plus
     the `LogReadURL` on hydrated `Plan`/`Apply` relations (tag `log-read-url`):
     they expire within minutes, can embed tokens, and duplicate blobs already
@@ -347,51 +349,59 @@ host repo. Single `main.go` is fine to start.
 Client: `tfe.NewClient(&tfe.Config{Token, Address})`
 
 Organizations:
+
 - `Organizations.List(ctx, *OrganizationListOptions) (*OrganizationList, error)`
 - `Organizations.Read(ctx, org string) (*Organization, error)`
 
 Workspaces:
+
 - `Workspaces.List(ctx, org string, *WorkspaceListOptions) (*WorkspaceList, error)`
   - `WorkspaceListOptions` embeds `ListOptions{PageNumber, PageSize}`
 - `Workspaces.ReadByIDWithOptions(ctx, id, *WorkspaceReadOptions)`
 
 Variables:
+
 - `Variables.ListAll(ctx, workspaceID string, *VariableListOptions) (*VariableList, error)`
   (hits `.../all-vars`, so it includes variable-set-inherited variables)
 - `Variable` fields: `Key, Value, Description, Category, HCL, Sensitive, VersionID`
   (redact `Value` when `Sensitive`)
 
 State versions:
+
 - `StateVersions.List(ctx, *StateVersionListOptions) (*StateVersionList, error)`
   - `StateVersionListOptions{ListOptions, Organization, Workspace}` (both are
     **name** filters: `filter[organization][name]`, `filter[workspace][name]`)
 - `StateVersions.Download(ctx, url string) ([]byte, error)`: pass a version's
   `DownloadURL` (raw) or `JSONDownloadURL` (json-format)
 - `StateVersion` fields: `ID, CreatedAt, DownloadURL (hosted-state-download-url),
-  JSONDownloadURL, Serial int64, Size int64, VCSCommitSHA, Status`
+JSONDownloadURL, Serial int64, Size int64, VCSCommitSHA, Status`
 
 Runs:
+
 - `Runs.List(ctx, workspaceID string, *RunListOptions) (*RunList, error)`
   - Set `RunListOptions.Include = []RunIncludeOpt{RunPlan, RunApply,
-    RunConfigVer, RunCreatedBy, RunCostEstimate}` to hydrate relations
+RunConfigVer, RunCreatedBy, RunCostEstimate}` to hydrate relations
 - `Run` relations: `Plan *Plan`, `Apply *Apply`,
   `ConfigurationVersion *ConfigurationVersion`, `CreatedBy *User`,
   `Comments []*Comment`, `Workspace *Workspace`
 - `Run` attrs incl.: `ID, CreatedAt, Message, Status, HasChanges, IsDestroy, ...`
 
 Plans / Applies:
+
 - `Plans.Logs(ctx, planID string) (io.Reader, error)`
 - `Plans.ReadJSONOutput(ctx, planID string) ([]byte, error)`
 - `Applies.Logs(ctx, applyID string) (io.Reader, error)`
 - both `Plan`/`Apply` carry `ResourceAdditions/Changes/Destructions`, `Status`
 
 Cost estimates:
+
 - reachable via the `RunCostEstimate` include (already set) / `Run.CostEstimate`;
   persist the id-serialized attrs (`Delta/Prior/ProposedMonthlyCost`, matched /
   unmatched resource counts) plus `CostEstimates.Logs(id)` for the human-readable
   breakdown. Do not flatten it to a bare id like other relations.
 
 Configuration versions:
+
 - `ConfigurationVersions.List(ctx, workspaceID string, *ConfigurationVersionListOptions)`
 - `ConfigurationVersions.Download(ctx, cvID string) ([]byte, error)`: tar.gz
 - `Source`/`Speculative`/`Status` are top-level `ConfigurationVersion` attrs
@@ -399,11 +409,13 @@ Configuration versions:
   relation (commit-sha/branch/PR/sender), which is independent of the tarball
 
 Comments:
+
 - `Comments.List(ctx, runID string) (*CommentList, error)`
 
 Additional org surface (now in scope, verified against the same source; these
 are shorthand; every `List` here takes an options arg and returns paginated
 results to loop, per the pagination pattern below):
+
 - **Projects**: `Projects.List/Read`; every workspace has a `Project` relation
   (`include=project`) carrying default execution mode, agent pool, auto-destroy,
   tag bindings.
@@ -458,6 +470,7 @@ results to loop, per the pagination pattern below):
   stack state).
 
 Gotchas confirmed against source:
+
 - `Run.Comments` is a struct relation but is NOT includable via `RunIncludeOpt`;
   comments come from the separate `Comments.List(runID)` call.
 - `StateVersionOutputs` is intentionally skipped: the endpoint redacts sensitive
@@ -483,8 +496,8 @@ Pagination pattern: loop `PageNumber` from 1, advance while
     sunset (no removal date, still accepts critical/security fixes, ~100 releases
     of hardening) and `v1.109.0` is the last and most complete v1 tag. For a
     read-only archive this is the low-risk, highest-fidelity surface.
-  - **v2 is disqualifying for *this* tool: a breadth gap, not just
-    `ChangeRequests`.** v2's spec omits ~20 operations the archive needs *today*
+  - **v2 is disqualifying for _this_ tool: a breadth gap, not just
+    `ChangeRequests`.** v2's spec omits ~20 operations the archive needs _today_
     (not "coming soon": absent from the spec, so nightly codegen will not produce
     them): the entire Stacks family, the entire private Registry (module
     `List`/`ReadVersion`/`ListCommits`, providers, provider versions/platforms,
