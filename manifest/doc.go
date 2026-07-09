@@ -6,9 +6,9 @@
 // # What it records
 //
 // For each object, keyed by its archive-relative path as an opaque string, the
-// ledger stores a status (done, permanently absent, skipped, errored, or not
-// applicable) with counts, timestamps, the failing error, a fetch time, and a
-// content signature (a size or hash). Failures record whether they were
+// ledger stores a status (done, permanently absent, skipped, errored, forbidden,
+// or not applicable) with counts, timestamps, the failing error, a fetch time,
+// and a content signature (a size or hash). Failures record whether they were
 // transient or terminal. Alongside the per-object entries it holds a high-water
 // mark per append-mostly collection and a summary record per run (the last run
 // time, a run count, and per-status totals). Keying on the relative path keeps
@@ -18,11 +18,12 @@
 //
 // From this state the ledger decides, per object, whether the current pass
 // should fetch it: settled work (done, and sticky permanent absence) is skipped,
-// while errored objects and anything absent from the ledger are retried. Because
-// permanent absence is sticky, a 404 or 410 is not re-requested every run; an
-// absent-recheck toggle forces re-probing when an operator suspects a since-
-// restored object. Distinguishing transient failures from terminal ones is what
-// keeps a rate-limit blip from being mistaken for permanent absence. A first run
+// while errored and forbidden objects and anything absent from the ledger are
+// retried. Because permanent absence is sticky, a 404 or 410 is not re-requested
+// every run; an absent-recheck toggle forces re-probing when an operator
+// suspects a since-restored object. Distinguishing transient failures from
+// terminal ones is what keeps a rate-limit blip from being mistaken for
+// permanent absence. A first run
 // starts from an empty ledger, so resume and a clean start are one code path,
 // and an interrupted run and a failed one are indistinguishable to it: both
 // leave objects errored or absent, and both are picked up next time.
