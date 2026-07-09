@@ -38,6 +38,8 @@ var (
 	ErrInvalidConcurrency = errors.New("workspace concurrency must be at least 1")
 	// ErrInvalidProgressMode indicates an unrecognized progress mode.
 	ErrInvalidProgressMode = errors.New("invalid progress mode")
+	// ErrInvalidProgressInterval indicates a progress interval of zero or less.
+	ErrInvalidProgressInterval = errors.New("progress interval must be greater than zero")
 )
 
 // Config holds the already-resolved settings that govern a single archive run.
@@ -232,6 +234,10 @@ func (c *Config) Validate() error {
 
 	if !c.ProgressMode.valid() {
 		return fmt.Errorf("%w: %q", ErrInvalidProgressMode, c.ProgressMode)
+	}
+
+	if c.ProgressInterval <= 0 {
+		return fmt.Errorf("%w: %s", ErrInvalidProgressInterval, c.ProgressInterval)
 	}
 
 	return nil

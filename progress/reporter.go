@@ -54,10 +54,13 @@ type Reporter struct {
 type Option func(*Reporter)
 
 // WithInterval sets the default cadence used by [Reporter.Run] when it is
-// called with a non-positive interval. It returns an [Option].
+// called with a non-positive interval. A non-positive value keeps the default.
+// It returns an [Option].
 func WithInterval(d time.Duration) Option {
 	return func(r *Reporter) {
-		r.interval = d
+		if d > 0 {
+			r.interval = d
+		}
 	}
 }
 
@@ -242,6 +245,10 @@ func (r *Reporter) Summary() error {
 func (r *Reporter) Run(ctx context.Context, interval time.Duration) error {
 	if interval <= 0 {
 		interval = r.interval
+	}
+
+	if interval <= 0 {
+		interval = config.DefaultProgressInterval
 	}
 
 	ticker := time.NewTicker(interval)
