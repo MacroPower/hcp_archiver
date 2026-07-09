@@ -20,9 +20,24 @@ rules:
   scope-enum:
     - 2
     - always
-    - - ci
+    - - archiver
+      - atomicfile
+      - audit
+      - ci
       - cli
+      - cmd
+      - collect
+      - config
       - deps
+      - manifest
+      - orgscope
+      - progress
+      - registry
+      - serialize
+      - stacks
+      - store
+      - tfeclient
+      - workspace
   header-max-length:
     - 2
     - always
