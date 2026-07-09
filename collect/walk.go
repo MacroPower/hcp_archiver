@@ -53,6 +53,14 @@ type Pager[T any] func(ctx context.Context, page int) (items []T, hasNext bool, 
 // [Env.Bytes] are skipped on that boundary refresh because the ledger already has
 // them settled.
 //
+// The early stop fires only once the collection was walked to its end in a prior
+// run (see [manifest.Ledger.IsCollectionComplete]). An interrupted first walk
+// archives a newest-first prefix and leaves an older tail with no ledger entry,
+// so stopping at the newest already-done element would strand that tail forever;
+// until the collection has completed once, the walk pages all the way down,
+// relying on the primitives to skip already-settled elements cheaply, and marks
+// the collection complete only when it reaches the final page.
+//
 // Only a context cancellation surfaced by an Archive closure or a page fetch
 // aborts the walk; every per-object error is recorded by the primitives and the
 // walk continues.
@@ -63,6 +71,8 @@ func Walk[T any](
 	page Pager[T],
 	describe func(T) Item,
 ) error {
+	complete := env.ledger.IsCollectionComplete(key)
+
 	for pageNum := 1; ; pageNum++ {
 		items, hasNext, err := page(ctx, pageNum)
 		if err != nil {
@@ -82,12 +92,14 @@ func Walk[T any](
 				return archiveErr
 			}
 
-			if frozen {
+			if frozen && complete {
 				return nil
 			}
 		}
 
 		if !hasNext {
+			env.ledger.MarkCollectionComplete(key)
+
 			return nil
 		}
 	}

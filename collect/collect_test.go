@@ -237,10 +237,13 @@ func TestWalkHaltsAndRevisits(t *testing.T) {
 
 	env, _, ledger := newEnv(t)
 
-	// Seed prior-run state: every element was archived done in a previous run.
+	// Seed prior-run state: every element was archived done in a previous run
+	// that walked the collection to its end, so the early stop is permitted.
 	for _, it := range []walkItem{r3, r2, r1} {
 		ledger.RecordDone(it.relPath, manifest.Signature{Hash: "prior", Size: 1})
 	}
+
+	ledger.MarkCollectionComplete("runs")
 
 	archived := map[string]int{}
 
@@ -283,6 +286,58 @@ func TestWalkHaltsAndRevisits(t *testing.T) {
 	assert.Equal(t, 1, pagesRequested, "the walk halts before requesting a second page")
 
 	assert.Equal(t, r3.createdAt, ledger.HighWaterMark("runs"), "the mark advances to the newest element seen")
+}
+
+func TestWalkResumesIncompleteCollection(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
+
+	// An interrupted first run archived the newest elements (r3, r2) but never
+	// reached the older tail (r1) and never completed the walk.
+	r3 := walkItem{relPath: "runs/r3/run.json", createdAt: base.Add(3 * time.Hour), terminal: true}
+	r2 := walkItem{relPath: "runs/r2/run.json", createdAt: base.Add(2 * time.Hour), terminal: true}
+	r1 := walkItem{relPath: "runs/r1/run.json", createdAt: base.Add(1 * time.Hour), terminal: true}
+
+	env, _, ledger := newEnv(t)
+
+	// The prior run recorded the newest elements done but was interrupted before
+	// completing the collection, so it is not marked complete.
+	ledger.RecordDone(r3.relPath, manifest.Signature{Hash: "prior", Size: 1})
+	ledger.RecordDone(r2.relPath, manifest.Signature{Hash: "prior", Size: 1})
+
+	archived := map[string]int{}
+
+	pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
+		if page == 1 {
+			return []walkItem{r3, r2, r1}, false, nil
+		}
+
+		return nil, false, nil
+	}
+
+	describe := func(it walkItem) collect.Item {
+		return collect.Item{
+			RelPath:   it.relPath,
+			CreatedAt: it.createdAt,
+			Terminal:  it.terminal,
+			Archive: func(ctx context.Context) error {
+				return env.Object(ctx, it.relPath, func(_ context.Context) (any, error) {
+					archived[it.relPath]++
+
+					return cannedProject(), nil
+				})
+			},
+		}
+	}
+
+	err := collect.Walk(t.Context(), env, "runs", pager, describe)
+	require.NoError(t, err)
+
+	// The walk does not stop at the newest already-done boundary; it pages all
+	// the way down and reaches the un-archived older tail.
+	assert.Equal(t, 1, archived[r1.relPath], "the un-archived older tail is reached and archived")
+	assert.True(t, ledger.IsCollectionComplete("runs"), "reaching the final page marks the collection complete")
 }
 
 func TestWalkPropagatesPageError(t *testing.T) {

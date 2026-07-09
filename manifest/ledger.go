@@ -25,6 +25,7 @@ type document struct {
 	LastRun        *RunRecord           `json:"lastRun,omitempty"`
 	HighWaterMarks map[string]time.Time `json:"highWaterMarks,omitempty"`
 	Entries        map[string]*Entry    `json:"entries,omitempty"`
+	Completed      map[string]bool      `json:"completedCollections,omitempty"`
 	Version        int                  `json:"version"`
 	RunCount       int                  `json:"runCount"`
 }
@@ -39,6 +40,7 @@ type Ledger struct {
 	now           func() time.Time
 	entries       map[string]*Entry
 	watermarks    map[string]time.Time
+	completed     map[string]bool
 	counts        map[Status]int
 	lastRun       *RunRecord
 	runStartedAt  time.Time
@@ -89,6 +91,7 @@ func Load(path string, opts ...Option) (*Ledger, error) {
 		now:        time.Now,
 		entries:    make(map[string]*Entry),
 		watermarks: make(map[string]time.Time),
+		completed:  make(map[string]bool),
 		counts:     make(map[Status]int),
 		path:       path,
 	}
@@ -120,6 +123,10 @@ func Load(path string, opts ...Option) (*Ledger, error) {
 
 	if doc.HighWaterMarks != nil {
 		l.watermarks = doc.HighWaterMarks
+	}
+
+	if doc.Completed != nil {
+		l.completed = doc.Completed
 	}
 
 	l.runCount = doc.RunCount
@@ -284,6 +291,33 @@ func (l *Ledger) AdvanceHighWaterMark(key string, t time.Time) {
 	}
 }
 
+// IsCollectionComplete reports whether the append-mostly collection under key
+// was walked to its end in a prior run.
+//
+// It is false until the collection has been fully paged at least once, so an
+// interrupted first walk (which leaves a newest-first prefix archived and an
+// older tail missing) is not mistaken for a complete collection. A re-run may
+// stop early at the newest already-archived element only once this is true.
+func (l *Ledger) IsCollectionComplete(key string) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	return l.completed[key]
+}
+
+// MarkCollectionComplete records that the collection under key has been walked
+// to its end, so later re-runs may stop early once they reach already-archived
+// history.
+//
+// It is sticky: an append-mostly collection only grows at its newest end, so
+// once its tail is fully archived that tail stays archived.
+func (l *Ledger) MarkCollectionComplete(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.completed[key] = true
+}
+
 // AddBytes adds n to the run's downloaded-bytes counter.
 func (l *Ledger) AddBytes(n int64) {
 	l.mu.Lock()
@@ -407,6 +441,7 @@ func (l *Ledger) Flush() error {
 		RunCount:       l.runCount,
 		HighWaterMarks: l.watermarks,
 		Entries:        l.entries,
+		Completed:      l.completed,
 	}
 
 	data, err := json.MarshalIndent(doc, "", "  ")
