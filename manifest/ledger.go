@@ -117,7 +117,18 @@ func Load(path string, opts ...Option) (*Ledger, error) {
 		return nil, fmt.Errorf("%w: %w", ErrCorruptManifest, err)
 	}
 
+	if doc.Version > schemaVersion {
+		return nil, fmt.Errorf("%w: schema version %d is newer than supported %d",
+			ErrCorruptManifest, doc.Version, schemaVersion)
+	}
+
 	if doc.Entries != nil {
+		for relPath, e := range doc.Entries {
+			if e == nil {
+				return nil, fmt.Errorf("%w: entry %q is null", ErrCorruptManifest, relPath)
+			}
+		}
+
 		l.entries = doc.Entries
 	}
 
