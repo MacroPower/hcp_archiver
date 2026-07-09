@@ -10,11 +10,11 @@ import (
 
 	"github.com/hashicorp/go-tfe"
 
-	"github.com/MacroPower/tfc_archiver/collect"
-	"github.com/MacroPower/tfc_archiver/manifest"
-	"github.com/MacroPower/tfc_archiver/progress"
-	"github.com/MacroPower/tfc_archiver/store"
-	"github.com/MacroPower/tfc_archiver/tfeclient"
+	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/progress"
+	"go.jacobcolvin.com/hcp_archiver/store"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // resolveOrgs resolves the organizations to archive.

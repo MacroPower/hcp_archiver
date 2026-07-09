@@ -8,9 +8,9 @@ import (
 	"github.com/hashicorp/go-tfe"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/MacroPower/tfc_archiver/collect"
-	"github.com/MacroPower/tfc_archiver/collect/workspace"
-	"github.com/MacroPower/tfc_archiver/tfeclient"
+	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/collect/workspace"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // defaultProjectName labels a workspace whose project cannot be resolved, so it

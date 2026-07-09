@@ -6,7 +6,7 @@ import (
 
 	"github.com/hashicorp/go-tfe"
 
-	"github.com/MacroPower/tfc_archiver/tfeclient"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // collectModules enumerates the organization's registry modules through the

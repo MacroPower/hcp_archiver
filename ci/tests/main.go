@@ -90,8 +90,8 @@ func (m *Tests) TestBuildImageMetadata(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("[%d]: title label: %w", i, err)
 		}
-		if title != "tfc_archiver" {
-			return fmt.Errorf("[%d]: title label = %q, want %q", i, title, "tfc_archiver")
+		if title != "hcp_archiver" {
+			return fmt.Errorf("[%d]: title label = %q, want %q", i, title, "hcp_archiver")
 		}
 
 		created, err := ctr.Label(ctx, "org.opencontainers.image.created")
@@ -106,8 +106,8 @@ func (m *Tests) TestBuildImageMetadata(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("[%d]: entrypoint: %w", i, err)
 		}
-		if len(ep) != 1 || ep[0] != "tfc_archiver" {
-			return fmt.Errorf("[%d]: entrypoint = %v, want [tfc_archiver]", i, ep)
+		if len(ep) != 1 || ep[0] != "hcp_archiver" {
+			return fmt.Errorf("[%d]: entrypoint = %v, want [hcp_archiver]", i, ep)
 		}
 	}
 
@@ -122,7 +122,7 @@ func (m *Tests) TestLintReleaserClean(ctx context.Context) error {
 	return dag.Ci().LintReleaser(ctx)
 }
 
-// TestBinary verifies that [Ci.Binary] compiles the tfc_archiver binary.
+// TestBinary verifies that [Ci.Binary] compiles the hcp_archiver binary.
 //
 // +check
 func (m *Tests) TestBinary(ctx context.Context) error {

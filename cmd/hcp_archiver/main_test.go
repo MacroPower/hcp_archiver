@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	main "github.com/MacroPower/tfc_archiver/cmd/tfc_archiver"
-	"github.com/MacroPower/tfc_archiver/config"
+	main "go.jacobcolvin.com/hcp_archiver/cmd/hcp_archiver"
+	"go.jacobcolvin.com/hcp_archiver/config"
 )
 
 func TestNewRootCmd(t *testing.T) {

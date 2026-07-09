@@ -31,7 +31,7 @@ jobs:
           private-key: "${{ secrets.BOT_APP_PRIVATE_KEY }}"
           owner: "${{ github.repository_owner }}"
           repositories: |
-            tfc_archiver
+            hcp_archiver
           # goreleaser creates the GitHub release; the token needs only repo
           # contents.
           permission-contents: write

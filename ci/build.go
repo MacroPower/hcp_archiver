@@ -26,7 +26,7 @@ func (m *Ci) Build(ctx context.Context) (*dagger.Directory, error) {
 		Directory("/src/dist"), nil
 }
 
-// BinarySnapshot builds the tfc_archiver binary for a single platform via GoReleaser
+// BinarySnapshot builds the hcp_archiver binary for a single platform via GoReleaser
 // in snapshot mode.
 func (m *Ci) BinarySnapshot(
 	ctx context.Context,
@@ -45,9 +45,9 @@ func (m *Ci) BinarySnapshot(
 		WithDirectory("/out", dag.Directory()).
 		WithExec([]string{
 			"goreleaser", "build", "--snapshot", "--clean",
-			"--single-target", "--output", "/out/tfc_archiver",
+			"--single-target", "--output", "/out/hcp_archiver",
 		}).
-		File("/out/tfc_archiver"), nil
+		File("/out/hcp_archiver"), nil
 }
 
 // BuildImages builds multi-arch runtime container images from a GoReleaser
@@ -79,7 +79,7 @@ func ociCreated() string {
 }
 
 // platformDistDir maps a target platform to the GoReleaser dist
-// subdirectory holding its tfc_archiver binary.
+// subdirectory holding its hcp_archiver binary.
 type platformDistDir struct {
 	platform dagger.Platform
 	distDir  string
@@ -89,8 +89,8 @@ type platformDistDir struct {
 // and [Ci.ReleaseDryRun] range over it so the images that ship
 // and the dry-run that verifies them cover the same platforms.
 var platformDistDirs = []platformDistDir{
-	{platform: "linux/amd64", distDir: "tfc_archiver_linux_amd64_v1"},
-	{platform: "linux/arm64", distDir: "tfc_archiver_linux_arm64_v8.0"},
+	{platform: "linux/amd64", distDir: "hcp_archiver_linux_amd64_v1"},
+	{platform: "linux/arm64", distDir: "hcp_archiver_linux_arm64_v8.0"},
 }
 
 // runtimeImages builds a multi-arch set of runtime container images from a
@@ -104,8 +104,8 @@ func runtimeImages(dist *dagger.Directory, version, created string) ([]*dagger.C
 			WithLabel("org.opencontainers.image.created", created).
 			WithAnnotation("org.opencontainers.image.version", version).
 			WithAnnotation("org.opencontainers.image.created", created).
-			WithFile("/usr/local/bin/tfc_archiver", dist.File(p.distDir+"/tfc_archiver")).
-			WithEntrypoint([]string{"tfc_archiver"})
+			WithFile("/usr/local/bin/hcp_archiver", dist.File(p.distDir+"/hcp_archiver")).
+			WithEntrypoint([]string{"hcp_archiver"})
 	}
 
 	return containers, nil
@@ -114,12 +114,12 @@ func runtimeImages(dist *dagger.Directory, version, created string) ([]*dagger.C
 // withOCILabels applies the static OCI labels and annotations.
 func withOCILabels(ctr *dagger.Container) *dagger.Container {
 	return ctr.
-		WithLabel("org.opencontainers.image.title", "tfc_archiver").
-		WithLabel("org.opencontainers.image.source", "https://github.com/MacroPower/tfc_archiver").
-		WithLabel("org.opencontainers.image.url", "https://github.com/MacroPower/tfc_archiver").
+		WithLabel("org.opencontainers.image.title", "hcp_archiver").
+		WithLabel("org.opencontainers.image.source", "https://github.com/MacroPower/hcp_archiver").
+		WithLabel("org.opencontainers.image.url", "https://github.com/MacroPower/hcp_archiver").
 		WithLabel("org.opencontainers.image.licenses", "Apache-2.0").
-		WithAnnotation("org.opencontainers.image.title", "tfc_archiver").
-		WithAnnotation("org.opencontainers.image.source", "https://github.com/MacroPower/tfc_archiver")
+		WithAnnotation("org.opencontainers.image.title", "hcp_archiver").
+		WithAnnotation("org.opencontainers.image.source", "https://github.com/MacroPower/hcp_archiver")
 }
 
 // releaserBase builds the full release toolset: the shared GoReleaser base

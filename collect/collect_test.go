@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/MacroPower/tfc_archiver/collect"
-	"github.com/MacroPower/tfc_archiver/manifest"
-	"github.com/MacroPower/tfc_archiver/store"
+	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
 // fixedClock returns a clock stuck at a fixed instant for deterministic ledger

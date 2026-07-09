@@ -7,7 +7,7 @@ import (
 
 	tfe "github.com/hashicorp/go-tfe"
 
-	"github.com/MacroPower/tfc_archiver/collect/stacks"
+	"go.jacobcolvin.com/hcp_archiver/collect/stacks"
 )
 
 func TestConfigTerminal(t *testing.T) {

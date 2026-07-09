@@ -4,7 +4,7 @@ set: [errexit, nounset, pipefail]
 shopt: [globstar]
 
 # Go tasks call the local toolchain (go, golangci-lint) directly; devbox
-# provides both on PATH. tfc_archiver is a single Go module, so the package set
+# provides both on PATH. hcp_archiver is a single Go module, so the package set
 # is the module-relative ./... pattern.
 vars:
   GO_PKGS: ./...
@@ -60,7 +60,7 @@ tasks:
       Runs the unit tests with the race detector.
 
       For a single package or extra flags, call go directly:
-        go test -run TestName ./cmd/tfc_archiver/...
+        go test -run TestName ./cmd/hcp_archiver/...
     cmds:
       - go test -timeout={{.TEST_TIMEOUT}} -race {{.GO_PKGS}}
 
@@ -112,13 +112,13 @@ tasks:
       results.
 
       Args:
-        PKG: Go package to benchmark (default: github.com/MacroPower/tfc_archiver/...)
+        PKG: Go package to benchmark (default: go.jacobcolvin.com/hcp_archiver/...)
         FLAGS: Additional flags to pass to `go test` (default: "")
 
       Examples:
-        task go:bench PKG=./cmd/tfc_archiver FLAGS="-cpuprofile profile.out -run=^\$"
+        task go:bench PKG=./cmd/hcp_archiver FLAGS="-cpuprofile profile.out -run=^\$"
     vars:
-      PKG: '{{.PKG | default "github.com/MacroPower/tfc_archiver/..."}}'
+      PKG: '{{.PKG | default "go.jacobcolvin.com/hcp_archiver/..."}}'
       FLAGS: '{{.FLAGS | default ""}}'
     cmds:
       - go test -bench=. -benchmem {{.FLAGS}} {{.PKG}}
@@ -131,10 +131,10 @@ tasks:
       interactive reading.
 
       Args:
-        PKG: Go package(s) to document (default: github.com/MacroPower/tfc_archiver/...)
+        PKG: Go package(s) to document (default: go.jacobcolvin.com/hcp_archiver/...)
         FLAGS: Additional flags to pass to `go doc` (default: "")
     vars:
-      PKG: '{{.PKG | default "github.com/MacroPower/tfc_archiver/..."}}'
+      PKG: '{{.PKG | default "go.jacobcolvin.com/hcp_archiver/..."}}'
       FLAGS: '{{.FLAGS | default ""}}'
       PACKAGES:
         sh: go list {{.PKG}} | grep -v -E '/cmd(/|$)'

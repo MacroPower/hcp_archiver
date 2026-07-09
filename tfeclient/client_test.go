@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/MacroPower/tfc_archiver/tfeclient"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // roundTripFunc adapts a function to an [http.RoundTripper].

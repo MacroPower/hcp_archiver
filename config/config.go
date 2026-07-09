@@ -21,9 +21,13 @@ const (
 
 // Environment variables consulted for the API token, in precedence order.
 const (
-	// EnvToken is the primary token variable, checked before [EnvTokenFallback].
-	EnvToken = "TFC_TOKEN"
-	// EnvTokenFallback is the secondary token variable.
+	// EnvToken is the primary token variable, checked before [EnvTokenTFC] and
+	// [EnvTokenFallback].
+	EnvToken = "HCP_TOKEN"
+	// EnvTokenTFC is the secondary token variable, retained for compatibility
+	// with the tool's former name.
+	EnvTokenTFC = "TFC_TOKEN"
+	// EnvTokenFallback is the tertiary token variable.
 	EnvTokenFallback = "TFE_TOKEN"
 )
 
@@ -31,7 +35,7 @@ const (
 var (
 	// ErrMissingToken indicates that no API token was supplied or found in the
 	// environment.
-	ErrMissingToken = errors.New("api token is required (set TFC_TOKEN or TFE_TOKEN)")
+	ErrMissingToken = errors.New("api token is required (set HCP_TOKEN, TFC_TOKEN, or TFE_TOKEN)")
 	// ErrMissingOutputDir indicates that no output directory was supplied.
 	ErrMissingOutputDir = errors.New("output directory is required")
 	// ErrInvalidConcurrency indicates a workspace concurrency below one.
@@ -188,9 +192,9 @@ func WithAuditTrail(enabled bool) Option {
 // New creates a new [Config].
 //
 // It starts from the package defaults, applies each [Option] in order, resolves
-// the API token from [EnvToken] then [EnvTokenFallback] when no token was set,
-// and validates the result. It reads environment variables but performs no
-// other I/O.
+// the API token from [EnvToken], then [EnvTokenTFC], then [EnvTokenFallback]
+// when no token was set, and validates the result. It reads environment
+// variables but performs no other I/O.
 func New(opts ...Option) (*Config, error) {
 	c := &Config{
 		Address:              DefaultAddress,
@@ -244,14 +248,13 @@ func (c *Config) Validate() error {
 }
 
 // tokenFromEnv resolves the token from the environment, preferring [EnvToken]
-// over [EnvTokenFallback] and treating an empty value as unset.
+// over [EnvTokenTFC] over [EnvTokenFallback] and treating an empty value as
+// unset.
 func tokenFromEnv() string {
-	if v, ok := os.LookupEnv(EnvToken); ok && v != "" {
-		return v
-	}
-
-	if v, ok := os.LookupEnv(EnvTokenFallback); ok && v != "" {
-		return v
+	for _, env := range []string{EnvToken, EnvTokenTFC, EnvTokenFallback} {
+		if v, ok := os.LookupEnv(env); ok && v != "" {
+			return v
+		}
 	}
 
 	return ""

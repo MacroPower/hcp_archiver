@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/MacroPower/tfc_archiver/config"
+	"go.jacobcolvin.com/hcp_archiver/config"
 )
 
 func TestNew_Defaults(t *testing.T) {
@@ -65,23 +65,43 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 
 func TestNew_TokenFromEnv(t *testing.T) {
 	tests := map[string]struct {
+		hcpToken    *string
 		tfcToken    *string
 		tfeToken    *string
 		optionToken string
 		want        string
 		wantErr     error
 	}{
-		"tfc token used": {
+		"hcp token used": {
+			hcpToken: new("hcp-value"),
+			want:     "hcp-value",
+		},
+		"tfc token used when hcp unset": {
 			tfcToken: new("tfc-value"),
 			want:     "tfc-value",
 		},
-		"tfe token used when tfc unset": {
+		"tfe token used when hcp and tfc unset": {
 			tfeToken: new("tfe-value"),
 			want:     "tfe-value",
+		},
+		"hcp precedence over tfc": {
+			hcpToken: new("hcp-value"),
+			tfcToken: new("tfc-value"),
+			want:     "hcp-value",
+		},
+		"hcp precedence over tfe": {
+			hcpToken: new("hcp-value"),
+			tfeToken: new("tfe-value"),
+			want:     "hcp-value",
 		},
 		"tfc precedence over tfe": {
 			tfcToken: new("tfc-value"),
 			tfeToken: new("tfe-value"),
+			want:     "tfc-value",
+		},
+		"empty hcp falls back to tfc": {
+			hcpToken: new(""),
+			tfcToken: new("tfc-value"),
 			want:     "tfc-value",
 		},
 		"empty tfc falls back to tfe": {
@@ -91,25 +111,32 @@ func TestNew_TokenFromEnv(t *testing.T) {
 		},
 		"option token beats environment": {
 			optionToken: "opt-value",
-			tfcToken:    new("tfc-value"),
+			hcpToken:    new("hcp-value"),
 			want:        "opt-value",
 		},
-		"both empty is missing token": {
+		"all empty is missing token": {
+			hcpToken: new(""),
 			tfcToken: new(""),
 			tfeToken: new(""),
 			wantErr:  config.ErrMissingToken,
 		},
-		"neither set is missing token": {
+		"none set is missing token": {
 			wantErr: config.ErrMissingToken,
 		},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			if tc.tfcToken != nil {
-				t.Setenv(config.EnvToken, *tc.tfcToken)
+			if tc.hcpToken != nil {
+				t.Setenv(config.EnvToken, *tc.hcpToken)
 			} else {
 				t.Setenv(config.EnvToken, "")
+			}
+
+			if tc.tfcToken != nil {
+				t.Setenv(config.EnvTokenTFC, *tc.tfcToken)
+			} else {
+				t.Setenv(config.EnvTokenTFC, "")
 			}
 
 			if tc.tfeToken != nil {
@@ -179,6 +206,7 @@ func TestNew_ValidationErrors(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			// Ensure the environment does not supply a token for these cases.
 			t.Setenv(config.EnvToken, "")
+			t.Setenv(config.EnvTokenTFC, "")
 			t.Setenv(config.EnvTokenFallback, "")
 
 			cfg, err := config.New(tc.opts...)

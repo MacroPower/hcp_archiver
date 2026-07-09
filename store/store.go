@@ -11,8 +11,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/MacroPower/tfc_archiver/atomicfile"
-	"github.com/MacroPower/tfc_archiver/serialize"
+	"go.jacobcolvin.com/hcp_archiver/atomicfile"
+	"go.jacobcolvin.com/hcp_archiver/serialize"
 )
 
 // Store maps a logical archive object to a stable relative path under one

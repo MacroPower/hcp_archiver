@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/MacroPower/tfc_archiver/store"
+	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
 func TestStore_pathBuilders(t *testing.T) {

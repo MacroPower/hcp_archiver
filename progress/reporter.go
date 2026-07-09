@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/MacroPower/tfc_archiver/config"
-	"github.com/MacroPower/tfc_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/config"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
 )
 
 // TallySource supplies the live counters the reporter renders.

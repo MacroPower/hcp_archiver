@@ -36,7 +36,7 @@ func (m *Ci) TestCoverage() *dagger.File {
 
 // LintReleaser validates the GoReleaser configuration. Delegates to the
 // shared [Goreleaser] toolchain, which mounts the source over a minimal git
-// repo (the tfc_archiver remote URL is configured at construction) because the
+// repo (the hcp_archiver remote URL is configured at construction) because the
 // goreleaser config references a git remote for changelog generation.
 //
 // +check
@@ -135,7 +135,7 @@ func (m *Ci) ReleaseDryRun(ctx context.Context) error {
 	// architecture, catching cross-compilation mismatches early.
 	for _, t := range platformDistDirs {
 		g.Go(func() error {
-			bin := dist.File(t.distDir + "/tfc_archiver")
+			bin := dist.File(t.distDir + "/hcp_archiver")
 			if err := m.Goreleaser.VerifyBinaryPlatform(ctx, bin, t.platform); err != nil {
 				return fmt.Errorf("platform verification for %s: %w", t.platform, err)
 			}

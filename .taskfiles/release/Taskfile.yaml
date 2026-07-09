@@ -4,7 +4,7 @@ set: [errexit, nounset, pipefail]
 shopt: [globstar]
 
 # Release tasks run through the `ci` Dagger toolchain, which composes the
-# goreleaser toolchain. tfc_archiver has a single root .goreleaser.yaml: check
+# goreleaser toolchain. hcp_archiver has a single root .goreleaser.yaml: check
 # validates it, snapshot cross-compiles the binaries (no publishing).
 tasks:
   check:

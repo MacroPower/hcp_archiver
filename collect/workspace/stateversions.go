@@ -6,7 +6,7 @@ import (
 
 	"github.com/hashicorp/go-tfe"
 
-	"github.com/MacroPower/tfc_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/collect"
 )
 
 // collectStateVersions archives the workspace's state versions newest-first.

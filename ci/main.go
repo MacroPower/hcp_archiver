@@ -1,4 +1,4 @@
-// CI functions specific to the tfc_archiver repository. The quality gates that run
+// CI functions specific to the hcp_archiver repository. The quality gates that run
 // local tools (go, golangci-lint, prettier) are Taskfile targets; these
 // functions run those same tasks inside the project's devbox environment via
 // the devbox toolchain, so CI reproduces exactly what developers run locally:
@@ -25,11 +25,11 @@ import (
 const (
 	goreleaserVersion = "v2.16.0" // renovate: datasource=github-releases depName=goreleaser/goreleaser
 
-	cacheNamespace = "github.com/MacroPower/tfc_archiver/ci"
+	cacheNamespace = "github.com/MacroPower/hcp_archiver/ci"
 
-	defaultRegistry = "ghcr.io/macropower/tfc_archiver"
+	defaultRegistry = "ghcr.io/macropower/hcp_archiver"
 
-	cloneURL = "https://github.com/MacroPower/tfc_archiver.git"
+	cloneURL = "https://github.com/MacroPower/hcp_archiver.git"
 
 	// renovateConfig is the Renovate configuration file validated by
 	// [Ci.LintRenovate], relative to the source root.
@@ -52,12 +52,12 @@ const (
 	devboxUser = "devbox"
 )
 
-// Ci provides CI functions for the tfc_archiver repository. Create instances with
+// Ci provides CI functions for the hcp_archiver repository. Create instances with
 // [New].
 type Ci struct {
 	// Project source directory.
 	Source *dagger.Directory
-	// Container image registry address (e.g. "ghcr.io/macropower/tfc_archiver").
+	// Container image registry address (e.g. "ghcr.io/macropower/hcp_archiver").
 	Registry string
 	// Directory containing only go.mod and go.sum, synced independently of
 	// [Ci.Source] so that its content hash changes only when dependency files
@@ -142,7 +142,7 @@ func (m *Ci) runTask(ctx context.Context, target string) error {
 	return err
 }
 
-// Binary compiles the tfc_archiver binary for the given platform via GoReleaser in
+// Binary compiles the hcp_archiver binary for the given platform via GoReleaser in
 // snapshot mode. There is no longer a lightweight Go toolchain to delegate to,
 // so this routes through the release toolchain (releaserBase), producing the
 // same artifact the release pipeline ships.

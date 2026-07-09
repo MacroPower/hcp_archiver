@@ -3,7 +3,7 @@ package main
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/MacroPower/tfc_archiver/config"
+	"go.jacobcolvin.com/hcp_archiver/config"
 )
 
 // NewRootCmd exposes newRootCmd for tests.

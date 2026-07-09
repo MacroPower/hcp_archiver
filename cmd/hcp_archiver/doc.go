@@ -1,4 +1,4 @@
-// Command tfc_archiver archives an HCP Terraform (formerly Terraform Cloud)
+// Command hcp_archiver archives an HCP Terraform (formerly Terraform Cloud)
 // organization to local disk for long-term reference. It captures state
 // history, run history, the configuration that produced each run, and the
 // surrounding org-level metadata as plain files. It does not restore anything

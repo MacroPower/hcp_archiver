@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/MacroPower/tfc_archiver/manifest"
-	"github.com/MacroPower/tfc_archiver/store"
-	"github.com/MacroPower/tfc_archiver/tfeclient"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/store"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // Object archives a single immutable object at relPath.

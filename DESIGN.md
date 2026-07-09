@@ -1,4 +1,4 @@
-# TFC Archiver: Design Notes
+# HCP Archiver: Design Notes
 
 A standalone tool to fully archive an HCP Terraform (formerly Terraform Cloud)
 account to disk for **long-term reference**, not restoration back into TFC.

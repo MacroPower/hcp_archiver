@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/MacroPower/tfc_archiver/atomicfile"
+	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 )
 
 // schemaVersion is the on-disk manifest format version.

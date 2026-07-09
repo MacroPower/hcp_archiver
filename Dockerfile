@@ -1,5 +1,5 @@
 FROM scratch
 
-COPY tfc_archiver /usr/local/bin/
+COPY hcp_archiver /usr/local/bin/
 
-ENTRYPOINT ["tfc_archiver"]
+ENTRYPOINT ["hcp_archiver"]

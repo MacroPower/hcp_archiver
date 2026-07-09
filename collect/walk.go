@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/MacroPower/tfc_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
 )
 
 // Item describes one element of an append-mostly collection to [Walk].

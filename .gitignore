@@ -5,7 +5,7 @@
 *.so
 *.dylib
 dist/
-/tfc_archiver
+/hcp_archiver
 
 # Test binary, built with `go test -c`
 *.test

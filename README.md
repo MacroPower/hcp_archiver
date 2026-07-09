@@ -1,4 +1,4 @@
-# tfc_archiver
+# hcp_archiver
 
 A standalone tool that archives an HCP Terraform (formerly Terraform Cloud)
 organization to plain files on disk for **long-term reference**, not for
@@ -28,22 +28,24 @@ still existing.
 
 ```bash
 task build          # cross-compile snapshot binaries to ./dist via Dagger
-go install ./cmd/tfc_archiver
+go install ./cmd/hcp_archiver
 ```
 
 ## Usage
 
-Authentication reads `TFC_TOKEN` or `TFE_TOKEN` from the environment.
+Authentication reads `HCP_TOKEN` from the environment, falling back to
+`TFC_TOKEN` and then `TFE_TOKEN` for compatibility.
 
 ```bash
-export TFC_TOKEN=...    # an HCP Terraform user, team, or organization token
+export HCP_TOKEN=...    # an HCP Terraform user, team, or organization token
 
-tfc_archiver version
+hcp_archiver version
 ```
 
 ### Configuration surface
 
-- `TFC_TOKEN` / `TFE_TOKEN` (required): the archiving identity's API token.
+- `HCP_TOKEN` / `TFC_TOKEN` / `TFE_TOKEN` (required): the archiving identity's
+  API token.
 - **address**: the API endpoint, defaulting to `https://app.terraform.io`.
 - **organization**: optional; when omitted, every organization the token can
   see is archived in turn.

@@ -6,7 +6,7 @@ import (
 	"github.com/hashicorp/go-tfe"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/MacroPower/tfc_archiver/collect/workspace"
+	"go.jacobcolvin.com/hcp_archiver/collect/workspace"
 )
 
 func TestRunTerminal(t *testing.T) {

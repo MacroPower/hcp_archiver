@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/MacroPower/tfc_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
 )
 
 // fixedClock returns a clock function yielding a constant time.

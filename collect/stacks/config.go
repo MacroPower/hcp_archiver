@@ -7,8 +7,8 @@ import (
 
 	tfe "github.com/hashicorp/go-tfe"
 
-	"github.com/MacroPower/tfc_archiver/collect"
-	"github.com/MacroPower/tfc_archiver/tfeclient"
+	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // collectConfigurations walks a stack's configurations newest-first, archiving

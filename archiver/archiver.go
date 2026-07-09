@@ -8,8 +8,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/MacroPower/tfc_archiver/config"
-	"github.com/MacroPower/tfc_archiver/tfeclient"
+	"go.jacobcolvin.com/hcp_archiver/config"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // defaultFlushInterval is the cadence at which each organization's ledger is

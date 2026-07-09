@@ -2,10 +2,10 @@
 // archive run, so the rest of the program receives one already-checked value
 // rather than reaching for the environment or flag tree itself.
 //
-// The archiving identity is an HCP Terraform API token, read from TFC_TOKEN or
-// TFE_TOKEN. The API address defaults to https://app.terraform.io. An empty
-// organization filter means "every organization the token can see", archived in
-// turn. The output directory is the archive root; because resume and
+// The archiving identity is an HCP Terraform API token, read from HCP_TOKEN,
+// TFC_TOKEN, or TFE_TOKEN. The API address defaults to https://app.terraform.io.
+// An empty organization filter means "every organization the token can see",
+// archived in turn. The output directory is the archive root; because resume and
 // incremental re-run are driven by the ledger already on disk, pointing a run
 // at a directory that already holds an archive is what makes it a resume rather
 // than a fresh start.

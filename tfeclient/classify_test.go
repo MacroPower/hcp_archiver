@@ -10,7 +10,7 @@ import (
 	"github.com/hashicorp/go-tfe"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/MacroPower/tfc_archiver/tfeclient"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // timeoutErr is a net.Error whose Timeout reports true.

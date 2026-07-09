@@ -6,7 +6,7 @@ import (
 	"github.com/hashicorp/go-tfe"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/MacroPower/tfc_archiver/collect/orgscope"
+	"go.jacobcolvin.com/hcp_archiver/collect/orgscope"
 )
 
 func TestPolicyExt(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 
 	tfe "github.com/hashicorp/go-tfe"
 
-	"github.com/MacroPower/tfc_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/collect"
 )
 
 // configFile is the leaf name of the organization audit-configuration file

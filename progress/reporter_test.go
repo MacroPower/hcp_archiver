@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/MacroPower/tfc_archiver/config"
-	"github.com/MacroPower/tfc_archiver/manifest"
-	"github.com/MacroPower/tfc_archiver/progress"
+	"go.jacobcolvin.com/hcp_archiver/config"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/progress"
 )
 
 // fakeSource is a static [progress.TallySource] for tests.

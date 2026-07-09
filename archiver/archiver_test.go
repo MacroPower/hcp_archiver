@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/MacroPower/tfc_archiver/archiver"
-	"github.com/MacroPower/tfc_archiver/config"
+	"go.jacobcolvin.com/hcp_archiver/archiver"
+	"go.jacobcolvin.com/hcp_archiver/config"
 )
 
 func TestNew(t *testing.T) {

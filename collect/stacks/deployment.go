@@ -7,7 +7,7 @@ import (
 
 	tfe "github.com/hashicorp/go-tfe"
 
-	"github.com/MacroPower/tfc_archiver/tfeclient"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // collectDeployments archives every named deployment of a stack. A named

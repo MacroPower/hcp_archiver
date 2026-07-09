@@ -6,7 +6,7 @@ import (
 
 	"github.com/hashicorp/go-tfe"
 
-	"github.com/MacroPower/tfc_archiver/tfeclient"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // collectGPGKeys archives the private-registry GPG signing keys scoped to the

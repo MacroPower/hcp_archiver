@@ -17,11 +17,11 @@ import (
 	"go.jacobcolvin.com/x/cobras/profile"
 	"go.jacobcolvin.com/x/version"
 
-	"github.com/MacroPower/tfc_archiver/archiver"
-	"github.com/MacroPower/tfc_archiver/config"
+	"go.jacobcolvin.com/hcp_archiver/archiver"
+	"go.jacobcolvin.com/hcp_archiver/config"
 )
 
-const appName = "tfc_archiver"
+const appName = "hcp_archiver"
 
 // Flag names bound onto the root command.
 const (
@@ -137,7 +137,7 @@ func (af *archiveFlags) config() (*config.Config, error) {
 	)
 }
 
-// newRootCmd builds the root [*cobra.Command] for the tfc_archiver CLI. Logging
+// newRootCmd builds the root [*cobra.Command] for the hcp_archiver CLI. Logging
 // and profiling are configured from persistent flags in PersistentPreRunE, so
 // every subcommand shares the same setup. The root command itself runs the
 // archive; the only subcommand reports version information.

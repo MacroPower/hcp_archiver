@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/MacroPower/tfc_archiver/collect"
-	"github.com/MacroPower/tfc_archiver/collect/audit"
-	"github.com/MacroPower/tfc_archiver/collect/orgscope"
-	"github.com/MacroPower/tfc_archiver/collect/registry"
-	"github.com/MacroPower/tfc_archiver/collect/stacks"
-	"github.com/MacroPower/tfc_archiver/collect/workspace"
+	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/collect/audit"
+	"go.jacobcolvin.com/hcp_archiver/collect/orgscope"
+	"go.jacobcolvin.com/hcp_archiver/collect/registry"
+	"go.jacobcolvin.com/hcp_archiver/collect/stacks"
+	"go.jacobcolvin.com/hcp_archiver/collect/workspace"
 )
 
 // collectOrg runs the domain collectors against one organization in order.

@@ -88,12 +88,12 @@ tasks:
 
   install:
     desc: Runs all install targets
-    deps: [dev:install, git:hooks:install, install:tfc_archiver]
+    deps: [dev:install, git:hooks:install, install:hcp_archiver]
 
-  install:tfc_archiver:
-    desc: Builds and installs the tfc_archiver binary
+  install:hcp_archiver:
+    desc: Builds and installs the hcp_archiver binary
     cmds:
-      - go install ./cmd/tfc_archiver
+      - go install ./cmd/hcp_archiver
 
   clean:
     desc: Removes build artifacts and caches

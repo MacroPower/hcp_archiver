@@ -3,7 +3,7 @@
 This repository's own CI module, registered as `ci` in the root `dagger.json`.
 It is not designed for remote consumption: it orchestrates the repo's
 `dagger -> devbox -> task` flow so CI reproduces exactly what `task check:all`
-runs locally, and it owns tfc_archiver's release pipeline.
+runs locally, and it owns hcp_archiver's release pipeline.
 
 ## Functions
 
@@ -50,7 +50,7 @@ syft SBOM tooling (`with-cosign`/`with-syft`/`sign-keyless`).
   `binary` / `binary-snapshot` produce a single-platform binary the same way.
 - `release --tag=vX.Y.Z` runs GoReleaser for binaries/archives/SBOMs/signing,
   creates the GitHub release, builds the multi-arch runtime image from the dist
-  binaries (scratch base + the tfc_archiver binary), publishes it natively via
+  binaries (scratch base + the hcp_archiver binary), publishes it natively via
   Dagger, and signs the published digests with cosign keyless signing. Signing
   is keyless (Sigstore Fulcio + Rekor): the workflow forwards the GitHub Actions
   OIDC token; with no token the release is unsigned.

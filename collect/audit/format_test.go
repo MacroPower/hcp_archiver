@@ -8,7 +8,7 @@ import (
 
 	tfe "github.com/hashicorp/go-tfe"
 
-	"github.com/MacroPower/tfc_archiver/collect/audit"
+	"go.jacobcolvin.com/hcp_archiver/collect/audit"
 )
 
 func TestPageName(t *testing.T) {

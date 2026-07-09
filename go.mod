@@ -1,4 +1,4 @@
-module github.com/MacroPower/tfc_archiver
+module go.jacobcolvin.com/hcp_archiver
 
 go 1.26.0
 

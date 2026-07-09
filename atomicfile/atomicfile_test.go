@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/MacroPower/tfc_archiver/atomicfile"
+	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 )
 
 // errBoom is the sentinel a failing callback returns midway through a write.

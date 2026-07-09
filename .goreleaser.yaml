@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 version: 2
 
-project_name: tfc_archiver
+project_name: hcp_archiver
 
 env:
   - DOCKER_REGISTRY=ghcr.io/macropower
@@ -14,8 +14,8 @@ before:
     - go generate ./...
 
 builds:
-  - id: tfc_archiver
-    main: ./cmd/tfc_archiver
+  - id: hcp_archiver
+    main: ./cmd/hcp_archiver
     goos:
       - linux
       - darwin

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/MacroPower/tfc_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/collect"
 )
 
 // Collector archives an organization's private registry: modules, providers,

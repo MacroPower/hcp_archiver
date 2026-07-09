@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/MacroPower/tfc_archiver/serialize"
+	"go.jacobcolvin.com/hcp_archiver/serialize"
 )
 
 func TestMarshal(t *testing.T) {

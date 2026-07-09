@@ -1,5 +1,5 @@
 {
-  "name": "tfc_archiver",
+  "name": "hcp_archiver",
   "engineVersion": "v0.21.4",
   "toolchains": [
     {
@@ -43,7 +43,7 @@
         },
         {
           "argument": "cacheNamespace",
-          "default": "github.com/MacroPower/tfc_archiver/ci"
+          "default": "github.com/MacroPower/hcp_archiver/ci"
         }
       ]
     },
