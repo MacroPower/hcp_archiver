@@ -228,6 +228,37 @@ func TestEnvBytes(t *testing.T) {
 	assert.True(t, exists)
 }
 
+func TestEnvBytesEmptyIsNotApplicable(t *testing.T) {
+	t.Parallel()
+
+	// A 204 No Content answer (an absent structured plan JSON, for one) reaches
+	// the fetch as empty bytes with no error; it must be recorded as a settled
+	// gap rather than written as a zero-byte, unparseable file.
+	const relPath = "projects/example/workspaces/ws/runs/run-1/plan.json"
+
+	env, st, ledger := newEnv(t)
+
+	called := false
+	err := env.Bytes(t.Context(), relPath, func(_ context.Context) ([]byte, error) {
+		called = true
+
+		return []byte{}, nil
+	})
+	require.NoError(t, err)
+	assert.True(t, called)
+
+	entry, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusNotApplicable, entry.Status)
+	assert.Nil(t, entry.Signature, "an empty payload records no content signature")
+
+	exists, existErr := st.Exists(relPath)
+	require.NoError(t, existErr)
+	assert.False(t, exists, "no file is written for an empty payload")
+
+	assert.Equal(t, int64(0), ledger.Tally().BytesDownloaded)
+}
+
 // walkItem is a listed element the walk describes and archives.
 type walkItem struct {
 	createdAt time.Time

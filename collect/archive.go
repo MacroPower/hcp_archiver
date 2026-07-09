@@ -79,6 +79,12 @@ func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Conte
 // It suits raw artifacts the client buffers whole (configuration tarballs,
 // policy source) that need no serialization. Like [Env.Object] it skips a
 // settled object and records the outcome; error handling matches [Env.Object].
+//
+// An empty payload carries nothing to archive. Some endpoints answer an absent
+// artifact with 204 No Content instead of a 404 (the structured plan JSON of a
+// run that produced none, for one), which the client hands back as empty bytes
+// with no error; writing it would leave a zero-byte, unparseable file. Such a
+// result is recorded as not applicable, a settled gap, and no file is written.
 func (e *Env) Bytes(ctx context.Context, relPath string, fetch func(context.Context) ([]byte, error)) error {
 	if !e.ledger.ShouldFetch(relPath) {
 		return nil
@@ -87,6 +93,12 @@ func (e *Env) Bytes(ctx context.Context, relPath string, fetch func(context.Cont
 	data, err := fetch(ctx)
 	if err != nil {
 		return e.fail(ctx, relPath, err)
+	}
+
+	if len(data) == 0 {
+		e.ledger.RecordNotApplicable(relPath)
+
+		return nil
 	}
 
 	res, err := e.store.WriteBytes(relPath, data)
