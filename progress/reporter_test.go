@@ -58,9 +58,12 @@ func TestReporter_HumanLine(t *testing.T) {
 		config.ProgressModeHuman,
 		src,
 		progress.WithClock(fixedClock(base, base.Add(10*time.Second))),
-		progress.WithTotal(20),
 	)
 	r.SetPhase("workspaces")
+	// Unit progress is decoupled from the object tally: seven of twenty weighted
+	// units are done regardless of the twelve objects the tally records.
+	r.SetTotal(20)
+	r.Advance(7)
 
 	require.NoError(t, r.Report())
 
@@ -70,10 +73,36 @@ func TestReporter_HumanLine(t *testing.T) {
 	assert.Contains(t, line, "target=org/acme")
 	assert.Contains(t, line, "done=10")
 	assert.Contains(t, line, "errored=2")
-	assert.Contains(t, line, "remaining=8")
+	assert.Contains(t, line, "completed=7/20")
 	assert.Contains(t, line, "bytes=2.0 MiB")
 	assert.Contains(t, line, "elapsed=10s")
 	assert.Contains(t, line, "rate=")
+}
+
+func TestReporter_UnitProgressResets(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	src := fakeSource{tally: manifest.Tally{Done: 1}}
+
+	buf := &bytes.Buffer{}
+	r := progress.New(
+		buf,
+		config.ProgressModeHuman,
+		src,
+		progress.WithClock(fixedClock(base, base.Add(time.Second))),
+	)
+	r.SetPhase("workspaces")
+
+	// A prior phase leaves units done; SetTotal for the next phase resets the
+	// completed count so its bar starts fresh rather than inheriting the total.
+	r.SetTotal(4)
+	r.Advance(3)
+	r.SetTotal(8)
+	r.Advance(2)
+
+	require.NoError(t, r.Report())
+	assert.Contains(t, buf.String(), "completed=2/8")
 }
 
 func TestReporter_HumanLine_UnknownTotal(t *testing.T) {
@@ -91,7 +120,7 @@ func TestReporter_HumanLine_UnknownTotal(t *testing.T) {
 	)
 
 	require.NoError(t, r.Report())
-	assert.NotContains(t, buf.String(), "remaining=")
+	assert.NotContains(t, buf.String(), "completed=")
 }
 
 func TestReporter_JSONLine(t *testing.T) {
@@ -115,9 +144,10 @@ func TestReporter_JSONLine(t *testing.T) {
 		config.ProgressModeJSON,
 		src,
 		progress.WithClock(fixedClock(base, base.Add(4*time.Second))),
-		progress.WithTotal(30),
 	)
 	r.SetPhase("runs")
+	r.SetTotal(30)
+	r.Advance(10)
 
 	require.NoError(t, r.Report())
 
@@ -128,6 +158,8 @@ func TestReporter_JSONLine(t *testing.T) {
 	var line struct {
 		Phase           string  `json:"phase"`
 		Target          string  `json:"target"`
+		PhaseTotal      *int    `json:"phaseTotal"`
+		PhaseCompleted  *int    `json:"phaseCompleted"`
 		Remaining       *int    `json:"remaining"`
 		Done            int     `json:"done"`
 		Errored         int     `json:"errored"`
@@ -150,8 +182,13 @@ func TestReporter_JSONLine(t *testing.T) {
 	assert.InEpsilon(t, 4.0, line.ElapsedSeconds, 1e-9)
 	assert.InEpsilon(t, 256.0, line.BytesPerSecond, 1e-9)
 	assert.False(t, line.Summary)
-	require.NotNil(t, line.Remaining)
-	assert.Equal(t, 5, *line.Remaining)
+	// The JSON line carries no object-based remaining field; explicit phase
+	// progress appears only while the phase is determinate.
+	assert.Nil(t, line.Remaining)
+	require.NotNil(t, line.PhaseTotal)
+	require.NotNil(t, line.PhaseCompleted)
+	assert.Equal(t, 30, *line.PhaseTotal)
+	assert.Equal(t, 10, *line.PhaseCompleted)
 }
 
 func TestReporter_Summary(t *testing.T) {

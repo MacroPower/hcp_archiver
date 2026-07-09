@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/config"
+	"go.jacobcolvin.com/hcp_archiver/progress"
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
@@ -31,6 +32,8 @@ type Archiver struct {
 	client        *tfeclient.Client
 	logger        *slog.Logger
 	w             io.Writer
+	logSink       progress.LogSink
+	cancelRun     context.CancelFunc
 	flushInterval time.Duration
 }
 
@@ -39,6 +42,7 @@ type Archiver struct {
 // The available options are:
 //   - [WithWriter]
 //   - [WithLogger]
+//   - [WithLogSink]
 //   - [WithFlushInterval]
 type Option func(*Archiver)
 
@@ -61,6 +65,16 @@ func WithLogger(logger *slog.Logger) Option {
 		if logger != nil {
 			a.logger = logger
 		}
+	}
+}
+
+// WithLogSink sets the [progress.LogSink] the per-organization reporter routes
+// its terminal UI's log output through, so log lines and the live panel share
+// one renderer. A nil sink leaves the UI without a sink. It returns an
+// [Option].
+func WithLogSink(sink progress.LogSink) Option {
+	return func(a *Archiver) {
+		a.logSink = sink
 	}
 }
 
@@ -102,10 +116,12 @@ func New(cfg *config.Config, opts ...Option) *Archiver {
 //
 // It validates the configuration, builds the one shared client, resolves the
 // organizations (the single named one, or every visible organization), and
-// archives each sequentially. A non-cancellation failure of one organization is
-// logged and does not abort the others; a cancellation of ctx aborts the run
-// and is returned wrapped so the command can map it to a graceful exit. Run
-// returns nil on clean completion.
+// archives each sequentially. The orgs run under a cancelable child of ctx
+// whose cancel the reporter's terminal UI holds, so an in-UI ctrl+c aborts the
+// whole run exactly as an external SIGINT does. A non-cancellation failure of
+// one organization is logged and does not abort the others; a cancellation
+// aborts the run and is returned wrapped so the command can map it to a graceful
+// exit. Run returns nil on clean completion.
 func (a *Archiver) Run(ctx context.Context) error {
 	err := a.cfg.Validate()
 	if err != nil {
@@ -120,27 +136,32 @@ func (a *Archiver) Run(ctx context.Context) error {
 		return fmt.Errorf("build client: %w", err)
 	}
 
-	orgs, err := a.resolveOrgs(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	a.cancelRun = cancel
+
+	orgs, err := a.resolveOrgs(runCtx)
 	if err != nil {
 		return fmt.Errorf("resolve organizations: %w", err)
 	}
 
 	for _, orgName := range orgs {
-		if ctx.Err() != nil {
-			return fmt.Errorf("archive run: %w", ctx.Err())
+		if runCtx.Err() != nil {
+			return fmt.Errorf("archive run: %w", runCtx.Err())
 		}
 
-		a.logger.LogAttrs(ctx, slog.LevelInfo, "org_archive_start",
+		a.logger.LogAttrs(runCtx, slog.LevelInfo, "org_archive_start",
 			slog.String("org", orgName),
 		)
 
-		err = a.runOrg(ctx, orgName)
+		err = a.runOrg(runCtx, orgName)
 		if err != nil {
-			if ctx.Err() != nil {
-				return fmt.Errorf("archive run: %w", ctx.Err())
+			if runCtx.Err() != nil {
+				return fmt.Errorf("archive run: %w", runCtx.Err())
 			}
 
-			a.logger.LogAttrs(ctx, slog.LevelError, "org_archive_error",
+			a.logger.LogAttrs(runCtx, slog.LevelError, "org_archive_error",
 				slog.String("org", orgName),
 				slog.String("error", err.Error()),
 			)
@@ -148,7 +169,7 @@ func (a *Archiver) Run(ctx context.Context) error {
 			continue
 		}
 
-		a.logger.LogAttrs(ctx, slog.LevelInfo, "org_archive_finish",
+		a.logger.LogAttrs(runCtx, slog.LevelInfo, "org_archive_finish",
 			slog.String("org", orgName),
 		)
 	}

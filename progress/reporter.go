@@ -3,12 +3,15 @@ package progress
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
 
 	"go.jacobcolvin.com/hcp_archiver/config"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
@@ -28,20 +31,30 @@ type TallySource interface {
 // It reads a [TallySource] and formats snapshots in the resolved
 // [config.ProgressMode]; it never mutates ledger state. Create instances with
 // [New]. A Reporter is safe for concurrent use: [Reporter.Report],
-// [Reporter.Summary], [Reporter.SetPhase], and [Reporter.SetTotal] are guarded
-// by a mutex, so a background [Reporter.Run] loop and the archiver may touch it
-// at once.
+// [Reporter.Summary], [Reporter.SetPhase], [Reporter.SetTotal], and
+// [Reporter.Advance] are guarded by a mutex, so a background [Reporter.Run] loop
+// and the archiver may touch it at once.
+//
+// On an interactive terminal the human mode drives a Bubble Tea panel; off one
+// (a pipe, a redirect, or a test buffer) it falls back to a logfmt line. The
+// total and completed counters track a phase's unit progress (a weighted
+// count the archiver sets and advances) and are independent of the object
+// tally read from source.
 type Reporter struct {
-	w        io.Writer
-	source   TallySource
-	now      func() time.Time
-	ttyForce *bool
-	start    time.Time
-	phase    string
-	mode     config.ProgressMode
-	interval time.Duration
-	total    int
-	mu       sync.Mutex
+	w         io.Writer
+	in        io.Reader
+	source    TallySource
+	now       func() time.Time
+	ttyForce  *bool
+	sink      LogSink
+	interrupt func()
+	start     time.Time
+	phase     string
+	mode      config.ProgressMode
+	interval  time.Duration
+	total     int
+	completed int
+	mu        sync.Mutex
 }
 
 // Option configures a [Reporter] passed to [New].
@@ -51,6 +64,9 @@ type Reporter struct {
 //   - [WithClock]
 //   - [WithTTY]
 //   - [WithTotal]
+//   - [WithInput]
+//   - [WithLogSink]
+//   - [WithInterrupt]
 type Option func(*Reporter)
 
 // WithInterval sets the default cadence used by [Reporter.Run] when it is
@@ -83,12 +99,42 @@ func WithTTY(isTTY bool) Option {
 	}
 }
 
-// WithTotal sets the number of objects the run expects to process, letting the
-// reporter show a remaining count. A negative value means unknown, which is the
-// default. It returns an [Option].
+// WithTotal seeds the current phase's unit-progress denominator, the same value
+// [Reporter.SetTotal] sets later. A non-positive value means indeterminate,
+// which is the default and shows a spinner rather than a bar. It returns an
+// [Option].
 func WithTotal(total int) Option {
 	return func(r *Reporter) {
 		r.total = total
+	}
+}
+
+// WithInput sets the reader the terminal UI reads keys from, defaulting to
+// [os.Stdin]. A nil reader keeps the default. It returns an [Option].
+func WithInput(in io.Reader) Option {
+	return func(r *Reporter) {
+		if in != nil {
+			r.in = in
+		}
+	}
+}
+
+// WithLogSink routes the terminal UI's log output through sink so log lines and
+// the live panel share one renderer. Without it the UI still runs, but
+// concurrent log writes to the same terminal can corrupt the panel. It returns
+// an [Option].
+func WithLogSink(sink LogSink) Option {
+	return func(r *Reporter) {
+		r.sink = sink
+	}
+}
+
+// WithInterrupt sets the callback the terminal UI invokes when the operator
+// presses ctrl+c or q, used to cancel the whole run under raw mode where the
+// kernel does not raise SIGINT. It returns an [Option].
+func WithInterrupt(fn func()) Option {
+	return func(r *Reporter) {
+		r.interrupt = fn
 	}
 }
 
@@ -103,6 +149,7 @@ func WithTotal(total int) Option {
 func New(w io.Writer, mode config.ProgressMode, source TallySource, opts ...Option) *Reporter {
 	r := &Reporter{
 		w:        w,
+		in:       os.Stdin,
 		source:   source,
 		now:      time.Now,
 		interval: config.DefaultProgressInterval,
@@ -174,14 +221,25 @@ func (r *Reporter) SetPhase(phase string) {
 	r.phase = phase
 }
 
-// SetTotal updates the number of objects the run expects to process. A negative
-// value means unknown, which suppresses the remaining count. It is safe to call
-// concurrently.
+// SetTotal sets the current phase's unit-progress denominator and resets the
+// completed counter to zero, so each phase starts its bar fresh. A non-positive
+// value marks the phase indeterminate, rendering a spinner instead of a bar. It
+// is safe to call concurrently.
 func (r *Reporter) SetTotal(total int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.total = total
+	r.completed = 0
+}
+
+// Advance adds n to the phase's completed unit count, moving the bar toward its
+// total. It is safe to call concurrently.
+func (r *Reporter) Advance(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.completed += n
 }
 
 // snapshot is one rendered line's worth of derived state, computed under lock.
@@ -190,8 +248,14 @@ type snapshot struct {
 	tally     manifest.Tally
 	elapsed   time.Duration
 	rate      float64
-	remaining int
-	hasRem    bool
+	total     int
+	completed int
+}
+
+// hasBar reports whether the phase is determinate, so the view renders a bar and
+// a completed=x/y fraction rather than a spinner alone.
+func (s snapshot) hasBar() bool {
+	return s.total > 0
 }
 
 // take builds a [snapshot] from the current tally and clock. The caller holds
@@ -205,19 +269,30 @@ func (r *Reporter) take() snapshot {
 		rate = float64(t.BytesDownloaded) / elapsed.Seconds()
 	}
 
-	snap := snapshot{
-		tally:   t,
-		phase:   r.phase,
-		elapsed: elapsed,
-		rate:    rate,
+	return snapshot{
+		tally:     t,
+		phase:     r.phase,
+		elapsed:   elapsed,
+		rate:      rate,
+		total:     r.total,
+		completed: r.completed,
 	}
+}
 
-	if r.total >= 0 {
-		snap.hasRem = true
-		snap.remaining = max(r.total-t.Total(), 0)
-	}
+// usesPanel reports whether the live view is the Bubble Tea panel rather than a
+// logfmt/JSON line: human mode on an interactive terminal. It is resolved from
+// static state, so both [Reporter.Run] and [Reporter.Summary] agree on it.
+func (r *Reporter) usesPanel() bool {
+	return r.mode == config.ProgressModeHuman && r.isTTY()
+}
 
-	return snap
+// lockedTake returns a snapshot under the mutex, the accessor the panel's model
+// calls each frame. It is safe to call concurrently.
+func (r *Reporter) lockedTake() snapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.take()
 }
 
 // Report renders one snapshot in the resolved mode. It writes nothing in quiet
@@ -230,19 +305,32 @@ func (r *Reporter) Report() error {
 }
 
 // Summary renders the final totals per status class, the wall time, and the
-// errored count. It writes nothing in quiet mode and returns any write error.
+// errored count. On an interactive terminal in human mode it writes a styled
+// block; otherwise it renders the logfmt or JSON summary line. It writes nothing
+// in quiet mode and returns any write error.
 func (r *Reporter) Summary() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if r.usesPanel() {
+		return r.writeString(r.summaryBlock(r.take()))
+	}
+
 	return r.render(r.take(), true)
 }
 
-// Run reports on a fixed cadence until ctx is done, then returns nil. A
+// Run drives the live view until ctx is done, then returns nil.
+//
+// In human mode on an interactive terminal it runs the Bubble Tea panel, whose
+// spinner drives repaints; otherwise it reports on a fixed cadence. A
 // non-positive interval falls back to the reporter's configured interval. It is
 // a convenience over [Reporter.Report]; the archiver may drive Report directly
 // instead.
 func (r *Reporter) Run(ctx context.Context, interval time.Duration) error {
+	if r.usesPanel() {
+		return r.runTUI(ctx)
+	}
+
 	if interval <= 0 {
 		interval = r.interval
 	}
@@ -265,6 +353,39 @@ func (r *Reporter) Run(ctx context.Context, interval time.Duration) error {
 			}
 		}
 	}
+}
+
+// runTUI runs the Bubble Tea panel until ctx is done or the operator quits.
+//
+// It binds the program to ctx so an external SIGINT (mapped upstream to a ctx
+// cancel) or the archiver's own cancel stops it, and registers the program on
+// the log sink so log lines route through the one renderer, clearing it again
+// on return so the fallback is restored before the next org logs. A ctx-driven
+// stop surfaces as [tea.ErrProgramKilled], which is mapped to a clean nil.
+func (r *Reporter) runTUI(ctx context.Context) error {
+	program := tea.NewProgram(
+		newTUIModel(r.lockedTake, r.interrupt),
+		tea.WithContext(ctx),
+		tea.WithOutput(r.w),
+		tea.WithInput(r.in),
+		tea.WithoutSignalHandler(),
+	)
+
+	if r.sink != nil {
+		r.sink.SetProgram(program)
+		defer r.sink.SetProgram(nil)
+	}
+
+	_, err := program.Run()
+	if err != nil {
+		if errors.Is(err, tea.ErrProgramKilled) {
+			return nil
+		}
+
+		return fmt.Errorf("run progress ui: %w", err)
+	}
+
+	return nil
 }
 
 // render writes one snapshot in the resolved mode. The caller holds the mutex.
@@ -322,8 +443,8 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 			t.NotApplicable,
 			t.Total(),
 		)
-	} else if snap.hasRem {
-		fmt.Fprintf(&b, " remaining=%d", snap.remaining)
+	} else if snap.hasBar() {
+		fmt.Fprintf(&b, " completed=%d/%d", snap.completed, snap.total)
 	}
 
 	fmt.Fprintf(
@@ -337,9 +458,35 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 	return b.String()
 }
 
+// summaryBlock formats the styled multi-line summary written when the run ends
+// on an interactive terminal, ending in a newline.
+func (r *Reporter) summaryBlock(snap snapshot) string {
+	t := snap.tally
+
+	head := styleSummaryHead.Render("archive complete")
+
+	counts := "  " + statusCounts(t)
+
+	rest := styleMeta.Render(fmt.Sprintf(
+		"  absent=%d skipped=%d n/a=%d total=%d bytes=%s elapsed=%s",
+		t.AbsentPermanently,
+		t.Skipped,
+		t.NotApplicable,
+		t.Total(),
+		humanBytes(t.BytesDownloaded),
+		snap.elapsed.Round(time.Second),
+	))
+
+	return head + "\n" + counts + "\n" + rest + "\n"
+}
+
 // jsonLine is the machine-readable shape emitted one per line.
+//
+// PhaseTotal and PhaseCompleted report the current phase's weighted unit
+// progress and are present only while a phase is determinate.
 type jsonLine struct {
-	Remaining         *int    `json:"remaining,omitempty"`
+	PhaseTotal        *int    `json:"phaseTotal,omitempty"`
+	PhaseCompleted    *int    `json:"phaseCompleted,omitempty"`
 	Phase             string  `json:"phase,omitempty"`
 	Target            string  `json:"target,omitempty"`
 	Done              int     `json:"done"`
@@ -376,9 +523,11 @@ func (r *Reporter) writeJSON(snap snapshot, summary bool) error {
 		Summary:           summary,
 	}
 
-	if snap.hasRem {
-		rem := snap.remaining
-		line.Remaining = &rem
+	if snap.hasBar() {
+		total := snap.total
+		completed := snap.completed
+		line.PhaseTotal = &total
+		line.PhaseCompleted = &completed
 	}
 
 	data, err := json.Marshal(line)

@@ -108,8 +108,8 @@ func compareVersions(a, b string) int {
 // splitPrerelease separates a version's numeric release core from its
 // pre-release remainder at the first "-", returning the whole string as the core
 // when it carries no pre-release.
-func splitPrerelease(v string) (core, prerelease string) {
-	core, prerelease, _ = strings.Cut(v, "-")
+func splitPrerelease(v string) (string, string) {
+	core, prerelease, _ := strings.Cut(v, "-")
 
 	return core, prerelease
 }

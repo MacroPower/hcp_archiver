@@ -10,6 +10,7 @@ import (
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
 	"go.jacobcolvin.com/hcp_archiver/collect/workspace"
+	"go.jacobcolvin.com/hcp_archiver/progress"
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
@@ -17,6 +18,12 @@ import (
 // still lands under a project directory (a workspace with no explicit project
 // belongs to the organization's default project).
 const defaultProjectName = "Default Project"
+
+// Phase names for the two collection surfaces that carry a determinate bar.
+const (
+	phaseProjects   = "projects"
+	phaseWorkspaces = "workspaces"
+)
 
 // collectProjects archives every project in the organization and returns a map
 // from project id to project name for resolving each workspace's project.
@@ -26,9 +33,12 @@ const defaultProjectName = "Default Project"
 func (a *Archiver) collectProjects(
 	ctx context.Context,
 	env *collect.Env,
+	reporter *progress.Reporter,
 	orgName string,
 	wsc *workspace.Collector,
 ) (map[string]string, error) {
+	reporter.SetPhase(phaseProjects)
+
 	projects, err := tfeclient.Paginate(ctx, env.Client(),
 		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.Project, *tfe.Pagination, error) {
 			l, e := tc.Projects.List(ctx, orgName, &tfe.ProjectListOptions{ListOptions: o})
@@ -54,6 +64,8 @@ func (a *Archiver) collectProjects(
 		return map[string]string{}, nil
 	}
 
+	reporter.SetTotal(len(projects))
+
 	names := make(map[string]string, len(projects))
 	for _, p := range projects {
 		names[p.ID] = p.Name
@@ -62,6 +74,8 @@ func (a *Archiver) collectProjects(
 		if err != nil {
 			return nil, fmt.Errorf("collect project %q: %w", p.Name, err)
 		}
+
+		reporter.Advance(1)
 	}
 
 	return names, nil
@@ -77,10 +91,17 @@ func (a *Archiver) collectProjects(
 func (a *Archiver) collectWorkspaces(
 	ctx context.Context,
 	env *collect.Env,
+	reporter *progress.Reporter,
 	orgName string,
 	wsc *workspace.Collector,
 	names map[string]string,
 ) error {
+	// Enter the phase indeterminate: the (possibly multi-page) listing below has
+	// no count yet, so the bar is a spinner rather than the projects phase's
+	// stale full bar until the weighted total is known.
+	reporter.SetPhase(phaseWorkspaces)
+	reporter.SetTotal(-1)
+
 	workspaces, err := tfeclient.Paginate(ctx, env.Client(),
 		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.Workspace, *tfe.Pagination, error) {
 			l, e := tc.Workspaces.List(ctx, orgName, &tfe.WorkspaceListOptions{
@@ -109,11 +130,29 @@ func (a *Archiver) collectWorkspaces(
 		return nil
 	}
 
+	// Weight each workspace by 1 + its run count so the bar tracks real work
+	// (per-workspace effort spans orders of magnitude) and, since numerator and
+	// denominator share the weight, reaches exactly 100% as the last workspace
+	// finishes. RunsCount rides along on the list response, so this costs no
+	// extra call.
+	totalWeight := 0
+	for _, ws := range workspaces {
+		totalWeight += 1 + ws.RunsCount
+	}
+
+	reporter.SetTotal(totalWeight)
+
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(a.cfg.WorkspaceConcurrency)
 
 	for _, ws := range workspaces {
 		g.Go(func() error {
+			// Commit this workspace's weight on every return path so a failed
+			// workspace still advances the bar; otherwise it could never reach
+			// 100%. Deferring keeps that guarantee structural rather than
+			// dependent on statement order above later returns.
+			defer reporter.Advance(1 + ws.RunsCount)
+
 			err := wsc.CollectWorkspace(gctx, projectNameFor(names, ws), ws)
 			if err != nil && gctx.Err() == nil {
 				// Best-effort: a non-cancellation failure (e.g. a transient

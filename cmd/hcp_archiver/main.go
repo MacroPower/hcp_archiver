@@ -19,6 +19,7 @@ import (
 
 	"go.jacobcolvin.com/hcp_archiver/archiver"
 	"go.jacobcolvin.com/hcp_archiver/config"
+	"go.jacobcolvin.com/hcp_archiver/progress"
 )
 
 const appName = "hcp_archiver"
@@ -153,8 +154,17 @@ func newRootCmd() *cobra.Command {
 	af := registerArchiveFlags(cmd)
 	registerProgressCompletion(cmd)
 
+	// One shared writer sits between the log handler and stderr: while the
+	// terminal UI runs it hands log lines to the program so they scroll above
+	// the pinned panel, otherwise it writes through to stderr. It is built in
+	// PersistentPreRunE from the executing command's stderr (the same seam the
+	// archiver resolves its writer at), so a redirected stderr routes logs too.
+	var logWriter *progress.LogWriter
+
 	cmd.PersistentPreRunE = func(cc *cobra.Command, _ []string) error {
-		h, err := logCfg.NewHandler(cc.ErrOrStderr())
+		logWriter = progress.NewLogWriter(cc.ErrOrStderr())
+
+		h, err := logCfg.NewHandler(logWriter)
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrLogHandler, err)
 		}
@@ -169,7 +179,7 @@ func newRootCmd() *cobra.Command {
 		// the snapshot profiles are written even when the archive returns an
 		// error; cobra skips PersistentPostRunE once RunE has failed.
 		return profiler.Run(func() error {
-			return runArchive(cc, af)
+			return runArchive(cc, af, logWriter)
 		})
 	}
 
@@ -179,8 +189,10 @@ func newRootCmd() *cobra.Command {
 }
 
 // runArchive resolves the flags into a configuration and archives under a
-// signal-aware context. A graceful interrupt exits cleanly.
-func runArchive(cmd *cobra.Command, af *archiveFlags) error {
+// signal-aware context. A graceful interrupt exits cleanly. It passes logWriter
+// as the log sink so, while the terminal UI runs, the collectors' log output
+// routes through the one renderer that owns the screen.
+func runArchive(cmd *cobra.Command, af *archiveFlags, logWriter *progress.LogWriter) error {
 	cfg, err := af.config()
 	if err != nil {
 		return err
@@ -193,6 +205,7 @@ func runArchive(cmd *cobra.Command, af *archiveFlags) error {
 		cfg,
 		archiver.WithWriter(cmd.ErrOrStderr()),
 		archiver.WithLogger(slog.Default()),
+		archiver.WithLogSink(logWriter),
 	)
 
 	err = a.Run(ctx)

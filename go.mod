@@ -3,7 +3,11 @@ module go.jacobcolvin.com/hcp_archiver
 go 1.26.0
 
 require (
+	charm.land/bubbles/v2 v2.1.0
+	charm.land/bubbletea/v2 v2.0.7
 	charm.land/fang/v2 v2.0.1
+	charm.land/lipgloss/v2 v2.0.4
+	github.com/charmbracelet/x/exp/golden v0.0.0-20260602025833-85a30b5e440a
 	github.com/hashicorp/go-tfe v1.109.0
 	github.com/hashicorp/jsonapi v1.4.3-0.20250220162346-81a76b606f3e
 	github.com/spf13/cobra v1.10.2
@@ -17,9 +21,10 @@ require (
 )
 
 require (
-	charm.land/lipgloss/v2 v2.0.4 // indirect
 	charm.land/log/v2 v2.0.0 // indirect
+	github.com/aymanbagabas/go-udiff v0.4.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
+	github.com/charmbracelet/harmonica v0.2.0 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260525132238-948f4557a654 // indirect
 	github.com/charmbracelet/x/ansi v0.11.7 // indirect
 	github.com/charmbracelet/x/exp/charmtone v0.0.0-20260602025833-85a30b5e440a // indirect

@@ -81,7 +81,11 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) error {
 	}
 
 	env := collect.NewEnv(a.client, st, ledger)
-	reporter := progress.New(a.w, a.cfg.ProgressMode, ledger, progress.WithInterval(a.cfg.ProgressInterval))
+	reporter := progress.New(a.w, a.cfg.ProgressMode, ledger,
+		progress.WithInterval(a.cfg.ProgressInterval),
+		progress.WithInterrupt(a.cancelRun),
+		progress.WithLogSink(a.logSink),
+	)
 
 	ledger.StartRun()
 
@@ -128,7 +132,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) error {
 		}
 	}()
 
-	return a.collectOrg(ctx, env, orgName)
+	return a.collectOrg(ctx, env, reporter, orgName)
 }
 
 // flushLoop flushes the ledger on a fixed cadence until ctx is done, then

@@ -265,20 +265,33 @@ Notes:
 - **Progress reporting is required, not optional.** A full-org archive is a
   long, mostly-I/O job, so it must surface live progress rather than sitting
   silent until done. The archiver emits, to stderr:
-  - a periodic human-readable line (current org/project/workspace, objects
-    done / errored / remaining, bytes downloaded, elapsed and a rough rate), so
-    an operator watching a terminal sees forward motion;
+  - on an interactive terminal, a Bubble Tea panel pinned to the bottom of the
+    screen: a spinner and the current phase/target, colored per-status counts
+    (done / errored / forbidden) with bytes, rate, and elapsed, and a progress
+    bar while the phase is determinate. Log output routes through a slog sink
+    into the panel so log lines scroll above it rather than corrupting it, and
+    ctrl+c/q cancels the whole run under raw mode;
+  - off a terminal (a pipe, a redirect, CI), the same signal as a periodic
+    logfmt line (phase, current target, counts, `completed=x/y` while
+    determinate, bytes, elapsed, a rough rate);
   - the same signal in a machine-readable form (`--progress=json`, one JSON
-    object per line: phase, counts, current target) for wrapping in CI or a
-    watcher, defaulting to the human format on a TTY and quiet/log-only when not
-    on one.
+    object per line: phase, counts, current target, and `phaseTotal` /
+    `phaseCompleted` while determinate) for wrapping in CI or a watcher,
+    defaulting to the panel on a TTY and quiet/log-only when not on one.
 
-  Progress is derived from the same in-memory counters that back the manifest
-  (a single mutex-guarded tally), so the reported numbers and the ledger's own
-  tally never disagree (the on-disk copy trails only by the last unflushed
-  batch). A final summary line (totals per status class, wall
-  time, any orgs/workspaces that errored) prints on completion and is also
-  written to the manifest as the run record.
+  The bar tracks a per-phase weighted unit count the archiver drives, distinct
+  from the object tally: the true object count is discovered only by walking, so
+  it cannot seed a bar. During the workspaces phase each workspace is weighted by
+  `1 + RunsCount` (which rides along on the list response, no extra call), a
+  proxy that tracks real work far better than a flat workspaces-done bar and, as
+  numerator and denominator share the weight, reaches exactly 100% when the last
+  workspace finishes; phases with no cheap pre-count (org-scope, registry,
+  stacks, audit) show a spinner. The per-status counts are derived from the same
+  in-memory counters that back the manifest (a single mutex-guarded tally), so
+  they and the ledger's own tally never disagree (the on-disk copy trails only by
+  the last unflushed batch). A final summary (totals per status class, wall time,
+  any orgs/workspaces that errored) prints on completion and is also written to
+  the manifest as the run record.
 
 - **Concurrency**: worker pool over workspaces (default ~4); sequential within a
   workspace. `go-tfe` retries per request on rate limits, but N workers each
