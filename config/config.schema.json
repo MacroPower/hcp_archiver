@@ -1,0 +1,67 @@
+{
+  "type": "object",
+  "properties": {
+    "address": {
+      "type": "string",
+      "title": "Address",
+      "description": "Address is the HCP Terraform API address. It defaults to [DefaultAddress].",
+      "default": "https://app.terraform.io"
+    },
+    "organizations": {
+      "type": [
+        "null",
+        "array"
+      ],
+      "items": {
+        "type": "string"
+      },
+      "title": "Organizations",
+      "description": "Organizations limits the run to the named organizations. An empty list\narchives every organization the token can see."
+    },
+    "concurrency": {
+      "type": "integer",
+      "title": "Concurrency",
+      "description": "Concurrency is the number of workspaces archived concurrently. It defaults\nto [DefaultWorkspaceConcurrency].",
+      "default": 4,
+      "minimum": 1
+    },
+    "scope": {
+      "$ref": "#/$defs/FileScope",
+      "title": "Scope",
+      "description": "Scope selects the heavy or optional surfaces to archive, each off by\ndefault."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "FileScope": {
+      "type": "object",
+      "properties": {
+        "stacks": {
+          "type": "boolean",
+          "title": "Stacks",
+          "description": "Stacks enables archiving of Stacks."
+        },
+        "hyok": {
+          "type": "boolean",
+          "title": "HYOK",
+          "description": "HYOK enables archiving of hold-your-own-key configurations."
+        },
+        "registryDetail": {
+          "type": "boolean",
+          "title": "Registry Detail",
+          "description": "RegistryDetail enables the deeper registry version, platform, and binary\ndetail."
+        },
+        "auditTrail": {
+          "type": "boolean",
+          "title": "Audit Trail",
+          "description": "AuditTrail enables archiving of the audit trail."
+        }
+      },
+      "description": "FileScope holds the opt-in toggles for the heavy or most organization-specific\nsurfaces, each archived only when a configuration turns it on.",
+      "additionalProperties": false
+    }
+  },
+  "title": "File",
+  "description": "File is the on-disk YAML configuration describing what to archive and how.\n\nIt holds the settings that are stable across runs: the API address, the\norganizations to archive, the workspace concurrency, and the opt-in scope\ntoggles. Per-run and secret settings (the output directory, the progress\nmode, the recheck toggle, and the API token) are supplied by flags and the\nenvironment instead, so a configuration file never carries a machine-specific\npath or a credential.\n\nEvery field is optional; an absent field takes the package default. Create\ninstances with [LoadFile], or [DefaultFile] for the defaults alone.",
+  "additionalProperties": false
+}
