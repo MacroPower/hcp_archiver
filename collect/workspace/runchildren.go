@@ -1,0 +1,258 @@
+package workspace
+
+import (
+	"context"
+	"fmt"
+	"io"
+
+	"github.com/hashicorp/go-tfe"
+)
+
+// archiveRunChildren archives every immutable child of a terminal run: its
+// configuration version, plan and apply artifacts, cost estimate, comments, run
+// events, policy checks, task stages, and native Terraform policy outcomes.
+func (c *Collector) archiveRunChildren(ctx context.Context, project, ws string, run *tfe.Run) error {
+	steps := []func(context.Context, string, string, *tfe.Run) error{
+		c.archiveConfigurationVersion,
+		c.archivePlan,
+		c.archiveApply,
+		c.archiveCostEstimate,
+		c.archiveComments,
+		c.archiveRunEvents,
+		c.archivePolicyChecks,
+		c.archiveTaskStages,
+		c.archiveTFPolicyOutcomes,
+	}
+
+	for _, step := range steps {
+		err := step(ctx, project, ws, run)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// archiveConfigurationVersion archives the run's configuration-version record
+// (id plus ingress attributes) and, deduplicated org-wide by id, its tarball.
+func (c *Collector) archiveConfigurationVersion(ctx context.Context, project, ws string, run *tfe.Run) error {
+	if run.ConfigurationVersion == nil {
+		return nil
+	}
+
+	st := c.env.Store()
+	cvID := run.ConfigurationVersion.ID
+
+	err := objectOne(ctx, c, st.RunFile(project, ws, run.ID, "config-version.json"),
+		func(ctx context.Context, tc *tfe.Client) (*tfe.ConfigurationVersion, error) {
+			return tc.ConfigurationVersions.ReadWithOptions(ctx, cvID, &tfe.ConfigurationVersionReadOptions{
+				Include: []tfe.ConfigVerIncludeOpt{tfe.ConfigVerIngressAttributes},
+			})
+		})
+	if err != nil {
+		return err
+	}
+
+	return c.bytes(ctx, st.ConfigVersionTarball(cvID), func(ctx context.Context) ([]byte, error) {
+		return c.env.Client().DownloadConfigurationVersion(ctx, cvID)
+	})
+}
+
+// archivePlan archives the run's plan log and, when the Terraform version offers
+// it, the structured plan JSON.
+func (c *Collector) archivePlan(ctx context.Context, project, ws string, run *tfe.Run) error {
+	if run.Plan == nil {
+		return nil
+	}
+
+	st := c.env.Store()
+	planID := run.Plan.ID
+
+	err := c.logBlob(ctx, st.RunFile(project, ws, run.ID, "plan.log"),
+		func(ctx context.Context, tc *tfe.Client) (io.Reader, error) {
+			return tc.Plans.Logs(ctx, planID)
+		})
+	if err != nil {
+		return err
+	}
+
+	return c.bytesFromDo(ctx, st.RunFile(project, ws, run.ID, "plan.json"),
+		func(ctx context.Context, tc *tfe.Client) ([]byte, error) {
+			return tc.Plans.ReadJSONOutput(ctx, planID)
+		})
+}
+
+// archiveApply archives the run's apply log.
+func (c *Collector) archiveApply(ctx context.Context, project, ws string, run *tfe.Run) error {
+	if run.Apply == nil {
+		return nil
+	}
+
+	st := c.env.Store()
+	applyID := run.Apply.ID
+
+	return c.logBlob(ctx, st.RunFile(project, ws, run.ID, "apply.log"),
+		func(ctx context.Context, tc *tfe.Client) (io.Reader, error) {
+			return tc.Applies.Logs(ctx, applyID)
+		})
+}
+
+// archiveCostEstimate archives the run's cost-estimate attributes and its
+// human-readable log.
+func (c *Collector) archiveCostEstimate(ctx context.Context, project, ws string, run *tfe.Run) error {
+	if run.CostEstimate == nil {
+		return nil
+	}
+
+	st := c.env.Store()
+	estimate := run.CostEstimate
+	estimateID := estimate.ID
+
+	err := c.object(ctx, st.RunFile(project, ws, run.ID, "cost-estimate.json"), estimate)
+	if err != nil {
+		return err
+	}
+
+	return c.logBlob(ctx, st.RunFile(project, ws, run.ID, "cost-estimate.log"),
+		func(ctx context.Context, tc *tfe.Client) (io.Reader, error) {
+			return tc.CostEstimates.Logs(ctx, estimateID)
+		})
+}
+
+// archiveComments archives the run's comments, which come from their own list
+// endpoint because the run's comment relation is not sideloadable.
+func (c *Collector) archiveComments(ctx context.Context, project, ws string, run *tfe.Run) error {
+	runID := run.ID
+
+	return objectOne(ctx, c, c.env.Store().RunFile(project, ws, run.ID, "comments.json"),
+		func(ctx context.Context, tc *tfe.Client) ([]*tfe.Comment, error) {
+			l, e := tc.Comments.List(ctx, runID)
+			if e != nil {
+				return nil, fmt.Errorf("list comments: %w", e)
+			}
+
+			return l.Items, nil
+		})
+}
+
+// archiveRunEvents archives the run's actor-attributed events.
+func (c *Collector) archiveRunEvents(ctx context.Context, project, ws string, run *tfe.Run) error {
+	runID := run.ID
+
+	return objectOne(ctx, c, c.env.Store().RunFile(project, ws, run.ID, "run-events.json"),
+		func(ctx context.Context, tc *tfe.Client) ([]*tfe.RunEvent, error) {
+			l, e := tc.RunEvents.List(ctx, runID, &tfe.RunEventListOptions{
+				Include: []tfe.RunEventIncludeOpt{tfe.RunEventActor, tfe.RunEventComment},
+			})
+			if e != nil {
+				return nil, fmt.Errorf("list run events: %w", e)
+			}
+
+			return l.Items, nil
+		})
+}
+
+// archivePolicyChecks archives the run's Sentinel policy checks and a log per
+// check.
+func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string, run *tfe.Run) error {
+	st := c.env.Store()
+	runID := run.ID
+
+	checks, err := paginateAll(ctx, c,
+		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.PolicyCheck, *tfe.Pagination, error) {
+			l, e := tc.PolicyChecks.List(ctx, runID, &tfe.PolicyCheckListOptions{ListOptions: o})
+			if e != nil {
+				return nil, nil, fmt.Errorf("list policy checks: %w", e)
+			}
+
+			return l.Items, l.Pagination, nil
+		})
+	if err != nil {
+		return err
+	}
+
+	writeErr := c.object(ctx, st.RunFile(project, ws, run.ID, "policy-checks.json"), checks)
+	if writeErr != nil {
+		return writeErr
+	}
+
+	for _, pc := range checks {
+		checkID := pc.ID
+
+		logErr := c.logBlob(ctx, st.RunFile(project, ws, run.ID, "policy-check-"+pc.ID+".log"),
+			func(ctx context.Context, tc *tfe.Client) (io.Reader, error) {
+				return tc.PolicyChecks.Logs(ctx, checkID)
+			})
+		if logErr != nil {
+			return logErr
+		}
+	}
+
+	return nil
+}
+
+// archiveTaskStages archives the run's task stages resolved into task results
+// and policy evaluations.
+func (c *Collector) archiveTaskStages(ctx context.Context, project, ws string, run *tfe.Run) error {
+	runID := run.ID
+
+	return listObject(ctx, c, c.env.Store().RunFile(project, ws, run.ID, "task-stages.json"),
+		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.TaskStage, *tfe.Pagination, error) {
+			l, e := tc.TaskStages.List(ctx, runID, &tfe.TaskStageListOptions{ListOptions: o})
+			if e != nil {
+				return nil, nil, fmt.Errorf("list task stages: %w", e)
+			}
+
+			return l.Items, l.Pagination, nil
+		})
+}
+
+// archiveTFPolicyOutcomes archives the native Terraform policy-evaluation
+// outcomes, read per evaluation on the run and aggregated into one file.
+func (c *Collector) archiveTFPolicyOutcomes(ctx context.Context, project, ws string, run *tfe.Run) error {
+	st := c.env.Store()
+	relPath := st.RunFile(project, ws, run.ID, "tf-policy-outcomes.json")
+	runID := run.ID
+
+	return wrapArchive(relPath, c.env.Object(ctx, relPath, func(ctx context.Context) (any, error) {
+		evaluated, err := doRead(ctx, c, relPath, func(ctx context.Context, tc *tfe.Client) (*tfe.Run, error) {
+			return tc.Runs.ReadWithOptions(ctx, runID, &tfe.RunReadOptions{
+				Include: []tfe.RunIncludeOpt{tfe.RunTFPolicyEvaluation},
+			})
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		var out []*tfe.TFPolicySetOutcome
+
+		for _, eval := range evaluated.TFPolicyEvaluations {
+			evalID := eval.ID
+
+			items, listErr := paginateAll(
+				ctx,
+				c,
+				func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.TFPolicySetOutcome, *tfe.Pagination, error) {
+					l, e := tc.TFPolicyEvaluationOutcomes.List(
+						ctx,
+						evalID,
+						&tfe.TFPolicyEvaluationListOptions{ListOptions: o},
+					)
+					if e != nil {
+						return nil, nil, fmt.Errorf("list tf policy outcomes: %w", e)
+					}
+
+					return l.Items, l.Pagination, nil
+				},
+			)
+			if listErr != nil {
+				return nil, listErr
+			}
+
+			out = append(out, items...)
+		}
+
+		return out, nil
+	}))
+}
