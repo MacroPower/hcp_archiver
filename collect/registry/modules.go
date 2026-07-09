@@ -153,6 +153,13 @@ func (c *Collector) archiveModuleDetail(ctx context.Context, mod *tfe.RegistryMo
 	}
 
 	for _, vs := range mod.VersionStatuses {
+		// A non-concrete or empty version cannot address a per-version read and
+		// would only record a permanent error; skip it, matching how the no-code
+		// path resolves a concrete version before reading.
+		if !isConcreteVersion(vs.Version) {
+			continue
+		}
+
 		versionErr := c.archiveModuleVersion(ctx, mod, id, vs.Version)
 		if versionErr != nil {
 			return versionErr
