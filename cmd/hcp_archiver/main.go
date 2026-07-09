@@ -138,9 +138,10 @@ func (af *archiveFlags) config() (*config.Config, error) {
 }
 
 // newRootCmd builds the root [*cobra.Command] for the hcp_archiver CLI. Logging
-// and profiling are configured from persistent flags in PersistentPreRunE, so
-// every subcommand shares the same setup. The root command itself runs the
-// archive; the only subcommand reports version information.
+// is configured from persistent flags in PersistentPreRunE so every subcommand
+// shares it. The root command runs the archive inside the profiler, so its
+// profiles are written even when the archive errors; the only subcommand
+// reports version information.
 func newRootCmd() *cobra.Command {
 	logCfg := log.NewConfig()
 	profileCfg := profile.NewConfig()
@@ -163,11 +164,6 @@ func newRootCmd() *cobra.Command {
 	registerProgressCompletion(cmd)
 
 	cmd.PersistentPreRunE = func(cc *cobra.Command, _ []string) error {
-		err := profiler.Start()
-		if err != nil {
-			return fmt.Errorf("start profiler: %w", err)
-		}
-
 		h, err := logCfg.NewHandler(cc.ErrOrStderr())
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrLogHandler, err)
@@ -178,17 +174,13 @@ func newRootCmd() *cobra.Command {
 		return nil
 	}
 
-	cmd.PersistentPostRunE = func(_ *cobra.Command, _ []string) error {
-		err := profiler.Stop()
-		if err != nil {
-			return fmt.Errorf("stop profiler: %w", err)
-		}
-
-		return nil
-	}
-
 	cmd.RunE = func(cc *cobra.Command, _ []string) error {
-		return runArchive(cc, af)
+		// Run the archive inside the profiler so the CPU profile is flushed and
+		// the snapshot profiles are written even when the archive returns an
+		// error; cobra skips PersistentPostRunE once RunE has failed.
+		return profiler.Run(func() error {
+			return runArchive(cc, af)
+		})
 	}
 
 	cmd.AddCommand(newVersionCmd())
