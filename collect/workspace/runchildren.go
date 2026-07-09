@@ -157,6 +157,7 @@ func (c *Collector) archiveRunEvents(ctx context.Context, project, ws string, ru
 // check.
 func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string, run *tfe.Run) error {
 	st := c.env.Store()
+	relPath := st.RunFile(project, ws, run.ID, "policy-checks.json")
 	runID := run.ID
 
 	checks, err := paginateAll(ctx, c,
@@ -169,10 +170,16 @@ func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string,
 			return l.Items, l.Pagination, nil
 		})
 	if err != nil {
-		return err
+		// Record the list failure against the ledger like every other archived
+		// object rather than aborting the run walk, so a re-run retries it and
+		// one poisoned run never strands the older runs behind it. Only a
+		// cancellation propagates.
+		return wrapArchive(relPath, c.env.Object(ctx, relPath, func(context.Context) (any, error) {
+			return nil, err
+		}))
 	}
 
-	writeErr := c.object(ctx, st.RunFile(project, ws, run.ID, "policy-checks.json"), checks)
+	writeErr := c.object(ctx, relPath, checks)
 	if writeErr != nil {
 		return writeErr
 	}
