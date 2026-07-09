@@ -109,6 +109,7 @@ func TestConfigFromArgs(t *testing.T) {
 	for name, tc := range tcs {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv(config.EnvToken, tc.token)
+			t.Setenv(config.EnvTokenTFC, "")
 			t.Setenv(config.EnvTokenFallback, "")
 
 			cfg, err := main.ConfigFromArgs(tc.args)
