@@ -425,15 +425,25 @@ func (s *Store) StackDeploymentFile(project, stack, name, file string) string {
 }
 
 // StackStateFile returns the relative path of a stack state file, keyed on the
-// state generation.
-func (s *Store) StackStateFile(project, stack, generation string) string {
+// deployment and the state generation.
+//
+// Generation counters are per-deployment, not stack-global, so two of a stack's
+// deployments can each carry a state at the same generation; the deployment
+// name disambiguates them. A deployment that is empty falls back to keying on
+// the generation alone.
+func (s *Store) StackStateFile(project, stack, deployment, generation string) string {
+	stem := seg(generation)
+	if deployment != "" {
+		stem = seg(deployment) + "-" + seg(generation)
+	}
+
 	return cleanJoin(
 		"projects",
 		seg(project),
 		"stacks",
 		seg(stack),
 		"states",
-		seg(generation)+".json",
+		stem+".json",
 	)
 }
 

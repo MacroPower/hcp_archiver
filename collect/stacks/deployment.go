@@ -61,7 +61,12 @@ func (c *Collector) collectStates(ctx context.Context, project string, stack *tf
 	}
 
 	for _, state := range states {
-		stateFile := c.env.Store().StackStateFile(project, stack.Name, generationName(state.Generation))
+		stateFile := c.env.Store().StackStateFile(
+			project,
+			stack.Name,
+			state.Deployment,
+			generationName(state.Generation),
+		)
 
 		err = c.env.Blob(ctx, stateFile, func(ctx context.Context) (io.Reader, error) {
 			return c.stateDescription(ctx, state.ID)

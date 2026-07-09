@@ -148,7 +148,11 @@ func TestStore_pathBuilders(t *testing.T) {
 			want: "projects/proj/stacks/mystack/deployments/prod/deployment.json",
 		},
 		"stack state file": {
-			build: func(s *store.Store) string { return s.StackStateFile("proj", "mystack", "42") },
+			build: func(s *store.Store) string { return s.StackStateFile("proj", "mystack", "prod", "42") },
+			want:  "projects/proj/stacks/mystack/states/prod-42.json",
+		},
+		"stack state file without deployment": {
+			build: func(s *store.Store) string { return s.StackStateFile("proj", "mystack", "", "42") },
 			want:  "projects/proj/stacks/mystack/states/42.json",
 		},
 	}
