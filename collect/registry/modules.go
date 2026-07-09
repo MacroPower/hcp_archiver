@@ -117,7 +117,10 @@ func (c *Collector) archiveNoCodeModule(
 		return out, wrap("fetch no-code module variables", doErr)
 	}
 
-	return wrap("archive no-code module variables", c.env.Object(ctx, varsPath, fetch))
+	// The resolved version tracks a movable pin ("latest" or an operator-changed
+	// concrete pin), so the variable options are re-read and overwritten when
+	// they change rather than frozen on first capture.
+	return wrap("archive no-code module variables", c.env.Mutable(ctx, varsPath, fetch))
 }
 
 // archiveModuleDetail writes a private module's last commits and the frozen
