@@ -34,3 +34,7 @@ dist/
 # Temp files
 .tmp/
 .task/
+
+# Local archive output and run config
+/out/
+/hcp_archiver.yaml

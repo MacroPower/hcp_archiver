@@ -6,3 +6,7 @@
 
 # Generated from config.File by `go generate ./config`.
 config/config.schema.json
+
+# Local archive output and run config.
+out/
+hcp_archiver.yaml
