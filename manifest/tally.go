@@ -18,6 +18,8 @@ type Tally struct {
 	Skipped int `json:"skipped"`
 	// Errored counts objects recorded as [StatusErrored] this run.
 	Errored int `json:"errored"`
+	// Forbidden counts objects recorded as [StatusForbidden] this run.
+	Forbidden int `json:"forbidden"`
 	// NotApplicable counts objects recorded as [StatusNotApplicable] this run.
 	NotApplicable int `json:"notApplicable"`
 	// BytesDownloaded is the total bytes downloaded this run.
@@ -26,5 +28,5 @@ type Tally struct {
 
 // Total returns the number of objects recorded across every status this run.
 func (t Tally) Total() int {
-	return t.Done + t.AbsentPermanently + t.Skipped + t.Errored + t.NotApplicable
+	return t.Done + t.AbsentPermanently + t.Skipped + t.Errored + t.Forbidden + t.NotApplicable
 }

@@ -134,9 +134,11 @@ func (e *Env) recordDone(relPath string, res store.WriteResult) {
 // transient-versus-terminal classification is turned into a recorded outcome.
 //
 // A cancellation of the passed context propagates so the run can wind down; a
-// terminal error records permanent absence (sticky); anything else records an
-// errored object, transient when the client classifies it so, so a re-run
-// retries it and never mistakes a rate-limit blip for a gone object.
+// terminal error records permanent absence (sticky); an access denial records a
+// forbidden object (retryable, so a later run under a broader token captures
+// it); anything else records an errored object, transient when the client
+// classifies it so, so a re-run retries it and never mistakes a rate-limit blip
+// for a gone object.
 func (e *Env) fail(ctx context.Context, relPath string, cause error) error {
 	ctxErr := ctx.Err()
 	if ctxErr != nil {
@@ -145,6 +147,12 @@ func (e *Env) fail(ctx context.Context, relPath string, cause error) error {
 
 	if tfeclient.IsTerminal(cause) {
 		e.ledger.RecordAbsent(relPath)
+
+		return nil
+	}
+
+	if tfeclient.IsForbidden(cause) {
+		e.ledger.RecordForbidden(relPath, cause)
 
 		return nil
 	}

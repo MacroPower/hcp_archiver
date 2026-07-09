@@ -227,6 +227,23 @@ func (l *Ledger) RecordErrored(relPath string, cause error, transient bool) {
 	})
 }
 
+// RecordForbidden records relPath as inaccessible to the archiving identity (an
+// HTTP 403). It keeps the cause text so the entry documents the permission gap,
+// and unlike [Ledger.RecordAbsent] it is not settled, so a re-run under a
+// token with broader access retries it.
+func (l *Ledger) RecordForbidden(relPath string, cause error) {
+	msg := ""
+	if cause != nil {
+		msg = cause.Error()
+	}
+
+	l.record(relPath, StatusForbidden, func(now time.Time, e *Entry) {
+		e.LastError = msg
+		e.LastErrorAt = now
+		e.Transient = false
+	})
+}
+
 // RecordSkipped records relPath as intentionally deferred, a settled state that
 // is not mistaken for a gap.
 func (l *Ledger) RecordSkipped(relPath string) {
@@ -351,6 +368,7 @@ func (l *Ledger) Tally() Tally {
 		AbsentPermanently: l.counts[StatusAbsentPermanently],
 		Skipped:           l.counts[StatusSkipped],
 		Errored:           l.counts[StatusErrored],
+		Forbidden:         l.counts[StatusForbidden],
 		NotApplicable:     l.counts[StatusNotApplicable],
 		BytesDownloaded:   l.bytes,
 	}

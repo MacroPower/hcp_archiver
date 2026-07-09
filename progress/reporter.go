@@ -311,7 +311,7 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 		fmt.Fprintf(&b, " target=%s", t.Target)
 	}
 
-	fmt.Fprintf(&b, " done=%d errored=%d", t.Done, t.Errored)
+	fmt.Fprintf(&b, " done=%d errored=%d forbidden=%d", t.Done, t.Errored, t.Forbidden)
 
 	if summary {
 		fmt.Fprintf(
@@ -346,6 +346,7 @@ type jsonLine struct {
 	AbsentPermanently int     `json:"absentPermanently"`
 	Skipped           int     `json:"skipped"`
 	Errored           int     `json:"errored"`
+	Forbidden         int     `json:"forbidden"`
 	NotApplicable     int     `json:"notApplicable"`
 	Total             int     `json:"total"`
 	BytesDownloaded   int64   `json:"bytesDownloaded"`
@@ -366,6 +367,7 @@ func (r *Reporter) writeJSON(snap snapshot, summary bool) error {
 		AbsentPermanently: t.AbsentPermanently,
 		Skipped:           t.Skipped,
 		Errored:           t.Errored,
+		Forbidden:         t.Forbidden,
 		NotApplicable:     t.NotApplicable,
 		Total:             t.Total(),
 		BytesDownloaded:   t.BytesDownloaded,

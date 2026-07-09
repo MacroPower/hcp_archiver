@@ -2,6 +2,7 @@ package collect_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -99,6 +100,17 @@ func TestEnvObject(t *testing.T) {
 			},
 			wantFetch:  true,
 			wantStatus: manifest.StatusErrored,
+		},
+		"records forbidden on an access denial": {
+			fetch: func(called *bool) func(context.Context) (any, error) {
+				return func(_ context.Context) (any, error) {
+					*called = true
+
+					return nil, errors.New("forbidden\n\nTeam and Organization Tokens are not supported")
+				}
+			},
+			wantFetch:  true,
+			wantStatus: manifest.StatusForbidden,
 		},
 		"skips when the ledger has it settled": {
 			seed: func(l *manifest.Ledger) {

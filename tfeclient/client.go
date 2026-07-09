@@ -140,8 +140,8 @@ func (c *Client) TFE() *tfe.Client {
 // Do runs fn after waiting on the shared limiter, passing the underlying
 // go-tfe client. It is the single gate every request should pass through so
 // the whole run shares one aggregate throttle. The error from fn is returned
-// unmodified so callers can classify it with [Classify], [IsTransient], or
-// [IsTerminal].
+// unmodified so callers can classify it with [Classify], [IsTransient],
+// [IsTerminal], or [IsForbidden].
 func (c *Client) Do(ctx context.Context, fn func(context.Context, *tfe.Client) error) error {
 	err := c.limiter.Wait(ctx)
 	if err != nil {

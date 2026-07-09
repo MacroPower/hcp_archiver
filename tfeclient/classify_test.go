@@ -57,6 +57,14 @@ func TestClassify(t *testing.T) {
 			err:  fmt.Errorf("read: %w", tfe.ErrUnauthorized),
 			want: tfeclient.KindUnknown,
 		},
+		"forbidden payload is forbidden": {
+			err:  errors.New("forbidden\n\nTeam and Organization Tokens are not supported"),
+			want: tfeclient.KindForbidden,
+		},
+		"wrapped forbidden is forbidden": {
+			err:  fmt.Errorf("list github app installations: %w", errors.New("forbidden")),
+			want: tfeclient.KindForbidden,
+		},
 	}
 
 	for name, tc := range tests {
@@ -66,6 +74,7 @@ func TestClassify(t *testing.T) {
 			assert.Equal(t, tc.want, tfeclient.Classify(tc.err))
 			assert.Equal(t, tc.want == tfeclient.KindTerminal, tfeclient.IsTerminal(tc.err))
 			assert.Equal(t, tc.want == tfeclient.KindTransient, tfeclient.IsTransient(tc.err))
+			assert.Equal(t, tc.want == tfeclient.KindForbidden, tfeclient.IsForbidden(tc.err))
 		})
 	}
 }
@@ -80,6 +89,7 @@ func TestKindString(t *testing.T) {
 		"unknown":   {kind: tfeclient.KindUnknown, want: "unknown"},
 		"transient": {kind: tfeclient.KindTransient, want: "transient"},
 		"terminal":  {kind: tfeclient.KindTerminal, want: "terminal"},
+		"forbidden": {kind: tfeclient.KindForbidden, want: "forbidden"},
 	}
 
 	for name, tc := range tests {

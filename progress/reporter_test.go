@@ -104,6 +104,7 @@ func TestReporter_JSONLine(t *testing.T) {
 		AbsentPermanently: 1,
 		Skipped:           2,
 		Errored:           3,
+		Forbidden:         5,
 		NotApplicable:     4,
 		BytesDownloaded:   1024,
 	}}
@@ -130,6 +131,7 @@ func TestReporter_JSONLine(t *testing.T) {
 		Remaining       *int    `json:"remaining"`
 		Done            int     `json:"done"`
 		Errored         int     `json:"errored"`
+		Forbidden       int     `json:"forbidden"`
 		Total           int     `json:"total"`
 		BytesDownloaded int64   `json:"bytesDownloaded"`
 		ElapsedSeconds  float64 `json:"elapsedSeconds"`
@@ -142,13 +144,14 @@ func TestReporter_JSONLine(t *testing.T) {
 	assert.Equal(t, "org/acme", line.Target)
 	assert.Equal(t, 10, line.Done)
 	assert.Equal(t, 3, line.Errored)
-	assert.Equal(t, 20, line.Total)
+	assert.Equal(t, 5, line.Forbidden)
+	assert.Equal(t, 25, line.Total)
 	assert.Equal(t, int64(1024), line.BytesDownloaded)
 	assert.InEpsilon(t, 4.0, line.ElapsedSeconds, 1e-9)
 	assert.InEpsilon(t, 256.0, line.BytesPerSecond, 1e-9)
 	assert.False(t, line.Summary)
 	require.NotNil(t, line.Remaining)
-	assert.Equal(t, 10, *line.Remaining)
+	assert.Equal(t, 5, *line.Remaining)
 }
 
 func TestReporter_Summary(t *testing.T) {
@@ -160,6 +163,7 @@ func TestReporter_Summary(t *testing.T) {
 		AbsentPermanently: 3,
 		Skipped:           2,
 		Errored:           4,
+		Forbidden:         6,
 		NotApplicable:     1,
 		BytesDownloaded:   5 * 1024 * 1024,
 	}}
@@ -183,8 +187,9 @@ func TestReporter_Summary(t *testing.T) {
 		assert.Contains(t, out, "absent=3")
 		assert.Contains(t, out, "skipped=2")
 		assert.Contains(t, out, "errored=4")
+		assert.Contains(t, out, "forbidden=6")
 		assert.Contains(t, out, "n/a=1")
-		assert.Contains(t, out, "total=110")
+		assert.Contains(t, out, "total=116")
 		assert.Contains(t, out, "elapsed=3m20s")
 	})
 
@@ -208,7 +213,7 @@ func TestReporter_Summary(t *testing.T) {
 
 		require.NoError(t, json.Unmarshal(buf.Bytes(), &line))
 		assert.True(t, line.Summary)
-		assert.Equal(t, 110, line.Total)
+		assert.Equal(t, 116, line.Total)
 	})
 }
 

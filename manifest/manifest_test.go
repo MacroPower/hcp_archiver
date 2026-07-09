@@ -26,6 +26,7 @@ func TestStatus_String(t *testing.T) {
 
 	assert.Equal(t, "done", manifest.StatusDone.String())
 	assert.Equal(t, "absent-permanently", manifest.StatusAbsentPermanently.String())
+	assert.Equal(t, "forbidden", manifest.StatusForbidden.String())
 	assert.Equal(t, "not-applicable", manifest.StatusNotApplicable.String())
 }
 
@@ -37,12 +38,13 @@ func TestStatus_ValidAndSettled(t *testing.T) {
 		wantValid   bool
 		wantSettled bool
 	}{
-		"done":    {status: manifest.StatusDone, wantValid: true, wantSettled: true},
-		"absent":  {status: manifest.StatusAbsentPermanently, wantValid: true, wantSettled: true},
-		"skipped": {status: manifest.StatusSkipped, wantValid: true, wantSettled: true},
-		"na":      {status: manifest.StatusNotApplicable, wantValid: true, wantSettled: true},
-		"errored": {status: manifest.StatusErrored, wantValid: true, wantSettled: false},
-		"unknown": {status: manifest.Status("nonsense"), wantValid: false, wantSettled: false},
+		"done":      {status: manifest.StatusDone, wantValid: true, wantSettled: true},
+		"absent":    {status: manifest.StatusAbsentPermanently, wantValid: true, wantSettled: true},
+		"skipped":   {status: manifest.StatusSkipped, wantValid: true, wantSettled: true},
+		"na":        {status: manifest.StatusNotApplicable, wantValid: true, wantSettled: true},
+		"errored":   {status: manifest.StatusErrored, wantValid: true, wantSettled: false},
+		"forbidden": {status: manifest.StatusForbidden, wantValid: true, wantSettled: false},
+		"unknown":   {status: manifest.Status("nonsense"), wantValid: false, wantSettled: false},
 	}
 
 	for name, tc := range tests {
@@ -112,6 +114,7 @@ func TestLedger_RoundTrip(t *testing.T) {
 	ledger.RecordDone("ws/state.json", sig)
 	ledger.RecordAbsent("ws/expired.tar.gz")
 	ledger.RecordErrored("ws/run.log", errors.New("boom"), true)
+	ledger.RecordForbidden("github-app-installations.json", errors.New("forbidden: team tokens not supported"))
 	ledger.RecordSkipped("ws/deferred.json")
 	ledger.RecordNotApplicable("ws/ssh-keys.json")
 	ledger.AdvanceHighWaterMark("state-versions", now)
@@ -145,6 +148,15 @@ func TestLedger_RoundTrip(t *testing.T) {
 	assert.Equal(t, "boom", errd.LastError)
 	assert.True(t, errd.Transient)
 
+	// A forbidden entry survives reload keeping its cause, and stays retryable so
+	// a re-run under a broader token captures a superset.
+	forb, ok := reloaded.Entry("github-app-installations.json")
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusForbidden, forb.Status)
+	assert.Equal(t, "forbidden: team tokens not supported", forb.LastError)
+	assert.False(t, forb.Transient)
+	assert.True(t, reloaded.ShouldFetch("github-app-installations.json"))
+
 	last, ok := reloaded.LastRun()
 	require.True(t, ok)
 	assert.Equal(t, 1, last.Totals[manifest.StatusDone])
@@ -176,6 +188,11 @@ func TestLedger_ShouldFetch(t *testing.T) {
 		},
 		"errored is retried": {
 			record:        func(l *manifest.Ledger, p string) { l.RecordErrored(p, errors.New("x"), false) },
+			wantNoRecheck: true,
+			wantRecheck:   true,
+		},
+		"forbidden is retried": {
+			record:        func(l *manifest.Ledger, p string) { l.RecordForbidden(p, errors.New("forbidden")) },
 			wantNoRecheck: true,
 			wantRecheck:   true,
 		},
@@ -247,16 +264,18 @@ func TestLedger_TallyMatchesRecords(t *testing.T) {
 	ledger.RecordSkipped("d")
 	ledger.RecordAbsent("e")
 	ledger.RecordNotApplicable("f")
+	ledger.RecordForbidden("g", errors.New("forbidden"))
 	ledger.AddBytes(42)
 
 	tally := ledger.Tally()
 	assert.Equal(t, 2, tally.Done)
 	assert.Equal(t, 1, tally.Errored)
+	assert.Equal(t, 1, tally.Forbidden)
 	assert.Equal(t, 1, tally.Skipped)
 	assert.Equal(t, 1, tally.AbsentPermanently)
 	assert.Equal(t, 1, tally.NotApplicable)
 	assert.Equal(t, int64(42), tally.BytesDownloaded)
-	assert.Equal(t, 6, tally.Total())
+	assert.Equal(t, 7, tally.Total())
 }
 
 func TestLedger_ReRecordSwapsTally(t *testing.T) {
