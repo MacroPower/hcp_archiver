@@ -42,6 +42,93 @@ export HCP_TOKEN=...    # an HCP Terraform user, team, or organization token
 hcp_archiver version
 ```
 
+### Archiving an organization
+
+The only required flag is the output directory; every other setting has a
+default. Point `--organization` (`--org`) at one org and `--output` (`-o`) at
+the archive root:
+
+```bash
+hcp_archiver --organization my-org --output ./archive
+```
+
+Omit `--organization` to archive every organization the token can see, each into
+its own `./archive/<org>/` subtree:
+
+```bash
+hcp_archiver --output ./archive
+```
+
+The default surfaces cover the bulk of an organization; the heaviest and most
+org-specific families are opt-in. Enable the ones you want:
+
+```bash
+hcp_archiver -o ./archive --org my-org \
+  --stacks --hyok --registry-detail --audit-trail
+```
+
+Raise `--concurrency` (default 4) to widen the worker pool over workspaces on a
+large organization, within HCP's per-token rate limit.
+
+### Resuming and re-running
+
+The output directory is the unit of resume: run the same command again and the
+durable [manifest](#behavior) drives an incremental pass that skips what is done
+or permanently gone, retries what errored, appends new runs and state versions,
+and refreshes mutable metadata, without re-downloading immutable blobs. An
+interrupted run (Ctrl-C or `SIGTERM`) exits cleanly, and the next invocation
+continues from where it stopped. There is no separate resume command; it is the
+second run against the same directory.
+
+### Combining tokens for a superset
+
+Coverage is bounded by the archiving identity, so no single token necessarily
+sees everything. An object the token may not read (an HTTP 403, such as the
+GitHub App installations list, which rejects team and organization tokens) is
+recorded as `forbidden` and, unlike a permanent absence, is **not** settled: a
+later run under a differently scoped token retries it. Point several tokens at
+the same output directory in turn to accumulate the union of what each can read:
+
+```bash
+HCP_TOKEN=$team_token hcp_archiver -o ./archive --org my-org
+HCP_TOKEN=$user_token hcp_archiver -o ./archive --org my-org
+```
+
+Each pass keeps everything already captured and fills in only what its token can
+now reach.
+
+### Progress and logging
+
+Progress is written to stderr; `--progress` selects the form:
+
+- `auto` (default) — the human line on a TTY, silent when redirected.
+- `human` — force the human line even off a TTY.
+- `json` — one JSON object per line, for CI or a watcher.
+- `quiet` — no progress output.
+
+`--progress-interval` (default `5s`) sets the cadence. Run logs are separate
+from progress and have their own knobs, `--log-level` (`error|warn|info|debug`)
+and `--log-format` (`text|logfmt|json`), so a warning about a skipped collection
+stays legible next to `--progress=json`.
+
+### Reading the run summary
+
+A run ends with a per-status summary line; the counts are the resume model made
+visible:
+
+- **done** — fetched and written.
+- **absent** — permanently gone (a 404/410), re-probed only with
+  `--recheck-absent`.
+- **forbidden** — the token may not read it (a 403); retried on the next run, so
+  a broader token can still capture it (see above). Counted apart from an error.
+- **errored** — a transient or unclassified failure, retried next run; a healthy
+  archive ends with `errored=0`.
+- **skipped** / **n/a** — intentionally deferred or not applicable to this
+  archive; settled, and never mistaken for a gap.
+
+A non-zero `errored` is the count to investigate; `forbidden`, `absent`,
+`skipped`, and `n/a` are recorded gaps, not failures.
+
 ### Configuration surface
 
 - `HCP_TOKEN` / `TFC_TOKEN` / `TFE_TOKEN` (required): the archiving identity's
