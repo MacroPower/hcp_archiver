@@ -162,16 +162,11 @@ func (l *Ledger) ShouldFetch(relPath string) bool {
 		return true
 	}
 
-	switch e.Status {
-	case StatusErrored:
-		return true
-	case StatusAbsentPermanently:
+	if e.Status == StatusAbsentPermanently {
 		return l.recheckAbsent
-	case StatusDone, StatusSkipped, StatusNotApplicable:
-		return false
-	default:
-		return true
 	}
+
+	return !e.Status.Settled()
 }
 
 // Entry returns a copy of the recorded entry for relPath and whether it exists.
