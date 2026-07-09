@@ -57,6 +57,13 @@ func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Conte
 		return e.fail(ctx, relPath, err)
 	}
 
+	// Some clients hand back an [io.ReadCloser] over a live response body (stack
+	// state descriptions, step artifacts); close it once streamed so the
+	// connection and file descriptor are not leaked.
+	if rc, ok := r.(io.Closer); ok {
+		defer rc.Close() //nolint:errcheck // Best-effort close of an already-consumed body.
+	}
+
 	res, err := e.store.WriteReader(relPath, r)
 	if err != nil {
 		return e.failWrite(ctx, relPath, err)
