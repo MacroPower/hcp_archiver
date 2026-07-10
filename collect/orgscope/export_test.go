@@ -21,3 +21,8 @@ func (c *Collector) ArchiveHYOKConfiguration(ctx context.Context, config *tfe.HY
 func (c *Collector) ArchivePolicySetVersions(ctx context.Context, set *tfe.PolicySet) error {
 	return c.archivePolicySetVersions(ctx, set)
 }
+
+// ArchiveOAuthClient exposes archiveOAuthClient to the external test package.
+func (c *Collector) ArchiveOAuthClient(ctx context.Context, client *tfe.OAuthClient) error {
+	return c.archiveOAuthClient(ctx, client)
+}
