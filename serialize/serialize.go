@@ -173,7 +173,7 @@ func sanitizeStruct(rv reflect.Value) {
 		case name == "Token", name == "Secret", name == "HMACKey":
 			setString(fv, Redacted)
 		case name == "Value" && sensitive:
-			setString(fv, Redacted)
+			redactValue(fv)
 		case isEphemeralURL(name):
 			clearString(fv)
 		default:
@@ -205,6 +205,45 @@ func hasSensitiveValue(rv reflect.Value) bool {
 		return !f.IsNil() && f.Elem().Kind() == reflect.Bool && f.Elem().Bool()
 	default:
 		return false
+	}
+}
+
+// redactValue overwrites a sensitive Value field of any kind, failing closed so
+// no cleartext survives when the field is not a plain string.
+//
+// A string or *string takes the [Redacted] sentinel (a nil *string is allocated
+// so its existence is still recorded); an interface takes the sentinel when a
+// string satisfies it, else is zeroed; any other kind is zeroed. A plain string
+// Value redacts identically to [setString], so string-Value output stays
+// byte-for-byte unchanged. This is the safety-critical redactor, where a
+// silently-unredacted non-string secret would be worse than a blanked field.
+func redactValue(fv reflect.Value) {
+	switch fv.Kind() {
+	case reflect.String:
+		fv.SetString(Redacted)
+
+	case reflect.Pointer:
+		if fv.Type().Elem().Kind() != reflect.String {
+			fv.Set(reflect.Zero(fv.Type()))
+
+			return
+		}
+
+		p := reflect.New(fv.Type().Elem())
+		p.Elem().SetString(Redacted)
+		fv.Set(p)
+
+	case reflect.Interface:
+		if reflect.TypeFor[string]().Implements(fv.Type()) {
+			fv.Set(reflect.ValueOf(Redacted))
+
+			return
+		}
+
+		fv.Set(reflect.Zero(fv.Type()))
+
+	default:
+		fv.Set(reflect.Zero(fv.Type()))
 	}
 }
 

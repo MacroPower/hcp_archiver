@@ -127,6 +127,30 @@ func TestMarshal(t *testing.T) {
 	}
 }
 
+func TestMarshalRedactsNonStringValue(t *testing.T) {
+	t.Parallel()
+
+	// A sensitive Value whose kind is interface{} rather than a plain string must
+	// still be redacted: the redactor fails closed instead of emitting cleartext.
+	type sensitiveAnyValue struct {
+		Key       string `json:"key"`
+		Value     any    `json:"value"`
+		Sensitive bool   `json:"sensitive"`
+	}
+
+	got, err := serialize.Marshal(&sensitiveAnyValue{
+		Key:       "db_password",
+		Value:     "hunter2-SECRET",
+		Sensitive: true,
+	})
+	require.NoError(t, err)
+
+	out := string(got)
+	assert.NotContains(t, out, "hunter2-SECRET", "a non-string sensitive value must not leak cleartext")
+	assert.Contains(t, out, serialize.Redacted)
+	require.True(t, json.Valid(got), "output must be valid JSON")
+}
+
 func TestMarshalHydratedRelationAsIDRef(t *testing.T) {
 	t.Parallel()
 
