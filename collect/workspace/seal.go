@@ -29,13 +29,14 @@ var (
 	// Immutable run-child filenames, each mapped to the roll-up it coalesces into;
 	// run.json is absent, being mutable, and stays loose.
 	runRollups = map[string]string{
-		"config-version.json":     "config-versions.ndjson",
-		"cost-estimate.json":      "cost-estimates.ndjson",
-		"comments.json":           "comments.ndjson",
-		"run-events.json":         "run-events.ndjson",
-		"policy-checks.json":      "policy-checks.ndjson",
-		"task-stages.json":        "task-stages.ndjson",
-		"tf-policy-outcomes.json": "tf-policy-outcomes.ndjson",
+		"config-version.json":         "config-versions.ndjson",
+		"config-version-ingress.json": "config-versions.ndjson",
+		"cost-estimate.json":          "cost-estimates.ndjson",
+		"comments.json":               "comments.ndjson",
+		"run-events.json":             "run-events.ndjson",
+		"policy-checks.json":          "policy-checks.ndjson",
+		"task-stages.json":            "task-stages.ndjson",
+		"tf-policy-outcomes.json":     "tf-policy-outcomes.ndjson",
 	}
 )
 

@@ -34,8 +34,15 @@ func (c *Collector) archiveRunChildren(ctx context.Context, project, ws string, 
 	return nil
 }
 
-// archiveConfigurationVersion archives the run's configuration-version record
-// (id plus ingress attributes) and, deduplicated org-wide by id, its tarball.
+// archiveConfigurationVersion archives the run's configuration-version record,
+// its ingress attributes, and, deduplicated org-wide by id, its tarball.
+//
+// The record's ingress relation is hydrated by the include but renders as a bare
+// id ref, so the record is read once and split into config-version.json (kept
+// byte-identical to before) and config-version-ingress.json (the commit sha,
+// branch, and PR that survive even after the tarball expires). The read is gated
+// on either derived file, so if the record settles but the ingress write errors a
+// later pass still re-reads while the gap remains.
 func (c *Collector) archiveConfigurationVersion(ctx context.Context, project, ws string, run *tfe.Run) error {
 	if run.ConfigurationVersion == nil {
 		return nil
@@ -43,13 +50,10 @@ func (c *Collector) archiveConfigurationVersion(ctx context.Context, project, ws
 
 	st := c.env.Store()
 	cvID := run.ConfigurationVersion.ID
+	cvPath := st.RunFile(project, ws, run.ID, "config-version.json")
+	ingPath := st.RunFile(project, ws, run.ID, "config-version-ingress.json")
 
-	err := objectOne(ctx, c, st.RunFile(project, ws, run.ID, "config-version.json"),
-		func(ctx context.Context, tc *tfe.Client) (*tfe.ConfigurationVersion, error) {
-			return tc.ConfigurationVersions.ReadWithOptions(ctx, cvID, &tfe.ConfigurationVersionReadOptions{
-				Include: []tfe.ConfigVerIncludeOpt{tfe.ConfigVerIngressAttributes},
-			})
-		})
+	err := c.archiveConfigVersionRecord(ctx, cvPath, ingPath, cvID)
 	if err != nil {
 		return err
 	}
@@ -57,6 +61,58 @@ func (c *Collector) archiveConfigurationVersion(ctx context.Context, project, ws
 	return c.bytes(ctx, st.ConfigVersionTarball(cvID), func(ctx context.Context) ([]byte, error) {
 		return c.env.Client().DownloadConfigurationVersion(ctx, cvID)
 	})
+}
+
+// archiveConfigVersionRecord reads the configuration version once, only while
+// either derived file is still unsettled, and splits it into config-version.json
+// and config-version-ingress.json.
+//
+// One read feeds both files, so a read failure is routed through each path's
+// self-gating Object: a settled path is left untouched, an unsettled one records
+// the error so a re-run retries.
+func (c *Collector) archiveConfigVersionRecord(ctx context.Context, cvPath, ingPath, cvID string) error {
+	if !c.env.ShouldFetch(cvPath) && !c.env.ShouldFetch(ingPath) {
+		return nil
+	}
+
+	cv, err := doRead(ctx, c, cvPath,
+		func(ctx context.Context, tc *tfe.Client) (*tfe.ConfigurationVersion, error) {
+			return tc.ConfigurationVersions.ReadWithOptions(ctx, cvID, &tfe.ConfigurationVersionReadOptions{
+				Include: []tfe.ConfigVerIncludeOpt{tfe.ConfigVerIngressAttributes},
+			})
+		})
+	if err != nil {
+		recErr := c.recordErrored(ctx, cvPath, err)
+		if recErr != nil {
+			return recErr
+		}
+
+		return c.recordErrored(ctx, ingPath, err)
+	}
+
+	err = c.object(ctx, cvPath, cv)
+	if err != nil {
+		return err
+	}
+
+	return c.archiveConfigVersionIngress(ctx, ingPath, cv)
+}
+
+// archiveConfigVersionIngress archives the hydrated ingress attributes at
+// ingPath, or settles a not-applicable gap when the configuration version has
+// none (a VCS-less upload), so a re-run neither refetches nor writes a null file.
+func (c *Collector) archiveConfigVersionIngress(
+	ctx context.Context,
+	ingPath string,
+	cv *tfe.ConfigurationVersion,
+) error {
+	if cv.IngressAttributes == nil {
+		c.env.NotApplicable(ingPath)
+
+		return nil
+	}
+
+	return c.object(ctx, ingPath, cv.IngressAttributes)
 }
 
 // archivePlan archives the run's plan log and, when the Terraform version offers

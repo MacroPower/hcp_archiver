@@ -11,6 +11,16 @@ func RunTerminal(status tfe.RunStatus) bool {
 	return runTerminal(status)
 }
 
+// ArchiveConfigurationVersion exposes archiveConfigurationVersion to the
+// external test package.
+func (c *Collector) ArchiveConfigurationVersion(
+	ctx context.Context,
+	project, ws string,
+	run *tfe.Run,
+) error {
+	return c.archiveConfigurationVersion(ctx, project, ws, run)
+}
+
 // ArchiveStateVersion exposes archiveStateVersion to the external test package.
 func (c *Collector) ArchiveStateVersion(
 	ctx context.Context,

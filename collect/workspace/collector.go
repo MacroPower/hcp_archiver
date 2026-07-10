@@ -122,6 +122,18 @@ func (c *Collector) object(ctx context.Context, relPath string, value any) error
 	}))
 }
 
+// recordErrored funnels a read failure that feeds an immutable object into the
+// ledger through the self-gating [collect.Env.Object], so a settled path is left
+// untouched (never regressed done->errored) while an unsettled one records the
+// error with the client's transient classification and a re-run retries. It is
+// how a shared read that splits into several derived files reports its failure
+// without inventing a settled state or aborting the run walk.
+func (c *Collector) recordErrored(ctx context.Context, relPath string, cause error) error {
+	return wrapArchive(relPath, c.env.Object(ctx, relPath, func(context.Context) (any, error) {
+		return nil, cause
+	}))
+}
+
 // mutable archives a value already in hand as one mutable file at relPath.
 func (c *Collector) mutable(ctx context.Context, relPath string, value any) error {
 	return wrapArchive(relPath, c.env.Mutable(ctx, relPath, func(_ context.Context) (any, error) {

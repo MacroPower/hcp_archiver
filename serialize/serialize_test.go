@@ -127,6 +127,37 @@ func TestMarshal(t *testing.T) {
 	}
 }
 
+// TestMarshalSubStructKeepsAttributes locks the behavior the hydrated-relation
+// archiving depends on: a sub-object that carries its own jsonapi primary tag,
+// marshaled directly as the primary object, renders its full attributes rather
+// than the bare {type, id} reference it collapses to when nested on a parent.
+func TestMarshalSubStructKeepsAttributes(t *testing.T) {
+	t.Parallel()
+
+	version := &tfe.PolicySetVersion{
+		ID:     "psv-1",
+		Source: "tfe-api",
+		Status: "ready",
+	}
+
+	got, err := serialize.Marshal(version)
+	require.NoError(t, err)
+
+	var doc struct {
+		Data struct {
+			Type       string         `json:"type"`
+			ID         string         `json:"id"`
+			Attributes map[string]any `json:"attributes"`
+		} `json:"data"`
+	}
+
+	require.NoError(t, json.Unmarshal(got, &doc))
+	assert.Equal(t, "policy-set-versions", doc.Data.Type)
+	assert.Equal(t, "psv-1", doc.Data.ID)
+	assert.Equal(t, "tfe-api", doc.Data.Attributes["source"], "the attributes survive, not a bare id ref")
+	assert.Equal(t, "ready", doc.Data.Attributes["status"])
+}
+
 func TestMarshalRedactsNonStringValue(t *testing.T) {
 	t.Parallel()
 
