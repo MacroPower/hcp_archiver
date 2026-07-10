@@ -224,3 +224,91 @@ type failingReader struct{}
 func (failingReader) Read(p []byte) (int, error) {
 	return copy(p, "partial"), errBoom
 }
+
+func TestAppend_roundTrip(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "log.ndjson")
+
+	first := []byte("one\n")
+	second := []byte("two\nthree\n")
+
+	start, err := atomicfile.Append(target, first)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), start)
+
+	start, err = atomicfile.Append(target, second)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(first)), start)
+
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, append(append([]byte{}, first...), second...), got)
+}
+
+func TestAppend_createsParentDir(t *testing.T) {
+	t.Parallel()
+
+	target := filepath.Join(t.TempDir(), "nested", "deep", "log.ndjson")
+
+	start, err := atomicfile.Append(target, []byte("line\n"))
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), start)
+
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("line\n"), got)
+}
+
+func TestAppend_trimsTornTailBeforeAppending(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		existing  []byte
+		wantStart int64
+		wantHead  []byte
+	}{
+		"torn fragment after a committed line": {
+			existing:  []byte("committed\n{\"partial\":"),
+			wantStart: int64(len("committed\n")),
+			wantHead:  []byte("committed\n"),
+		},
+		"wholly unterminated file": {
+			existing:  []byte("{\"partial\":"),
+			wantStart: 0,
+			wantHead:  nil,
+		},
+		"clean trailing newline is preserved": {
+			existing:  []byte("committed\n"),
+			wantStart: int64(len("committed\n")),
+			wantHead:  []byte("committed\n"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			target := filepath.Join(dir, "log.ndjson")
+
+			// Simulate a crash-torn prior append written directly, bypassing Append.
+			require.NoError(t, os.WriteFile(target, tc.existing, 0o600))
+
+			next := []byte("recovered\n")
+
+			start, err := atomicfile.Append(target, next)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantStart, start)
+
+			got, err := os.ReadFile(target)
+			require.NoError(t, err)
+
+			// The torn fragment is gone and the new record lands on a clean
+			// boundary, so every line is a whole record.
+			assert.Equal(t, append(append([]byte{}, tc.wantHead...), next...), got)
+			assert.Equal(t, next, got[start:])
+		})
+	}
+}

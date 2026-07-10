@@ -1,6 +1,8 @@
 package atomicfile
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -167,6 +169,116 @@ func stage(f *os.File, tmpName, name string, mode fs.FileMode, fn func(io.Writer
 	}
 
 	return nil
+}
+
+// Append appends data to the append-only file at name and returns the offset the
+// data was written at.
+//
+// It is the durable, append-only counterpart to [Write] for newline-delimited
+// logs and roll-ups. A newline terminates each record and is its commit marker,
+// so a crash mid-append can leave an uncommitted fragment past the final
+// newline. Append trims that fragment before writing, landing the new data on a
+// record boundary rather than fusing it onto a half-written line; a wholly
+// unterminated file is trimmed to empty. The batch is flushed to stable storage,
+// and the parent directory is synced too so a first append that creates the file
+// survives a crash. Callers pass newline-terminated data.
+//
+// Any missing parent directory of name is created with the directory mode (see
+// [WithDirMode]); a created file takes the file mode (see [WithFileMode]).
+func Append(name string, data []byte, opts ...Option) (int64, error) {
+	cfg := config{
+		fileMode: DefaultFileMode,
+		dirMode:  DefaultDirMode,
+	}
+
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	dir := filepath.Dir(name)
+
+	err := os.MkdirAll(dir, cfg.dirMode)
+	if err != nil {
+		return 0, fmt.Errorf("create parent directory %q: %w", dir, err)
+	}
+
+	//nolint:gosec // The append target is chosen by the caller by design.
+	f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE, cfg.fileMode)
+	if err != nil {
+		return 0, fmt.Errorf("open append target %q: %w", name, err)
+	}
+
+	start, err := appendCommitted(f, data)
+	if err != nil {
+		return 0, err
+	}
+
+	err = syncDir(dir)
+	if err != nil {
+		return 0, fmt.Errorf("sync parent directory %q: %w", dir, err)
+	}
+
+	return start, nil
+}
+
+// appendCommitted trims any torn trailing fragment from f, writes data at the
+// resulting record boundary, and flushes it, returning the offset the write
+// began at. It closes f on every path, mirroring [stage].
+func appendCommitted(f *os.File, data []byte) (int64, error) {
+	start, opErr := lastRecordBoundary(f)
+	if opErr == nil {
+		opErr = f.Truncate(start)
+	}
+
+	if opErr == nil {
+		_, opErr = f.WriteAt(data, start)
+	}
+
+	if opErr == nil {
+		opErr = f.Sync()
+	}
+
+	closeErr := f.Close()
+
+	switch {
+	case opErr != nil:
+		return 0, fmt.Errorf("append at record boundary: %w", opErr)
+	case closeErr != nil:
+		return 0, fmt.Errorf("close append target: %w", closeErr)
+	}
+
+	return start, nil
+}
+
+// lastRecordBoundary returns the offset just past f's final newline, the end of
+// its last committed record. It scans backward from the end so a large log costs
+// one read rather than a whole-file scan; a file with no newline yields 0.
+func lastRecordBoundary(f *os.File) (int64, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat append target: %w", err)
+	}
+
+	const chunk = 4096
+
+	buf := make([]byte, chunk)
+
+	for off := info.Size(); off > 0; {
+		n := min(int64(chunk), off)
+		off -= n
+
+		_, err = f.ReadAt(buf[:n], off)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return 0, fmt.Errorf("scan for record boundary: %w", err)
+		}
+
+		idx := bytes.LastIndexByte(buf[:n], '\n')
+		if idx >= 0 {
+			return off + int64(idx) + 1, nil
+		}
+	}
+
+	return 0, nil
 }
 
 // syncDir flushes dir so a rename recorded within it is durable across a crash.

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
@@ -49,10 +48,10 @@ type walRecord struct {
 // bytes written.
 //
 // Each record is one line and the terminating newline is the commit marker: a
-// replay drops any bytes after the final newline as an incomplete trailing
-// write, so a crash mid-append loses at most the last record rather than
-// corrupting the log. The batch is written in one call and flushed to stable
-// storage before returning.
+// crash mid-append leaves an uncommitted fragment past the final newline that
+// the next append trims (see [atomicfile.Append]) and a replay drops, so a torn
+// write loses at most the last record rather than corrupting the log. The batch
+// is written in one call and flushed to stable storage before returning.
 func appendLog(path string, recs []walRecord) (int64, error) {
 	var buf bytes.Buffer
 
@@ -66,32 +65,12 @@ func appendLog(path string, recs []walRecord) (int64, error) {
 		buf.WriteByte('\n')
 	}
 
-	err := os.MkdirAll(filepath.Dir(path), atomicfile.DefaultDirMode)
+	_, err := atomicfile.Append(path, buf.Bytes())
 	if err != nil {
-		return 0, fmt.Errorf("create log directory: %w", err)
+		return 0, fmt.Errorf("append log: %w", err)
 	}
 
-	//nolint:gosec // The log path is derived from the operator-chosen manifest path.
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, atomicfile.DefaultFileMode)
-	if err != nil {
-		return 0, fmt.Errorf("open log: %w", err)
-	}
-
-	n, writeErr := f.Write(buf.Bytes())
-
-	syncErr := f.Sync()
-	closeErr := f.Close()
-
-	switch {
-	case writeErr != nil:
-		return 0, fmt.Errorf("append log: %w", writeErr)
-	case syncErr != nil:
-		return 0, fmt.Errorf("sync log: %w", syncErr)
-	case closeErr != nil:
-		return 0, fmt.Errorf("close log: %w", closeErr)
-	}
-
-	return int64(n), nil
+	return int64(buf.Len()), nil
 }
 
 // replayLog reads the append-only log at path and returns its records in order,

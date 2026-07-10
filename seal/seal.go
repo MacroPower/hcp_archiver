@@ -328,42 +328,14 @@ func encodeRollup(members []Member) ([]byte, error) {
 
 // appendPayload appends payload to the roll-up, flushes it to stable storage, and
 // returns the offset the append began at so the write can be verified.
+//
+// It relies on [atomicfile.Append] to land the batch on a record boundary even
+// when a prior append was torn by a crash, and to sync the parent directory so a
+// roll-up created by a first append survives one.
 func appendPayload(path string, payload []byte) (int64, error) {
-	err := os.MkdirAll(filepath.Dir(path), atomicfile.DefaultDirMode)
+	start, err := atomicfile.Append(path, payload)
 	if err != nil {
-		return 0, fmt.Errorf("create roll-up directory: %w", err)
-	}
-
-	var start int64
-
-	info, err := os.Stat(path)
-
-	switch {
-	case err == nil:
-		start = info.Size()
-	case errors.Is(err, fs.ErrNotExist):
-		start = 0
-	default:
-		return 0, fmt.Errorf("stat roll-up %q: %w", path, err)
-	}
-
-	//nolint:gosec // The roll-up path is composed by the caller from its archive root.
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, atomicfile.DefaultFileMode)
-	if err != nil {
-		return 0, fmt.Errorf("open roll-up %q: %w", path, err)
-	}
-
-	_, writeErr := f.Write(payload)
-	syncErr := f.Sync()
-	closeErr := f.Close()
-
-	switch {
-	case writeErr != nil:
-		return 0, fmt.Errorf("append roll-up %q: %w", path, writeErr)
-	case syncErr != nil:
-		return 0, fmt.Errorf("sync roll-up %q: %w", path, syncErr)
-	case closeErr != nil:
-		return 0, fmt.Errorf("close roll-up %q: %w", path, closeErr)
+		return 0, fmt.Errorf("append roll-up %q: %w", path, err)
 	}
 
 	return start, nil
