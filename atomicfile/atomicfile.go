@@ -210,10 +210,34 @@ func Append(name string, data []byte, opts ...Option) (int64, error) {
 		return 0, err
 	}
 
+	// Open exclusively first to learn whether this call creates the file, which
+	// decides both whether the mode needs enforcing and whether the parent
+	// directory needs syncing below.
+	created := true
+
 	//nolint:gosec // The append target is chosen by the caller by design.
-	f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE, cfg.fileMode)
+	f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, cfg.fileMode)
+	if errors.Is(err, fs.ErrExist) {
+		created = false
+
+		//nolint:gosec // The append target is chosen by the caller by design.
+		f, err = os.OpenFile(name, os.O_RDWR, cfg.fileMode)
+	}
+
 	if err != nil {
 		return 0, fmt.Errorf("open append target %q: %w", name, err)
+	}
+
+	// A freshly created file is masked by umask on open, so chmod it to land
+	// exactly the requested mode, matching Write; an existing target keeps the
+	// mode it was first created with.
+	if created {
+		err = f.Chmod(cfg.fileMode)
+		if err != nil {
+			f.Close() //nolint:errcheck,gosec // Best-effort close on the chmod-failure path.
+
+			return 0, fmt.Errorf("chmod append target %q: %w", name, err)
+		}
 	}
 
 	start, err := appendCommitted(f, data)
@@ -221,9 +245,14 @@ func Append(name string, data []byte, opts ...Option) (int64, error) {
 		return 0, err
 	}
 
-	err = syncDir(dir)
-	if err != nil {
-		return 0, fmt.Errorf("sync parent directory %q: %w", dir, err)
+	// Only a creating append changes the parent directory (its new entry); a later
+	// append changes only the file's own data, already flushed by appendCommitted,
+	// so syncing the directory every time would fsync it needlessly.
+	if created {
+		err = syncDir(dir)
+		if err != nil {
+			return 0, fmt.Errorf("sync parent directory %q: %w", dir, err)
+		}
 	}
 
 	return start, nil
