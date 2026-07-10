@@ -130,8 +130,15 @@ func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 }
 
 // projectName resolves the display name of a stack's project, caching each
-// lookup. A stack always carries a project relation; when the name cannot be
-// read the project id stands in so the archive path stays stable.
+// resolved name. A stack always carries a project relation; when the project
+// has no readable name the id stands in.
+//
+// A read failure is a transient blip or a permission gap, not a stable answer,
+// so it falls back to the id for this stack without caching it. That keeps a
+// single blip on one stack from freezing the whole project's stacks under the
+// id, and lets a later stack or a re-run under a broader token still resolve
+// the real name. Only a project that genuinely reads back without a name caches
+// the id, since that answer is stable.
 func (c *Collector) projectName(ctx context.Context, stack *tfe.Stack) string {
 	if stack.Project == nil || stack.Project.ID == "" {
 		return "unknown-project"
@@ -151,7 +158,11 @@ func (c *Collector) projectName(ctx context.Context, stack *tfe.Stack) string {
 
 		return wrap(e)
 	})
-	if err != nil || project == nil || project.Name == "" {
+	if err != nil {
+		return id
+	}
+
+	if project == nil || project.Name == "" {
 		c.projects[id] = id
 
 		return id
