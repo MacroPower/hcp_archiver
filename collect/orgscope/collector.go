@@ -28,7 +28,13 @@ const msgListSkipped = "org-scoped list read did not complete; skipping collecti
 // artifact and is fetched only once. Create instances with [New]; it satisfies
 // [collect.Collector].
 type Collector struct {
-	env  *collect.Env
+	env *collect.Env
+
+	// Set of user ids already archived this Collect, so the many teams and roster
+	// entries that reference the same users skip a duplicate re-serialization. It
+	// needs no lock because a Collector runs its org scope on a single goroutine.
+	seenUsers map[string]struct{}
+
 	org  string
 	hyok bool
 }
@@ -53,8 +59,9 @@ func WithHYOK(enabled bool) Option {
 // domain collectors sharing the same [collect.Env].
 func New(env *collect.Env, org string, opts ...Option) *Collector {
 	c := &Collector{
-		env: env,
-		org: org,
+		env:       env,
+		org:       org,
+		seenUsers: make(map[string]struct{}),
 	}
 
 	for _, opt := range opts {
@@ -188,6 +195,28 @@ func (c *Collector) mutableValue(ctx context.Context, relPath string, value any)
 	}
 
 	return nil
+}
+
+// archiveUser archives a hydrated user sub-object at users/<id>.json as mutable
+// metadata, once per Collect.
+//
+// The go-tfe SDK exposes no user list, only ReadCurrent, so a User hydrated on a
+// team or membership is the only path to capturing who is on a team or in the
+// org; every other reference is a permanently-opaque id. Teams and the roster
+// reference the same users in bulk, so a seen-set skips the duplicate
+// re-serialization. A nil user is a no-op.
+func (c *Collector) archiveUser(ctx context.Context, u *tfe.User) error {
+	if u == nil {
+		return nil
+	}
+
+	if _, ok := c.seenUsers[u.ID]; ok {
+		return nil
+	}
+
+	c.seenUsers[u.ID] = struct{}{}
+
+	return c.mutableValue(ctx, c.env.Store().User(u.ID), u)
 }
 
 // archiveList archives a whole paginated collection as one mutable file at

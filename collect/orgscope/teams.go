@@ -57,12 +57,23 @@ func (c *Collector) collectTeams(ctx context.Context) error {
 	)
 }
 
-// archiveTeam archives one team's definition and its notification
-// configurations.
+// archiveTeam archives one team's definition, its member users, and its
+// notification configurations.
+//
+// The team's Users relation is hydrated but renders as bare id refs, so each
+// member is archived directly at users/<id>.json (the only capture of who is on
+// the team, since go-tfe exposes no user list).
 func (c *Collector) archiveTeam(ctx context.Context, team *tfe.Team) error {
 	err := c.mutableValue(ctx, c.env.Store().TeamFile(team.ID, "team.json"), team)
 	if err != nil {
 		return err
+	}
+
+	for _, u := range team.Users {
+		uErr := c.archiveUser(ctx, u)
+		if uErr != nil {
+			return uErr
+		}
 	}
 
 	return c.collectTeamNotifications(ctx, team.ID)
@@ -94,10 +105,17 @@ func (c *Collector) collectTeamNotifications(ctx context.Context, teamID string)
 	)
 }
 
-// collectMemberships archives the organization roster with each membership's
-// user and team references.
+// collectMemberships archives the organization roster and, from each
+// membership's hydrated user relation, the referenced users.
+//
+// Unlike the other bulk lists this paginates the items itself so the individual
+// memberships are in hand: memberships.json is written from them, then each
+// membership's User is archived at users/<id>.json (the only capture of who is in
+// the org, since go-tfe exposes no user list). A read that does not complete is
+// logged and skipped, leaving the prior roster untouched rather than overwriting
+// it with an empty list.
 func (c *Collector) collectMemberships(ctx context.Context) error {
-	return archiveList(ctx, c, c.env.Store().Memberships(), "memberships",
+	memberships, err := paginate(ctx, c, "memberships",
 		func(
 			ctx context.Context,
 			tc *tfe.Client,
@@ -117,4 +135,25 @@ func (c *Collector) collectMemberships(ctx context.Context) error {
 			return l.Items, l.Pagination, nil
 		},
 	)
+	if err != nil {
+		return err
+	}
+
+	if memberships == nil {
+		return nil
+	}
+
+	err = c.mutableValue(ctx, c.env.Store().Memberships(), memberships)
+	if err != nil {
+		return err
+	}
+
+	for _, m := range memberships {
+		uErr := c.archiveUser(ctx, m.User)
+		if uErr != nil {
+			return uErr
+		}
+	}
+
+	return nil
 }

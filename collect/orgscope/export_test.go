@@ -26,3 +26,8 @@ func (c *Collector) ArchivePolicySetVersions(ctx context.Context, set *tfe.Polic
 func (c *Collector) ArchiveOAuthClient(ctx context.Context, client *tfe.OAuthClient) error {
 	return c.archiveOAuthClient(ctx, client)
 }
+
+// ArchiveUser exposes archiveUser to the external test package.
+func (c *Collector) ArchiveUser(ctx context.Context, u *tfe.User) error {
+	return c.archiveUser(ctx, u)
+}

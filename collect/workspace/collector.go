@@ -141,6 +141,23 @@ func (c *Collector) mutable(ctx context.Context, relPath string, value any) erro
 	}))
 }
 
+// archiveUser archives a hydrated user sub-object at users/<id>.json as mutable
+// metadata. A nil user is a no-op.
+//
+// The go-tfe SDK exposes no user list, only ReadCurrent, so a User hydrated as a
+// run's created-by or a run event's actor is the only path to capturing who ran
+// or confirmed a run; every other reference is a permanently-opaque id. No dedup
+// set is kept: the Collector is shared across concurrent workspace workers, so a
+// shared set would need a lock for little gain, while Mutable already no-ops an
+// unchanged re-write and the store commits each write atomically.
+func (c *Collector) archiveUser(ctx context.Context, u *tfe.User) error {
+	if u == nil {
+		return nil
+	}
+
+	return c.mutable(ctx, c.env.Store().User(u.ID), u)
+}
+
 // doRead runs read through the shared client so it passes the rate limiter,
 // returning the value it yields.
 func doRead[T any](

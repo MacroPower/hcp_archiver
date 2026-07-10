@@ -10,7 +10,8 @@ import (
 
 // archiveRunChildren archives every immutable child of a terminal run: its
 // configuration version, plan and apply artifacts, cost estimate, comments, run
-// events, policy checks, task stages, and native Terraform policy outcomes.
+// events, policy checks, task stages, native Terraform policy outcomes, and the
+// user that created it.
 func (c *Collector) archiveRunChildren(ctx context.Context, project, ws string, run *tfe.Run) error {
 	steps := []func(context.Context, string, string, *tfe.Run) error{
 		c.archiveConfigurationVersion,
@@ -31,7 +32,9 @@ func (c *Collector) archiveRunChildren(ctx context.Context, project, ws string, 
 		}
 	}
 
-	return nil
+	// The run's created-by is hydrated by the pager but renders as a bare id ref;
+	// archive that user directly (the only capture of who queued the run).
+	return c.archiveUser(ctx, run.CreatedBy)
 }
 
 // archiveConfigurationVersion archives the run's configuration-version record,
@@ -211,11 +214,20 @@ func (c *Collector) archiveComments(ctx context.Context, project, ws string, run
 		})
 }
 
-// archiveRunEvents archives the run's actor-attributed events.
+// archiveRunEvents archives the run's actor-attributed events and each event's
+// hydrated actor.
+//
+// The actor is hydrated by the include but renders as a bare id ref on the event,
+// so it is archived directly at users/<id>.json. The events are captured from the
+// list read so their actors can be looped after; a settled re-walk skips the read
+// and leaves the slice empty, a harmless no-op since the actors were archived when
+// the events were first written.
 func (c *Collector) archiveRunEvents(ctx context.Context, project, ws string, run *tfe.Run) error {
 	runID := run.ID
 
-	return objectOne(ctx, c, c.env.Store().RunFile(project, ws, run.ID, "run-events.json"),
+	var events []*tfe.RunEvent
+
+	err := objectOne(ctx, c, c.env.Store().RunFile(project, ws, run.ID, "run-events.json"),
 		func(ctx context.Context, tc *tfe.Client) ([]*tfe.RunEvent, error) {
 			l, e := tc.RunEvents.List(ctx, runID, &tfe.RunEventListOptions{
 				Include: []tfe.RunEventIncludeOpt{tfe.RunEventActor, tfe.RunEventComment},
@@ -224,8 +236,22 @@ func (c *Collector) archiveRunEvents(ctx context.Context, project, ws string, ru
 				return nil, fmt.Errorf("list run events: %w", e)
 			}
 
+			events = l.Items
+
 			return l.Items, nil
 		})
+	if err != nil {
+		return err
+	}
+
+	for _, ev := range events {
+		uErr := c.archiveUser(ctx, ev.Actor)
+		if uErr != nil {
+			return uErr
+		}
+	}
+
+	return nil
 }
 
 // archivePolicyChecks archives the run's Sentinel policy checks and a log per
