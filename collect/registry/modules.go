@@ -177,7 +177,7 @@ func (c *Collector) archiveModuleVersion(
 	version string,
 ) error {
 	st := c.env.Store()
-	path := st.RegistryModuleFile(mod.Namespace, mod.Name, mod.Provider, moduleVersionFilename(version))
+	path := st.RegistryModuleFile(mod.Namespace, mod.Name, mod.Provider, versionFilename(version))
 
 	fetch := func(ctx context.Context) (any, error) {
 		var out *tfe.RegistryModuleVersion

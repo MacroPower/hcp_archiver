@@ -121,8 +121,7 @@ func TestResolveNoCodeVersion(t *testing.T) {
 func TestVersionFilenames(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, "version-1.2.3.json", moduleVersionFilename("1.2.3"))
-	assert.Equal(t, "version-1.2.3.json", providerVersionFilename("1.2.3"))
+	assert.Equal(t, "version-1.2.3.json", versionFilename("1.2.3"))
 	assert.Equal(t, "version-1.2.3-platforms.json", providerPlatformsFilename("1.2.3"))
 }
 

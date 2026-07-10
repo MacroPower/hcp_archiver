@@ -18,15 +18,11 @@ const (
 // version, so it cannot drive a per-version read.
 const versionLatest = "latest"
 
-// moduleVersionFilename returns the leaf a module version's frozen metadata is
-// archived under, keyed on its version.
-func moduleVersionFilename(version string) string {
-	return "version-" + version + ".json"
-}
-
-// providerVersionFilename returns the leaf a provider version's frozen metadata
-// is archived under, keyed on its version.
-func providerVersionFilename(version string) string {
+// versionFilename returns the leaf a module or provider version's frozen
+// metadata is archived under, keyed on its version. Both registries share the
+// scheme, which [providerPlatformsFilename] extends for a provider's platform
+// list.
+func versionFilename(version string) string {
 	return "version-" + version + ".json"
 }
 

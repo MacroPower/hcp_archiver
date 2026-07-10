@@ -111,7 +111,7 @@ func (c *Collector) archiveProviderVersion(
 	ver *tfe.RegistryProviderVersion,
 ) error {
 	st := c.env.Store()
-	versionPath := st.RegistryProviderFile(prov.Namespace, prov.Name, providerVersionFilename(ver.Version))
+	versionPath := st.RegistryProviderFile(prov.Namespace, prov.Name, versionFilename(ver.Version))
 
 	err := c.env.Object(ctx, versionPath, func(_ context.Context) (any, error) {
 		return ver, nil
