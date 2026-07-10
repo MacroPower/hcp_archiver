@@ -175,17 +175,9 @@ func TestStore_registryPathsDoNotCollide(t *testing.T) {
 		a string
 		b string
 	}{
-		"module dir": {
-			a: s.RegistryModuleDir("foo-bar", "baz", "aws"),
-			b: s.RegistryModuleDir("foo", "bar-baz", "aws"),
-		},
 		"module file": {
 			a: s.RegistryModuleFile("foo-bar", "baz", "aws", "module.json"),
 			b: s.RegistryModuleFile("foo", "bar-baz", "aws", "module.json"),
-		},
-		"provider dir": {
-			a: s.RegistryProviderDir("foo-bar", "baz"),
-			b: s.RegistryProviderDir("foo", "bar-baz"),
 		},
 		"provider file": {
 			a: s.RegistryProviderFile("foo-bar", "baz", "provider.json"),
@@ -241,7 +233,6 @@ func TestStore_sanitizationConfinesToRoot(t *testing.T) {
 	s := store.New(root)
 
 	hostile := []string{
-		s.ProjectDir("../../../etc"),
 		s.WorkspaceDir("../..", "../../../etc/passwd"),
 		s.WorkspaceFile("..", "..", "../../secret"),
 		s.RunFile("p", "ws", "../../../../../root", ".ssh/authorized_keys"),
@@ -250,7 +241,7 @@ func TestStore_sanitizationConfinesToRoot(t *testing.T) {
 		s.Join("/absolute/escape"),
 		s.OAuthClient("../../escape"),
 		s.RegistryModuleFile("../../../etc", "..", "../..", "passwd"),
-		s.RegistryProviderDir("../../..", "../../etc"),
+		s.RegistryProviderFile("../../..", "../../etc", "provider.json"),
 		s.RegistryGPGKey("..", "../../../root/.ssh/authorized_keys"),
 	}
 

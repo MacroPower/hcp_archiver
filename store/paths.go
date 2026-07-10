@@ -54,12 +54,6 @@ func (s *Store) ReservedTagKeys() string {
 	return cleanJoin("reserved-tag-keys.json")
 }
 
-// TeamDir returns the directory that holds a team's archived objects, keyed on
-// the team id.
-func (s *Store) TeamDir(id string) string {
-	return cleanJoin("teams", seg(id))
-}
-
 // TeamFile returns the relative path of a leaf named name under a team's
 // directory (e.g. team.json, notification-configs.json).
 func (s *Store) TeamFile(id, name string) string {
@@ -72,22 +66,10 @@ func (s *Store) OAuthClient(id string) string {
 	return cleanJoin("oauth-clients", seg(id)+".json")
 }
 
-// VariableSetDir returns the directory that holds a variable set's archived
-// objects, keyed on its id.
-func (s *Store) VariableSetDir(id string) string {
-	return cleanJoin("variable-sets", seg(id))
-}
-
 // VariableSetFile returns the relative path of a leaf named name under a
 // variable set's directory (e.g. variable-set.json, variables.json).
 func (s *Store) VariableSetFile(id, name string) string {
 	return cleanJoin("variable-sets", seg(id), seg(name))
-}
-
-// PolicySetDir returns the directory that holds a policy set's archived
-// objects, keyed on its id.
-func (s *Store) PolicySetDir(id string) string {
-	return cleanJoin("policy-sets", seg(id))
 }
 
 // PolicySetFile returns the relative path of a leaf named name under a policy
@@ -124,18 +106,13 @@ func (s *Store) HYOKConfiguration(id string) string {
 	return cleanJoin("hyok-configurations", seg(id)+".json")
 }
 
-// RegistryModuleDir returns the directory for a registry module, nesting its
-// namespace, name, and provider as directory levels.
-//
-// Each is its own level rather than one hyphen-joined segment because all three
-// legally contain hyphens, so joining them would alias distinct modules onto one
-// path (and one ledger entry); seg maps "/" to "_", so the nesting is injective.
-func (s *Store) RegistryModuleDir(namespace, name, provider string) string {
-	return cleanJoin("registry", "modules", seg(namespace), seg(name), seg(provider))
-}
-
 // RegistryModuleFile returns the relative path of a leaf named file under a
 // registry module's directory (e.g. module.json).
+//
+// Each of namespace, name, and provider is its own path level rather than one
+// hyphen-joined segment because all three legally contain hyphens, so joining
+// them would alias distinct modules onto one path (and one ledger entry); seg
+// maps "/" to "_", so the nesting is injective.
 func (s *Store) RegistryModuleFile(namespace, name, provider, file string) string {
 	return cleanJoin(
 		"registry",
@@ -153,15 +130,11 @@ func (s *Store) RegistryNoCodeModule(id string) string {
 	return cleanJoin("registry", "no-code-modules", seg(id)+".json")
 }
 
-// RegistryProviderDir returns the directory for a registry provider, nesting its
-// namespace and name as directory levels so two providers whose hyphenated
-// namespace and name would otherwise join to the same segment stay distinct.
-func (s *Store) RegistryProviderDir(namespace, name string) string {
-	return cleanJoin("registry", "providers", seg(namespace), seg(name))
-}
-
 // RegistryProviderFile returns the relative path of a leaf named file under a
 // registry provider's directory (e.g. provider.json).
+//
+// Namespace and name are separate path levels so two providers whose hyphenated
+// namespace and name would otherwise join to the same segment stay distinct.
 func (s *Store) RegistryProviderFile(namespace, name, file string) string {
 	return cleanJoin("registry", "providers", seg(namespace), seg(name), seg(file))
 }
@@ -178,12 +151,6 @@ func (s *Store) RegistryGPGKey(namespace, keyID string) string {
 // id.
 func (s *Store) ConfigVersionTarball(cvID string) string {
 	return cleanJoin("config-versions", seg(cvID)+".tar.gz")
-}
-
-// ProjectDir returns the directory that holds a project's archived objects,
-// keyed on the project name (sanitized so a hostile name cannot escape root).
-func (s *Store) ProjectDir(project string) string {
-	return cleanJoin("projects", seg(project))
 }
 
 // ProjectFile returns the relative path of a leaf named name under a project's
@@ -278,19 +245,6 @@ func (s *Store) StackFile(project, stack, name string) string {
 	return cleanJoin("projects", seg(project), "stacks", seg(stack), seg(name))
 }
 
-// StackConfigurationDir returns the directory for a stack configuration, keyed
-// on its id.
-func (s *Store) StackConfigurationDir(project, stack, configID string) string {
-	return cleanJoin(
-		"projects",
-		seg(project),
-		"stacks",
-		seg(stack),
-		"configurations",
-		seg(configID),
-	)
-}
-
 // StackConfigurationFile returns the relative path of a leaf named name under a
 // stack configuration's directory (e.g. configuration.json).
 func (s *Store) StackConfigurationFile(project, stack, configID, name string) string {
@@ -336,23 +290,6 @@ func (s *Store) StackDeploymentGroupFile(project, stack, configID, groupID, name
 	)
 }
 
-// StackRunDir returns the directory for a run under a deployment group, keyed
-// on the run id.
-func (s *Store) StackRunDir(project, stack, configID, groupID, runID string) string {
-	return cleanJoin(
-		"projects",
-		seg(project),
-		"stacks",
-		seg(stack),
-		"configurations",
-		seg(configID),
-		"deployment-groups",
-		seg(groupID),
-		"runs",
-		seg(runID),
-	)
-}
-
 // StackRunFile returns the relative path of a leaf named name under a stack
 // run's directory (e.g. run.json).
 func (s *Store) StackRunFile(project, stack, configID, groupID, runID, name string) string {
@@ -368,25 +305,6 @@ func (s *Store) StackRunFile(project, stack, configID, groupID, runID, name stri
 		"runs",
 		seg(runID),
 		seg(name),
-	)
-}
-
-// StackStepDir returns the directory for a step under a stack run, keyed on the
-// step id.
-func (s *Store) StackStepDir(project, stack, configID, groupID, runID, stepID string) string {
-	return cleanJoin(
-		"projects",
-		seg(project),
-		"stacks",
-		seg(stack),
-		"configurations",
-		seg(configID),
-		"deployment-groups",
-		seg(groupID),
-		"runs",
-		seg(runID),
-		"steps",
-		seg(stepID),
 	)
 }
 
@@ -408,19 +326,6 @@ func (s *Store) StackStepFile(project, stack, configID, groupID, runID, stepID, 
 		seg(runID),
 		"steps",
 		seg(stepID),
-		seg(name),
-	)
-}
-
-// StackDeploymentDir returns the directory for a named stack deployment, keyed
-// on the deployment name.
-func (s *Store) StackDeploymentDir(project, stack, name string) string {
-	return cleanJoin(
-		"projects",
-		seg(project),
-		"stacks",
-		seg(stack),
-		"deployments",
 		seg(name),
 	)
 }
