@@ -472,3 +472,141 @@ func TestLedger_ConcurrentRecords(t *testing.T) {
 	require.NoError(t, ledger.Flush())
 	assert.Equal(t, int64(workers*perWorker), ledger.Tally().BytesDownloaded)
 }
+
+func TestLedger_AppendOnlyFlushLeavesLog(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "manifest.json")
+
+	ledger, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	ledger.StartRun()
+	ledger.RecordDone("ws/a.json", manifest.Signature{Size: 3})
+	ledger.RecordErrored("ws/b.log", errors.New("boom"), true)
+	require.NoError(t, ledger.Flush())
+
+	// A flush mid-run only appends: the log holds the delta and no compacted
+	// snapshot has been written yet.
+	_, statErr := os.Stat(path)
+	assert.True(t, os.IsNotExist(statErr), "no snapshot before compaction")
+
+	_, statErr = os.Stat(path + ".log")
+	require.NoError(t, statErr, "the append-only log holds the flushed records")
+
+	// The records survive a reload driven by replaying the log alone.
+	reloaded, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	done, ok := reloaded.Entry("ws/a.json")
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusDone, done.Status)
+
+	errd, ok := reloaded.Entry("ws/b.log")
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, errd.Status)
+	assert.True(t, errd.Transient)
+}
+
+func TestLedger_CompactionOnFinishClearsLog(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "manifest.json")
+
+	ledger, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	ledger.StartRun()
+	ledger.RecordDone("ws/a.json", manifest.Signature{Size: 3})
+	ledger.FinishRun()
+	require.NoError(t, ledger.Flush())
+
+	// Finishing a run folds the log into the snapshot: a completed archive leaves
+	// a current manifest and no leftover log.
+	_, statErr := os.Stat(path)
+	require.NoError(t, statErr, "the snapshot is written on a finished-run flush")
+
+	_, statErr = os.Stat(path + ".log")
+	assert.True(t, os.IsNotExist(statErr), "the log is removed after compaction")
+
+	reloaded, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	done, ok := reloaded.Entry("ws/a.json")
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusDone, done.Status)
+	assert.Equal(t, 1, reloaded.RunCount())
+}
+
+func TestLedger_SnapshotPlusLogMerge(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "manifest.json")
+
+	// First run finishes, compacting a snapshot for object a.
+	first, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	first.StartRun()
+	first.RecordDone("a", manifest.Signature{Size: 1})
+	first.FinishRun()
+	require.NoError(t, first.Flush())
+
+	// Second run appends object b to the log without compacting, so the durable
+	// state is the snapshot (a) plus the log (b).
+	second, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	second.StartRun()
+	second.RecordDone("b", manifest.Signature{Size: 1})
+	// Flush without finishing the run: b lands in the log, a stays in the snapshot.
+	require.NoError(t, second.Flush())
+
+	_, statErr := os.Stat(path + ".log")
+	require.NoError(t, statErr, "the second run's delta is in the log")
+
+	// A reload merges both sources.
+	reloaded, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	_, ok := reloaded.Entry("a")
+	assert.True(t, ok, "the snapshot object survives")
+
+	_, ok = reloaded.Entry("b")
+	assert.True(t, ok, "the logged object survives")
+	assert.Equal(t, 2, reloaded.Tally().Done)
+}
+
+func TestLoad_TornTrailingLogLineDropped(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "manifest.json")
+
+	// A committed record (newline-terminated) followed by a torn trailing write
+	// with no commit marker: the fragment is dropped, the committed record stays.
+	good := `{"kind":"entry","path":"ws/a.json","entry":{"firstSeen":"2026-07-08T12:00:00Z","status":"done","attempts":1}}`
+	torn := `{"kind":"entry","path":"ws/b.json","entry":{"firstSeen"`
+	require.NoError(t, os.WriteFile(path+".log", []byte(good+"\n"+torn), 0o600))
+
+	ledger, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	_, ok := ledger.Entry("ws/a.json")
+	assert.True(t, ok, "the committed record is applied")
+
+	_, ok = ledger.Entry("ws/b.json")
+	assert.False(t, ok, "the torn trailing record is dropped")
+}
+
+func TestLoad_CorruptLogLine(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "manifest.json")
+
+	// A complete, newline-terminated line that does not parse is genuine
+	// corruption, not a torn tail.
+	require.NoError(t, os.WriteFile(path+".log", []byte("{ not json\n"), 0o600))
+
+	_, err := manifest.Load(path)
+	require.ErrorIs(t, err, manifest.ErrCorruptManifest)
+}
