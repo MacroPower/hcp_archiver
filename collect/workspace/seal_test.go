@@ -106,6 +106,10 @@ func TestSealWorkspace_BundlesFrozenArtifacts(t *testing.T) {
 	f.writeDone(t, st.RunFile(project, ws, "run-1", "apply.log"), []byte("apply output"))
 	f.writeDone(t, st.RunFile(project, ws, "run-1", "policy-check-pc1.log"), []byte("policy log"))
 	f.writeDone(t, st.RunFile(project, ws, "run-1", "config-version.json"), []byte(`{"cv":"cv-1"}`))
+	f.writeDone(t, st.RunFile(project, ws, "run-1", "config-version-ingress.json"), []byte(`{"sha":"abc"}`))
+	f.writeDone(t, st.RunFile(project, ws, "run-1", "plan-summary.json"), []byte(`{"plan":"plan-1"}`))
+	f.writeDone(t, st.RunFile(project, ws, "run-1", "apply-summary.json"), []byte(`{"apply":"apply-1"}`))
+	f.writeDone(t, st.RunFile(project, ws, "run-1", "tf-policy-evaluations.json"), []byte(`{"eval":"eval-1"}`))
 	f.writeDone(t, st.RunFile(project, ws, "run-1", "run-events.json"), []byte("[\n  {}\n]"))
 
 	// A state version: raw and JSON blobs plus the meta sidecar.
@@ -126,6 +130,10 @@ func TestSealWorkspace_BundlesFrozenArtifacts(t *testing.T) {
 		st.RunFile(project, ws, "run-1", "apply.log"),
 		st.RunFile(project, ws, "run-1", "policy-check-pc1.log"),
 		st.RunFile(project, ws, "run-1", "config-version.json"),
+		st.RunFile(project, ws, "run-1", "config-version-ingress.json"),
+		st.RunFile(project, ws, "run-1", "plan-summary.json"),
+		st.RunFile(project, ws, "run-1", "apply-summary.json"),
+		st.RunFile(project, ws, "run-1", "tf-policy-evaluations.json"),
 		st.RunFile(project, ws, "run-1", "run-events.json"),
 		st.Join(sv, "20260101T000000Z-sv-1.tfstate.json"),
 		st.Join(sv, "20260101T000000Z-sv-1.json"),
@@ -144,6 +152,9 @@ func TestSealWorkspace_BundlesFrozenArtifacts(t *testing.T) {
 		st.Join(st.BundleDir(project, ws), "state.gen0001.zip"),
 		st.Join(st.BundleDir(project, ws), "state.gen0001.zip.sidecar.ndjson"),
 		st.Join(st.RollupDir(project, ws), "config-versions.ndjson"),
+		st.Join(st.RollupDir(project, ws), "plan-summaries.ndjson"),
+		st.Join(st.RollupDir(project, ws), "apply-summaries.ndjson"),
+		st.Join(st.RollupDir(project, ws), "tf-policy-evaluations.ndjson"),
 		st.Join(st.RollupDir(project, ws), "run-events.ndjson"),
 		st.Join(st.RollupDir(project, ws), "state-versions.ndjson"),
 	} {
