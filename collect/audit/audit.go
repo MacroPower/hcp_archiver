@@ -111,6 +111,16 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 
 	for page := 1; ; {
 		list, listErr := c.listPage(ctx, since, page)
+
+		// A page that lists cleanly but carries no items settles nothing. Its file
+		// name is keyed on the unchanged Since cursor, so writing it would settle
+		// that name; a later run, once events have arrived under the same cursor,
+		// would skip them as already done and lose them. Stop the walk with the
+		// watermark unmoved so the next run re-lists from here.
+		if listErr == nil && len(list.Items) == 0 {
+			break
+		}
+
 		relPath := st.AuditTrailFile(pageName(since, page))
 
 		err := c.env.Object(ctx, relPath, func(context.Context) (any, error) {
@@ -144,7 +154,7 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 		}
 
 		p := list.AuditTrailPagination
-		if len(list.Items) == 0 || p == nil || p.NextPage == 0 {
+		if p == nil || p.NextPage == 0 {
 			break
 		}
 
