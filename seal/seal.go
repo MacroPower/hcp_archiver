@@ -48,12 +48,21 @@ type Member struct {
 // Instances are produced by [Seal] and written, one JSON object per line, to the
 // bundle's sidecar file.
 type Entry struct {
-	Name   string `json:"name"`
+	// Name is the member's archive-relative path, its identity within the bundle.
+	Name string `json:"name"`
+	// Bundle is the base filename of the zip the member was packed into.
 	Bundle string `json:"bundle"`
+	// Method is the zip compression method the member was packed with, either
+	// [methodStore] or [methodDeflate].
 	Method string `json:"method"`
+	// SHA256 is the lowercase hex SHA-256 of the member's content, verified
+	// against a read-back before its loose source is removed.
 	SHA256 string `json:"sha256"`
-	Size   int64  `json:"size"`
-	CRC32  uint32 `json:"crc32"`
+	// Size is the member's content length in bytes.
+	Size int64 `json:"size"`
+	// CRC32 is the IEEE CRC-32 of the member's content, the zip's own integrity
+	// check.
+	CRC32 uint32 `json:"crc32"`
 }
 
 // Seal packs members into a zip bundle at bundlePath, writes a sidecar index
@@ -237,7 +246,7 @@ func verifyMember(f *zip.File, entry *Entry) error {
 
 	got := hex.EncodeToString(sha.Sum(nil))
 	if got != entry.SHA256 {
-		return fmt.Errorf("sealed member %q failed verification: got %s, want %s",
+		return fmt.Errorf("sealed member %q does not match its recorded digest: got %s, want %s",
 			entry.Name, got, entry.SHA256)
 	}
 
@@ -363,7 +372,7 @@ func verifyAppended(path string, start int64, payload []byte) error {
 	}
 
 	if !bytes.Equal(got, payload) {
-		return fmt.Errorf("roll-up %q failed verification after append", path)
+		return fmt.Errorf("roll-up %q does not read back the appended bytes", path)
 	}
 
 	return nil
