@@ -22,7 +22,8 @@ import (
 // TallySource supplies the live counters the reporter renders.
 //
 // The ledger satisfies it through its Tally method, so the reporter reads the
-// same counters that back the manifest and the two can never disagree.
+// same counters that back the manifest and the two can never disagree. See
+// [manifest.Ledger] for an implementation.
 type TallySource interface {
 	// Tally returns a point-in-time snapshot of the live counters.
 	Tally() manifest.Tally
