@@ -899,11 +899,18 @@ func (l *Ledger) Flush() error {
 			// The drained records never reached the log; put them and every
 			// not-yet-appended shard's records back so a retry re-appends them
 			// rather than dropping the delta (and, mid-migration, retiring the
-			// legacy source over shards that were never persisted).
+			// legacy source over shards that were never persisted). Restore a
+			// pending compaction request too, so a finished run still folds its
+			// shards' logs into their snapshots on the retry rather than leaving
+			// them uncompacted.
 			l.mu.Lock()
 
 			for _, rem := range work[i:] {
 				rem.sh.restoreDirty(rem.recs)
+			}
+
+			if compactAll {
+				l.compactNext = true
 			}
 
 			l.mu.Unlock()
