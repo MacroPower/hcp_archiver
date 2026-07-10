@@ -789,11 +789,29 @@ func (l *Ledger) Flush() error {
 
 	l.mu.RUnlock()
 
+	var compactErrs []error
+
 	for _, sh := range toCompact {
 		err := l.compactShard(sh)
 		if err != nil {
-			return err
+			compactErrs = append(compactErrs, err)
 		}
+	}
+
+	if len(compactErrs) > 0 {
+		// A finished run's compact-all request was consumed above; a shard that
+		// failed to fold would otherwise drop it and keep its log until the log
+		// independently outgrew the threshold. Restore the request, mirroring the
+		// append-failure path, so a later flush retries the fold. The other shards
+		// were still attempted, so one shard's failure does not strand the rest.
+		if compactAll {
+			l.mu.Lock()
+
+			l.compactNext = true
+			l.mu.Unlock()
+		}
+
+		return fmt.Errorf("compact shards: %w", errors.Join(compactErrs...))
 	}
 
 	return nil
@@ -837,6 +855,14 @@ func (l *Ledger) compactShard(sh *shard) error {
 		return fmt.Errorf("write shard %q: %w", sh.dir, err)
 	}
 
+	// The snapshot now reflects the shard. Record its size before removing the
+	// log, so the accounting stays correct even if the removal below fails and the
+	// fold is retried on a later flush.
+	l.mu.Lock()
+
+	sh.snapshotBytes = int64(len(data))
+	l.mu.Unlock()
+
 	err = os.Remove(sh.logPath())
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("truncate shard log %q: %w", sh.dir, err)
@@ -844,7 +870,6 @@ func (l *Ledger) compactShard(sh *shard) error {
 
 	l.mu.Lock()
 
-	sh.snapshotBytes = int64(len(data))
 	sh.logBytes = 0
 	l.mu.Unlock()
 
