@@ -4,9 +4,11 @@ A standalone tool that archives an HCP Terraform (formerly Terraform Cloud)
 organization to plain files on disk for **long-term reference**, not for
 restoration back into HCP Terraform.
 
-The archive is a predictable tree of JSON documents and raw blobs: grep-able,
-diff-able, and readable years from now with no dependency on HCP or on this tool
-still existing.
+The archive is a predictable tree of JSON documents and raw blobs: diff-able and
+readable years from now with no dependency on HCP or on this tool still existing.
+The JSON metadata stays grep-able on disk; the heavy audit-only artifacts (plan
+and apply logs, plan JSON, and raw state) are packed into per-workspace `zip`
+bundles, so grepping those means unzipping the one bundle a sidecar points at.
 
 ## Goal & non-goals
 
@@ -179,7 +181,7 @@ Settings are grouped by how much they vary; see
 ```
 archive/<org>/
   org.json                          organization metadata
-  manifest.json                     per-object ledger + run records & watermarks
+  .ledger/                          sharded per-object ledger + run records & watermarks
 
   # org-level objects (not scoped to a single project)
   teams/<id>/
@@ -235,6 +237,13 @@ Layout rules worth knowing:
   globally unique, so each tarball is stored once and runs reference it by id;
   a run keeps the ingress attributes (commit sha, branch, PR) even when the
   tarball itself has expired.
+- **On disk, frozen heavy artifacts seal and small metadata coalesces.** The tree
+  above is the logical namespace: every object's stable path. A collected
+  workspace's plan/apply logs, plan JSON, and raw + JSON state pack into
+  per-workspace `zip` bundles under `bundles/` (each with a `.sidecar.ndjson`
+  index), and the immutable run children and state-version metadata coalesce into
+  NDJSON roll-ups under `rollups/`; `run.json` stays loose. Every object keeps its
+  stable path as the key, so resume and incremental re-run are unaffected.
 
 ## Limitations
 
