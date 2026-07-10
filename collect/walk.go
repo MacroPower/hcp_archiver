@@ -53,13 +53,30 @@ type Pager[T any] func(ctx context.Context, page int) (items []T, hasNext bool, 
 // [Env.Bytes] are skipped on that boundary refresh because the ledger already has
 // them settled.
 //
-// The early stop fires only once the collection was walked to its end in a prior
-// run (see [manifest.Ledger.IsCollectionComplete]). An interrupted first walk
-// archives a newest-first prefix and leaves an older tail with no ledger entry,
-// so stopping at the newest already-done element would strand that tail forever;
-// until the collection has completed once, the walk pages all the way down,
-// relying on the primitives to skip already-settled elements cheaply, and marks
-// the collection complete only when it reaches the final page.
+// The early stop is gated so it fires only once the collection is fully settled,
+// because elements do not settle in creation order. A run is recorded done while
+// still non-terminal and its children are deferred, and runs finish out of
+// order, so a newer run reaching a terminal state can freeze the boundary ahead
+// of an older run still in flight; and an older errored or forbidden child can
+// sit below a newer done boundary. Three conditions compose to keep either from
+// stranding it:
+//
+//   - the collection was walked to its end in a prior run
+//     ([manifest.Ledger.IsCollectionComplete]), so an interrupted first walk's
+//     un-archived older tail is not mistaken for settled history;
+//   - the newest full walk saw only terminal elements
+//     ([manifest.Ledger.IsCollectionSettled]), which carries a still-running run
+//     (recorded done, so invisible to a status scan) across passes; and
+//   - no errored or forbidden child sits below the boundary
+//     ([manifest.Ledger.HasUnsettledUnder]), which forces a full re-walk while
+//     any such child exists.
+//
+// A non-terminal element seen mid-pass suppresses the stop for that pass too, so
+// the stop condition is strictly stricter than a plain complete check and can
+// only ever widen the walk, never newly strand an element. When early-stop is
+// suppressed the walk re-pages the collection (list calls only; the primitives
+// still skip settled objects), and on the final page it records both completion
+// and whether this walk settled the collection.
 //
 // Only a context cancellation surfaced by an Archive closure or a page fetch
 // aborts the walk; every per-object error is recorded by the primitives and the
@@ -71,7 +88,11 @@ func Walk[T any](
 	page Pager[T],
 	describe func(T) Item,
 ) error {
-	complete := env.ledger.IsCollectionComplete(key)
+	earlyStopAllowed := env.ledger.IsCollectionComplete(key) &&
+		env.ledger.IsCollectionSettled(key) &&
+		!env.ledger.HasUnsettledUnder(key)
+
+	sawNonTerminal := false
 
 	for pageNum := 1; ; pageNum++ {
 		items, hasNext, err := page(ctx, pageNum)
@@ -92,13 +113,18 @@ func Walk[T any](
 				return archiveErr
 			}
 
-			if frozen && complete {
+			if !item.Terminal {
+				sawNonTerminal = true
+			}
+
+			if frozen && earlyStopAllowed && !sawNonTerminal {
 				return nil
 			}
 		}
 
 		if !hasNext {
 			env.ledger.MarkCollectionComplete(key)
+			env.ledger.SetCollectionSettled(key, !sawNonTerminal && !env.ledger.HasUnsettledUnder(key))
 
 			return nil
 		}

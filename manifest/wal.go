@@ -24,6 +24,11 @@ const (
 	walWatermark walKind = "watermark"
 	// WalCompleted records that a collection has been walked to its end.
 	walCompleted walKind = "completed"
+	// WalSettled records whether a collection's newest full walk settled it. It
+	// carries its boolean value because, unlike completion, settledness is
+	// non-monotonic: a walk that reaches a still-running element flips it back to
+	// false.
+	walSettled walKind = "settled"
 	// WalRun records the run-level metadata (last run time, count, and summary).
 	walRun walKind = "run"
 )
@@ -41,6 +46,10 @@ type walRecord struct {
 	Path      string     `json:"path,omitempty"`
 	Key       string     `json:"key,omitempty"`
 	RunCount  int        `json:"runCount,omitempty"`
+	// Settled carries the value of a walSettled record. It is omitempty, so a
+	// false value replays as the zero value, which is the intended false; the
+	// walSettled kind still identifies the record.
+	Settled bool `json:"settled,omitempty"`
 }
 
 // appendLog appends recs to the log at path as newline-terminated JSON lines,

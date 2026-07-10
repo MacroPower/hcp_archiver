@@ -746,6 +746,114 @@ func TestLedger_FlushTouchesOnlyChangedShards(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "the untouched workspace's shard is not rewritten")
 }
 
+func TestLedger_SettledSurvivesLogRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	// The load-bearing guard for the non-monotonic settled record: a walSettled
+	// value logged as false must replay as false, not as the record kind's
+	// implicit true. Two mid-run flushes keep both records in the log (no
+	// compaction), so the reload exercises the replay path.
+	path := t.TempDir()
+
+	ledger, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	ledger.StartRun()
+	ledger.SetCollectionSettled("runs", true)
+	require.NoError(t, ledger.Flush())
+
+	// The true value is durable on its own before the flip, so the final false is
+	// a genuine true->false transition rather than a value that was never set.
+	afterTrue, err := manifest.Load(path)
+	require.NoError(t, err)
+	assert.True(t, afterTrue.IsCollectionSettled("runs"), "settled=true persists through the log")
+
+	ledger.SetCollectionSettled("runs", false)
+	require.NoError(t, ledger.Flush())
+
+	reloaded, err := manifest.Load(path)
+	require.NoError(t, err)
+	assert.False(t, reloaded.IsCollectionSettled("runs"),
+		"a logged settled=false replays as false, re-widening the walk")
+}
+
+func TestLedger_SettledSurvivesCompaction(t *testing.T) {
+	t.Parallel()
+
+	// Finishing the run folds the log into the snapshot, so the settled flag must
+	// round-trip through the compacted document too.
+	path := t.TempDir()
+
+	ledger, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	ledger.StartRun()
+	ledger.SetCollectionSettled("runs", true)
+	ledger.FinishRun()
+	require.NoError(t, ledger.Flush())
+
+	snapshot, logFile := rootShardFiles(path)
+
+	_, statErr := os.Stat(snapshot)
+	require.NoError(t, statErr, "compaction writes the snapshot")
+
+	_, statErr = os.Stat(logFile)
+	assert.True(t, os.IsNotExist(statErr), "the log is removed after compaction")
+
+	reloaded, err := manifest.Load(path)
+	require.NoError(t, err)
+	assert.True(t, reloaded.IsCollectionSettled("runs"), "settled survives compaction into the snapshot")
+}
+
+func TestLedger_HasUnsettledUnderPrefixIsolation(t *testing.T) {
+	t.Parallel()
+
+	ledger, err := manifest.Load(t.TempDir())
+	require.NoError(t, err)
+
+	ledger.StartRun()
+
+	// A run child left errored and a forbidden state-version blob sit in the same
+	// workspace shard as a fully archived state version. HasUnsettledUnder must
+	// isolate on the prefix so the runs walk sees its errored child while the
+	// state-versions walk sees only settled work.
+	const (
+		runsKey  = "projects/p/workspaces/w/runs"
+		svKey    = "projects/p/workspaces/w/state-versions"
+		otherKey = "projects/p/workspaces/w/configuration-versions"
+	)
+
+	ledger.RecordErrored(runsKey+"/r1/plan.log", errors.New("boom"), true)
+	ledger.RecordDone(runsKey+"/r1/run.json", manifest.Signature{Size: 1})
+	ledger.RecordDone(svKey+"/sv.meta.json", manifest.Signature{Size: 1})
+
+	assert.True(t, ledger.HasUnsettledUnder(runsKey), "the errored run child is unsettled under runs")
+	assert.False(t, ledger.HasUnsettledUnder(svKey), "the state-versions collection has only settled work")
+	assert.False(t, ledger.HasUnsettledUnder(otherKey), "a prefix with no entries is settled")
+
+	// A forbidden state-version child flips its collection to unsettled without
+	// touching the runs prefix.
+	ledger.RecordForbidden(svKey+"/sv2.tfstate.json", errors.New("forbidden"))
+	assert.True(t, ledger.HasUnsettledUnder(svKey), "the forbidden state-version child is unsettled")
+}
+
+func TestLedger_HasUnsettledUnderIgnoresSyntheticCursor(t *testing.T) {
+	t.Parallel()
+
+	ledger, err := manifest.Load(t.TempDir())
+	require.NoError(t, err)
+
+	ledger.StartRun()
+
+	// A stack walk's cursor key is an id, not a path prefix of the entries it
+	// routes past, so it matches nothing and reports settled — the documented
+	// scoping that keeps stacks at today's behavior.
+	ledger.RecordErrored("projects/p/stacks/s/configurations/c/config.json", errors.New("boom"), true)
+
+	assert.False(t, ledger.HasUnsettledUnder("stacks/stk-123/configurations"),
+		"a synthetic id cursor is not a prefix of any entry")
+}
+
 func TestLoad_MigratesLegacyManifest(t *testing.T) {
 	t.Parallel()
 

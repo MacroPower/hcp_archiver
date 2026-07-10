@@ -63,6 +63,8 @@ type shard struct {
 	dirtyCompleted  map[string]struct{}
 	watermarks      map[string]time.Time
 	completed       map[string]bool
+	settled         map[string]bool
+	dirtySettled    map[string]struct{}
 	dirtyEntries    map[string]struct{}
 	dirtyWatermarks map[string]struct{}
 	lastRun         *RunRecord
@@ -81,9 +83,11 @@ func newShard(dir string) *shard {
 		entries:         make(map[string]*Entry),
 		watermarks:      make(map[string]time.Time),
 		completed:       make(map[string]bool),
+		settled:         make(map[string]bool),
 		dirtyEntries:    make(map[string]struct{}),
 		dirtyWatermarks: make(map[string]struct{}),
 		dirtyCompleted:  make(map[string]struct{}),
+		dirtySettled:    make(map[string]struct{}),
 	}
 }
 
@@ -162,6 +166,10 @@ func (s *shard) applyDocument(doc *document) {
 		s.completed = doc.Completed
 	}
 
+	if doc.Settled != nil {
+		s.settled = doc.Settled
+	}
+
 	s.lastRunAt = doc.LastRunAt
 	s.runCount = doc.RunCount
 	s.lastRun = doc.LastRun
@@ -181,6 +189,8 @@ func (s *shard) applyRecord(rec *walRecord) error {
 		s.watermarks[rec.Key] = rec.At
 	case walCompleted:
 		s.completed[rec.Key] = true
+	case walSettled:
+		s.settled[rec.Key] = rec.Settled
 	case walRun:
 		s.lastRunAt = rec.LastRunAt
 		s.runCount = rec.RunCount
@@ -198,6 +208,7 @@ func (s *shard) hasDirty() bool {
 	return len(s.dirtyEntries) > 0 ||
 		len(s.dirtyWatermarks) > 0 ||
 		len(s.dirtyCompleted) > 0 ||
+		len(s.dirtySettled) > 0 ||
 		s.runDirty
 }
 
@@ -207,7 +218,8 @@ func (s *shard) hasDirty() bool {
 // It runs under the owning ledger's write lock; the entry it emits is a copy, so
 // a concurrent record does not race the marshal that follows outside the lock.
 func (s *shard) drainDirty() []walRecord {
-	recs := make([]walRecord, 0, len(s.dirtyEntries)+len(s.dirtyWatermarks)+len(s.dirtyCompleted)+1)
+	recs := make([]walRecord, 0,
+		len(s.dirtyEntries)+len(s.dirtyWatermarks)+len(s.dirtyCompleted)+len(s.dirtySettled)+1)
 
 	for relPath := range s.dirtyEntries {
 		e := s.entries[relPath]
@@ -232,6 +244,10 @@ func (s *shard) drainDirty() []walRecord {
 		recs = append(recs, walRecord{Kind: walCompleted, Key: key})
 	}
 
+	for key := range s.dirtySettled {
+		recs = append(recs, walRecord{Kind: walSettled, Key: key, Settled: s.settled[key]})
+	}
+
 	if s.runDirty {
 		rec := walRecord{Kind: walRun, LastRunAt: s.lastRunAt, RunCount: s.runCount}
 
@@ -247,6 +263,7 @@ func (s *shard) drainDirty() []walRecord {
 	clear(s.dirtyEntries)
 	clear(s.dirtyWatermarks)
 	clear(s.dirtyCompleted)
+	clear(s.dirtySettled)
 
 	s.runDirty = false
 
@@ -266,6 +283,8 @@ func (s *shard) restoreDirty(recs []walRecord) {
 			s.dirtyWatermarks[recs[i].Key] = struct{}{}
 		case walCompleted:
 			s.dirtyCompleted[recs[i].Key] = struct{}{}
+		case walSettled:
+			s.dirtySettled[recs[i].Key] = struct{}{}
 		case walRun:
 			s.runDirty = true
 		}
@@ -283,5 +302,6 @@ func (s *shard) document() document {
 		HighWaterMarks: s.watermarks,
 		Entries:        s.entries,
 		Completed:      s.completed,
+		Settled:        s.settled,
 	}
 }

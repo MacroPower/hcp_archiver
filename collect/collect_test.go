@@ -3,6 +3,7 @@ package collect_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -266,27 +267,27 @@ type walkItem struct {
 	terminal  bool
 }
 
-func TestWalkHaltsAndRevisits(t *testing.T) {
+func TestWalkEarlyStopsWhenFullySettled(t *testing.T) {
 	t.Parallel()
 
 	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
 
-	// Newest-first: r3 was archived while non-terminal (done, now still
-	// non-terminal), r2 was archived done and is terminal (the frozen boundary,
-	// here also the just-terminal transition), r1 is older terminal history.
-	r3 := walkItem{relPath: "runs/r3/run.json", createdAt: base.Add(3 * time.Hour), terminal: false}
+	// A fully settled collection: every element terminal and archived done, the
+	// collection walked to its end and recorded settled, with no unsettled child.
+	// The walk must still stop at the newest boundary so the incremental
+	// optimization is preserved.
+	r3 := walkItem{relPath: "runs/r3/run.json", createdAt: base.Add(3 * time.Hour), terminal: true}
 	r2 := walkItem{relPath: "runs/r2/run.json", createdAt: base.Add(2 * time.Hour), terminal: true}
 	r1 := walkItem{relPath: "runs/r1/run.json", createdAt: base.Add(1 * time.Hour), terminal: true}
 
 	env, _, ledger := newEnv(t)
 
-	// Seed prior-run state: every element was archived done in a previous run
-	// that walked the collection to its end, so the early stop is permitted.
 	for _, it := range []walkItem{r3, r2, r1} {
 		ledger.RecordDone(it.relPath, manifest.Signature{Hash: "prior", Size: 1})
 	}
 
 	ledger.MarkCollectionComplete("runs")
+	ledger.SetCollectionSettled("runs", true)
 
 	archived := map[string]int{}
 
@@ -319,16 +320,153 @@ func TestWalkHaltsAndRevisits(t *testing.T) {
 	err := collect.Walk(t.Context(), env, "runs", pager, describe)
 	require.NoError(t, err)
 
-	// Element r3 is non-terminal, so it is re-visited; r2 is the frozen boundary,
-	// so it is archived once more (the transition refresh) and then the walk
-	// halts before reaching r1.
-	assert.Equal(t, 1, archived[r3.relPath], "non-terminal element is re-visited")
-	assert.Equal(t, 1, archived[r2.relPath], "the boundary element gets a final refresh")
-	assert.NotContains(t, archived, r1.relPath, "history past the boundary is never touched")
+	// Only r3, the newest boundary, is refreshed; the walk halts before touching
+	// the settled history below it or requesting a second page.
+	assert.Equal(t, 1, archived[r3.relPath], "the newest boundary gets a final refresh")
+	assert.NotContains(t, archived, r2.relPath, "settled history is not re-touched")
+	assert.NotContains(t, archived, r1.relPath, "settled history is not re-touched")
 
 	assert.Equal(t, 1, pagesRequested, "the walk halts before requesting a second page")
 
 	assert.Equal(t, r3.createdAt, ledger.HighWaterMark("runs"), "the mark advances to the newest element seen")
+}
+
+func TestWalkPagesPastNonTerminalBoundary(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
+
+	// A newer run finished terminal while an older run is still in flight
+	// (recorded done but non-terminal, as a run archives its summary done and
+	// defers its children). Old behavior stopped at the newer terminal boundary
+	// and stranded the older run's pending children; the fix must page past it.
+	newer := walkItem{relPath: "runs/rNew/run.json", createdAt: base.Add(3 * time.Hour), terminal: true}
+	older := walkItem{relPath: "runs/rOld/run.json", createdAt: base.Add(1 * time.Hour), terminal: false}
+
+	env, _, ledger := newEnv(t)
+
+	ledger.RecordDone(newer.relPath, manifest.Signature{Hash: "prior", Size: 1})
+	ledger.RecordDone(older.relPath, manifest.Signature{Hash: "prior", Size: 1})
+
+	// The collection completed a prior walk, so the old early-stop would fire at
+	// the newer boundary; settled is unset, so the fix keeps paging.
+	ledger.MarkCollectionComplete("runs")
+
+	archived := map[string]int{}
+
+	pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
+		if page == 1 {
+			return []walkItem{newer, older}, false, nil
+		}
+
+		return nil, false, nil
+	}
+
+	describe := func(it walkItem) collect.Item {
+		return collect.Item{
+			RelPath:   it.relPath,
+			CreatedAt: it.createdAt,
+			Terminal:  it.terminal,
+			Archive: func(ctx context.Context) error {
+				return env.Mutable(ctx, it.relPath, func(_ context.Context) (any, error) {
+					archived[it.relPath]++
+
+					return cannedProject(), nil
+				})
+			},
+		}
+	}
+
+	err := collect.Walk(t.Context(), env, "runs", pager, describe)
+	require.NoError(t, err)
+
+	// The walk pages past the newer terminal boundary and revisits the older
+	// in-flight run, which old behavior would have stranded.
+	assert.Equal(t, 1, archived[newer.relPath], "the newer terminal boundary is refreshed")
+	assert.Equal(t, 1, archived[older.relPath], "the older in-flight run is reached and refreshed")
+
+	// Seeing a non-terminal element leaves the collection unsettled, so the next
+	// run re-pages until it finishes.
+	assert.False(t, ledger.IsCollectionSettled("runs"), "an in-flight run keeps the collection unsettled")
+	assert.True(t, ledger.IsCollectionComplete("runs"), "reaching the final page still marks completion")
+}
+
+func TestWalkReachesErroredChildBelowBoundary(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
+
+	// Both runs are terminal and their summaries archived done, and the
+	// collection is marked complete and settled — yet an older run's child log
+	// errored in a prior run and was never retried. The start gate's
+	// HasUnsettledUnder check must force a full re-walk so the errored child is
+	// reached.
+	r2 := walkItem{relPath: "runs/r2/run.json", createdAt: base.Add(2 * time.Hour), terminal: true}
+	r1 := walkItem{relPath: "runs/r1/run.json", createdAt: base.Add(1 * time.Hour), terminal: true}
+
+	env, _, ledger := newEnv(t)
+
+	ledger.RecordDone(r2.relPath, manifest.Signature{Hash: "prior", Size: 1})
+	ledger.RecordDone(r1.relPath, manifest.Signature{Hash: "prior", Size: 1})
+
+	const erroredChild = "runs/r1/plan.log"
+
+	ledger.RecordErrored(erroredChild, errors.New("prior boom"), true)
+
+	ledger.MarkCollectionComplete("runs")
+	// The steady-state hole: a prior all-terminal walk recorded settled even
+	// though a child stayed errored. The start gate closes it.
+	ledger.SetCollectionSettled("runs", true)
+
+	archivedChild := 0
+
+	pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
+		if page == 1 {
+			return []walkItem{r2, r1}, false, nil
+		}
+
+		return nil, false, nil
+	}
+
+	describe := func(it walkItem) collect.Item {
+		return collect.Item{
+			RelPath:   it.relPath,
+			CreatedAt: it.createdAt,
+			Terminal:  it.terminal,
+			Archive: func(ctx context.Context) error {
+				err := env.Mutable(ctx, it.relPath, func(_ context.Context) (any, error) {
+					return cannedProject(), nil
+				})
+				if err != nil {
+					return fmt.Errorf("archive run summary: %w", err)
+				}
+
+				if it.relPath != r1.relPath {
+					return nil
+				}
+
+				// The older run retries its errored child once the walk reaches it.
+				return env.Object(ctx, erroredChild, func(_ context.Context) (any, error) {
+					archivedChild++
+
+					return cannedProject(), nil
+				})
+			},
+		}
+	}
+
+	err := collect.Walk(t.Context(), env, "runs", pager, describe)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, archivedChild, "the errored child below the done boundary is reached and retried")
+
+	child, ok := ledger.Entry(erroredChild)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusDone, child.Status, "the retried child is now settled done")
+
+	// With the child fixed, the completing walk records the collection settled
+	// again, so a later run may early-stop.
+	assert.True(t, ledger.IsCollectionSettled("runs"), "the collection settles once no unsettled child remains")
 }
 
 func TestWalkResumesIncompleteCollection(t *testing.T) {

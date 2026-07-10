@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,7 @@ type document struct {
 	HighWaterMarks map[string]time.Time `json:"highWaterMarks,omitempty"`
 	Entries        map[string]*Entry    `json:"entries,omitempty"`
 	Completed      map[string]bool      `json:"completedCollections,omitempty"`
+	Settled        map[string]bool      `json:"settledCollections,omitempty"`
 	Version        int                  `json:"version"`
 	RunCount       int                  `json:"runCount"`
 }
@@ -309,6 +311,14 @@ func (l *Ledger) distributeLegacy(doc *document) {
 		sh.dirtyCompleted[key] = struct{}{}
 	}
 
+	// Settledness is non-monotonic, so its value carries through unconditionally:
+	// a recorded false is as meaningful as a true and must not be dropped.
+	for key, settled := range doc.Settled {
+		sh := l.shardFor(key)
+		sh.settled[key] = settled
+		sh.dirtySettled[key] = struct{}{}
+	}
+
 	l.rootShard.lastRunAt = doc.LastRunAt
 	l.rootShard.runCount = doc.RunCount
 	l.rootShard.lastRun = doc.LastRun
@@ -330,6 +340,10 @@ func applyLegacyRecords(doc *document, recs []walRecord) {
 		doc.Completed = make(map[string]bool)
 	}
 
+	if doc.Settled == nil {
+		doc.Settled = make(map[string]bool)
+	}
+
 	for i := range recs {
 		rec := &recs[i]
 
@@ -343,6 +357,8 @@ func applyLegacyRecords(doc *document, recs []walRecord) {
 			doc.HighWaterMarks[rec.Key] = rec.At
 		case walCompleted:
 			doc.Completed[rec.Key] = true
+		case walSettled:
+			doc.Settled[rec.Key] = rec.Settled
 		case walRun:
 			doc.LastRunAt = rec.LastRunAt
 			doc.RunCount = rec.RunCount
@@ -613,6 +629,70 @@ func (l *Ledger) MarkCollectionComplete(key string) {
 	sh := l.shardFor(key)
 	sh.completed[key] = true
 	sh.dirtyCompleted[key] = struct{}{}
+}
+
+// IsCollectionSettled reports whether the newest full walk of the collection
+// under key settled it: saw only terminal elements and left no unsettled child.
+//
+// Unlike completion it is not sticky. It is false until a full walk records it,
+// and a later walk that reaches a still-running element flips it back to false
+// (see [Ledger.SetCollectionSettled]), so a collection with work still in flight
+// re-pages in full rather than stopping at a done boundary that a later,
+// out-of-order element sits behind.
+func (l *Ledger) IsCollectionSettled(key string) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	sh, ok := l.lookupShard(key)
+	if !ok {
+		return false
+	}
+
+	return sh.settled[key]
+}
+
+// SetCollectionSettled records whether the newest full walk of the collection
+// under key settled it, so a later re-run may stop early only while it stays
+// true.
+//
+// It is deliberately non-monotonic: passing false undoes an earlier true, which
+// is how a walk that reaches a still-running element forces the next run to
+// re-page the collection until that element settles.
+func (l *Ledger) SetCollectionSettled(key string, settled bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	sh := l.shardFor(key)
+	sh.settled[key] = settled
+	sh.dirtySettled[key] = struct{}{}
+}
+
+// HasUnsettledUnder reports whether any entry beneath prefix (a key beginning
+// with prefix + "/") is recorded in a status a normal re-run still retries.
+//
+// It scans the shard that owns prefix, so a collection's walk can tell whether
+// an errored or forbidden child left below its newest done boundary still needs
+// reaching. A prefix whose shard holds no such child returns false, which
+// includes a synthetic cursor key that is not a genuine path prefix of any
+// entry (a stack walk's id cursor).
+func (l *Ledger) HasUnsettledUnder(prefix string) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	sh, ok := l.lookupShard(prefix)
+	if !ok {
+		return false
+	}
+
+	under := prefix + "/"
+
+	for relPath, e := range sh.entries {
+		if strings.HasPrefix(relPath, under) && !e.Status.Settled() {
+			return true
+		}
+	}
+
+	return false
 }
 
 // AddBytes adds n to the run's downloaded-bytes counter.
