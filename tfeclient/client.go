@@ -110,8 +110,10 @@ func WithResponseHeaderTimeout(timeout time.Duration) Option {
 	}
 }
 
-// WithHTTPClient sets the underlying [*http.Client]. A nil value keeps
-// go-tfe's pooled default. Returns an [Option].
+// WithHTTPClient sets the underlying [*http.Client]. A nil value leaves the
+// client to build its own pooled default, whose transport bounds the time to
+// first byte (see [WithResponseHeaderTimeout]); go-tfe's own pooled default is
+// never used. Returns an [Option].
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *config) {
 		c.httpClient = hc
