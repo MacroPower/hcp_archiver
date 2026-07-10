@@ -173,12 +173,20 @@ func newConfig(opts []Option) config {
 // non-zero Client.Timeout would cap a legitimately large streaming state, log,
 // or tarball download), so this narrows "hang forever" to the header wait
 // rather than eliminating a mid-body stall.
+//
+// ResponseHeaderTimeout is an HTTP/1 transport setting the HTTP/2 round-tripper
+// ignores, and DefaultPooledTransport force-attempts HTTP/2, which HCP Terraform
+// negotiates over ALPN; left enabled, the header bound would be silently dead on
+// the real connection. HTTP/2 is disabled so the timeout governs the time to
+// first byte over HTTP/1, where multiplexing buys a single rate-limited host
+// little.
 func resolveHTTPClient(cfg *config) *http.Client {
 	if cfg.httpClient != nil {
 		return cfg.httpClient
 	}
 
 	tr := cleanhttp.DefaultPooledTransport()
+	tr.ForceAttemptHTTP2 = false
 	tr.ResponseHeaderTimeout = cfg.responseHeaderTimeout
 
 	return &http.Client{Transport: tr}
