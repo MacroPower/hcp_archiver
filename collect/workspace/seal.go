@@ -275,9 +275,11 @@ func (c *Collector) coalesce(ctx context.Context, project, ws string, rollups ma
 	return nil
 }
 
-// subdirs lists the immediate subdirectory names of dir, tolerating a dir that
-// does not exist (a workspace with no runs).
-func subdirs(dir string) ([]string, error) {
+// listNames returns the names of dir's entries that keep selects, tolerating a
+// dir that does not exist (a workspace with no runs or state versions yet). It
+// is the shared body of the frozen-artifact listers, each of which differs only
+// in its predicate.
+func listNames(dir string, keep func(fs.DirEntry) bool) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 
 	switch {
@@ -290,7 +292,7 @@ func subdirs(dir string) ([]string, error) {
 	var out []string
 
 	for _, e := range entries {
-		if e.IsDir() {
+		if keep(e) {
 			out = append(out, e.Name())
 		}
 	}
@@ -298,27 +300,19 @@ func subdirs(dir string) ([]string, error) {
 	return out, nil
 }
 
+// subdirs lists the immediate subdirectory names of dir.
+func subdirs(dir string) ([]string, error) {
+	return listNames(dir, func(e fs.DirEntry) bool {
+		return e.IsDir()
+	})
+}
+
 // heavyRunFiles lists the heavy, audit-only artifact filenames present in a run
 // directory.
 func heavyRunFiles(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, nil
-	case err != nil:
-		return nil, fmt.Errorf("read %q: %w", dir, err)
-	}
-
-	var out []string
-
-	for _, e := range entries {
-		if !e.IsDir() && isHeavyRunFile(e.Name()) {
-			out = append(out, e.Name())
-		}
-	}
-
-	return out, nil
+	return listNames(dir, func(e fs.DirEntry) bool {
+		return !e.IsDir() && isHeavyRunFile(e.Name())
+	})
 }
 
 // isHeavyRunFile reports whether a run-directory filename is a heavy, audit-only
@@ -334,84 +328,39 @@ func isHeavyRunFile(name string) bool {
 // metadataRunFiles lists the immutable run-child filenames present in a run
 // directory that coalesce into roll-ups.
 func metadataRunFiles(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, nil
-	case err != nil:
-		return nil, fmt.Errorf("read %q: %w", dir, err)
-	}
-
-	var out []string
-
-	for _, e := range entries {
+	return listNames(dir, func(e fs.DirEntry) bool {
 		if e.IsDir() {
-			continue
+			return false
 		}
 
-		if _, ok := runRollups[e.Name()]; ok {
-			out = append(out, e.Name())
-		}
-	}
+		_, ok := runRollups[e.Name()]
 
-	return out, nil
+		return ok
+	})
 }
 
 // stateMetaFiles lists the immutable state-version meta sidecars in a
 // state-versions directory.
 func stateMetaFiles(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, nil
-	case err != nil:
-		return nil, fmt.Errorf("read %q: %w", dir, err)
-	}
-
-	var out []string
-
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".meta.json") {
-			out = append(out, e.Name())
-		}
-	}
-
-	return out, nil
+	return listNames(dir, func(e fs.DirEntry) bool {
+		return !e.IsDir() && strings.HasSuffix(e.Name(), ".meta.json")
+	})
 }
 
 // stateBlobFiles lists the raw and JSON-format state blobs in a state-versions
 // directory, leaving the meta sidecars loose.
 func stateBlobFiles(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, nil
-	case err != nil:
-		return nil, fmt.Errorf("read %q: %w", dir, err)
-	}
-
-	var out []string
-
-	for _, e := range entries {
-		if !e.IsDir() && isStateBlob(e.Name()) {
-			out = append(out, e.Name())
-		}
-	}
-
-	return out, nil
+	return listNames(dir, func(e fs.DirEntry) bool {
+		return !e.IsDir() && isStateBlob(e.Name())
+	})
 }
 
 // isStateBlob reports whether a state-versions filename is a raw or JSON-format
-// state blob, the heavy artifacts that seal; the meta sidecar stays loose.
+// state blob, the heavy artifacts that seal; the meta sidecar stays loose. Both
+// the raw ".tfstate.json" and JSON-format ".json" blobs end in ".json", so one
+// suffix test covers them, excluding only the ".meta.json" sidecar.
 func isStateBlob(name string) bool {
-	if strings.HasSuffix(name, ".meta.json") {
-		return false
-	}
-
-	return strings.HasSuffix(name, ".tfstate.json") || strings.HasSuffix(name, ".json")
+	return strings.HasSuffix(name, ".json") && !strings.HasSuffix(name, ".meta.json")
 }
 
 // nextGeneration returns the generation number for a new bundle named by prefix,
