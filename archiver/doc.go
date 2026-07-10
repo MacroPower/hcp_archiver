@@ -4,10 +4,10 @@
 // store, ledger, progress reporter, collection environment, and every domain
 // collector, then drives the walk. It enumerates the organizations the token can
 // see (all of them when no organization is named) and, for each, archives the
-// directly-owned org-level objects once, fans that organization's projects and
-// workspaces across a worker pool (a handful of workspaces at a time, sequential
-// within each), and gathers the optional stacks, registry, and audit surfaces as
-// their toggles allow. Because each organization has its own archive tree and
+// directly-owned org-level objects once, walks that organization's projects in
+// order, fans its workspaces across a worker pool (a handful at a time,
+// sequential within each), and gathers the optional stacks, registry, and audit
+// surfaces as their toggles allow. Because each organization has its own archive tree and
 // manifest, a fresh store and ledger are built per organization.
 //
 // It owns the cross-cutting runtime and nothing else: the worker pool, the
