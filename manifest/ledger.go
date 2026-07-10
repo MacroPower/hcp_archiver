@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -16,16 +17,17 @@ import (
 // schemaVersion is the on-disk manifest format version.
 const schemaVersion = 1
 
-// defaultCompactThreshold is the log size past which a flush folds the
-// append-only log back into the snapshot. It bounds a single run's log growth
-// and how much a resume replays, while staying large enough that ordinary
-// flushes only append.
+// defaultCompactThreshold is the per-shard log size past which a flush folds the
+// log back into that shard's snapshot. It bounds a single run's log growth and
+// how much a resume replays, while staying large enough that ordinary flushes
+// only append.
 const defaultCompactThreshold = 64 << 20
 
 // ErrCorruptManifest indicates that an existing manifest could not be parsed.
 var ErrCorruptManifest = errors.New("manifest is corrupt")
 
-// document is the serialized shape of the manifest on disk.
+// document is the serialized shape of one shard's snapshot on disk. The run-level
+// fields are populated only for the org-root shard; other shards leave them zero.
 type document struct {
 	LastRunAt      time.Time            `json:"lastRunAt,omitzero"`
 	LastRun        *RunRecord           `json:"lastRun,omitempty"`
@@ -41,43 +43,38 @@ type document struct {
 //
 // It guards its in-memory state with a single mutex, so record methods called
 // from many workspace workers are race-free and the live tally never drifts from
-// the recorded entries. A second mutex serializes flushes so the append-only log
-// takes one writer at a time. Create instances with [Load].
+// the recorded entries. A second mutex serializes flushes so a shard's log takes
+// one writer at a time. Create instances with [Load].
 //
-// # Durability
+// # Sharded storage
 //
-// The ledger persists as a compacted snapshot (the manifest file) plus an
-// append-only log beside it. A [Ledger.Flush] appends only the records changed
-// since the last flush, so a flush costs the recent delta rather than the whole
-// ledger, and folds the log back into the snapshot once the log outgrows it (or
-// when a run finishes). [Load] reads the snapshot and replays the log on top, so
-// resume and a clean start are one path and a crash loses at most the last
-// unflushed batch.
+// The ledger partitions its state into per-workspace, per-stack, per-config-
+// version, and org-root shards (see [shardKey]), each persisted as a compacted
+// snapshot plus an append-only log in a co-located .ledger directory. Every entry
+// is keyed by its archive-relative path exactly as before; the path only
+// determines which shard the entry lives in, so resume, the newest-first
+// early-stop, and the watermarks are unchanged. A flush appends only the records
+// changed since the last flush to the shards that changed, and folds a shard's
+// log back into its snapshot once the log outgrows it or a run finishes, so a
+// re-run's cost tracks the workspaces it touched rather than the whole archive.
+// The per-status tally stays global to the ledger, seeded on load from every
+// shard's entries.
 type Ledger struct {
 	now              func() time.Time
-	entries          map[string]*Entry
-	watermarks       map[string]time.Time
-	completed        map[string]bool
+	shards           map[string]*shard
+	rootShard        *shard
 	counts           map[Status]int
 	cumulative       map[Status]int
-	dirtyEntries     map[string]struct{}
-	dirtyWatermarks  map[string]struct{}
-	dirtyCompleted   map[string]struct{}
-	lastRun          *RunRecord
 	runStartedAt     time.Time
-	lastRunAt        time.Time
-	path             string
+	root             string
 	target           string
+	legacyPath       string
 	bytes            int64
 	compactThreshold int64
-	logBytes         int64
-	snapshotBytes    int64
-	runCount         int
 	mu               sync.RWMutex
 	flushMu          sync.Mutex
 	recheckAbsent    bool
 	resumed          bool
-	runDirty         bool
 	compactNext      bool
 }
 
@@ -108,24 +105,20 @@ func WithRecheckAbsent(recheck bool) Option {
 	}
 }
 
-// Load reads the manifest at path, or starts empty when the file does not
-// exist.
+// Load reads the sharded manifest under root, or starts empty when none exists.
 //
-// Resume and a clean first run are one code path: a first run simply loads no
-// entries. A file that exists but cannot be parsed returns [ErrCorruptManifest]
-// rather than being silently discarded.
-func Load(path string, opts ...Option) (*Ledger, error) {
+// It discovers and loads every shard beneath root, then migrates a legacy
+// single-file manifest.json (with its log) into shards when one is present and
+// the shard layout is still empty. Resume and a clean first run are one code
+// path: a first run simply finds no shards. A shard whose snapshot or log cannot
+// be parsed returns [ErrCorruptManifest].
+func Load(root string, opts ...Option) (*Ledger, error) {
 	l := &Ledger{
 		now:              time.Now,
-		entries:          make(map[string]*Entry),
-		watermarks:       make(map[string]time.Time),
-		completed:        make(map[string]bool),
+		shards:           make(map[string]*shard),
 		counts:           make(map[Status]int),
 		cumulative:       make(map[Status]int),
-		dirtyEntries:     make(map[string]struct{}),
-		dirtyWatermarks:  make(map[string]struct{}),
-		dirtyCompleted:   make(map[string]struct{}),
-		path:             path,
+		root:             root,
 		compactThreshold: defaultCompactThreshold,
 	}
 
@@ -133,78 +126,208 @@ func Load(path string, opts ...Option) (*Ledger, error) {
 		opt(l)
 	}
 
-	//nolint:gosec // The manifest path is chosen by the operator by design.
-	data, err := os.ReadFile(path)
+	l.rootShard = newShard(l.shardDir(""))
+	l.shards[""] = l.rootShard
 
-	var doc document
-
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		// No snapshot yet; the document stays empty and any log is replayed on
-		// top of it below, so a first flush that only appended is still resumed.
-	case err != nil:
-		return nil, fmt.Errorf("read manifest %q: %w", path, err)
-	default:
-		err = json.Unmarshal(data, &doc)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrCorruptManifest, err)
-		}
-
-		if doc.Version > schemaVersion {
-			return nil, fmt.Errorf("%w: schema version %d is newer than supported %d",
-				ErrCorruptManifest, doc.Version, schemaVersion)
-		}
-	}
-
-	if doc.Entries != nil {
-		l.entries = doc.Entries
-	}
-
-	if doc.HighWaterMarks != nil {
-		l.watermarks = doc.HighWaterMarks
-	}
-
-	if doc.Completed != nil {
-		l.completed = doc.Completed
-	}
-
-	l.runCount = doc.RunCount
-	l.lastRunAt = doc.LastRunAt
-	l.lastRun = doc.LastRun
-	l.snapshotBytes = int64(len(data))
-
-	err = l.replay()
+	dirs, err := discoverShards(root)
 	if err != nil {
 		return nil, err
 	}
 
-	// Validate and seed the cumulative tally from the merged snapshot-plus-log
-	// state, so a resumed run's counts start from the prior run's settled work
-	// rather than from zero. An unrecognized status is rejected rather than
-	// seeded under a key Tally never reads, which would report a zero total.
-	for relPath, e := range l.entries {
-		if e == nil {
-			return nil, fmt.Errorf("%w: entry %q is null", ErrCorruptManifest, relPath)
+	for sk, dir := range dirs {
+		sh, ok := l.shards[sk]
+		if !ok {
+			sh = newShard(dir)
+			l.shards[sk] = sh
 		}
 
-		if !e.Status.Valid() {
-			return nil, fmt.Errorf("%w: entry %q has unknown status %q",
-				ErrCorruptManifest, relPath, e.Status)
+		err = sh.load()
+		if err != nil {
+			return nil, err
 		}
+	}
 
-		l.cumulative[e.Status]++
+	err = l.migrateLegacy()
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate and seed the cumulative tally from every shard's entries, so a
+	// resumed run's counts start from the prior run's settled work rather than
+	// from zero. An unrecognized status is rejected rather than seeded under a
+	// key Tally never reads, which would report a zero total.
+	for _, sh := range l.shards {
+		for relPath, e := range sh.entries {
+			if e == nil {
+				return nil, fmt.Errorf("%w: entry %q is null", ErrCorruptManifest, relPath)
+			}
+
+			if !e.Status.Valid() {
+				return nil, fmt.Errorf("%w: entry %q has unknown status %q",
+					ErrCorruptManifest, relPath, e.Status)
+			}
+
+			l.cumulative[e.Status]++
+		}
 	}
 
 	return l, nil
 }
 
-// replay applies the append-only log on top of the loaded snapshot, so the
-// in-memory state reflects every flushed record. It runs during [Load] before
-// the tally is seeded.
-func (l *Ledger) replay() error {
-	recs, err := replayLog(l.logPath())
+// shardDir returns the absolute .ledger directory for a shard key, co-located
+// with the subtree it indexes; the empty key is the org root.
+func (l *Ledger) shardDir(sk string) string {
+	if sk == "" {
+		return filepath.Join(l.root, ledgerDirName)
+	}
+
+	return filepath.Join(l.root, filepath.FromSlash(sk), ledgerDirName)
+}
+
+// discoverShards finds the .ledger directories beneath root and maps each to its
+// shard key. It globs the known structural depths rather than walking the whole
+// tree, so discovery costs the number of workspaces and stacks, not the number
+// of archived objects.
+func discoverShards(root string) (map[string]string, error) {
+	patterns := []string{
+		filepath.Join(root, ledgerDirName),
+		filepath.Join(root, "config-versions", ledgerDirName),
+		filepath.Join(root, "projects", "*", "workspaces", "*", ledgerDirName),
+		filepath.Join(root, "projects", "*", "stacks", "*", ledgerDirName),
+	}
+
+	out := make(map[string]string)
+
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("glob shards %q: %w", pattern, err)
+		}
+
+		for _, dir := range matches {
+			info, statErr := os.Stat(dir)
+			if statErr != nil || !info.IsDir() {
+				continue
+			}
+
+			rel, relErr := filepath.Rel(root, filepath.Dir(dir))
+			if relErr != nil {
+				continue
+			}
+
+			sk := filepath.ToSlash(rel)
+			if sk == "." {
+				sk = ""
+			}
+
+			out[sk] = dir
+		}
+	}
+
+	return out, nil
+}
+
+// migrateLegacy imports a pre-shard single-file manifest into the shard layout.
+//
+// When the shard layout already holds state it is authoritative and the legacy
+// file is only marked for retirement; otherwise the legacy snapshot and its log
+// are read and distributed into shards, marked dirty so the next flush persists
+// them. The legacy file is renamed aside after that flush (see
+// [Ledger.retireLegacy]), so a crash before then simply re-imports it.
+func (l *Ledger) migrateLegacy() error {
+	legacyPath := filepath.Join(l.root, legacyManifestName)
+
+	_, err := os.Stat(legacyPath)
+
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("stat legacy manifest: %w", err)
+	}
+
+	if l.totalEntries() > 0 || l.rootShard.runCount > 0 {
+		l.legacyPath = legacyPath
+
+		return nil
+	}
+
+	//nolint:gosec // The manifest path is chosen by the operator by design.
+	data, err := os.ReadFile(legacyPath)
+	if err != nil {
+		return fmt.Errorf("read legacy manifest: %w", err)
+	}
+
+	var doc document
+
+	err = json.Unmarshal(data, &doc)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrCorruptManifest, err)
+	}
+
+	if doc.Version > schemaVersion {
+		return fmt.Errorf("%w: schema version %d is newer than supported %d",
+			ErrCorruptManifest, doc.Version, schemaVersion)
+	}
+
+	recs, err := replayLog(legacyPath + ".log")
 	if err != nil {
 		return err
+	}
+
+	applyLegacyRecords(&doc, recs)
+	l.distributeLegacy(&doc)
+
+	l.legacyPath = legacyPath
+
+	return nil
+}
+
+// distributeLegacy routes a legacy document's state into shards and marks it
+// dirty so the next flush persists it. It runs during [Load], before any worker
+// records, so it needs no lock.
+func (l *Ledger) distributeLegacy(doc *document) {
+	for relPath, e := range doc.Entries {
+		sh := l.shardFor(relPath)
+		sh.entries[relPath] = e
+		sh.dirtyEntries[relPath] = struct{}{}
+	}
+
+	for key, at := range doc.HighWaterMarks {
+		sh := l.shardFor(key)
+		sh.watermarks[key] = at
+		sh.dirtyWatermarks[key] = struct{}{}
+	}
+
+	for key, done := range doc.Completed {
+		if !done {
+			continue
+		}
+
+		sh := l.shardFor(key)
+		sh.completed[key] = true
+		sh.dirtyCompleted[key] = struct{}{}
+	}
+
+	l.rootShard.lastRunAt = doc.LastRunAt
+	l.rootShard.runCount = doc.RunCount
+	l.rootShard.lastRun = doc.LastRun
+	l.rootShard.runDirty = true
+}
+
+// applyLegacyRecords merges a legacy manifest's append-only log into its snapshot
+// document, so migration sees the full pre-shard state.
+func applyLegacyRecords(doc *document, recs []walRecord) {
+	if doc.Entries == nil {
+		doc.Entries = make(map[string]*Entry)
+	}
+
+	if doc.HighWaterMarks == nil {
+		doc.HighWaterMarks = make(map[string]time.Time)
+	}
+
+	if doc.Completed == nil {
+		doc.Completed = make(map[string]bool)
 	}
 
 	for i := range recs {
@@ -212,32 +335,53 @@ func (l *Ledger) replay() error {
 
 		switch rec.Kind {
 		case walEntry:
-			if rec.Entry == nil {
-				return fmt.Errorf("%w: log entry %q has no record", ErrCorruptManifest, rec.Path)
+			if rec.Entry != nil {
+				doc.Entries[rec.Path] = rec.Entry
 			}
 
-			l.entries[rec.Path] = rec.Entry
-
 		case walWatermark:
-			l.watermarks[rec.Key] = rec.At
+			doc.HighWaterMarks[rec.Key] = rec.At
 		case walCompleted:
-			l.completed[rec.Key] = true
+			doc.Completed[rec.Key] = true
 		case walRun:
-			l.lastRunAt = rec.LastRunAt
-			l.runCount = rec.RunCount
-			l.lastRun = rec.LastRun
-
-		default:
-			return fmt.Errorf("%w: unknown log record kind %q", ErrCorruptManifest, rec.Kind)
+			doc.LastRunAt = rec.LastRunAt
+			doc.RunCount = rec.RunCount
+			doc.LastRun = rec.LastRun
 		}
 	}
+}
 
-	fi, err := os.Stat(l.logPath())
-	if err == nil {
-		l.logBytes = fi.Size()
+// shardFor returns the shard that owns key, creating it if absent. Callers that
+// mutate must hold the write lock; a first record into a new workspace creates
+// its shard here.
+func (l *Ledger) shardFor(key string) *shard {
+	sk := shardKey(key)
+
+	sh, ok := l.shards[sk]
+	if !ok {
+		sh = newShard(l.shardDir(sk))
+		l.shards[sk] = sh
 	}
 
-	return nil
+	return sh
+}
+
+// lookupShard returns the shard that owns key when it already exists, without
+// creating one. Read paths use it so a lookup never materializes a shard.
+func (l *Ledger) lookupShard(key string) (*shard, bool) {
+	sh, ok := l.shards[shardKey(key)]
+
+	return sh, ok
+}
+
+// totalEntries returns the number of entries across every shard.
+func (l *Ledger) totalEntries() int {
+	n := 0
+	for _, sh := range l.shards {
+		n += len(sh.entries)
+	}
+
+	return n
 }
 
 // ShouldFetch reports whether the current pass should fetch the object at
@@ -250,7 +394,12 @@ func (l *Ledger) ShouldFetch(relPath string) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	e, ok := l.entries[relPath]
+	sh, ok := l.lookupShard(relPath)
+	if !ok {
+		return true
+	}
+
+	e, ok := sh.entries[relPath]
 	if !ok {
 		return true
 	}
@@ -267,7 +416,12 @@ func (l *Ledger) Entry(relPath string) (Entry, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	e, ok := l.entries[relPath]
+	sh, ok := l.lookupShard(relPath)
+	if !ok {
+		return Entry{}, false
+	}
+
+	e, ok := sh.entries[relPath]
 	if !ok {
 		return Entry{}, false
 	}
@@ -357,20 +511,21 @@ func (l *Ledger) RecordNotApplicable(relPath string) {
 	})
 }
 
-// record applies status and mutate to the entry at relPath and keeps both
-// tallies in step: the per-run counts swap any status this entry already
-// contributed to the run, and the cumulative counts swap the entry's prior
-// settled status so they always reflect every entry's current state.
+// record applies status and mutate to the entry at relPath in its shard and
+// keeps both tallies in step: the per-run counts swap any status this entry
+// already contributed to the run, and the cumulative counts swap the entry's
+// prior settled status so they always reflect every entry's current state.
 func (l *Ledger) record(relPath string, status Status, mutate func(now time.Time, e *Entry)) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	now := l.now()
+	sh := l.shardFor(relPath)
 
-	e, ok := l.entries[relPath]
+	e, ok := sh.entries[relPath]
 	if !ok {
 		e = &Entry{FirstSeen: now}
-		l.entries[relPath] = e
+		sh.entries[relPath] = e
 	}
 
 	if e.counted {
@@ -392,7 +547,7 @@ func (l *Ledger) record(relPath string, status Status, mutate func(now time.Time
 	l.counts[status]++
 	l.cumulative[status]++
 
-	l.dirtyEntries[relPath] = struct{}{}
+	sh.dirtyEntries[relPath] = struct{}{}
 }
 
 // HighWaterMark returns the recorded watermark for key, or the zero time when
@@ -404,7 +559,12 @@ func (l *Ledger) HighWaterMark(key string) time.Time {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	return l.watermarks[key]
+	sh, ok := l.lookupShard(key)
+	if !ok {
+		return time.Time{}
+	}
+
+	return sh.watermarks[key]
 }
 
 // AdvanceHighWaterMark advances the watermark for key toward t, keeping the
@@ -413,9 +573,11 @@ func (l *Ledger) AdvanceHighWaterMark(key string, t time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if t.After(l.watermarks[key]) {
-		l.watermarks[key] = t
-		l.dirtyWatermarks[key] = struct{}{}
+	sh := l.shardFor(key)
+
+	if t.After(sh.watermarks[key]) {
+		sh.watermarks[key] = t
+		sh.dirtyWatermarks[key] = struct{}{}
 	}
 }
 
@@ -430,7 +592,12 @@ func (l *Ledger) IsCollectionComplete(key string) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	return l.completed[key]
+	sh, ok := l.lookupShard(key)
+	if !ok {
+		return false
+	}
+
+	return sh.completed[key]
 }
 
 // MarkCollectionComplete records that the collection under key has been walked
@@ -443,8 +610,9 @@ func (l *Ledger) MarkCollectionComplete(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	l.completed[key] = true
-	l.dirtyCompleted[key] = struct{}{}
+	sh := l.shardFor(key)
+	sh.completed[key] = true
+	sh.dirtyCompleted[key] = struct{}{}
 }
 
 // AddBytes adds n to the run's downloaded-bytes counter.
@@ -494,22 +662,26 @@ func (l *Ledger) StartRun() {
 	defer l.mu.Unlock()
 
 	now := l.now()
-	l.runCount++
-	l.lastRunAt = now
+	l.rootShard.runCount++
+	l.rootShard.lastRunAt = now
+	l.rootShard.runDirty = true
 	l.runStartedAt = now
-	l.resumed = len(l.entries) > 0
+	l.resumed = l.totalEntries() > 0
 	l.counts = make(map[Status]int)
 	l.bytes = 0
 	l.target = ""
-	l.runDirty = true
 
-	for _, e := range l.entries {
-		e.counted = false
+	for _, sh := range l.shards {
+		for _, e := range sh.entries {
+			e.counted = false
+		}
 	}
 }
 
-// FinishRun closes the current run, writing its summary into the ledger and
-// returning a copy for the final progress line.
+// FinishRun closes the current run, writing its summary into the org-root shard
+// and returning a copy for the final progress line. It marks the run for
+// compaction, so a finished run leaves each touched shard with a current
+// snapshot and no leftover log.
 func (l *Ledger) FinishRun() RunRecord {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -522,19 +694,16 @@ func (l *Ledger) FinishRun() RunRecord {
 		}
 	}
 
-	l.lastRun = &RunRecord{
+	l.rootShard.lastRun = &RunRecord{
 		StartedAt:       l.runStartedAt,
 		FinishedAt:      l.now(),
 		Totals:          totals,
 		BytesDownloaded: l.bytes,
 	}
-
-	// A finished run's summary is worth folding the log into the snapshot for, so
-	// a completed archive leaves a current manifest and an empty log.
-	l.runDirty = true
+	l.rootShard.runDirty = true
 	l.compactNext = true
 
-	out := *l.lastRun
+	out := *l.rootShard.lastRun
 	out.Totals = copyStatusCounts(totals)
 
 	return out
@@ -546,7 +715,7 @@ func (l *Ledger) RunCount() int {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	return l.runCount
+	return l.rootShard.runCount
 }
 
 // LastRunAt returns the start time of the most recent run, or the zero time
@@ -555,7 +724,7 @@ func (l *Ledger) LastRunAt() time.Time {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	return l.lastRunAt
+	return l.rootShard.lastRunAt
 }
 
 // LastRun returns a copy of the most recent run summary and whether one exists.
@@ -563,12 +732,12 @@ func (l *Ledger) LastRun() (RunRecord, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	if l.lastRun == nil {
+	if l.rootShard.lastRun == nil {
 		return RunRecord{}, false
 	}
 
-	out := *l.lastRun
-	out.Totals = copyStatusCounts(l.lastRun.Totals)
+	out := *l.rootShard.lastRun
+	out.Totals = copyStatusCounts(l.rootShard.lastRun.Totals)
 
 	return out, true
 }
@@ -576,150 +745,135 @@ func (l *Ledger) LastRun() (RunRecord, bool) {
 // Flush persists the state recorded since the last flush durably, so a hard kill
 // loses at most that batch.
 //
-// It appends the changed entries, watermarks, completion flags, and run record
-// to the append-only log, then folds the log back into the snapshot when the log
-// has outgrown it or a run has just finished. An append-only flush costs the
-// recent delta rather than the whole ledger. Flushes are serialized, so the log
-// takes one writer at a time.
+// It appends each changed shard's delta to that shard's append-only log, then
+// folds a log back into its snapshot when the log has outgrown it or a run has
+// just finished. An append-only flush costs the recent delta rather than the
+// whole ledger, and only the shards that changed are touched. Flushes are
+// serialized, so each shard's log takes one writer at a time.
 func (l *Ledger) Flush() error {
 	l.flushMu.Lock()
 	defer l.flushMu.Unlock()
 
 	l.mu.Lock()
 
-	recs := l.drainDirtyLocked()
-	compactNow := l.compactNext
+	type pending struct {
+		sh   *shard
+		recs []walRecord
+	}
+
+	var work []pending
+
+	for _, sh := range l.shards {
+		if sh.hasDirty() {
+			work = append(work, pending{sh: sh, recs: sh.drainDirty()})
+		}
+	}
+
+	compactAll := l.compactNext
+	l.compactNext = false
+
 	l.mu.Unlock()
 
-	if len(recs) > 0 {
-		n, err := appendLog(l.logPath(), recs)
+	for _, w := range work {
+		n, err := appendLog(w.sh.logPath(), w.recs)
 		if err != nil {
-			return fmt.Errorf("append manifest log: %w", err)
+			return fmt.Errorf("append shard log %q: %w", w.sh.dir, err)
 		}
 
 		l.mu.Lock()
 
-		l.logBytes += n
+		w.sh.logBytes += n
 		l.mu.Unlock()
 	}
 
 	l.mu.RLock()
 
-	needCompact := compactNow || (l.logBytes > l.compactThreshold && l.logBytes > l.snapshotBytes)
+	var toCompact []*shard
+
+	for _, sh := range l.shards {
+		outgrown := sh.logBytes > l.compactThreshold && sh.logBytes > sh.snapshotBytes
+		if (compactAll && sh.logBytes > 0) || outgrown {
+			toCompact = append(toCompact, sh)
+		}
+	}
+
 	l.mu.RUnlock()
 
-	if !needCompact {
-		return nil
+	for _, sh := range toCompact {
+		err := l.compactShard(sh)
+		if err != nil {
+			return err
+		}
 	}
 
-	return l.compact()
+	return l.retireLegacy()
 }
 
-// drainDirtyLocked builds the log records for everything changed since the last
-// flush and clears the dirty sets, so their state is carried by the returned
-// records. It runs under the write lock; the entry it emits is a copy, so a
-// concurrent record does not race the marshal that follows outside the lock.
-func (l *Ledger) drainDirtyLocked() []walRecord {
-	recs := make([]walRecord, 0, len(l.dirtyEntries)+len(l.dirtyWatermarks)+len(l.dirtyCompleted)+1)
-
-	for relPath := range l.dirtyEntries {
-		e := l.entries[relPath]
-		if e == nil {
-			continue
-		}
-
-		cp := *e
-		if e.Signature != nil {
-			sig := *e.Signature
-			cp.Signature = &sig
-		}
-
-		recs = append(recs, walRecord{Kind: walEntry, Path: relPath, Entry: &cp})
-	}
-
-	for key := range l.dirtyWatermarks {
-		recs = append(recs, walRecord{Kind: walWatermark, Key: key, At: l.watermarks[key]})
-	}
-
-	for key := range l.dirtyCompleted {
-		recs = append(recs, walRecord{Kind: walCompleted, Key: key})
-	}
-
-	if l.runDirty {
-		rec := walRecord{Kind: walRun, LastRunAt: l.lastRunAt, RunCount: l.runCount}
-
-		if l.lastRun != nil {
-			lr := *l.lastRun
-			lr.Totals = copyStatusCounts(l.lastRun.Totals)
-			rec.LastRun = &lr
-		}
-
-		recs = append(recs, rec)
-	}
-
-	clear(l.dirtyEntries)
-	clear(l.dirtyWatermarks)
-	clear(l.dirtyCompleted)
-
-	l.runDirty = false
-
-	return recs
-}
-
-// compact folds the append-only log back into the snapshot: it writes the full
-// document to the snapshot path via an atomic temp-and-rename, then removes the
-// log, so the snapshot alone reflects every recorded object and the log starts
-// empty again.
+// compactShard folds one shard's append-only log back into its snapshot: it
+// writes the shard's full document via an atomic temp-and-rename, then removes
+// the log, so the snapshot alone reflects the shard and its log starts empty.
 //
 // The snapshot is written before the log is removed, so a crash between the two
 // leaves the log's records applied on top of a complete snapshot rather than
-// losing them; because the in-memory entries are only ever added to, the
-// snapshot is a superset of the log it replaces. The marshal holds a read lock,
-// briefly blocking recording workers.
-func (l *Ledger) compact() error {
+// losing them; because a shard's entries are only ever added to, the snapshot is
+// a superset of the log it replaces. The marshal holds a read lock, briefly
+// blocking recording workers, but spans one shard rather than the whole ledger.
+func (l *Ledger) compactShard(sh *shard) error {
 	l.mu.RLock()
 
-	doc := document{
-		Version:        schemaVersion,
-		LastRunAt:      l.lastRunAt,
-		LastRun:        l.lastRun,
-		RunCount:       l.runCount,
-		HighWaterMarks: l.watermarks,
-		Entries:        l.entries,
-		Completed:      l.completed,
-	}
-
+	doc := sh.document()
 	data, err := json.MarshalIndent(doc, "", "  ")
 
 	l.mu.RUnlock()
 
 	if err != nil {
-		return fmt.Errorf("marshal manifest: %w", err)
+		return fmt.Errorf("marshal shard %q: %w", sh.dir, err)
 	}
 
-	err = atomicfile.WriteFile(l.path, data)
+	err = atomicfile.WriteFile(sh.snapshotPath(), data)
 	if err != nil {
-		return fmt.Errorf("write manifest: %w", err)
+		return fmt.Errorf("write shard %q: %w", sh.dir, err)
 	}
 
-	err = os.Remove(l.logPath())
+	err = os.Remove(sh.logPath())
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("truncate manifest log: %w", err)
+		return fmt.Errorf("truncate shard log %q: %w", sh.dir, err)
 	}
 
 	l.mu.Lock()
 
-	l.snapshotBytes = int64(len(data))
-	l.logBytes = 0
-	l.compactNext = false
+	sh.snapshotBytes = int64(len(data))
+	sh.logBytes = 0
 	l.mu.Unlock()
 
 	return nil
 }
 
-// logPath returns the path of the append-only log beside the snapshot.
-func (l *Ledger) logPath() string {
-	return l.path + ".log"
+// retireLegacy renames a migrated single-file manifest aside once its state is
+// durable in the shards, so a later load reads only shards. It is a no-op when
+// no migration is pending.
+func (l *Ledger) retireLegacy() error {
+	l.mu.Lock()
+
+	legacy := l.legacyPath
+	l.legacyPath = ""
+	l.mu.Unlock()
+
+	if legacy == "" {
+		return nil
+	}
+
+	err := os.Rename(legacy, legacy+".migrated")
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("retire legacy manifest: %w", err)
+	}
+
+	err = os.Remove(legacy + ".log")
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove legacy manifest log: %w", err)
+	}
+
+	return nil
 }
 
 // copyStatusCounts returns a shallow copy of a per-status count map, or nil.

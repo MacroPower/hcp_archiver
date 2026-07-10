@@ -21,6 +21,19 @@ func fixedClock(t time.Time) func() time.Time {
 	}
 }
 
+// rootShardFiles returns the org-root shard's snapshot and log paths under an
+// archive root; objects with no workspace or stack prefix key to that shard.
+func rootShardFiles(root string) (string, string) {
+	dir := filepath.Join(root, ".ledger")
+
+	return filepath.Join(dir, "snapshot.json"), filepath.Join(dir, "log.ndjson")
+}
+
+// legacyManifest returns the pre-shard single-file manifest path under a root.
+func legacyManifest(root string) string {
+	return filepath.Join(root, "manifest.json")
+}
+
 func TestStatus_String(t *testing.T) {
 	t.Parallel()
 
@@ -78,7 +91,7 @@ func TestSignatureOf_Equal(t *testing.T) {
 func TestLoad_EmptyWhenMissing(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "manifest.json")
+	path := t.TempDir()
 
 	ledger, err := manifest.Load(path)
 	require.NoError(t, err)
@@ -92,8 +105,8 @@ func TestLoad_EmptyWhenMissing(t *testing.T) {
 func TestLoad_Corrupt(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "manifest.json")
-	require.NoError(t, os.WriteFile(path, []byte("{ not json"), 0o600))
+	path := t.TempDir()
+	require.NoError(t, os.WriteFile(legacyManifest(path), []byte("{ not json"), 0o600))
 
 	_, err := manifest.Load(path)
 	require.ErrorIs(t, err, manifest.ErrCorruptManifest)
@@ -105,9 +118,9 @@ func TestLoad_UnknownStatus(t *testing.T) {
 	// A status outside the recognized set would seed the cumulative tally under a
 	// key the tally never reads, so a resumed run would report a zero total; the
 	// load rejects it instead.
-	path := filepath.Join(t.TempDir(), "manifest.json")
+	path := t.TempDir()
 	doc := `{"version":1,"entries":{"a":{"status":"pending","attempts":1}}}`
-	require.NoError(t, os.WriteFile(path, []byte(doc), 0o600))
+	require.NoError(t, os.WriteFile(legacyManifest(path), []byte(doc), 0o600))
 
 	_, err := manifest.Load(path)
 	require.ErrorIs(t, err, manifest.ErrCorruptManifest)
@@ -117,7 +130,7 @@ func TestLedger_RoundTrip(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, time.July, 8, 12, 0, 0, 0, time.UTC)
-	path := filepath.Join(t.TempDir(), "manifest.json")
+	path := t.TempDir()
 
 	ledger, err := manifest.Load(path, manifest.WithClock(fixedClock(now)))
 	require.NoError(t, err)
@@ -221,13 +234,13 @@ func TestLedger_ShouldFetch(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			plain, err := manifest.Load(filepath.Join(t.TempDir(), "m.json"))
+			plain, err := manifest.Load(t.TempDir())
 			require.NoError(t, err)
 			tc.record(plain, "obj")
 			assert.Equal(t, tc.wantNoRecheck, plain.ShouldFetch("obj"))
 
 			recheck, err := manifest.Load(
-				filepath.Join(t.TempDir(), "m.json"),
+				t.TempDir(),
 				manifest.WithRecheckAbsent(true),
 			)
 			require.NoError(t, err)
@@ -240,7 +253,7 @@ func TestLedger_ShouldFetch(t *testing.T) {
 func TestLedger_ShouldFetch_Unknown(t *testing.T) {
 	t.Parallel()
 
-	ledger, err := manifest.Load(filepath.Join(t.TempDir(), "m.json"))
+	ledger, err := manifest.Load(t.TempDir())
 	require.NoError(t, err)
 
 	assert.True(t, ledger.ShouldFetch("never-seen"))
@@ -249,7 +262,7 @@ func TestLedger_ShouldFetch_Unknown(t *testing.T) {
 func TestLedger_HighWaterMarkMonotonic(t *testing.T) {
 	t.Parallel()
 
-	ledger, err := manifest.Load(filepath.Join(t.TempDir(), "m.json"))
+	ledger, err := manifest.Load(t.TempDir())
 	require.NoError(t, err)
 
 	early := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
@@ -268,7 +281,7 @@ func TestLedger_HighWaterMarkMonotonic(t *testing.T) {
 func TestLedger_TallyMatchesRecords(t *testing.T) {
 	t.Parallel()
 
-	ledger, err := manifest.Load(filepath.Join(t.TempDir(), "m.json"))
+	ledger, err := manifest.Load(t.TempDir())
 	require.NoError(t, err)
 
 	ledger.StartRun()
@@ -295,7 +308,7 @@ func TestLedger_TallyMatchesRecords(t *testing.T) {
 func TestLedger_CumulativeAcrossRuns(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "m.json")
+	path := t.TempDir()
 
 	// First run archives two objects and errors a third, then persists.
 	first, err := manifest.Load(path)
@@ -337,7 +350,7 @@ func TestLedger_CumulativeAcrossRuns(t *testing.T) {
 func TestLedger_CumulativeReRecordIsIdempotent(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "m.json")
+	path := t.TempDir()
 
 	first, err := manifest.Load(path)
 	require.NoError(t, err)
@@ -364,7 +377,7 @@ func TestLedger_CumulativeReRecordIsIdempotent(t *testing.T) {
 func TestLedger_ReRecordSwapsTally(t *testing.T) {
 	t.Parallel()
 
-	ledger, err := manifest.Load(filepath.Join(t.TempDir(), "m.json"))
+	ledger, err := manifest.Load(t.TempDir())
 	require.NoError(t, err)
 
 	ledger.StartRun()
@@ -383,7 +396,7 @@ func TestLedger_ReRecordSwapsTally(t *testing.T) {
 func TestLedger_TransientVsTerminal(t *testing.T) {
 	t.Parallel()
 
-	ledger, err := manifest.Load(filepath.Join(t.TempDir(), "m.json"))
+	ledger, err := manifest.Load(t.TempDir())
 	require.NoError(t, err)
 
 	ledger.RecordErrored("transient", errors.New("429"), true)
@@ -401,7 +414,7 @@ func TestLedger_TransientVsTerminal(t *testing.T) {
 func TestLedger_AttemptsAccumulate(t *testing.T) {
 	t.Parallel()
 
-	ledger, err := manifest.Load(filepath.Join(t.TempDir(), "m.json"))
+	ledger, err := manifest.Load(t.TempDir())
 	require.NoError(t, err)
 
 	ledger.RecordErrored("obj", errors.New("first"), true)
@@ -417,7 +430,7 @@ func TestLedger_AttemptsAccumulate(t *testing.T) {
 func TestLedger_EntryCopyIsIsolated(t *testing.T) {
 	t.Parallel()
 
-	ledger, err := manifest.Load(filepath.Join(t.TempDir(), "m.json"))
+	ledger, err := manifest.Load(t.TempDir())
 	require.NoError(t, err)
 
 	ledger.RecordDone("obj", manifest.SignatureOf([]byte("payload")))
@@ -438,7 +451,7 @@ func TestLedger_EntryCopyIsIsolated(t *testing.T) {
 func TestLedger_ConcurrentRecords(t *testing.T) {
 	t.Parallel()
 
-	ledger, err := manifest.Load(filepath.Join(t.TempDir(), "m.json"))
+	ledger, err := manifest.Load(t.TempDir())
 	require.NoError(t, err)
 
 	ledger.StartRun()
@@ -476,7 +489,7 @@ func TestLedger_ConcurrentRecords(t *testing.T) {
 func TestLedger_AppendOnlyFlushLeavesLog(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "manifest.json")
+	path := t.TempDir()
 
 	ledger, err := manifest.Load(path)
 	require.NoError(t, err)
@@ -488,10 +501,12 @@ func TestLedger_AppendOnlyFlushLeavesLog(t *testing.T) {
 
 	// A flush mid-run only appends: the log holds the delta and no compacted
 	// snapshot has been written yet.
-	_, statErr := os.Stat(path)
+	snapshot, logFile := rootShardFiles(path)
+
+	_, statErr := os.Stat(snapshot)
 	assert.True(t, os.IsNotExist(statErr), "no snapshot before compaction")
 
-	_, statErr = os.Stat(path + ".log")
+	_, statErr = os.Stat(logFile)
 	require.NoError(t, statErr, "the append-only log holds the flushed records")
 
 	// The records survive a reload driven by replaying the log alone.
@@ -511,7 +526,7 @@ func TestLedger_AppendOnlyFlushLeavesLog(t *testing.T) {
 func TestLedger_CompactionOnFinishClearsLog(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "manifest.json")
+	path := t.TempDir()
 
 	ledger, err := manifest.Load(path)
 	require.NoError(t, err)
@@ -523,10 +538,12 @@ func TestLedger_CompactionOnFinishClearsLog(t *testing.T) {
 
 	// Finishing a run folds the log into the snapshot: a completed archive leaves
 	// a current manifest and no leftover log.
-	_, statErr := os.Stat(path)
+	snapshot, logFile := rootShardFiles(path)
+
+	_, statErr := os.Stat(snapshot)
 	require.NoError(t, statErr, "the snapshot is written on a finished-run flush")
 
-	_, statErr = os.Stat(path + ".log")
+	_, statErr = os.Stat(logFile)
 	assert.True(t, os.IsNotExist(statErr), "the log is removed after compaction")
 
 	reloaded, err := manifest.Load(path)
@@ -541,7 +558,7 @@ func TestLedger_CompactionOnFinishClearsLog(t *testing.T) {
 func TestLedger_SnapshotPlusLogMerge(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "manifest.json")
+	path := t.TempDir()
 
 	// First run finishes, compacting a snapshot for object a.
 	first, err := manifest.Load(path)
@@ -562,7 +579,9 @@ func TestLedger_SnapshotPlusLogMerge(t *testing.T) {
 	// Flush without finishing the run: b lands in the log, a stays in the snapshot.
 	require.NoError(t, second.Flush())
 
-	_, statErr := os.Stat(path + ".log")
+	_, logFile := rootShardFiles(path)
+
+	_, statErr := os.Stat(logFile)
 	require.NoError(t, statErr, "the second run's delta is in the log")
 
 	// A reload merges both sources.
@@ -580,13 +599,15 @@ func TestLedger_SnapshotPlusLogMerge(t *testing.T) {
 func TestLoad_TornTrailingLogLineDropped(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "manifest.json")
+	path := t.TempDir()
 
 	// A committed record (newline-terminated) followed by a torn trailing write
 	// with no commit marker: the fragment is dropped, the committed record stays.
 	good := `{"kind":"entry","path":"ws/a.json","entry":{"firstSeen":"2026-07-08T12:00:00Z","status":"done","attempts":1}}`
 	torn := `{"kind":"entry","path":"ws/b.json","entry":{"firstSeen"`
-	require.NoError(t, os.WriteFile(path+".log", []byte(good+"\n"+torn), 0o600))
+	_, logFile := rootShardFiles(path)
+	require.NoError(t, os.MkdirAll(filepath.Dir(logFile), 0o755))
+	require.NoError(t, os.WriteFile(logFile, []byte(good+"\n"+torn), 0o600))
 
 	ledger, err := manifest.Load(path)
 	require.NoError(t, err)
@@ -601,12 +622,133 @@ func TestLoad_TornTrailingLogLineDropped(t *testing.T) {
 func TestLoad_CorruptLogLine(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "manifest.json")
+	path := t.TempDir()
 
 	// A complete, newline-terminated line that does not parse is genuine
 	// corruption, not a torn tail.
-	require.NoError(t, os.WriteFile(path+".log", []byte("{ not json\n"), 0o600))
+	_, logFile := rootShardFiles(path)
+	require.NoError(t, os.MkdirAll(filepath.Dir(logFile), 0o755))
+	require.NoError(t, os.WriteFile(logFile, []byte("{ not json\n"), 0o600))
 
 	_, err := manifest.Load(path)
 	require.ErrorIs(t, err, manifest.ErrCorruptManifest)
+}
+
+func TestLedger_ShardsPerWorkspace(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	ledger, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	ledger.StartRun()
+	ledger.RecordDone("projects/p1/workspaces/ws1/runs/r1/run.json", manifest.Signature{Size: 1})
+	ledger.RecordDone("projects/p1/workspaces/ws2/state-versions/s.meta.json", manifest.Signature{Size: 1})
+	ledger.RecordDone("org.json", manifest.Signature{Size: 1})
+	ledger.FinishRun()
+	require.NoError(t, ledger.Flush())
+
+	// Each workspace's entries compact into a shard co-located with its subtree,
+	// and the org-level object into the org-root shard.
+	for _, dir := range []string{
+		filepath.Join(root, "projects", "p1", "workspaces", "ws1", ".ledger"),
+		filepath.Join(root, "projects", "p1", "workspaces", "ws2", ".ledger"),
+		filepath.Join(root, ".ledger"),
+	} {
+		_, statErr := os.Stat(filepath.Join(dir, "snapshot.json"))
+		require.NoError(t, statErr, "a shard snapshot exists under %s", dir)
+	}
+
+	// A reload discovers every shard by globbing the known depths and rebuilds the
+	// full state.
+	reloaded, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	for _, relPath := range []string{
+		"projects/p1/workspaces/ws1/runs/r1/run.json",
+		"projects/p1/workspaces/ws2/state-versions/s.meta.json",
+		"org.json",
+	} {
+		_, ok := reloaded.Entry(relPath)
+		assert.True(t, ok, "entry %q survives the shard round-trip", relPath)
+	}
+
+	assert.Equal(t, 3, reloaded.Tally().Done)
+}
+
+func TestLedger_FlushTouchesOnlyChangedShards(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	ledger, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	ledger.StartRun()
+	ledger.RecordDone("projects/p/workspaces/ws1/runs/r/run.json", manifest.Signature{Size: 1})
+	ledger.RecordDone("projects/p/workspaces/ws2/runs/r/run.json", manifest.Signature{Size: 1})
+	ledger.FinishRun()
+	require.NoError(t, ledger.Flush())
+
+	// A resumed run that records only into ws1 leaves ws2's shard untouched: only
+	// the shard that changed grows a log.
+	resumed, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	resumed.StartRun()
+	resumed.RecordErrored("projects/p/workspaces/ws1/runs/r2/run.json", errors.New("boom"), true)
+	require.NoError(t, resumed.Flush())
+
+	ws1Log := filepath.Join(root, "projects", "p", "workspaces", "ws1", ".ledger", "log.ndjson")
+	ws2Log := filepath.Join(root, "projects", "p", "workspaces", "ws2", ".ledger", "log.ndjson")
+
+	_, statErr := os.Stat(ws1Log)
+	require.NoError(t, statErr, "the touched workspace's shard grows a log")
+
+	_, statErr = os.Stat(ws2Log)
+	assert.True(t, os.IsNotExist(statErr), "the untouched workspace's shard is not rewritten")
+}
+
+func TestLoad_MigratesLegacyManifest(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	// A pre-shard single-file manifest with a workspace object and an org object.
+	doc := `{"version":1,"runCount":2,"entries":{` +
+		`"projects/p/workspaces/ws/runs/r/run.json":` +
+		`{"firstSeen":"2026-07-08T12:00:00Z","status":"done","attempts":1},` +
+		`"org.json":{"firstSeen":"2026-07-08T12:00:00Z","status":"done","attempts":1}}}`
+	require.NoError(t, os.WriteFile(legacyManifest(root), []byte(doc), 0o600))
+
+	ledger, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	// The legacy state loads, distributed into shards by key.
+	_, ok := ledger.Entry("projects/p/workspaces/ws/runs/r/run.json")
+	assert.True(t, ok)
+
+	_, ok = ledger.Entry("org.json")
+	assert.True(t, ok)
+
+	assert.Equal(t, 2, ledger.RunCount())
+	assert.Equal(t, 2, ledger.Tally().Done)
+
+	// A flush persists the shards and retires the legacy file to .migrated.
+	require.NoError(t, ledger.Flush())
+
+	_, statErr := os.Stat(legacyManifest(root))
+	assert.True(t, os.IsNotExist(statErr), "the legacy manifest is renamed aside")
+
+	_, statErr = os.Stat(legacyManifest(root) + ".migrated")
+	require.NoError(t, statErr, "the legacy manifest is retained as .migrated")
+
+	// A fresh load reads only shards and sees the same state.
+	reloaded, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	_, ok = reloaded.Entry("projects/p/workspaces/ws/runs/r/run.json")
+	assert.True(t, ok)
+	assert.Equal(t, 2, reloaded.RunCount())
 }

@@ -31,7 +31,7 @@ func newEnv(t *testing.T) (*collect.Env, *store.Store, *manifest.Ledger) {
 	root := t.TempDir()
 	st := store.New(root)
 
-	ledger, err := manifest.Load(st.Manifest(), manifest.WithClock(fixedClock()))
+	ledger, err := manifest.Load(st.Root(), manifest.WithClock(fixedClock()))
 	require.NoError(t, err)
 
 	env := collect.NewEnv(nil, st, ledger)

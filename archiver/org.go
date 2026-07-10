@@ -73,7 +73,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) error {
 	st := store.New(filepath.Join(a.cfg.OutputDir, orgName))
 
 	ledger, err := manifest.Load(
-		st.AbsPath(st.Manifest()),
+		st.Root(),
 		manifest.WithRecheckAbsent(a.cfg.RecheckAbsent),
 	)
 	if err != nil {
