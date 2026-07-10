@@ -153,7 +153,9 @@ func (a *Archiver) collectWorkspaces(
 			// dependent on statement order above later returns.
 			defer reporter.Advance(1 + ws.RunsCount)
 
-			err := wsc.CollectWorkspace(gctx, projectNameFor(names, ws), ws)
+			project := projectNameFor(names, ws)
+
+			err := wsc.CollectWorkspace(gctx, project, ws)
 			if err != nil && gctx.Err() == nil {
 				// Best-effort: a non-cancellation failure (e.g. a transient
 				// list error) for one workspace is logged and does not cancel
@@ -170,6 +172,25 @@ func (a *Archiver) collectWorkspaces(
 
 			if err != nil {
 				return fmt.Errorf("collect workspace %q: %w", ws.Name, err)
+			}
+
+			// Seal the workspace's now-frozen cold artifacts into bundles. It runs
+			// only after a clean collection, so the collections are complete; a
+			// failure is logged and does not abort the pool, since the loose
+			// sources stay canonical until a bundle verifies and a re-run re-seals.
+			err = wsc.SealWorkspace(gctx, project, ws.Name)
+			if err != nil && gctx.Err() == nil {
+				a.logger.LogAttrs(gctx, slog.LevelError, "workspace_seal_error",
+					slog.String("org", orgName),
+					slog.String("workspace", ws.Name),
+					slog.String("error", err.Error()),
+				)
+
+				return nil
+			}
+
+			if err != nil {
+				return fmt.Errorf("seal workspace %q: %w", ws.Name, err)
 			}
 
 			return nil

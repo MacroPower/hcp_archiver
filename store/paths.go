@@ -201,6 +201,12 @@ func (s *Store) WorkspaceFile(project, ws, name string) string {
 	return cleanJoin("projects", seg(project), "workspaces", seg(ws), seg(name))
 }
 
+// BundleDir returns the directory that holds a workspace's sealed cold bundles
+// and their sidecar indexes, a sibling of its runs and state-versions.
+func (s *Store) BundleDir(project, ws string) string {
+	return cleanJoin("projects", seg(project), "workspaces", seg(ws), "bundles")
+}
+
 // StateVersionDir returns the directory that holds a workspace's state-version
 // files.
 func (s *Store) StateVersionDir(project, ws string) string {

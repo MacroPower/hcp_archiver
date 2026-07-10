@@ -109,6 +109,20 @@ func (e *Env) AdvanceHighWaterMark(key string, t time.Time) {
 	e.ledger.AdvanceHighWaterMark(key, t)
 }
 
+// Entry returns the ledger entry recorded for relPath and whether one exists.
+// The seal phase reads it to confirm an artifact is settled before it bundles the
+// loose copy and removes it.
+func (e *Env) Entry(relPath string) (manifest.Entry, bool) {
+	return e.ledger.Entry(relPath)
+}
+
+// IsCollectionComplete reports whether the append-mostly collection under key was
+// walked to its end, so the seal phase bundles a collection's cold artifacts only
+// once its tail is fully archived.
+func (e *Env) IsCollectionComplete(key string) bool {
+	return e.ledger.IsCollectionComplete(key)
+}
+
 // Collector archives one domain object family into a shared [Env].
 //
 // Each domain package implements it over the [Env] it is constructed with; the
