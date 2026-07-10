@@ -10,13 +10,16 @@ import (
 	"path/filepath"
 )
 
-// Default permissions applied when an [Option] leaves a mode unset.
+// Default permissions applied when an [Option] leaves a mode unset. They are
+// owner-only: this package backs an archive whose raw state blobs hold secrets
+// in cleartext, so a written file and any directory created for it are readable
+// only by the user that wrote them rather than world-readable.
 const (
 	// DefaultFileMode is the mode of a written file when none is given.
-	DefaultFileMode fs.FileMode = 0o644
+	DefaultFileMode fs.FileMode = 0o600
 	// DefaultDirMode is the mode of a created parent directory when none is
 	// given.
-	DefaultDirMode fs.FileMode = 0o755
+	DefaultDirMode fs.FileMode = 0o700
 )
 
 // tmpPattern is the [os.CreateTemp] pattern for the staging file. The leading
