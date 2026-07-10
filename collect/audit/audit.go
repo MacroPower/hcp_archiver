@@ -125,6 +125,15 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 		}
 
 		if listErr != nil {
+			// A cancellation must propagate even when Object short-circuited on an
+			// already-settled page and so never observed it, or the walk returns nil
+			// on a real cancellation and the run logs a canceled org as a clean
+			// finish.
+			ctxErr := ctx.Err()
+			if ctxErr != nil {
+				return fmt.Errorf("archive audit trail page: %w", ctxErr)
+			}
+
 			// The page fetch is recorded by Object; the walk cannot paginate past
 			// an unreadable page, so stop without advancing the watermark.
 			return nil //nolint:nilerr // The page error is recorded, not fatal.
