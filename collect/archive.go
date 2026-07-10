@@ -1,7 +1,9 @@
 package collect
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -47,6 +49,13 @@ func (e *Env) Mutable(ctx context.Context, relPath string, fetch func(context.Co
 // It suits large raw artifacts (state blobs, plan and apply logs) that should
 // not be buffered or redacted. Like [Env.Object] it skips a settled object and
 // records the outcome; error handling matches [Env.Object].
+//
+// An empty stream carries nothing to archive. Some endpoints answer an absent
+// artifact with 204 No Content (a stack step that only planned, for one), which
+// the client hands back as an empty reader with no error; writing it would leave
+// a zero-byte file recorded done that a re-run never retries. Such a result is
+// recorded as not applicable, a settled gap, and no file is written, matching
+// [Env.Bytes].
 func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Context) (io.Reader, error)) error {
 	if !e.ledger.ShouldFetch(relPath) {
 		return nil
@@ -64,7 +73,19 @@ func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Conte
 		defer rc.Close() //nolint:errcheck // Best-effort close of an already-consumed body.
 	}
 
-	res, err := e.store.WriteReader(relPath, r)
+	// Peek one byte to spot an empty payload without buffering the blob. Only a
+	// clean EOF settles it as not applicable; any other read error flows through
+	// WriteReader below and is recorded like a mid-stream transfer failure.
+	buffered := bufio.NewReader(r)
+
+	_, peekErr := buffered.Peek(1)
+	if errors.Is(peekErr, io.EOF) {
+		e.ledger.RecordNotApplicable(relPath)
+
+		return nil
+	}
+
+	res, err := e.store.WriteReader(relPath, buffered)
 	if err != nil {
 		return e.failWrite(ctx, relPath, err)
 	}

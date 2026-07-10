@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -244,6 +246,37 @@ func TestEnvBytesEmptyIsNotApplicable(t *testing.T) {
 		called = true
 
 		return []byte{}, nil
+	})
+	require.NoError(t, err)
+	assert.True(t, called)
+
+	entry, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusNotApplicable, entry.Status)
+	assert.Nil(t, entry.Signature, "an empty payload records no content signature")
+
+	exists, existErr := st.Exists(relPath)
+	require.NoError(t, existErr)
+	assert.False(t, exists, "no file is written for an empty payload")
+
+	assert.Equal(t, int64(0), ledger.Tally().BytesDownloaded)
+}
+
+func TestEnvBlobEmptyIsNotApplicable(t *testing.T) {
+	t.Parallel()
+
+	// A 204 No Content answer (a stack step that only planned, for one) reaches
+	// the fetch as an empty reader with no error; like the buffered Bytes path it
+	// must be recorded as a settled gap rather than streamed to a zero-byte file.
+	const relPath = "projects/example/workspaces/ws/runs/run-1/apply.log"
+
+	env, st, ledger := newEnv(t)
+
+	called := false
+	err := env.Blob(t.Context(), relPath, func(_ context.Context) (io.Reader, error) {
+		called = true
+
+		return strings.NewReader(""), nil
 	})
 	require.NoError(t, err)
 	assert.True(t, called)
