@@ -149,6 +149,15 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 			return nil //nolint:nilerr // The page error is recorded, not fatal.
 		}
 
+		// A page whose write failed is recorded errored rather than settled, and
+		// its file name is keyed on the unadvanced Since cursor. Halt without
+		// advancing, exactly like the fetch-error path, so the next run retries the
+		// page from the same cursor instead of stepping past its events under a
+		// name it would never revisit.
+		if entry, ok := c.env.Entry(relPath); ok && !entry.Status.Settled() {
+			return nil
+		}
+
 		if t := newestTimestamp(list.Items); t.After(newest) {
 			newest = t
 		}
