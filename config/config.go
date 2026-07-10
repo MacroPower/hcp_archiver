@@ -106,10 +106,14 @@ func WithToken(token string) Option {
 	}
 }
 
-// WithAddress sets the HCP Terraform API address. It returns an [Option].
+// WithAddress sets the HCP Terraform API address. An empty address is ignored so
+// it does not clobber [DefaultAddress], matching the client's own guard. It
+// returns an [Option].
 func WithAddress(address string) Option {
 	return func(c *Config) {
-		c.Address = address
+		if address != "" {
+			c.Address = address
+		}
 	}
 }
 

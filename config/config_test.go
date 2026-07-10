@@ -32,6 +32,19 @@ func TestNew_Defaults(t *testing.T) {
 	assert.False(t, cfg.AuditTrail)
 }
 
+func TestNew_EmptyAddressKeepsDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.New(
+		config.WithToken("tok"),
+		config.WithOutputDir("/tmp/archive"),
+		config.WithAddress(""),
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, config.DefaultAddress, cfg.Address)
+}
+
 func TestNew_OptionsOverrideDefaults(t *testing.T) {
 	t.Parallel()
 
