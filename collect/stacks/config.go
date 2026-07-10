@@ -38,7 +38,13 @@ func (c *Collector) collectConfigurations(ctx context.Context, project string, s
 		}
 	}
 
-	err := collect.Walk(ctx, c.env, configKey(stack.ID), pager, describe)
+	// The cursor key is a synthetic stack id, but the entries live under the
+	// stack's configurations directory; pass that real prefix so the errored-child
+	// gate scans the stack shard rather than the org-root shard the id routes to.
+	archivePrefix := configArchivePrefix(c.env.Store(), project, stack.Name)
+
+	err := collect.Walk(ctx, c.env, configKey(stack.ID), pager, describe,
+		collect.WithArchivePrefix(archivePrefix))
 	if err != nil {
 		return fmt.Errorf("walk stack configurations: %w", err)
 	}
@@ -195,7 +201,13 @@ func (c *Collector) collectRuns(ctx context.Context, project, stackName, configI
 		}
 	}
 
-	err := collect.Walk(ctx, c.env, runKey(groupID), pager, describe)
+	// The cursor key is a synthetic group id; the entries live under the group's
+	// runs directory. Pass that prefix so the errored-child gate reaches a step
+	// artifact left errored below a done run boundary.
+	archivePrefix := runArchivePrefix(c.env.Store(), project, stackName, configID, groupID)
+
+	err := collect.Walk(ctx, c.env, runKey(groupID), pager, describe,
+		collect.WithArchivePrefix(archivePrefix))
 	if err != nil {
 		return fmt.Errorf("walk stack deployment runs: %w", err)
 	}

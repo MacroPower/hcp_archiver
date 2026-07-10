@@ -837,6 +837,30 @@ func TestLedger_HasUnsettledUnderPrefixIsolation(t *testing.T) {
 	assert.True(t, ledger.HasUnsettledUnder(svKey), "the forbidden state-version child is unsettled")
 }
 
+func TestLedger_HasUnsettledUnderMatchesDeepDescendant(t *testing.T) {
+	t.Parallel()
+
+	ledger, err := manifest.Load(t.TempDir())
+	require.NoError(t, err)
+
+	ledger.StartRun()
+
+	// A stack configuration walk gates on the configurations prefix, and its
+	// deployment-group run steps nest many levels beneath it. An errored step
+	// artifact deep under the prefix must still be caught, so the configuration
+	// walk re-pages and re-reaches it through the composed sub-walks.
+	const (
+		configPrefix = "projects/p/stacks/s/configurations"
+		deepChild    = configPrefix + "/cfg1/deployment-groups/g1/runs/r1/steps/st1/plan-description.json"
+	)
+
+	ledger.RecordDone(configPrefix+"/cfg1/configuration.json", manifest.Signature{Size: 1})
+	ledger.RecordErrored(deepChild, errors.New("boom"), true)
+
+	assert.True(t, ledger.HasUnsettledUnder(configPrefix),
+		"a deeply nested errored child is caught by the shallow configurations prefix")
+}
+
 func TestLedger_HasUnsettledUnderIgnoresSyntheticCursor(t *testing.T) {
 	t.Parallel()
 

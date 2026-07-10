@@ -38,6 +38,38 @@ type Item struct {
 // paging the moment it reaches already-archived history.
 type Pager[T any] func(ctx context.Context, page int) (items []T, hasNext bool, err error)
 
+// walkConfig holds the resolved settings for one [Walk].
+type walkConfig struct {
+	archivePrefix string
+}
+
+// WalkOption configures a [Walk].
+//
+// Options of this type:
+//   - [WithArchivePrefix]
+type WalkOption func(*walkConfig)
+
+// WithArchivePrefix sets the archive-relative path prefix under which the
+// collection's entries live, for use by the walk's errored-child gate when that
+// prefix differs from the cursor key.
+//
+// A collection whose cursor key is itself a path prefix of its entries — a
+// workspace's runs (projects/.../runs) or state versions — needs no override:
+// the walk gates on the key directly. A collection cursored by a synthetic id
+// whose entries live elsewhere — a stack's configurations or a deployment
+// group's runs, keyed on an id but archived under projects/.../stacks/... —
+// passes the real prefix here so [manifest.Ledger.HasUnsettledUnder] scans the
+// shard that actually holds the entries and can find an errored or forbidden
+// child left below a done boundary. An empty prefix keeps the default (the cursor
+// key). It returns a [WalkOption].
+func WithArchivePrefix(prefix string) WalkOption {
+	return func(c *walkConfig) {
+		if prefix != "" {
+			c.archivePrefix = prefix
+		}
+	}
+}
+
 // Walk archives an append-mostly collection newest-first and halts as soon as it
 // reaches already-archived history, the incremental re-run engine shared by every
 // ordered collection (state versions, runs, per-run children, config versions).
@@ -74,9 +106,17 @@ type Pager[T any] func(ctx context.Context, page int) (items []T, hasNext bool, 
 // A non-terminal element seen mid-pass suppresses the stop for that pass too, so
 // the stop condition is strictly stricter than a plain complete check and can
 // only ever widen the walk, never newly strand an element. When early-stop is
-// suppressed the walk re-pages the collection (list calls only; the primitives
-// still skip settled objects), and on the final page it records both completion
-// and whether this walk settled the collection.
+// suppressed the walk re-pages the collection: the immutable-object primitives
+// still skip settled entries, so re-paging is near free for a workspace whose
+// children are immutable, but an element that re-reads mutable metadata through
+// [Env.Mutable] (a stack configuration's or step's diagnostics) re-fetches it
+// every pass. On the final page it records both completion and whether this walk
+// settled the collection.
+//
+// The errored-child gate scans the shard owning key, so it works directly for a
+// collection whose key is a path prefix of its entries; a collection cursored by
+// a synthetic id (a stack walk) passes the real archive prefix through
+// [WithArchivePrefix] so the gate scans the right shard.
 //
 // Only a context cancellation surfaced by an Archive closure or a page fetch
 // aborts the walk; every per-object error is recorded by the primitives and the
@@ -87,10 +127,16 @@ func Walk[T any](
 	key string,
 	page Pager[T],
 	describe func(T) Item,
+	opts ...WalkOption,
 ) error {
+	cfg := walkConfig{archivePrefix: key}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	earlyStopAllowed := env.ledger.IsCollectionComplete(key) &&
 		env.ledger.IsCollectionSettled(key) &&
-		!env.ledger.HasUnsettledUnder(key)
+		!env.ledger.HasUnsettledUnder(cfg.archivePrefix)
 
 	sawNonTerminal := false
 
@@ -124,7 +170,7 @@ func Walk[T any](
 
 		if !hasNext {
 			env.ledger.MarkCollectionComplete(key)
-			env.ledger.SetCollectionSettled(key, !sawNonTerminal && !env.ledger.HasUnsettledUnder(key))
+			env.ledger.SetCollectionSettled(key, !sawNonTerminal && !env.ledger.HasUnsettledUnder(cfg.archivePrefix))
 
 			return nil
 		}

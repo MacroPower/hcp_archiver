@@ -4,6 +4,8 @@ import (
 	"strconv"
 
 	tfe "github.com/hashicorp/go-tfe"
+
+	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
 // configTerminal reports whether a stack configuration has settled into a state
@@ -57,4 +59,22 @@ func configKey(stackID string) string {
 // the group id, keeping each group's incremental cursor distinct.
 func runKey(groupID string) string {
 	return "stack-deployment-groups/" + groupID + "/runs"
+}
+
+// configArchivePrefix is the archive-relative directory holding a stack's
+// configuration entries: the real path prefix the configurations walk gates its
+// errored-child check on, distinct from the synthetic [configKey] cursor.
+//
+// The cursor routes to the org-root shard, but the entries live in the stack's
+// own shard, so the walk must gate on this prefix rather than the cursor for
+// [manifest.Ledger.HasUnsettledUnder] to scan the shard that holds them.
+func configArchivePrefix(st *store.Store, project, stackName string) string {
+	return st.Join(st.StackDir(project, stackName), "configurations")
+}
+
+// runArchivePrefix is the archive-relative directory holding a deployment
+// group's run entries: the real path prefix the runs walk gates its
+// errored-child check on, distinct from the synthetic [runKey] cursor.
+func runArchivePrefix(st *store.Store, project, stackName, configID, groupID string) string {
+	return st.Join(st.StackDeploymentGroupDir(project, stackName, configID, groupID), "runs")
 }

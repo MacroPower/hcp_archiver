@@ -521,6 +521,198 @@ func TestWalkResumesIncompleteCollection(t *testing.T) {
 	assert.True(t, ledger.IsCollectionComplete("runs"), "reaching the final page marks the collection complete")
 }
 
+// stackConfigCursorKey is a synthetic stack-configuration cursor: it routes to
+// the org-root shard, while the configuration entries live in a stack shard.
+const stackConfigCursorKey = "stacks/stk-1/configurations"
+
+// erroredChildScenario is a Walk mimicking a stack's configuration walk, whose
+// cursor key routes to a different shard than its entries, with an older
+// configuration's child left errored below a newer done boundary.
+type erroredChildScenario struct {
+	env           *collect.Env
+	ledger        *manifest.Ledger
+	pager         collect.Pager[walkItem]
+	describe      func(walkItem) collect.Item
+	erroredChild  string
+	archivedChild *int
+}
+
+// newErroredChildScenario seeds two terminal configurations archived done in a
+// stack shard, marks the collection complete and settled under its synthetic
+// cursor, and leaves the older configuration's child errored. The older
+// configuration's Archive closure retries that child and bumps a counter.
+func newErroredChildScenario(t *testing.T) *erroredChildScenario {
+	t.Helper()
+
+	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
+
+	cfg2 := walkItem{
+		relPath:   "projects/p/stacks/s/configurations/cfg2/configuration.json",
+		createdAt: base.Add(2 * time.Hour),
+		terminal:  true,
+	}
+	cfg1 := walkItem{
+		relPath:   "projects/p/stacks/s/configurations/cfg1/configuration.json",
+		createdAt: base.Add(1 * time.Hour),
+		terminal:  true,
+	}
+
+	env, _, ledger := newEnv(t)
+
+	ledger.RecordDone(cfg2.relPath, manifest.Signature{Hash: "prior", Size: 1})
+	ledger.RecordDone(cfg1.relPath, manifest.Signature{Hash: "prior", Size: 1})
+
+	const erroredChild = "projects/p/stacks/s/configurations/cfg1/json-schemas.json"
+
+	ledger.RecordErrored(erroredChild, errors.New("prior boom"), true)
+
+	ledger.MarkCollectionComplete(stackConfigCursorKey)
+	ledger.SetCollectionSettled(stackConfigCursorKey, true)
+
+	archivedChild := 0
+
+	pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
+		if page == 1 {
+			return []walkItem{cfg2, cfg1}, false, nil
+		}
+
+		return nil, false, nil
+	}
+
+	describe := func(it walkItem) collect.Item {
+		return collect.Item{
+			RelPath:   it.relPath,
+			CreatedAt: it.createdAt,
+			Terminal:  it.terminal,
+			Archive: func(ctx context.Context) error {
+				err := env.Mutable(ctx, it.relPath, func(_ context.Context) (any, error) {
+					return cannedProject(), nil
+				})
+				if err != nil {
+					return fmt.Errorf("archive configuration: %w", err)
+				}
+
+				if it.relPath != cfg1.relPath {
+					return nil
+				}
+
+				return env.Object(ctx, erroredChild, func(_ context.Context) (any, error) {
+					archivedChild++
+
+					return cannedProject(), nil
+				})
+			},
+		}
+	}
+
+	return &erroredChildScenario{
+		env:           env,
+		ledger:        ledger,
+		pager:         pager,
+		describe:      describe,
+		erroredChild:  erroredChild,
+		archivedChild: &archivedChild,
+	}
+}
+
+func TestWalkArchivePrefixReachesErroredChildInAnotherShard(t *testing.T) {
+	t.Parallel()
+
+	s := newErroredChildScenario(t)
+
+	// The archive prefix points the errored-child gate at the stack shard that
+	// actually holds the entries, so the walk re-pages past the done boundary and
+	// retries the older configuration's errored child.
+	err := collect.Walk(t.Context(), s.env, stackConfigCursorKey, s.pager, s.describe,
+		collect.WithArchivePrefix("projects/p/stacks/s/configurations"))
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, *s.archivedChild, "the archive prefix reaches the errored child in the entries' shard")
+
+	child, ok := s.ledger.Entry(s.erroredChild)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusDone, child.Status, "the retried child settles done")
+	assert.True(t, s.ledger.IsCollectionSettled(stackConfigCursorKey),
+		"the collection settles once no unsettled child remains")
+}
+
+func TestWalkSyntheticCursorStrandsErroredChildWithoutArchivePrefix(t *testing.T) {
+	t.Parallel()
+
+	s := newErroredChildScenario(t)
+
+	// Without the override the gate scans the org-root shard the synthetic cursor
+	// routes to, not the stack shard holding the entries, so the done boundary
+	// early-stops and the older errored child stays stranded. This is the default
+	// the override exists to close.
+	err := collect.Walk(t.Context(), s.env, stackConfigCursorKey, s.pager, s.describe)
+	require.NoError(t, err)
+
+	assert.Zero(t, *s.archivedChild, "without an archive prefix the errored child is not reached")
+}
+
+func TestWalkFinalPageRecomputesSettledFromArchivePrefix(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
+
+	// A first full walk reaches the final page, where it recomputes the settled
+	// flag. That recompute must consult the archive prefix, not the synthetic
+	// cursor: an errored child under the prefix (in the stack shard) must record
+	// the collection unsettled so the next run re-walks it. A recompute keyed on
+	// the cursor would scan the empty org-root shard and wrongly record settled.
+	const (
+		cursorKey     = "stacks/stk-2/configurations"
+		archivePrefix = "projects/p/stacks/s2/configurations"
+		erroredChild  = archivePrefix + "/cfg1/json-schemas.json"
+	)
+
+	cfg2 := walkItem{
+		relPath:   archivePrefix + "/cfg2/configuration.json",
+		createdAt: base.Add(2 * time.Hour),
+		terminal:  true,
+	}
+	cfg1 := walkItem{
+		relPath:   archivePrefix + "/cfg1/configuration.json",
+		createdAt: base.Add(1 * time.Hour),
+		terminal:  true,
+	}
+
+	env, _, ledger := newEnv(t)
+
+	// An errored child left under the prefix that the walk does not retry.
+	ledger.RecordErrored(erroredChild, errors.New("prior boom"), true)
+
+	pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
+		if page == 1 {
+			return []walkItem{cfg2, cfg1}, false, nil
+		}
+
+		return nil, false, nil
+	}
+
+	describe := func(it walkItem) collect.Item {
+		return collect.Item{
+			RelPath:   it.relPath,
+			CreatedAt: it.createdAt,
+			Terminal:  it.terminal,
+			Archive: func(ctx context.Context) error {
+				return env.Mutable(ctx, it.relPath, func(_ context.Context) (any, error) {
+					return cannedProject(), nil
+				})
+			},
+		}
+	}
+
+	err := collect.Walk(t.Context(), env, cursorKey, pager, describe,
+		collect.WithArchivePrefix(archivePrefix))
+	require.NoError(t, err)
+
+	assert.True(t, ledger.IsCollectionComplete(cursorKey), "the final page marks the collection complete")
+	assert.False(t, ledger.IsCollectionSettled(cursorKey),
+		"an errored child under the archive prefix records the collection unsettled")
+}
+
 func TestWalkPropagatesPageError(t *testing.T) {
 	t.Parallel()
 

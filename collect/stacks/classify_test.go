@@ -1,6 +1,7 @@
 package stacks_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,6 +9,7 @@ import (
 	tfe "github.com/hashicorp/go-tfe"
 
 	"go.jacobcolvin.com/hcp_archiver/collect/stacks"
+	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
 func TestConfigTerminal(t *testing.T) {
@@ -98,4 +100,34 @@ func TestCollectionKeys(t *testing.T) {
 		stacks.ConfigKeyForTest("st-def"),
 		"distinct stacks must map to distinct configuration cursors",
 	)
+}
+
+func TestArchivePrefixes(t *testing.T) {
+	t.Parallel()
+
+	st := store.New(t.TempDir())
+
+	cfgFile := st.StackConfigurationFile("proj", "mystack", "cfg-1", "configuration.json")
+	runFile := st.StackRunFile("proj", "mystack", "cfg-1", "grp-1", "run-1", "run.json")
+	stepFile := st.StackStepFile("proj", "mystack", "cfg-1", "grp-1", "run-1", "step-1", "plan-description.json")
+
+	// The configurations prefix is the real archive directory, a genuine path
+	// prefix of every configuration entry down to a deeply nested run step.
+	configPrefix := stacks.ConfigArchivePrefixForTest(st, "proj", "mystack")
+
+	assert.Equal(t, "projects/proj/stacks/mystack/configurations", configPrefix)
+	assert.True(t, strings.HasPrefix(cfgFile, configPrefix+"/"), "a config entry sits under the configurations prefix")
+	assert.True(t, strings.HasPrefix(stepFile, configPrefix+"/"), "a nested step sits under the configurations prefix")
+
+	// The runs prefix nests the group's run entries and their steps, and routes to
+	// the stack shard rather than the org-root shard the runKey cursor targets.
+	runPrefix := stacks.RunArchivePrefixForTest(st, "proj", "mystack", "cfg-1", "grp-1")
+
+	assert.Equal(t, "projects/proj/stacks/mystack/configurations/cfg-1/deployment-groups/grp-1/runs", runPrefix)
+	assert.True(t, strings.HasPrefix(runFile, runPrefix+"/"), "a run entry sits under the runs prefix")
+	assert.True(t, strings.HasPrefix(stepFile, runPrefix+"/"), "a run's step sits under the runs prefix")
+
+	// The prefixes differ from their synthetic cursors, which is the whole point.
+	assert.NotEqual(t, stacks.ConfigKeyForTest("st-abc"), configPrefix, "the config prefix is not the config cursor")
+	assert.NotEqual(t, stacks.RunKeyForTest("sdg-xyz"), runPrefix, "the run prefix is not the run cursor")
 }

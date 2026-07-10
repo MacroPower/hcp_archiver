@@ -1,6 +1,10 @@
 package stacks
 
-import tfe "github.com/hashicorp/go-tfe"
+import (
+	tfe "github.com/hashicorp/go-tfe"
+
+	"go.jacobcolvin.com/hcp_archiver/store"
+)
 
 // ConfigTerminalForTest exposes [configTerminal] to the external test package.
 func ConfigTerminalForTest(status tfe.StackConfigurationStatus) bool {
@@ -25,4 +29,16 @@ func ConfigKeyForTest(stackID string) string {
 // RunKeyForTest exposes [runKey] to the external test package.
 func RunKeyForTest(groupID string) string {
 	return runKey(groupID)
+}
+
+// ConfigArchivePrefixForTest exposes [configArchivePrefix] to the external test
+// package.
+func ConfigArchivePrefixForTest(st *store.Store, project, stackName string) string {
+	return configArchivePrefix(st, project, stackName)
+}
+
+// RunArchivePrefixForTest exposes [runArchivePrefix] to the external test
+// package.
+func RunArchivePrefixForTest(st *store.Store, project, stackName, configID, groupID string) string {
+	return runArchivePrefix(st, project, stackName, configID, groupID)
 }
