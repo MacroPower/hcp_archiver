@@ -226,7 +226,8 @@ func New(opts ...Option) (*Config, error) {
 // Validate reports whether the [Config] is internally consistent.
 //
 // It returns [ErrMissingToken], [ErrMissingOutputDir], [ErrInvalidConcurrency],
-// or [ErrInvalidProgressMode] wrapped with context on the first problem found.
+// [ErrInvalidProgressMode], or [ErrInvalidProgressInterval] wrapped with context
+// on the first problem found.
 func (c *Config) Validate() error {
 	if c.Token == "" {
 		return ErrMissingToken
