@@ -89,14 +89,20 @@ archive/<org>/
                                      #   SSO/SCIM linkage
     notification-configs.json       # team-scoped alerting (redact Token)
   memberships.json                  # org roster: email, status, user + team refs
-  oauth-clients/<id>.json           # VCS connection def + tokens (redact Secret)
+  users/<id>.json                   # hydrated user records; no user-list API, so
+                                     #   sourced from run/event/team/membership refs
+  oauth-clients/<id>/
+    oauth-client.json               # VCS connection def (redact Secret)
+    tokens/<token-id>.json          # token metadata (uid, ssh-key flag; no secret)
   github-app-installations.json     # GitHub App VCS installs (metadata only;
                                      #   user/token-scoped, not org-scoped)
   variable-sets/<id>/
     variable-set.json               # name, global/priority, applied scopes
     variables.json                  # sensitive values -> "[REDACTED]"
   policy-sets/<id>/
-    policy-set.json                 # kind, scope, current/newest version meta
+    policy-set.json                 # kind, scope, current/newest version refs
+    current-version.json            # current version source/status/timestamps
+    newest-version.json             # newest version source/status/timestamps
     parameters.json                 # sensitive values -> "[REDACTED]"
   policies/<id>.json                # metadata
   policies/<id>.<ext>               # Sentinel/OPA source (Policies.Download)
@@ -107,7 +113,10 @@ archive/<org>/
     config.json                     # whether/how auditing is on (elevated token)
     <page>.json                     # who-did-what-when (elevated token; windowed)
   reserved-tag-keys.json            # org tag governance (optional)
-  hyok-configurations/<id>.json     # HYOK encryption config (optional)
+  hyok-configurations/<id>/         # HYOK encryption config (optional)
+    hyok-configuration.json         # KEK id, KMS options, status
+    oidc-configuration.json         # concrete AWS/GCP/Azure/Vault OIDC config
+    key-versions/<kv-id>.json       # per customer-key-version status
   registry/
     modules/<ns>-<name>-<provider>/module.json    # + versions, last commits
     no-code-modules/<id>.json                     # version pin + variable options
@@ -121,6 +130,7 @@ archive/<org>/
   projects/<project-name>/
     project.json                    # id, defaults (exec mode, agent pool,
                                      #   auto-destroy), tag bindings, team access
+    effective-tag-bindings.json     # resolved bindings, including inherited
     notification-configs.json       # project-scoped alerting (redact Token)
 
     workspaces/<ws-name>/
@@ -139,9 +149,12 @@ archive/<org>/
         <created-at>-<id>.meta.json     # serial, created-at, run ref, size, vcs sha
       runs/<run-id>/
         run.json                    # summary, status, timestamps, trigger, message
-        config-version.json         # cv id + ingress attrs (commit sha/branch/PR)
+        config-version.json         # cv record (ingress relation is a bare ref here)
+        config-version-ingress.json # commit sha/branch/PR (survives tarball expiry)
+        plan-summary.json           # plan resource counts + change flags
         plan.log                    # plan log output
         plan.json                   # structured plan (ReadJSONOutput), if available
+        apply-summary.json          # apply resource counts
         apply.log                   # apply log output
         cost-estimate.json          # monthly cost deltas + resource counts, if any
         cost-estimate.log           # human-readable cost breakdown (Logs)
@@ -149,7 +162,8 @@ archive/<org>/
         run-events.json             # actor-attributed timeline (confirm/discard)
         policy-checks.json          # Sentinel results (+ policy-check-<id>.log)
         task-stages.json            # task stages -> task results + policy evals
-        tf-policy-outcomes.json     # native TF policy results, if any
+        tf-policy-evaluations.json  # native TF policy evaluation metadata, if any
+        tf-policy-outcomes.json     # native TF policy set outcomes, if any
 
     # stacks are a parallel deployment model, also project-scoped; present only
     # if the project uses them. runs live under deployment GROUPS, not named
@@ -187,9 +201,19 @@ Notes:
   `-<id>` suffix keeps filenames unique; ordering and "latest" logic key on
   `CreatedAt`, and `id` is the identity. `serial` still lives in the `.meta.json`.
 - Config version tarballs use globally-unique ids and are deduped org-wide
-  (store once). A run references its cv by **id** plus a relative path;
-  `config-version.json` keeps the ingress attributes even when the tarball
-  itself is no longer downloadable.
+  (store once). A run references its cv by **id** plus a relative path. The
+  hydrated ingress relation is split into `config-version-ingress.json` (commit
+  sha/branch/PR), which survives even after the tarball is no longer
+  downloadable, while `config-version.json` holds the record itself.
+- Several relations are hydrated by a list/read `include` but would serialize as
+  a bare `{type, id}` on their parent (the serializer renders relations as id
+  refs). Each is instead archived as its own primary object so the sideloaded
+  attributes are not discarded: HYOK OIDC configs and key versions, policy-set
+  current/newest versions, OAuth tokens, run plan/apply summaries, native TF
+  policy evaluations, project effective tag bindings, and the users a run,
+  event, team, or membership references. Users are special: go-tfe has no user
+  list (only `ReadCurrent`), so the hydrated sub-object is the only way to
+  capture who ran or confirmed a run or who is on a team.
 - Runs record only the cv **id** as the join key, never the expiring signed
   `upload-url` that a `RunConfigVer` include would otherwise nest in run.json (a
   `ConfigurationVersion` carries only `upload-url`; the `hosted-*-url` fields are
@@ -528,8 +552,10 @@ projects/<project>/workspaces/<ws>/
     log.ndjson                                               #   append-only; compacts when log > snapshot
   rollups/
     config-versions.ndjson                                   # the immutable run children, one JSON line each
+    plan-summaries.ndjson  apply-summaries.ndjson
     cost-estimates.ndjson  comments.ndjson  run-events.ndjson
-    policy-checks.ndjson  task-stages.ndjson  tf-policy-outcomes.ndjson
+    policy-checks.ndjson  task-stages.ndjson
+    tf-policy-evaluations.ndjson  tf-policy-outcomes.ndjson
     state-versions.ndjson                                    #   state-version .meta.json sidecars
   bundles/
     logs.gen0001.zip.sidecar.ndjson                          # index, outside the bundle

@@ -6,19 +6,30 @@
 // The surface covers the organization record itself; teams with their
 // organization-access matrix, members, and SSO/SCIM linkage, plus their team-
 // scoped notification configurations; the organization roster, with each
-// membership's user and team references; and VCS connections. Those connections
-// are OAuth clients (with their tokens, secret redacted) and GitHub App
+// membership's team reference; and VCS connections. Those connections are OAuth
+// clients (secret redacted, each with its access tokens) and GitHub App
 // installations; the installations are user- and token-scoped rather than
 // org-scoped, so their completeness depends on the archiving identity.
 //
-// It also captures the governance objects: policy sets with their versions and
-// parameters, the Sentinel or OPA policy source alongside each policy's
-// metadata, variable sets with their variables, and organization run-task
-// definitions (HMAC key redacted). The remaining org-level configuration rounds
-// it out: agent pools with their allowed and excluded workspaces and allowed
-// projects, per-token-type max-TTL policies, and reserved tag keys. When the
-// corresponding scope toggle is on, it also captures hold-your-own-key
-// configurations with their OIDC configuration and customer key versions.
+// It also captures the governance objects: policy sets with their current and
+// newest version and their parameters, the Sentinel or OPA policy source
+// alongside each policy's metadata, variable sets with their variables, and
+// organization run-task definitions (HMAC key redacted). The remaining org-level
+// configuration rounds it out: agent pools with their allowed and excluded
+// workspaces and allowed projects, per-token-type max-TTL policies, and reserved
+// tag keys. When the corresponding scope toggle is on, it also captures
+// hold-your-own-key configurations with their OIDC configuration and customer
+// key versions.
+//
+// Several of these relations are hydrated by a list include yet would collapse
+// to a bare id reference on their parent, discarding the attributes the include
+// already fetched. Each is instead archived as its own record so those
+// attributes survive: a policy set's current and newest version, a HYOK
+// configuration's OIDC configuration and key versions, and an OAuth client's
+// tokens. Users are the sharpest case: go-tfe exposes no user listing, so the
+// users a team and the roster reference are the only capture of who belongs to
+// the org, and each is archived from the membership and team reads that hydrate
+// them.
 //
 // Two related objects are deliberately reduced to metadata or skipped: every
 // token's secret is write-only and comes back blank, so only its existence and

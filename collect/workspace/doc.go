@@ -6,8 +6,10 @@
 // # Projects and workspace settings
 //
 // For each project it captures the project record (default execution mode,
-// agent pool, auto-destroy, tag bindings), its project-scoped notification
-// configurations, and its team access. For each workspace it captures the full
+// agent pool, auto-destroy, tag bindings), its resolved effective tag bindings
+// (hydrated on the project read and kept as their own record rather than dropped
+// to bare id refs), its project-scoped notification configurations, and its team
+// access. For each workspace it captures the full
 // settings (including the project reference and the global-remote-state flag),
 // the variables (read through the all-vars endpoint so variable-set-inherited
 // variables are included, with a value redacted when the variable is
@@ -29,18 +31,27 @@
 // # Runs and their children
 //
 // Runs are listed newest-first and hydrated with their plan, apply,
-// configuration-version, created-by, and cost-estimate relations. Beneath each
-// run go the run summary; the configuration-version record, kept as its id plus
-// ingress attributes (commit SHA, branch, PR) so the join survives even after
-// the tarball itself has expired; the plan log and, when the Terraform version
-// is recent enough to offer it, the structured plan JSON; the apply log; the
-// cost estimate, kept as its own attributes (the monthly cost deltas and matched
-// and unmatched resource counts) plus its human-readable log rather than
-// flattened to a bare id; the run comments; the actor-attributed run events; the
-// policy checks with their logs; the task stages resolved into task results and
-// policy evaluations down to policy-set outcomes; and native Terraform policy-
-// evaluation outcomes. Comments come from their own list endpoint because the
-// run's comment relation is not sideloadable through an include.
+// configuration-version, created-by, and cost-estimate relations. Each of those
+// hydrated relations would otherwise collapse to a bare id ref on the run
+// summary, so it is archived as its own record: the configuration-version record
+// and, split out beside it, its ingress attributes (commit SHA, branch, PR) so
+// the VCS join survives even after the tarball has expired; the plan and apply
+// summaries (resource counts and change flags) alongside their logs; and the
+// user that created the run. Beneath each run also go the run summary itself; the
+// structured plan JSON when the Terraform version is recent enough to offer it;
+// the cost estimate, kept as its own attributes (the monthly cost deltas and
+// matched and unmatched resource counts) plus its human-readable log; the run
+// comments; the actor-attributed run events, whose actors are archived as their
+// own user records; the policy checks with their logs; the task stages resolved
+// into task results and policy evaluations down to policy-set outcomes; and the
+// native Terraform policy evaluations with their set outcomes. Comments come from
+// their own list endpoint because the run's comment relation is not sideloadable
+// through an include.
+//
+// A run's created-by and each run event's actor are hydrated users, and go-tfe
+// exposes no user listing, so these sub-objects are the only capture of who
+// queued or confirmed a run; each is archived to the org-level users directory,
+// shared org-wide so a user who acts across workspaces is stored once.
 //
 // Configuration-version tarballs are deduplicated org-wide by their globally
 // unique id, so workspaces that share one stay race-free; a run references its
