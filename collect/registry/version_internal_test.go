@@ -44,6 +44,9 @@ func TestCompareVersions(t *testing.T) {
 		"two prereleases compare text": {a: "1.2.0-rc2", b: "1.2.0-rc1", want: 1},
 		"release outranks prerelease":  {a: "1.2.0", b: "1.2.0-rc1", want: 1},
 		"prerelease sorts below":       {a: "2.0.0-beta", b: "2.0.0", want: -1},
+		"numbered prerelease numeric":  {a: "1.0.0-rc.10", b: "1.0.0-rc.2", want: 1},
+		"numeric id below alphanum":    {a: "1.0.0-1", b: "1.0.0-alpha", want: -1},
+		"more identifiers outrank":     {a: "1.0.0-rc.1", b: "1.0.0-rc.1.1", want: -1},
 	}
 
 	for name, tc := range tests {

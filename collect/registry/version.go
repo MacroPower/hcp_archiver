@@ -82,8 +82,9 @@ func latestModuleVersion(statuses []tfe.RegistryModuleVersionStatuses) string {
 // It compares the numeric release core segment by segment (numerically when both
 // segments parse as integers, lexically otherwise); when the cores are equal, a
 // version carrying no pre-release outranks one that does, and two pre-releases
-// compare lexically. It returns a negative number when a sorts before b, zero
-// when they are equal, and a positive number when a sorts after b.
+// compare by SemVer identifier precedence (see [comparePrerelease]). It returns a
+// negative number when a sorts before b, zero when they are equal, and a positive
+// number when a sorts after b.
 func compareVersions(a, b string) int {
 	aCore, aPre := splitPrerelease(a)
 	bCore, bPre := splitPrerelease(b)
@@ -101,7 +102,47 @@ func compareVersions(a, b string) int {
 	case bPre == "":
 		return -1
 	default:
-		return strings.Compare(aPre, bPre)
+		return comparePrerelease(aPre, bPre)
+	}
+}
+
+// comparePrerelease orders two non-empty pre-release remainders by SemVer
+// identifier precedence: it compares dot-separated identifiers left to right,
+// numerically when both parse as integers, lexically when both are alphanumeric,
+// and ranks a numeric identifier below an alphanumeric one; when every shared
+// identifier ties, the remainder carrying more identifiers outranks the shorter
+// (1.0.0-rc.2 < 1.0.0-rc.10 < 1.0.0-rc.10.1).
+func comparePrerelease(a, b string) int {
+	as := strings.Split(a, ".")
+	bs := strings.Split(b, ".")
+	n := min(len(as), len(bs))
+
+	for i := range n {
+		if c := comparePrereleaseID(as[i], bs[i]); c != 0 {
+			return c
+		}
+	}
+
+	return len(as) - len(bs)
+}
+
+// comparePrereleaseID orders two pre-release identifiers: both numeric compare
+// numerically, both alphanumeric compare lexically, and a numeric identifier
+// ranks below an alphanumeric one.
+func comparePrereleaseID(a, b string) int {
+	an, aErr := strconv.Atoi(a)
+	bn, bErr := strconv.Atoi(b)
+
+	switch {
+	case aErr == nil && bErr == nil:
+		return an - bn
+	case aErr == nil:
+		// A numeric identifier has lower precedence than an alphanumeric one.
+		return -1
+	case bErr == nil:
+		return 1
+	default:
+		return strings.Compare(a, b)
 	}
 }
 
