@@ -15,3 +15,9 @@ var PolicyExt = policyExt
 func (c *Collector) ArchiveHYOKConfiguration(ctx context.Context, config *tfe.HYOKConfiguration) error {
 	return c.archiveHYOKConfiguration(ctx, config)
 }
+
+// ArchivePolicySetVersions exposes archivePolicySetVersions to the external test
+// package.
+func (c *Collector) ArchivePolicySetVersions(ctx context.Context, set *tfe.PolicySet) error {
+	return c.archivePolicySetVersions(ctx, set)
+}

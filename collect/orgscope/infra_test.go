@@ -11,7 +11,7 @@ import (
 func TestArchiveHYOKConfiguration(t *testing.T) {
 	t.Parallel()
 
-	f := newOrgFixture(t, nil)
+	f := newOrgFixture(t)
 	st := f.store
 
 	config := &tfe.HYOKConfiguration{
@@ -58,7 +58,7 @@ func TestArchiveHYOKConfiguration(t *testing.T) {
 func TestArchiveHYOKConfigurationSkipsAllNilOIDC(t *testing.T) {
 	t.Parallel()
 
-	f := newOrgFixture(t, nil)
+	f := newOrgFixture(t)
 	st := f.store
 
 	// A transiently non-hydrated OIDC choice (all concrete pointers nil) records

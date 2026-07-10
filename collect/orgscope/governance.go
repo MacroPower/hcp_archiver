@@ -84,14 +84,47 @@ func (c *Collector) collectPolicySets(ctx context.Context) error {
 	)
 }
 
-// archivePolicySet archives one policy set's definition and its parameters.
+// archivePolicySet archives one policy set's definition, its current and newest
+// version metadata, and its parameters.
 func (c *Collector) archivePolicySet(ctx context.Context, set *tfe.PolicySet) error {
 	err := c.mutableValue(ctx, c.env.Store().PolicySetFile(set.ID, "policy-set.json"), set)
 	if err != nil {
 		return err
 	}
 
+	err = c.archivePolicySetVersions(ctx, set)
+	if err != nil {
+		return err
+	}
+
 	return c.collectPolicySetParameters(ctx, set.ID)
+}
+
+// archivePolicySetVersions archives the hydrated current and newest version
+// metadata already carried on the listed policy set.
+//
+// The parent renders both version relations as bare id refs, so each is archived
+// directly as its own primary object to keep the sideloaded attributes. When the
+// current and newest ids are equal the two files carry identical content; the
+// role each names is the information worth keeping.
+func (c *Collector) archivePolicySetVersions(ctx context.Context, set *tfe.PolicySet) error {
+	st := c.env.Store()
+
+	if set.CurrentVersion != nil {
+		err := c.mutableValue(ctx, st.PolicySetFile(set.ID, "current-version.json"), set.CurrentVersion)
+		if err != nil {
+			return err
+		}
+	}
+
+	if set.NewestVersion != nil {
+		err := c.mutableValue(ctx, st.PolicySetFile(set.ID, "newest-version.json"), set.NewestVersion)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // collectPolicySetParameters archives the parameters of one policy set.

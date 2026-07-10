@@ -12,19 +12,17 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/collect/orgscope"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/store"
-	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // orgFixture builds an org-scoped collector over a temp-dir store and ledger, so
-// the value-in-hand archive paths can be exercised without a network. Pass a
-// non-nil client only for a path that actually fetches.
+// the value-in-hand archive paths can be exercised without a network.
 type orgFixture struct {
 	collector *orgscope.Collector
 	store     *store.Store
 	ledger    *manifest.Ledger
 }
 
-func newOrgFixture(t *testing.T, client *tfeclient.Client) orgFixture {
+func newOrgFixture(t *testing.T) orgFixture {
 	t.Helper()
 
 	root := t.TempDir()
@@ -36,7 +34,7 @@ func newOrgFixture(t *testing.T, client *tfeclient.Client) orgFixture {
 	ledger.StartRun()
 
 	return orgFixture{
-		collector: orgscope.New(collect.NewEnv(client, st, ledger), "example-org"),
+		collector: orgscope.New(collect.NewEnv(nil, st, ledger), "example-org"),
 		store:     st,
 		ledger:    ledger,
 	}
