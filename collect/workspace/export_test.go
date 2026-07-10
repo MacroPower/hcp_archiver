@@ -31,6 +31,12 @@ func (c *Collector) ArchiveApply(ctx context.Context, project, ws string, run *t
 	return c.archiveApply(ctx, project, ws, run)
 }
 
+// ArchiveTFPolicyOutcomes exposes archiveTFPolicyOutcomes to the external test
+// package.
+func (c *Collector) ArchiveTFPolicyOutcomes(ctx context.Context, project, ws string, run *tfe.Run) error {
+	return c.archiveTFPolicyOutcomes(ctx, project, ws, run)
+}
+
 // ArchiveStateVersion exposes archiveStateVersion to the external test package.
 func (c *Collector) ArchiveStateVersion(
 	ctx context.Context,

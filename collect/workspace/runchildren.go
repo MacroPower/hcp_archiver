@@ -291,50 +291,94 @@ func (c *Collector) archiveTaskStages(ctx context.Context, project, ws string, r
 }
 
 // archiveTFPolicyOutcomes archives the native Terraform policy-evaluation
-// outcomes, read per evaluation on the run and aggregated into one file.
+// metadata and, read per evaluation on the run, its aggregated set outcomes.
+//
+// The run include hydrates the evaluations, but the run renders them as bare id
+// refs, so one run read is split into tf-policy-evaluations.json (the hydrated
+// evaluations) and tf-policy-outcomes.json (the per-evaluation outcomes). The
+// read is gated on either derived file. A run with no native policy evaluations
+// settles both as not-applicable rather than writing an empty outcomes list.
 func (c *Collector) archiveTFPolicyOutcomes(ctx context.Context, project, ws string, run *tfe.Run) error {
 	st := c.env.Store()
-	relPath := st.RunFile(project, ws, run.ID, "tf-policy-outcomes.json")
+	evalPath := st.RunFile(project, ws, run.ID, "tf-policy-evaluations.json")
+	outPath := st.RunFile(project, ws, run.ID, "tf-policy-outcomes.json")
 	runID := run.ID
 
-	return wrapArchive(relPath, c.env.Object(ctx, relPath, func(ctx context.Context) (any, error) {
-		evaluated, err := doRead(ctx, c, relPath, func(ctx context.Context, tc *tfe.Client) (*tfe.Run, error) {
-			return tc.Runs.ReadWithOptions(ctx, runID, &tfe.RunReadOptions{
-				Include: []tfe.RunIncludeOpt{tfe.RunTFPolicyEvaluation},
-			})
+	if !c.env.ShouldFetch(evalPath) && !c.env.ShouldFetch(outPath) {
+		return nil
+	}
+
+	evaluated, err := doRead(ctx, c, outPath, func(ctx context.Context, tc *tfe.Client) (*tfe.Run, error) {
+		return tc.Runs.ReadWithOptions(ctx, runID, &tfe.RunReadOptions{
+			Include: []tfe.RunIncludeOpt{tfe.RunTFPolicyEvaluation},
 		})
-		if err != nil {
-			return nil, err
+	})
+	if err != nil {
+		// The run read feeds both files, so record both errored; each self-gates so
+		// a settled path is left untouched.
+		recErr := c.recordErrored(ctx, evalPath, err)
+		if recErr != nil {
+			return recErr
 		}
 
-		var out []*tfe.TFPolicySetOutcome
+		return c.recordErrored(ctx, outPath, err)
+	}
 
-		for _, eval := range evaluated.TFPolicyEvaluations {
-			evalID := eval.ID
+	if len(evaluated.TFPolicyEvaluations) == 0 {
+		c.env.NotApplicable(evalPath)
+		c.env.NotApplicable(outPath)
 
-			items, listErr := paginateAll(
-				ctx,
-				c,
-				func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.TFPolicySetOutcome, *tfe.Pagination, error) {
-					l, e := tc.TFPolicyEvaluationOutcomes.List(
-						ctx,
-						evalID,
-						&tfe.TFPolicyEvaluationListOptions{ListOptions: o},
-					)
-					if e != nil {
-						return nil, nil, fmt.Errorf("list tf policy outcomes: %w", e)
-					}
+		return nil
+	}
 
-					return l.Items, l.Pagination, nil
-				},
-			)
-			if listErr != nil {
-				return nil, listErr
-			}
+	// The evaluations are in hand, so archive them regardless of whether the
+	// outcomes pagination below succeeds.
+	err = c.object(ctx, evalPath, evaluated.TFPolicyEvaluations)
+	if err != nil {
+		return err
+	}
 
-			out = append(out, items...)
+	return c.archiveTFPolicyOutcomeSet(ctx, outPath, evaluated.TFPolicyEvaluations)
+}
+
+// archiveTFPolicyOutcomeSet paginates each evaluation's set outcomes and archives
+// them aggregated at outPath.
+//
+// The run read already succeeded and the evaluations were written, so a
+// pagination failure here records only outPath errored (via the self-gating
+// Object) rather than stranding the evaluations behind it.
+func (c *Collector) archiveTFPolicyOutcomeSet(
+	ctx context.Context,
+	outPath string,
+	evals []*tfe.TFPolicyEvaluation,
+) error {
+	var out []*tfe.TFPolicySetOutcome
+
+	for _, eval := range evals {
+		evalID := eval.ID
+
+		items, listErr := paginateAll(
+			ctx,
+			c,
+			func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.TFPolicySetOutcome, *tfe.Pagination, error) {
+				l, e := tc.TFPolicyEvaluationOutcomes.List(
+					ctx,
+					evalID,
+					&tfe.TFPolicyEvaluationListOptions{ListOptions: o},
+				)
+				if e != nil {
+					return nil, nil, fmt.Errorf("list tf policy outcomes: %w", e)
+				}
+
+				return l.Items, l.Pagination, nil
+			},
+		)
+		if listErr != nil {
+			return c.recordErrored(ctx, outPath, listErr)
 		}
 
-		return out, nil
-	}))
+		out = append(out, items...)
+	}
+
+	return c.object(ctx, outPath, out)
 }

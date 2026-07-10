@@ -155,3 +155,62 @@ func TestArchiveApplySummary(t *testing.T) {
 	assert.InDelta(t, 5, attrs["resource-additions"], 0)
 	assert.InDelta(t, 2, attrs["resource-changes"], 0)
 }
+
+func TestArchiveTFPolicyOutcomes(t *testing.T) {
+	t.Parallel()
+
+	hydrated := &tfe.Run{
+		ID:                  "run-1",
+		TFPolicyEvaluations: []*tfe.TFPolicyEvaluation{{ID: "eval-1", Status: tfe.TFPolicyEvaluationStatusPassed}},
+	}
+	outcome := &tfe.TFPolicySetOutcome{ID: "out-1", PolicySetName: "prod-guardrails"}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/runs/run-1", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONAPI(t, w, marshalJSONAPI(t, hydrated))
+	})
+	mux.HandleFunc("/api/v2/tf-policy-evaluations/eval-1/tf-policy-set-outcomes",
+		func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONAPI(t, w, marshalJSONAPI(t, []*tfe.TFPolicySetOutcome{outcome}))
+		})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+
+	require.NoError(t, f.collector.ArchiveTFPolicyOutcomes(t.Context(), "proj", "ws", &tfe.Run{ID: "run-1"}))
+
+	// The hydrated evaluations are archived as their own file, not dropped as bare
+	// id refs, alongside their aggregated set outcomes.
+	assert.Equal(t, []string{"eval-1"}, f.dataIDs(t, st.RunFile("proj", "ws", "run-1", "tf-policy-evaluations.json")))
+	assert.Equal(t, []string{"out-1"}, f.dataIDs(t, st.RunFile("proj", "ws", "run-1", "tf-policy-outcomes.json")))
+}
+
+func TestArchiveTFPolicyOutcomesNoEvaluations(t *testing.T) {
+	t.Parallel()
+
+	// The common no-policy run has no native evaluations: both files settle a
+	// not-applicable gap rather than writing an empty {"data":[]} outcomes list.
+	hydrated := &tfe.Run{ID: "run-2"}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/runs/run-2", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONAPI(t, w, marshalJSONAPI(t, hydrated))
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+
+	require.NoError(t, f.collector.ArchiveTFPolicyOutcomes(t.Context(), "proj", "ws", &tfe.Run{ID: "run-2"}))
+
+	evalPath := st.RunFile("proj", "ws", "run-2", "tf-policy-evaluations.json")
+	outPath := st.RunFile("proj", "ws", "run-2", "tf-policy-outcomes.json")
+
+	assert.Equal(t, manifest.StatusNotApplicable, f.status(evalPath))
+	assert.Equal(t, manifest.StatusNotApplicable, f.status(outPath))
+
+	for _, p := range []string{evalPath, outPath} {
+		exists, err := st.Exists(p)
+		require.NoError(t, err)
+		assert.False(t, exists, "%s should not be written for a no-policy run", p)
+	}
+}

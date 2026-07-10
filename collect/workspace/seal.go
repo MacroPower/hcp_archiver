@@ -38,6 +38,7 @@ var (
 		"run-events.json":             "run-events.ndjson",
 		"policy-checks.json":          "policy-checks.ndjson",
 		"task-stages.json":            "task-stages.ndjson",
+		"tf-policy-evaluations.json":  "tf-policy-evaluations.ndjson",
 		"tf-policy-outcomes.json":     "tf-policy-outcomes.ndjson",
 	}
 )

@@ -100,6 +100,32 @@ func (f wsFixture) preSettle(relPath string) {
 	f.ledger.RecordDone(relPath, manifest.Signature{Size: 1})
 }
 
+// dataIDs reads relPath, asserts it is recorded done, and returns the ids of its
+// jsonapi list document in order.
+func (f wsFixture) dataIDs(t *testing.T, relPath string) []string {
+	t.Helper()
+
+	assert.Equal(t, manifest.StatusDone, f.status(relPath), "%s should be recorded done", relPath)
+
+	got, err := os.ReadFile(f.store.AbsPath(relPath))
+	require.NoError(t, err, "%s should be written", relPath)
+
+	var doc struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+
+	require.NoError(t, json.Unmarshal(got, &doc), "%s should be a jsonapi list", relPath)
+
+	ids := make([]string, len(doc.Data))
+	for i, d := range doc.Data {
+		ids[i] = d.ID
+	}
+
+	return ids
+}
+
 // marshalJSONAPI renders model as a JSON:API document, sideloading its hydrated
 // relations into the included array the go-tfe client links back on read.
 func marshalJSONAPI(t *testing.T, model any) string {
