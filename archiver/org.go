@@ -98,7 +98,9 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) error {
 	go func() {
 		defer wg.Done()
 
-		rerr := reporter.Run(orgCtx, a.cfg.ProgressInterval)
+		// The interval is already configured via WithInterval above; a non-positive
+		// value here falls back to it, so it need not be passed again.
+		rerr := reporter.Run(orgCtx, 0)
 		if rerr != nil {
 			a.logger.LogAttrs(orgCtx, slog.LevelWarn, "progress_report_error",
 				slog.String("org", orgName),
