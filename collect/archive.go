@@ -96,14 +96,42 @@ func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Conte
 		return nil
 	}
 
-	res, err := e.store.WriteReader(relPath, buffered)
+	// Distinguish a mid-stream read failure from a local write failure: the
+	// recorder remembers a non-EOF read error so it routes through the fetch
+	// classification (a stalled network read records errored+transient) rather
+	// than being mislabeled a non-transient write failure.
+	rec := &recordingReader{r: buffered}
+
+	res, err := e.store.WriteReader(relPath, rec)
 	if err != nil {
+		if rec.err != nil {
+			return e.fail(ctx, relPath, rec.err)
+		}
+
 		return e.failWrite(ctx, relPath, err)
 	}
 
 	e.recordDone(relPath, res)
 
 	return nil
+}
+
+// recordingReader remembers the first non-EOF error its reads return, so a
+// streaming write that fails can tell a source read error apart from a store
+// write error.
+type recordingReader struct {
+	r   io.Reader
+	err error
+}
+
+// Read delegates and records the first non-EOF error.
+func (r *recordingReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) && r.err == nil {
+		r.err = err
+	}
+
+	return n, err //nolint:wrapcheck // A transparent reader wrapper.
 }
 
 // Bytes archives a single immutable blob already held in memory at relPath.

@@ -85,6 +85,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) error {
 		progress.WithInterval(a.cfg.ProgressInterval),
 		progress.WithInterrupt(a.cancelRun),
 		progress.WithLogSink(a.logSink),
+		progress.WithWireBytes(a.wireBytes),
 	)
 
 	ledger.StartRun()

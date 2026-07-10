@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -53,6 +54,7 @@ type Reporter struct {
 	now        func() time.Time
 	ttyForce   *bool
 	interrupt  func()
+	wireBytes  *atomic.Int64
 	tasks      map[*Task]struct{}
 	mode       config.ProgressMode
 	phase      string
@@ -73,6 +75,7 @@ type Reporter struct {
 //   - [WithInput]
 //   - [WithLogSink]
 //   - [WithInterrupt]
+//   - [WithWireBytes]
 type Option func(*Reporter)
 
 // WithInterval sets the default cadence used by [Reporter.Run] when it is
@@ -141,6 +144,18 @@ func WithLogSink(sink LogSink) Option {
 func WithInterrupt(fn func()) Option {
 	return func(r *Reporter) {
 		r.interrupt = fn
+	}
+}
+
+// WithWireBytes sets the shared counter of raw response-body bytes read off
+// the wire, which the terminal UI's throughput window samples so the rate
+// reads live while a large transfer is still in flight rather than only when
+// whole objects commit. The displayed byte total stays the tally's committed
+// archive bytes; only the rate's source changes. A nil counter keeps the rate
+// sourced from committed bytes. It returns an [Option].
+func WithWireBytes(counter *atomic.Int64) Option {
+	return func(r *Reporter) {
+		r.wireBytes = counter
 	}
 }
 
@@ -376,6 +391,7 @@ type snapshot struct {
 	elapsed      time.Duration
 	phaseElapsed time.Duration
 	rate         float64
+	wireBytes    int64
 	total        int
 	completed    int
 }
@@ -435,6 +451,13 @@ func (r *Reporter) take() snapshot {
 		rate = float64(t.BytesDownloaded) / elapsed.Seconds()
 	}
 
+	// Without a wire counter the committed bytes stand in, so the terminal UI's
+	// throughput window still moves for a reporter built without the option.
+	wire := t.BytesDownloaded
+	if r.wireBytes != nil {
+		wire = r.wireBytes.Load()
+	}
+
 	return snapshot{
 		tally:        t,
 		phase:        r.phase,
@@ -442,6 +465,7 @@ func (r *Reporter) take() snapshot {
 		elapsed:      elapsed,
 		phaseElapsed: now.Sub(r.phaseStart),
 		rate:         rate,
+		wireBytes:    wire,
 		total:        r.total,
 		completed:    r.completed,
 	}

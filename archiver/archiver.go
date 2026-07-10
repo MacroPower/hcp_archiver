@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/config"
@@ -34,6 +35,7 @@ type Archiver struct {
 	w             io.Writer
 	logSink       progress.LogSink
 	cancelRun     context.CancelFunc
+	wireBytes     *atomic.Int64
 	flushInterval time.Duration
 }
 
@@ -98,6 +100,7 @@ func New(cfg *config.Config, opts ...Option) *Archiver {
 	a := &Archiver{
 		cfg:           cfg,
 		w:             os.Stderr,
+		wireBytes:     new(atomic.Int64),
 		flushInterval: defaultFlushInterval,
 	}
 
@@ -128,9 +131,12 @@ func (a *Archiver) Run(ctx context.Context) error {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
+	// Orgs run sequentially and each reporter windows deltas of the counter, so
+	// one shared monotonic wire-byte counter serves the whole run.
 	a.client, err = tfeclient.New(
 		tfeclient.WithToken(a.cfg.Token),
 		tfeclient.WithAddress(a.cfg.Address),
+		tfeclient.WithWireBytes(a.wireBytes),
 	)
 	if err != nil {
 		return fmt.Errorf("build client: %w", err)

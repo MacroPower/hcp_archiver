@@ -181,9 +181,12 @@ func (m *tuiModel) View() tea.View {
 }
 
 // observe appends one throughput sample and trims the window's tail, keeping at
-// least two samples so a rate can always be derived once ticks have flowed.
+// least two samples so a rate can always be derived once ticks have flowed. It
+// samples the snapshot's wire-byte figure (the shared wire counter when the
+// reporter has one, committed bytes otherwise), so the rate reads live while a
+// large object is still streaming and decays to zero only on true silence.
 func (m *tuiModel) observe(snap snapshot) {
-	m.samples = append(m.samples, rateSample{at: snap.elapsed, bytes: snap.tally.BytesDownloaded})
+	m.samples = append(m.samples, rateSample{at: snap.elapsed, bytes: snap.wireBytes})
 
 	for len(m.samples) > 2 && m.samples[len(m.samples)-1].at-m.samples[0].at > rateWindow {
 		m.samples = m.samples[1:]

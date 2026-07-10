@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/hashicorp/go-tfe"
@@ -291,6 +293,57 @@ func TestEnvBlobEmptyIsNotApplicable(t *testing.T) {
 	assert.False(t, exists, "no file is written for an empty payload")
 
 	assert.Equal(t, int64(0), ledger.Tally().BytesDownloaded)
+}
+
+func TestEnvBlobMidStreamReadErrorRecordsTransient(t *testing.T) {
+	t.Parallel()
+
+	// A stream that yields bytes and then fails with a network timeout is a fetch
+	// failure, not a local write failure: it must route through the fetch
+	// classification and record errored+transient so a re-run retries it and the
+	// failure log names the real cause.
+	const relPath = "projects/example/workspaces/ws/runs/run-1/apply.log"
+
+	env, st, ledger := newEnv(t)
+
+	err := env.Blob(t.Context(), relPath, func(_ context.Context) (io.Reader, error) {
+		return io.MultiReader(strings.NewReader("partial"), iotest.ErrReader(timeoutError{})), nil
+	})
+	require.NoError(t, err)
+
+	entry, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, entry.Status)
+	assert.True(t, entry.Transient, "a mid-stream network stall is recorded transient")
+	assert.Contains(t, entry.LastError, "i/o timeout", "the read error, not the write wrapper, is recorded")
+
+	exists, existErr := st.Exists(relPath)
+	require.NoError(t, existErr)
+	assert.False(t, exists, "a failed stream commits no file")
+}
+
+func TestEnvBlobWriteFailureRecordsNonTransient(t *testing.T) {
+	t.Parallel()
+
+	// A write that fails with a healthy stream is a local store failure: it stays
+	// errored+non-transient, distinct from the transient fetch class above. A
+	// regular file squatting on the parent path makes the write fail without
+	// touching the reader.
+	env, st, ledger := newEnv(t)
+
+	require.NoError(t, os.WriteFile(st.AbsPath("blocker"), []byte("x"), 0o600))
+
+	const relPath = "blocker/apply.log"
+
+	err := env.Blob(t.Context(), relPath, func(_ context.Context) (io.Reader, error) {
+		return strings.NewReader("payload"), nil
+	})
+	require.NoError(t, err)
+
+	entry, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, entry.Status)
+	assert.False(t, entry.Transient, "a local write failure is not transient")
 }
 
 // walkItem is a listed element the walk describes and archives.

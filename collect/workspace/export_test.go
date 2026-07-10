@@ -20,6 +20,17 @@ func (c *Collector) ArchiveStateVersion(
 	return c.archiveStateVersion(ctx, project, ws, sv)
 }
 
+// CollectStateVersions exposes collectStateVersions to the external test
+// package.
+func (c *Collector) CollectStateVersions(
+	ctx context.Context,
+	project string,
+	ws *tfe.Workspace,
+	progress func(n int),
+) error {
+	return c.collectStateVersions(ctx, project, ws, progress)
+}
+
 // StateVersionTerminal exposes stateVersionTerminal to the external test package.
 func StateVersionTerminal(status tfe.StateVersionStatus) bool {
 	return stateVersionTerminal(status)

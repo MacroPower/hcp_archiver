@@ -17,24 +17,24 @@
 //
 // The panel's bar tracks unit progress, a per-phase weighted count the archiver
 // sets and advances, distinct from the object tally. During the workspaces phase
-// each workspace is weighted by one plus its run count, so the bar reflects real
-// work and reaches 100% as the last workspace finishes; phases with no cheap
-// pre-count show a spinner instead. Long work items register as a [Task], whose
-// unit advances flow into the phase bar as they land, so one huge workspace
-// cannot park the bar for its whole duration. While tasks are in flight, the
-// panel lists each one under the combined phase bar on its own line (bar,
-// percent, unit fraction, and name), in registration order so rows hold still,
-// and caps the list to a screenful with the overflow counted. The target stays
-// empty while
-// tasks name the work: workspaces archive concurrently, so no single name is
-// the target. The line-oriented modes stay single-line and report the item with
-// the most remaining work: logfmt as completed=x/y with an eta once units have
-// landed (plus task=, taskCompleted=, and tasks= while items are in flight),
-// and JSON as phaseTotal and phaseCompleted with task, taskTotal,
-// taskCompleted, and tasksActive, each present only while determinate. A final
-// summary prints when the run ends with the totals per status class and the
-// wall time; the archiver logs each object still errored or forbidden in full
-// just above it, so failure text is never truncated to fit the panel.
+// each workspace is weighted by one plus its probed run and state-version
+// counts, so the bar reflects real work and reaches 100% as the last workspace
+// finishes; phases with no cheap pre-count show a spinner instead. Long work
+// items register as a [Task], whose unit advances flow into the phase bar as
+// they land, so one huge workspace cannot park the bar for its whole duration.
+// While tasks are in flight, the panel lists each one under the combined phase
+// bar on its own line (bar, percent, unit fraction, and name), in registration
+// order so rows hold still, and caps the list to a screenful with the overflow
+// counted. The target stays empty while tasks name the work: workspaces archive
+// concurrently, so no single name is the target. The line-oriented modes stay
+// single-line and report the item with the most remaining work: logfmt as
+// completed=x/y with an eta once units have landed (plus task=, taskCompleted=,
+// and tasks= while items are in flight), and JSON as phaseTotal and
+// phaseCompleted with task, taskTotal, taskCompleted, and tasksActive, each
+// present only while determinate. A final summary prints when the run ends
+// with the totals per status class and the wall time; the archiver logs each
+// object still errored or forbidden in full just above it, so failure text is
+// never truncated to fit the panel.
 //
 // The per-status counts are cumulative: they reflect every object the ledger has
 // recorded by its current status, across runs, so a resumed run opens with the

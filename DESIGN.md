@@ -286,14 +286,16 @@ Notes:
   The bar tracks a per-phase weighted unit count the archiver drives, distinct
   from the object tally: the true object count is discovered only by walking, so
   it cannot seed a bar. During the workspaces phase each workspace is weighted by
-  `1 + RunsCount` (which rides along on the list response, no extra call), a
-  proxy that tracks real work far better than a flat workspaces-done bar and, as
-  numerator and denominator share the weight, reaches exactly 100% when the last
-  workspace finishes; phases with no cheap pre-count (org-scope, registry,
-  stacks, audit) show a spinner. The per-status counts are derived from the same
-  in-memory counters that back the manifest (a single mutex-guarded tally), so
-  they and the ledger's own tally never disagree (the on-disk copy trails only by
-  the last unflushed batch). Those counts are cumulative across runs (every entry
+  one plus its probed run and state-version totals (one `PageSize`-1 list probe
+  of each collection before the workers start, since the advertised `RunsCount`
+  omits speculative runs and can go stale), a weight that tracks real work far
+  better than a flat workspaces-done bar and, as numerator and denominator share
+  the weight, reaches exactly 100% when the last workspace finishes; phases
+  with no cheap pre-count (org-scope, registry, stacks, audit) show a spinner.
+  The per-status counts are derived from the same in-memory counters that back
+  the manifest (a single mutex-guarded tally), so they and the ledger's own
+  tally never disagree (the on-disk copy trails only by the last unflushed
+  batch). Those counts are cumulative across runs (every entry
   counted by its current status), so a resumed run opens with the objects a prior
   run already settled rather than climbing from zero, and is tagged `resumed`; the
   bytes and rate stay per-run. A final summary (totals per status class, wall

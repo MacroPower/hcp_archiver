@@ -25,6 +25,7 @@ type PanelSnapshot struct {
 	Elapsed      time.Duration
 	PhaseElapsed time.Duration
 	Rate         float64
+	WireBytes    int64
 	Total        int
 	Completed    int
 }
@@ -50,9 +51,28 @@ func (ps PanelSnapshot) snap() snapshot {
 		elapsed:      ps.Elapsed,
 		phaseElapsed: ps.PhaseElapsed,
 		rate:         ps.Rate,
+		wireBytes:    ps.WireBytes,
 		total:        ps.Total,
 		completed:    ps.Completed,
 	}
+}
+
+// ObserveThroughput feeds each snapshot to a fresh model's throughput window in
+// turn and returns the rate derived after the last, exposing the wire-byte
+// sampling to tests.
+func ObserveThroughput(snaps []PanelSnapshot) float64 {
+	m := newTUIModel(nil, nil)
+	for i := range snaps {
+		m.observe(snaps[i].snap())
+	}
+
+	return m.throughput(snaps[len(snaps)-1].snap())
+}
+
+// TakeWireBytes exposes the wire-byte figure a snapshot of r carries, so tests
+// can assert both the counter path and the committed-bytes fallback.
+func TakeWireBytes(r *Reporter) int64 {
+	return r.lockedTake().wireBytes
 }
 
 // RenderPanel renders the live two-line panel for ps, using a fresh model so the

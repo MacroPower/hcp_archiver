@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/go-cleanhttp"
@@ -44,11 +45,13 @@ type Client struct {
 // config holds the resolved settings a [Client] is built from.
 type config struct {
 	httpClient            *http.Client
+	wireBytes             *atomic.Int64
 	address               string
 	token                 string
 	limit                 rate.Limit
 	burst                 int
 	responseHeaderTimeout time.Duration
+	idleReadTimeout       time.Duration
 }
 
 // Option configures a [Client] during [New].
@@ -58,6 +61,8 @@ type config struct {
 //   - [WithAddress]
 //   - [WithRateLimit]
 //   - [WithResponseHeaderTimeout]
+//   - [WithIdleReadTimeout]
+//   - [WithWireBytes]
 //   - [WithHTTPClient]
 type Option func(*config)
 
@@ -99,14 +104,42 @@ func WithRateLimit(perSecond float64, burst int) Option {
 // headers (its time to first byte) when [New] builds its own HTTP client, so a
 // stalled connection cannot hang a worker indefinitely. It does not bound the
 // body transfer, so a large streaming state, log, or tarball download still
-// runs uncapped. A non-positive value keeps [DefaultResponseHeaderTimeout], and
-// a caller-supplied [WithHTTPClient] takes precedence over it. Returns an
-// [Option].
+// runs uncapped; each body read's idle wait is bounded separately (see
+// [WithIdleReadTimeout]). A non-positive value keeps
+// [DefaultResponseHeaderTimeout], and a caller-supplied [WithHTTPClient] takes
+// precedence over it. Returns an [Option].
 func WithResponseHeaderTimeout(timeout time.Duration) Option {
 	return func(c *config) {
 		if timeout > 0 {
 			c.responseHeaderTimeout = timeout
 		}
+	}
+}
+
+// WithIdleReadTimeout bounds how long a response body read may sit with no
+// bytes arriving when [New] builds its own HTTP client, so a connection that
+// stalls mid-body cannot hang a worker indefinitely. It is an idle bound, not
+// a total one: a slow but live streaming download is never capped, only
+// silence is. A stalled read fails with an error wrapping [ErrIdleReadTimeout]
+// that classifies as [KindTransient], so a re-run retries the object. A
+// non-positive value keeps [DefaultIdleReadTimeout], and a caller-supplied
+// [WithHTTPClient] takes precedence over it. Returns an [Option].
+func WithIdleReadTimeout(timeout time.Duration) Option {
+	return func(c *config) {
+		if timeout > 0 {
+			c.idleReadTimeout = timeout
+		}
+	}
+}
+
+// WithWireBytes sets a shared counter that accumulates every response-body
+// byte as it is read off the wire when [New] builds its own HTTP client, so a
+// progress view can derive live throughput while a large transfer is still in
+// flight. A nil counter disables counting, and a caller-supplied
+// [WithHTTPClient] takes precedence over it. Returns an [Option].
+func WithWireBytes(counter *atomic.Int64) Option {
+	return func(c *config) {
+		c.wireBytes = counter
 	}
 }
 
@@ -155,6 +188,7 @@ func newConfig(opts []Option) config {
 		limit:                 DefaultRateLimit,
 		burst:                 DefaultBurst,
 		responseHeaderTimeout: DefaultResponseHeaderTimeout,
+		idleReadTimeout:       DefaultIdleReadTimeout,
 	}
 
 	for _, opt := range opts {
@@ -164,23 +198,27 @@ func newConfig(opts []Option) config {
 	return cfg
 }
 
-// resolveHTTPClient returns the caller-supplied HTTP client when one was set, or
-// otherwise builds a pooled client whose transport bounds the time to first
-// byte.
+// resolveHTTPClient returns the caller-supplied HTTP client when one was set,
+// or otherwise builds a pooled client whose transport bounds the time to first
+// byte and each body read's idle wait. A caller-supplied [WithHTTPClient]
+// client is returned as-is, so neither bound nor the wire-byte counter applies
+// to it.
 //
 // Without one, go-tfe falls back to [cleanhttp.DefaultPooledClient], which sets
 // no ResponseHeaderTimeout and leaves Client.Timeout zero, so one stalled
-// connection wedges a worker forever. The body transfer stays unbounded (a
-// non-zero Client.Timeout would cap a legitimately large streaming state, log,
-// or tarball download), so this narrows "hang forever" to the header wait
-// rather than eliminating a mid-body stall.
+// connection wedges a worker forever. A non-zero Client.Timeout would cap a
+// legitimately large streaming state, log, or tarball download, so the body is
+// bounded per read instead: the idleTransport wrapper fails any read that sits
+// past the idle-read timeout with no bytes arriving, closing the last "hang
+// forever" hole while leaving slow-but-alive transfers uncapped.
 //
 // ResponseHeaderTimeout is an HTTP/1 transport setting the HTTP/2 round-tripper
 // ignores, and DefaultPooledTransport force-attempts HTTP/2, which HCP Terraform
 // negotiates over ALPN; left enabled, the header bound would be silently dead on
 // the real connection. HTTP/2 is disabled so the timeout governs the time to
 // first byte over HTTP/1, where multiplexing buys a single rate-limited host
-// little.
+// little. The idle-read bound relies on the same HTTP/1 semantics to unblock a
+// stalled read by closing the connection.
 func resolveHTTPClient(cfg *config) *http.Client {
 	if cfg.httpClient != nil {
 		return cfg.httpClient
@@ -190,7 +228,11 @@ func resolveHTTPClient(cfg *config) *http.Client {
 	tr.ForceAttemptHTTP2 = false
 	tr.ResponseHeaderTimeout = cfg.responseHeaderTimeout
 
-	return &http.Client{Transport: tr}
+	return &http.Client{Transport: &idleTransport{
+		next:        tr,
+		idleTimeout: cfg.idleReadTimeout,
+		wireBytes:   cfg.wireBytes,
+	}}
 }
 
 // TFE returns the underlying go-tfe client so collectors can build closures

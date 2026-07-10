@@ -11,8 +11,16 @@ import (
 
 // collectStateVersions archives the workspace's state versions newest-first.
 // Each state version is immutable once created, so the walk halts as soon as it
-// reaches one already archived.
-func (c *Collector) collectStateVersions(ctx context.Context, project string, ws *tfe.Workspace) error {
+// reaches one already archived. The progress callback, when non-nil, is called
+// with 1 after each state version is handled, including a settled one the
+// primitives skip, so progress tracks the walk itself rather than only fresh
+// downloads.
+func (c *Collector) collectStateVersions(
+	ctx context.Context,
+	project string,
+	ws *tfe.Workspace,
+	progress func(n int),
+) error {
 	st := c.env.Store()
 	key := st.StateVersionDir(project, ws.Name)
 	wsName := ws.Name
@@ -48,7 +56,12 @@ func (c *Collector) collectStateVersions(ctx context.Context, project string, ws
 			CreatedAt: sv.CreatedAt,
 			Terminal:  stateVersionTerminal(sv.Status),
 			Archive: func(ctx context.Context) error {
-				return c.archiveStateVersion(ctx, project, wsName, sv)
+				err := c.archiveStateVersion(ctx, project, wsName, sv)
+				if err == nil && progress != nil {
+					progress(1)
+				}
+
+				return err
 			},
 		}
 	}

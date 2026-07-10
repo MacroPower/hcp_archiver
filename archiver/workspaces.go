@@ -96,13 +96,13 @@ func (a *Archiver) collectWorkspaces(
 	wsc *workspace.Collector,
 	names map[string]string,
 ) error {
-	// Enter the phase indeterminate: the (possibly multi-page) listing below has
-	// no count yet, so the bar is a spinner rather than the projects phase's
-	// stale full bar until the weighted total is known. The target clears for
-	// the whole phase: workspaces archive concurrently, so no single name is
-	// the target, and the per-task progress names each in-flight workspace.
-	// Clearing also keeps the projects phase's last target from lingering into
-	// this phase and beyond.
+	// Enter the phase indeterminate: the (possibly multi-page) listing and the
+	// per-workspace counting pass below have no count yet, so the bar is a
+	// spinner rather than the projects phase's stale full bar until the
+	// weighted total is known. The target clears for the whole phase:
+	// workspaces archive concurrently, so no single name is the target, and the
+	// per-task progress names each in-flight workspace. Clearing also keeps the
+	// projects phase's last target from lingering into this phase and beyond.
 	reporter.SetPhase(phaseWorkspaces)
 	reporter.SetTotal(-1)
 	env.SetTarget("")
@@ -135,14 +135,42 @@ func (a *Archiver) collectWorkspaces(
 		return nil
 	}
 
-	// Weight each workspace by 1 + its run count so the bar tracks real work
-	// (per-workspace effort spans orders of magnitude) and, since numerator and
-	// denominator share the weight, reaches exactly 100% as the last workspace
-	// finishes. RunsCount rides along on the list response, so this costs no
-	// extra call.
+	// Weight each workspace by 1 (its settings) + its probed run and
+	// state-version counts so the bar tracks real work (per-workspace effort
+	// spans orders of magnitude) and, since numerator and denominator share the
+	// weight, reaches exactly 100% as the last workspace finishes. The probes
+	// read each collection's listed total rather than the workspace's advertised
+	// RunsCount, which omits speculative runs and can go stale; an underestimate
+	// would peg the bar at 100% while the excess work drains. The phase total is
+	// still -1 here, so the spinner covers the counting stretch.
+	weights := make([]int, len(workspaces))
+
+	var counters errgroup.Group
+
+	counters.SetLimit(a.cfg.WorkspaceConcurrency)
+
+	for i, ws := range workspaces {
+		counters.Go(func() error {
+			runs, svs := wsc.Counts(ctx, ws)
+			weights[i] = 1 + runs + svs
+
+			return nil
+		})
+	}
+
+	// The counting workers never return an error; each probe falls back to its
+	// own estimate inside Counts.
+	_ = counters.Wait() //nolint:errcheck // Always nil.
+
+	// A cancellation mid-count leaves fallback weights behind; stop here rather
+	// than registering tasks for work that will never run.
+	if ctx.Err() != nil {
+		return fmt.Errorf("count workspaces: %w", ctx.Err())
+	}
+
 	totalWeight := 0
-	for _, ws := range workspaces {
-		totalWeight += 1 + ws.RunsCount
+	for _, w := range weights {
+		totalWeight += w
 	}
 
 	reporter.SetTotal(totalWeight)
@@ -150,19 +178,19 @@ func (a *Archiver) collectWorkspaces(
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(a.cfg.WorkspaceConcurrency)
 
-	for _, ws := range workspaces {
+	for i, ws := range workspaces {
 		g.Go(func() error {
 			project := projectNameFor(names, ws)
 
 			// Track the workspace as a task so the panel can show progress inside
-			// it, and so each run archived advances the phase bar as it lands
+			// it, and so each unit archived advances the phase bar as it lands
 			// rather than the whole weight arriving when the workspace finishes.
 			// The name matches the target's project/workspace form. Done commits
 			// any remainder on every return path (a failed workspace, or a walk
 			// that stopped early on settled history), so the bar still reaches
 			// 100%; deferring keeps that guarantee structural rather than
 			// dependent on statement order above later returns.
-			task := reporter.StartTask(project+"/"+ws.Name, 1+ws.RunsCount)
+			task := reporter.StartTask(project+"/"+ws.Name, weights[i])
 			defer task.Done()
 
 			err := wsc.CollectWorkspace(gctx, project, ws, task.Advance)
