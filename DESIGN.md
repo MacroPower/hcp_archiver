@@ -392,9 +392,8 @@ snapshot once the log has outgrown it, writing the merged snapshot before
 truncating the log, and an unchanged record appends no line, so a re-run's
 archive-then-stop boundary adds nothing. Each shard commits through the same
 temp-write-and-atomic-rename as every other file, so a shard that exists is
-whole. A single-file manifest is read by partitioning its entries onto the same
-relpath prefix; keys map one-to-one, and a shard with no file is re-derived from
-the on-disk tree rather than read as empty.
+whole. A shard with no file is re-derived from the on-disk tree rather than read
+as empty.
 
 ### Sealed cold storage
 

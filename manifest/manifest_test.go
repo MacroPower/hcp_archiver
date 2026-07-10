@@ -29,11 +29,6 @@ func rootShardFiles(root string) (string, string) {
 	return filepath.Join(dir, "snapshot.json"), filepath.Join(dir, "log.ndjson")
 }
 
-// legacyManifest returns the pre-shard single-file manifest path under a root.
-func legacyManifest(root string) string {
-	return filepath.Join(root, "manifest.json")
-}
-
 func TestStatus_String(t *testing.T) {
 	t.Parallel()
 
@@ -106,7 +101,9 @@ func TestLoad_Corrupt(t *testing.T) {
 	t.Parallel()
 
 	path := t.TempDir()
-	require.NoError(t, os.WriteFile(legacyManifest(path), []byte("{ not json"), 0o600))
+	snapshot, _ := rootShardFiles(path)
+	require.NoError(t, os.MkdirAll(filepath.Dir(snapshot), 0o755))
+	require.NoError(t, os.WriteFile(snapshot, []byte("{ not json"), 0o600))
 
 	_, err := manifest.Load(path)
 	require.ErrorIs(t, err, manifest.ErrCorruptManifest)
@@ -120,7 +117,9 @@ func TestLoad_UnknownStatus(t *testing.T) {
 	// load rejects it instead.
 	path := t.TempDir()
 	doc := `{"version":1,"entries":{"a":{"status":"pending","attempts":1}}}`
-	require.NoError(t, os.WriteFile(legacyManifest(path), []byte(doc), 0o600))
+	snapshot, _ := rootShardFiles(path)
+	require.NoError(t, os.MkdirAll(filepath.Dir(snapshot), 0o755))
+	require.NoError(t, os.WriteFile(snapshot, []byte(doc), 0o600))
 
 	_, err := manifest.Load(path)
 	require.ErrorIs(t, err, manifest.ErrCorruptManifest)
@@ -900,47 +899,4 @@ func TestLedger_HasUnsettledUnderIgnoresSyntheticCursor(t *testing.T) {
 
 	assert.False(t, ledger.HasUnsettledUnder("stacks/stk-123/configurations"),
 		"a synthetic id cursor is not a prefix of any entry")
-}
-
-func TestLoad_MigratesLegacyManifest(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-
-	// A pre-shard single-file manifest with a workspace object and an org object.
-	doc := `{"version":1,"runCount":2,"entries":{` +
-		`"projects/p/workspaces/ws/runs/r/run.json":` +
-		`{"firstSeen":"2026-07-08T12:00:00Z","status":"done","attempts":1},` +
-		`"org.json":{"firstSeen":"2026-07-08T12:00:00Z","status":"done","attempts":1}}}`
-	require.NoError(t, os.WriteFile(legacyManifest(root), []byte(doc), 0o600))
-
-	ledger, err := manifest.Load(root)
-	require.NoError(t, err)
-
-	// The legacy state loads, distributed into shards by key.
-	_, ok := ledger.Entry("projects/p/workspaces/ws/runs/r/run.json")
-	assert.True(t, ok)
-
-	_, ok = ledger.Entry("org.json")
-	assert.True(t, ok)
-
-	assert.Equal(t, 2, ledger.RunCount())
-	assert.Equal(t, 2, ledger.Tally().Done)
-
-	// A flush persists the shards and retires the legacy file to .migrated.
-	require.NoError(t, ledger.Flush())
-
-	_, statErr := os.Stat(legacyManifest(root))
-	assert.True(t, os.IsNotExist(statErr), "the legacy manifest is renamed aside")
-
-	_, statErr = os.Stat(legacyManifest(root) + ".migrated")
-	require.NoError(t, statErr, "the legacy manifest is retained as .migrated")
-
-	// A fresh load reads only shards and sees the same state.
-	reloaded, err := manifest.Load(root)
-	require.NoError(t, err)
-
-	_, ok = reloaded.Entry("projects/p/workspaces/ws/runs/r/run.json")
-	assert.True(t, ok)
-	assert.Equal(t, 2, reloaded.RunCount())
 }

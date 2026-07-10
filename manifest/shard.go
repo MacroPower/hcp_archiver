@@ -22,10 +22,6 @@ const snapshotFileName = "snapshot.json"
 // logFileName is a shard's append-only log of changes since its snapshot.
 const logFileName = "log.ndjson"
 
-// legacyManifestName is the pre-shard single-file manifest that a load migrates
-// into shards.
-const legacyManifestName = "manifest.json"
-
 // shardKey routes an archive-relative key (an object's path or an append-mostly
 // collection's high-water-mark key) to the shard that owns it.
 //

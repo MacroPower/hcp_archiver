@@ -71,7 +71,6 @@ type Ledger struct {
 	runStartedAt     time.Time
 	root             string
 	target           string
-	legacyPath       string
 	bytes            int64
 	compactThreshold int64
 	mu               sync.RWMutex
@@ -110,11 +109,9 @@ func WithRecheckAbsent(recheck bool) Option {
 
 // Load reads the sharded manifest under root, or starts empty when none exists.
 //
-// It discovers and loads every shard beneath root, then migrates a legacy
-// single-file manifest.json (with its log) into shards when one is present and
-// the shard layout is still empty. Resume and a clean first run are one code
-// path: a first run simply finds no shards. A shard whose snapshot or log cannot
-// be parsed returns [ErrCorruptManifest].
+// It discovers and loads every shard beneath root. Resume and a clean first run
+// are one code path: a first run simply finds no shards. A shard whose snapshot
+// or log cannot be parsed returns [ErrCorruptManifest].
 func Load(root string, opts ...Option) (*Ledger, error) {
 	l := &Ledger{
 		now:              time.Now,
@@ -148,11 +145,6 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	err = l.migrateLegacy()
-	if err != nil {
-		return nil, err
 	}
 
 	// Validate and seed the cumulative tally from every shard's entries, so a
@@ -228,144 +220,6 @@ func discoverShards(root string) (map[string]string, error) {
 	}
 
 	return out, nil
-}
-
-// migrateLegacy imports a pre-shard single-file manifest into the shard layout.
-//
-// When the shard layout already holds state it is authoritative and the legacy
-// file is only marked for retirement; otherwise the legacy snapshot and its log
-// are read and distributed into shards, marked dirty so the next flush persists
-// them. The legacy file is renamed aside after that flush (see
-// [Ledger.retireLegacy]), so a crash before then simply re-imports it.
-func (l *Ledger) migrateLegacy() error {
-	legacyPath := filepath.Join(l.root, legacyManifestName)
-
-	_, err := os.Stat(legacyPath)
-
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil
-	case err != nil:
-		return fmt.Errorf("stat legacy manifest: %w", err)
-	}
-
-	if l.totalEntries() > 0 || l.rootShard.runCount > 0 {
-		l.legacyPath = legacyPath
-
-		return nil
-	}
-
-	//nolint:gosec // The manifest path is chosen by the operator by design.
-	data, err := os.ReadFile(legacyPath)
-	if err != nil {
-		return fmt.Errorf("read legacy manifest: %w", err)
-	}
-
-	var doc document
-
-	err = json.Unmarshal(data, &doc)
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrCorruptManifest, err)
-	}
-
-	if doc.Version > schemaVersion {
-		return fmt.Errorf("%w: schema version %d is newer than supported %d",
-			ErrCorruptManifest, doc.Version, schemaVersion)
-	}
-
-	recs, err := replayLog(legacyPath + ".log")
-	if err != nil {
-		return err
-	}
-
-	applyLegacyRecords(&doc, recs)
-	l.distributeLegacy(&doc)
-
-	l.legacyPath = legacyPath
-
-	return nil
-}
-
-// distributeLegacy routes a legacy document's state into shards and marks it
-// dirty so the next flush persists it. It runs during [Load], before any worker
-// records, so it needs no lock.
-func (l *Ledger) distributeLegacy(doc *document) {
-	for relPath, e := range doc.Entries {
-		sh := l.shardFor(relPath)
-		sh.entries[relPath] = e
-		sh.dirtyEntries[relPath] = struct{}{}
-	}
-
-	for key, at := range doc.HighWaterMarks {
-		sh := l.shardFor(key)
-		sh.watermarks[key] = at
-		sh.dirtyWatermarks[key] = struct{}{}
-	}
-
-	for key, done := range doc.Completed {
-		if !done {
-			continue
-		}
-
-		sh := l.shardFor(key)
-		sh.completed[key] = true
-		sh.dirtyCompleted[key] = struct{}{}
-	}
-
-	// Settledness is non-monotonic, so its value carries through unconditionally:
-	// a recorded false is as meaningful as a true and must not be dropped.
-	for key, settled := range doc.Settled {
-		sh := l.shardFor(key)
-		sh.settled[key] = settled
-		sh.dirtySettled[key] = struct{}{}
-	}
-
-	l.rootShard.lastRunAt = doc.LastRunAt
-	l.rootShard.runCount = doc.RunCount
-	l.rootShard.lastRun = doc.LastRun
-	l.rootShard.runDirty = true
-}
-
-// applyLegacyRecords merges a legacy manifest's append-only log into its snapshot
-// document, so migration sees the full pre-shard state.
-func applyLegacyRecords(doc *document, recs []walRecord) {
-	if doc.Entries == nil {
-		doc.Entries = make(map[string]*Entry)
-	}
-
-	if doc.HighWaterMarks == nil {
-		doc.HighWaterMarks = make(map[string]time.Time)
-	}
-
-	if doc.Completed == nil {
-		doc.Completed = make(map[string]bool)
-	}
-
-	if doc.Settled == nil {
-		doc.Settled = make(map[string]bool)
-	}
-
-	for i := range recs {
-		rec := &recs[i]
-
-		switch rec.Kind {
-		case walEntry:
-			if rec.Entry != nil {
-				doc.Entries[rec.Path] = rec.Entry
-			}
-
-		case walWatermark:
-			doc.HighWaterMarks[rec.Key] = rec.At
-		case walCompleted:
-			doc.Completed[rec.Key] = true
-		case walSettled:
-			doc.Settled[rec.Key] = rec.Settled
-		case walRun:
-			doc.LastRunAt = rec.LastRunAt
-			doc.RunCount = rec.RunCount
-			doc.LastRun = rec.LastRun
-		}
-	}
 }
 
 // shardFor returns the shard that owns key, creating it if absent. Callers that
@@ -898,11 +752,9 @@ func (l *Ledger) Flush() error {
 		if err != nil {
 			// The drained records never reached the log; put them and every
 			// not-yet-appended shard's records back so a retry re-appends them
-			// rather than dropping the delta (and, mid-migration, retiring the
-			// legacy source over shards that were never persisted). Restore a
-			// pending compaction request too, so a finished run still folds its
-			// shards' logs into their snapshots on the retry rather than leaving
-			// them uncompacted.
+			// rather than dropping the delta. Restore a pending compaction request
+			// too, so a finished run still folds its shards' logs into their
+			// snapshots on the retry rather than leaving them uncompacted.
 			l.mu.Lock()
 
 			for _, rem := range work[i:] {
@@ -944,7 +796,7 @@ func (l *Ledger) Flush() error {
 		}
 	}
 
-	return l.retireLegacy()
+	return nil
 }
 
 // compactShard folds one shard's append-only log back into its snapshot: it
@@ -995,33 +847,6 @@ func (l *Ledger) compactShard(sh *shard) error {
 	sh.snapshotBytes = int64(len(data))
 	sh.logBytes = 0
 	l.mu.Unlock()
-
-	return nil
-}
-
-// retireLegacy renames a migrated single-file manifest aside once its state is
-// durable in the shards, so a later load reads only shards. It is a no-op when
-// no migration is pending.
-func (l *Ledger) retireLegacy() error {
-	l.mu.Lock()
-
-	legacy := l.legacyPath
-	l.legacyPath = ""
-	l.mu.Unlock()
-
-	if legacy == "" {
-		return nil
-	}
-
-	err := os.Rename(legacy, legacy+".migrated")
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("retire legacy manifest: %w", err)
-	}
-
-	err = os.Remove(legacy + ".log")
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("remove legacy manifest log: %w", err)
-	}
 
 	return nil
 }

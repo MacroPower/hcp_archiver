@@ -25,11 +25,6 @@ func (s *Store) Org() string {
 	return cleanJoin("org.json")
 }
 
-// Manifest returns the relative path of the per-object ledger file.
-func (s *Store) Manifest() string {
-	return cleanJoin("manifest.json")
-}
-
 // Memberships returns the relative path of the organization roster file.
 func (s *Store) Memberships() string {
 	return cleanJoin("memberships.json")

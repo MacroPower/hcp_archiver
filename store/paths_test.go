@@ -26,10 +26,6 @@ func TestStore_pathBuilders(t *testing.T) {
 			build: func(s *store.Store) string { return s.Org() },
 			want:  "org.json",
 		},
-		"manifest": {
-			build: func(s *store.Store) string { return s.Manifest() },
-			want:  "manifest.json",
-		},
 		"memberships": {
 			build: func(s *store.Store) string { return s.Memberships() },
 			want:  "memberships.json",
