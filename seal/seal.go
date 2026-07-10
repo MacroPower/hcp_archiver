@@ -310,6 +310,14 @@ func Rollup(rollupPath string, members []Member) error {
 func encodeRollup(members []Member) ([]byte, error) {
 	var buf bytes.Buffer
 
+	// A roll-up must stay greppable, so encode with HTML escaping off. The default
+	// json.Marshal rewrites &, <, and > (and U+2028/U+2029) into \u escapes, which
+	// a raw search over the roll-up would then miss for any content carrying them
+	// (a URL query string, an angle-bracketed tag). Encode also appends the
+	// trailing newline that frames each record.
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+
 	for i := range members {
 		//nolint:gosec // The source path is composed by the caller from its archive root.
 		data, err := os.ReadFile(members[i].Source)
@@ -319,7 +327,7 @@ func encodeRollup(members []Member) ([]byte, error) {
 
 		sum := sha256.Sum256(data)
 
-		encoded, err := json.Marshal(&rollupLine{
+		err = enc.Encode(&rollupLine{
 			Path:    members[i].Name,
 			SHA256:  hex.EncodeToString(sum[:]),
 			Content: string(data),
@@ -327,9 +335,6 @@ func encodeRollup(members []Member) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("encode roll-up line for %q: %w", members[i].Name, err)
 		}
-
-		buf.Write(encoded)
-		buf.WriteByte('\n')
 	}
 
 	return buf.Bytes(), nil
