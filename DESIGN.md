@@ -205,6 +205,11 @@ Notes:
   scope, so they are archived at all three levels: in each
   `projects/<name>/workspaces/<ws>/`, in `projects/<name>/`, and in `teams/<id>/`,
   not just workspaces.
+- **The tree above is the logical namespace**: every object's stable
+  archive-relative path. Physically that namespace is stored as per-workspace
+  ledger shards, coalesced NDJSON roll-ups, and sealed `zip` bundles across two
+  object-store storage classes, all keyed under the same path (see Storage at
+  scale).
 
 ## Behavior decisions
 
@@ -341,6 +346,171 @@ Notes:
     It applies only to jsonapi-tagged objects: `jsonapi.MarshalPayload` requires a
     `jsonapi:"primary"` field, which the plain-`json:` audit-trail and pagination
     types lack, so those stay on the `encoding/json` (snake-case) path.
+
+## Storage at scale
+
+An org with thousands of workspaces, each with hundreds of runs and dozens of
+state versions, produces millions of leaf objects. The tree in Output layout is
+the logical namespace — every object's stable archive-relative path — and that
+namespace is stored physically in two forms that keep it tractable: the ledger is
+partitioned into **per-workspace shards** rather than one document, and frozen
+history is **sealed into compressed, indexed bundles** rather than one file per
+object. Both key on the unchanged archive-relative path, so resume, the
+newest-first early-stop, and the per-collection watermarks (Behavior decisions)
+behave exactly as they do for a single-file, one-file-per-object form.
+
+Two independent pressures shape the two forms, and neither answers the other. A
+single in-RAM `map[relpath]*Entry`, marshaled in full and atomic-rewritten on
+every flush (a 10s cadence) and on shutdown, is a multi-GB document
+re-serialized every ten seconds over a multi-GB resident map at millions of
+entries — a per-tick, per-run cost independent of on-disk size, which sharding
+removes and bundling does not (a bundled run still carries its ~12 ledger
+entries). One file per object is millions of tiny leaves — inode pressure and
+O(files) traversal locally, and on a remote object store a per-object overhead
+(~8KB of name metadata, plus ~32KB of index on Glacier Deep Archive) that
+dominates the bill: at ~2.7M objects the per-object tax is ~37x the ~15GB
+compressed payload, so object count, not bytes, is the cost — which bundling
+removes and sharding does not.
+
+### Sharded ledger
+
+The ledger lives as per-workspace shards co-located with the subtree they index
+(`.../workspaces/<ws>/.ledger/`), a small org-root shard for org-scoped objects,
+and per-`cvID`-prefix sub-shards for the config-version entries (numerous enough
+to reconstitute the monolith on their own). Each entry belongs to the shard named
+by its relpath prefix, so its key is byte-identical to the single-file form and
+every ledger operation — `ShouldFetch`, `Entry`, the frozen early-stop, the
+watermarks and completion flags — is unchanged; only the entry's physical
+location differs. Each shard carries the marks and flags whose keys share its
+prefix, and resident ledger memory is bounded to `concurrency x one shard`: a
+shard loads when its workspace's walk begins and is released when it ends.
+
+A shard is a compacted `snapshot.json` plus an append-only `log.ndjson`.
+Recording an entry appends one newline-terminated line, so no flush re-serializes
+the whole ledger; the terminating newline is the commit marker and a torn
+trailing line is dropped on read. Compaction folds a shard's log into its
+snapshot once the log has outgrown it, writing the merged snapshot before
+truncating the log, and an unchanged record appends no line, so a re-run's
+archive-then-stop boundary adds nothing. Each shard commits through the same
+temp-write-and-atomic-rename as every other file, so a shard that exists is
+whole. A single-file manifest is read by partitioning its entries onto the same
+relpath prefix; keys map one-to-one, and a shard with no file is re-derived from
+the on-disk tree rather than read as empty.
+
+### Sealed cold storage
+
+A **frozen** object — the terminal predicate the append-mostly early-stop already
+uses (a run whose status is terminal with a `done` entry; a state version, which
+is immutable once written) — is sealed into cold storage. Sealing is confined to
+frozen objects, so a mutable or in-flight object is never bundled, and writes
+**write-once, generationally numbered** bundles that are never rewritten: new
+cold history is a new generation, so a re-run's sealing cost is proportional to
+newly-frozen objects rather than to the archive, and a bundle never rewrites to
+trip Deep Archive's 180-day minimum. Both cold transforms key on the
+archive-relative path and are invisible to the collector.
+
+- **Heavy audit-only artifacts pack into bundles.** The per-run logs (`plan.log`,
+  `apply.log`, `cost-estimate.log`, `policy-check-*.log`), `plan.json`, and the
+  raw and json state blobs are byte-heavy and read only during a narrow audit;
+  they live in per-workspace-generation `zip` bundles.
+- **Immutable small metadata coalesces into per-workspace NDJSON roll-ups.** This,
+  not bundling the blobs, is what holds object count down: most _files_ per run
+  are small JSON, so bundling the blobs alone leaves the ~1.6M small JSONs as the
+  floor, while coalescing collapses object count ~90x. `run.json` is the one
+  **mutable** small JSON, dedup-checked and refreshed while a run is in-flight;
+  its seven sibling children and the state-version `meta.json` are immutable and
+  `ShouldFetch`-gated. Coalescing is confined to the seal boundary, where the
+  object is already frozen, single-threaded, and settled, so the append is pure
+  and the relpath stays the ledger key: `run.json` joins `runs.ndjson` once
+  frozen, and the immutable children and `meta.json` coalesce directly.
+  Coalescing at collect time — `run.json` born as a line — would instead invert
+  the relpath-is-the-key coupling, the newest-first early-stop, `WriteJSON`'s
+  parse-free whole-file dedup, and per-object atomicity, so it belongs to the seal
+  boundary. A coalesced line's bytes equal the original file's, so the content
+  signature already in the ledger verifies it at line granularity.
+
+A sidecar index sits beside each bundle, outside it: one NDJSON line per member
+(`relpath`, run/sv id, bundle key, offset, sizes, method, crc32, sha256,
+generation) ties a metadata grep hit to a restorable byte range without opening
+or restoring the bundle. Loose originals are unlinked only once their member
+SHA-256 matches both the ledger signature and the object store's returned
+checksum and the sidecar is written, so the loose copy is canonical until the
+bundle is durable and verified.
+
+### Container format and compression
+
+Bundles are `zip` (Zip64), not `.tar.gz`. A zip's central directory is a member
+index for random access after a restore, per-member framing isolates corruption
+to a single member, and mixed per-member methods let one container **STORE** raw
+state while **DEFLATE**-ing logs — with `grep -a` reading the stored members
+directly and `unzip` readable decades out with no dependency on this tool. Gzip
+is a single non-seekable, non-appendable stream — one member needs the whole
+stream inflated from the front and one bad byte poisons the rest — so it is the
+wrong container here. (Config-version tarballs stay `.tar.gz`; they arrive that
+way from the API and are stored opaque.)
+
+Logs compress (per-member DEFLATE); raw state is stored uncompressed. Per-member
+framing, not compression, bounds bit-rot blast radius to a single member, so with
+the durable copy on a remote object store (11-nines, cross-AZ erasure coding,
+background scrub-and-heal, checksums on write) logs compress freely. Raw state
+stays uncompressed for longevity rather than durability: an uncompressed
+`tfstate.json` is grep-able and tool-independent decades out, and storing the
+irreplaceable state raw costs pennies a month.
+
+### Storage-class tiering
+
+The tiers map onto object-store storage classes and onto how an audit proceeds —
+narrow first, then read one thing. **Standard** holds the search layer: the loose
+mutable workspace files, the NDJSON roll-ups, every sidecar index, and the ledger
+shards — small, listable, zero-latency to grep. **Deep Archive** holds the cold
+bundles, written with the storage class set on the initial `PUT` rather than
+transitioned from Standard, and never as a sub-128KB object (which bills as
+~168KB, the reason small metadata stays in Standard). `logs.zip` and `state.zip`
+are separate per generation, so one restore answers one audit question and a
+plan-log thaw never drags the state along. An audit greps metadata in Standard
+(free, and tighter than a flat tree — one `runs.ndjson` over hundreds of run
+directories), reads the bundle key and member from the sidecar, restores that one
+bundle (~12h, cents), and `unzip`s the member. The greppable surface stays live
+and gets tighter; the trade is that a cold heavy artifact is no longer a
+directly-`cat`-able file, which falls on audit-only artifacts that are rarely
+read.
+
+### What stays loose vs. what seals
+
+| Tier | Objects | Storage class | Form |
+| --- | --- | --- | --- |
+| Loose, mutable, greppable | the 9 per-ws settings files (`workspace.json`, `variables.json`, `tags.json`, team access, notification configs, ...), ledger shards, sidecar indexes | Standard | one file per relpath |
+| Coalesced roll-ups | the 7 immutable run children + state-version `meta.json` + frozen `run.json` | Standard | per-ws `*.ndjson`, keyed by relpath |
+| Cold bundles | `plan.log` / `plan.json` / `apply.log` / `cost-estimate.log` / `policy-check-*.log`; raw + json state | Deep Archive | write-once generational `logs.zip` + `state.zip`, sidecar-indexed |
+
+At 1000 workspaces x 200 frozen runs x 30 state versions (config-version tarballs
+excluded, equal either way), object count holds near ~30k where one file per
+object gives ~2.7M, the compressed backup near ~29GB where the raw tree is
+~137GB, and the per-object tax falls from ~37x the payload to ~0.4x — a
+first-year object-store bill near ~$1.80 against ~$142 for the naive layout. The
+dollars are small; the structural win — request quotas, inventory and listing
+time, restore fees, and managing ~30k rather than ~2.7M objects — is the point,
+and it holds under wide log/state size variance, which moves only payload GB, the
+part the archive tier already prices near zero.
+
+### Physical layout (one workspace)
+
+```
+projects/<project>/workspaces/<ws>/
+  workspace.json  variables.json  readme.md  tags.json ...   # loose, mutable        (Standard)
+  .ledger/
+    snapshot.json                                            # ledger shard, keys = relpaths
+    log.ndjson                                               #   append-only; compacts when log > snapshot
+  rollups/
+    runs.ndjson                                              # frozen run.json, one line each
+    {config-versions,comments,run-events,...}.ndjson         #   the 7 immutable run children
+    state-versions.ndjson                                    #   state-version meta.json
+  bundles/
+    logs.gen0007.zip.sidecar.ndjson                          # index, outside the bundle    (Standard)
+    state.gen0007.zip.sidecar.ndjson
+    logs.gen0007.zip                                         # cold, DEFLATE members        (Deep Archive)
+    state.gen0007.zip                                        #   STORED members
+```
 
 ## Config surface
 
@@ -556,4 +726,6 @@ Pagination pattern: loop `PageNumber` from 1, advance while
   tool version) and the backbone of three required behaviors: resume,
   incremental re-run, and progress reporting, not just a summary. It also
   carries per-run records (`lastRunAt`, `runCount`, summary totals) and the
-  per-collection high-water marks re-runs key on (see Behavior decisions).
+  per-collection high-water marks re-runs key on (see Behavior decisions), and is
+  partitioned into per-workspace shards keyed under the same archive-relative
+  paths (see Storage at scale).
