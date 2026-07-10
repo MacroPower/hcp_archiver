@@ -151,6 +151,43 @@ func TestMarshalRedactsNonStringValue(t *testing.T) {
 	require.True(t, json.Valid(got), "output must be valid JSON")
 }
 
+func TestMarshalRedactsNestedSecret(t *testing.T) {
+	t.Parallel()
+
+	// A secret carried below the top-level struct must still be redacted: the
+	// safety pass descends into nested structs, pointers, and slice elements
+	// rather than stopping at the outermost struct.
+	type inner struct {
+		Token string `json:"token"`
+	}
+
+	type policy struct {
+		Secret string `json:"secret"`
+	}
+
+	type outer struct {
+		Name    string   `json:"name"`
+		Nested  inner    `json:"nested"`
+		Deep    *inner   `json:"deep"`
+		Members []policy `json:"members"`
+	}
+
+	got, err := serialize.Marshal(&outer{
+		Name:    "config",
+		Nested:  inner{Token: "nested-TOKEN-SECRET"},
+		Deep:    &inner{Token: "pointer-TOKEN-SECRET"},
+		Members: []policy{{Secret: "slice-SECRET"}},
+	})
+	require.NoError(t, err)
+
+	out := string(got)
+	assert.NotContains(t, out, "nested-TOKEN-SECRET", "a secret in a nested struct must not leak")
+	assert.NotContains(t, out, "pointer-TOKEN-SECRET", "a secret behind a pointer must not leak")
+	assert.NotContains(t, out, "slice-SECRET", "a secret in a slice element must not leak")
+	assert.Contains(t, out, serialize.Redacted)
+	require.True(t, json.Valid(got), "output must be valid JSON")
+}
+
 func TestMarshalHydratedRelationAsIDRef(t *testing.T) {
 	t.Parallel()
 

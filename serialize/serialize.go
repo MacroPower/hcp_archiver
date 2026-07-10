@@ -36,7 +36,7 @@ var ErrMarshal = fmt.Errorf("serialize")
 func Marshal(v any) ([]byte, error) {
 	v = addressable(v)
 
-	sanitize(reflect.ValueOf(v))
+	sanitize(reflect.ValueOf(v), map[uintptr]bool{})
 
 	if isJSONAPIModel(v) {
 		return marshalJSONAPI(v)
@@ -127,28 +127,43 @@ func deref(t reflect.Type) reflect.Type {
 	return t
 }
 
-// sanitize walks rv, following pointers and into slice or array elements, and
-// applies the safety pass to every struct it reaches.
-func sanitize(rv reflect.Value) {
+// sanitize walks rv, following pointers and into slice, array, and interface
+// elements, and applies the safety pass to every struct it reaches. The seen set
+// records visited pointers so a cycle in a hydrated model graph terminates.
+func sanitize(rv reflect.Value, seen map[uintptr]bool) {
 	if !rv.IsValid() {
 		return
 	}
 
 	switch rv.Kind() {
-	case reflect.Pointer, reflect.Interface:
+	case reflect.Pointer:
 		if rv.IsNil() {
 			return
 		}
 
-		sanitize(rv.Elem())
+		ptr := rv.Pointer()
+		if seen[ptr] {
+			return
+		}
+
+		seen[ptr] = true
+
+		sanitize(rv.Elem(), seen)
+
+	case reflect.Interface:
+		if rv.IsNil() {
+			return
+		}
+
+		sanitize(rv.Elem(), seen)
 
 	case reflect.Slice, reflect.Array:
 		for i := range rv.Len() {
-			sanitize(rv.Index(i))
+			sanitize(rv.Index(i), seen)
 		}
 
 	case reflect.Struct:
-		sanitizeStruct(rv)
+		sanitizeStruct(rv, seen)
 
 	default:
 	}
@@ -156,8 +171,9 @@ func sanitize(rv reflect.Value) {
 
 // sanitizeStruct redacts sensitive and write-only fields and strips ephemeral
 // URLs on a single struct value, recognizing the go-tfe field names rather than
-// enumerating concrete types.
-func sanitizeStruct(rv reflect.Value) {
+// enumerating concrete types. Every other field is walked recursively so a
+// secret carried in a nested struct, pointer, or slice is redacted too.
+func sanitizeStruct(rv reflect.Value, seen map[uintptr]bool) {
 	rt := rv.Type()
 	sensitive := hasSensitiveValue(rv)
 
@@ -177,6 +193,7 @@ func sanitizeStruct(rv reflect.Value) {
 		case isEphemeralURL(name):
 			clearString(fv)
 		default:
+			sanitize(fv, seen)
 		}
 	}
 }
