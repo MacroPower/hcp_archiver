@@ -26,7 +26,7 @@ func (c *Collector) collectOAuthClients(ctx context.Context) error {
 			return l.Items, l.Pagination, nil
 		},
 		func(ctx context.Context, client *tfe.OAuthClient) error {
-			return c.mutableValue(ctx, c.env.Store().OAuthClient(client.ID), client)
+			return c.mutableValue(ctx, c.env.Store().OAuthClientFile(client.ID, "oauth-client.json"), client)
 		},
 	)
 }

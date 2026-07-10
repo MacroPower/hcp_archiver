@@ -110,7 +110,9 @@ func (c *Collector) collectHYOKConfigurations(ctx context.Context) error {
 			return l.Items, l.Pagination, nil
 		},
 		func(ctx context.Context, config *tfe.HYOKConfiguration) error {
-			return c.mutableValue(ctx, c.env.Store().HYOKConfiguration(config.ID), config)
+			relPath := c.env.Store().HYOKConfigurationFile(config.ID, "hyok-configuration.json")
+
+			return c.mutableValue(ctx, relPath, config)
 		},
 	)
 }

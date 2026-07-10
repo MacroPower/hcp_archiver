@@ -30,6 +30,17 @@ func (s *Store) Memberships() string {
 	return cleanJoin("memberships.json")
 }
 
+// User returns the relative path of a user's metadata file, keyed on the user
+// id.
+//
+// A run's created-by, a run event's actor, a team's members, and each
+// membership's user are hydrated User sub-objects; go-tfe exposes no user list,
+// so archiving each one here is the only path to capturing who acted, keyed by
+// id so every one of those references resolves to a single file.
+func (s *Store) User(id string) string {
+	return cleanJoin("users", seg(id)+".json")
+}
+
 // GitHubAppInstallations returns the relative path of the GitHub App VCS
 // installations file.
 func (s *Store) GitHubAppInstallations() string {
@@ -60,10 +71,20 @@ func (s *Store) TeamFile(id, name string) string {
 	return cleanJoin("teams", seg(id), seg(name))
 }
 
-// OAuthClient returns the relative path of a VCS OAuth client file, keyed on
-// its id.
-func (s *Store) OAuthClient(id string) string {
-	return cleanJoin("oauth-clients", seg(id)+".json")
+// OAuthClientFile returns the relative path of a leaf named name under a VCS
+// OAuth client's directory (e.g. oauth-client.json).
+func (s *Store) OAuthClientFile(id, name string) string {
+	return cleanJoin("oauth-clients", seg(id), seg(name))
+}
+
+// OAuthTokenFile returns the relative path of a VCS OAuth token's metadata file
+// under its client's tokens directory, keyed on the token id.
+//
+// The token carries no secret (only its uid, creation time, and service-provider
+// user); a dedicated builder is required because [seg] collapses "/", so the
+// multi-segment tokens/<id> leaf cannot be composed against the client directory.
+func (s *Store) OAuthTokenFile(id, tokenID string) string {
+	return cleanJoin("oauth-clients", seg(id), "tokens", seg(tokenID)+".json")
 }
 
 // VariableSetFile returns the relative path of a leaf named name under a
@@ -100,10 +121,22 @@ func (s *Store) AuditTrailFile(name string) string {
 	return cleanJoin("audit-trails", seg(name))
 }
 
-// HYOKConfiguration returns the relative path of a HYOK configuration file,
-// keyed on its id.
-func (s *Store) HYOKConfiguration(id string) string {
-	return cleanJoin("hyok-configurations", seg(id)+".json")
+// HYOKConfigurationFile returns the relative path of a leaf named name under a
+// HYOK configuration's directory (e.g. hyok-configuration.json,
+// oidc-configuration.json).
+func (s *Store) HYOKConfigurationFile(id, name string) string {
+	return cleanJoin("hyok-configurations", seg(id), seg(name))
+}
+
+// HYOKKeyVersionFile returns the relative path of a HYOK customer key version's
+// file under its configuration's key-versions directory, keyed on the key
+// version id.
+//
+// A dedicated builder is required because [seg] collapses "/", so the
+// multi-segment key-versions/<id> leaf cannot be composed against the
+// configuration directory.
+func (s *Store) HYOKKeyVersionFile(id, kvID string) string {
+	return cleanJoin("hyok-configurations", seg(id), "key-versions", seg(kvID)+".json")
 }
 
 // RegistryModuleFile returns the relative path of a leaf named file under a

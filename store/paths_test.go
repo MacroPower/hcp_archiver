@@ -38,9 +38,13 @@ func TestStore_pathBuilders(t *testing.T) {
 			build: func(s *store.Store) string { return s.TeamFile("team-abc", "team.json") },
 			want:  "teams/team-abc/team.json",
 		},
-		"oauth client": {
-			build: func(s *store.Store) string { return s.OAuthClient("oc-xyz") },
-			want:  "oauth-clients/oc-xyz.json",
+		"oauth client file": {
+			build: func(s *store.Store) string { return s.OAuthClientFile("oc-xyz", "oauth-client.json") },
+			want:  "oauth-clients/oc-xyz/oauth-client.json",
+		},
+		"oauth token file": {
+			build: func(s *store.Store) string { return s.OAuthTokenFile("oc-xyz", "ot-1") },
+			want:  "oauth-clients/oc-xyz/tokens/ot-1.json",
 		},
 		"variable set file": {
 			build: func(s *store.Store) string { return s.VariableSetFile("vs-1", "variables.json") },
@@ -62,9 +66,17 @@ func TestStore_pathBuilders(t *testing.T) {
 			build: func(s *store.Store) string { return s.AuditTrailFile("config.json") },
 			want:  "audit-trails/config.json",
 		},
-		"hyok configuration": {
-			build: func(s *store.Store) string { return s.HYOKConfiguration("hyok-1") },
-			want:  "hyok-configurations/hyok-1.json",
+		"hyok configuration file": {
+			build: func(s *store.Store) string { return s.HYOKConfigurationFile("hyok-1", "hyok-configuration.json") },
+			want:  "hyok-configurations/hyok-1/hyok-configuration.json",
+		},
+		"hyok key version file": {
+			build: func(s *store.Store) string { return s.HYOKKeyVersionFile("hyok-1", "kv-1") },
+			want:  "hyok-configurations/hyok-1/key-versions/kv-1.json",
+		},
+		"user": {
+			build: func(s *store.Store) string { return s.User("user-1") },
+			want:  "users/user-1.json",
 		},
 		"registry module file": {
 			build: func(s *store.Store) string { return s.RegistryModuleFile("ns", "vpc", "aws", "module.json") },
@@ -239,7 +251,10 @@ func TestStore_sanitizationConfinesToRoot(t *testing.T) {
 		s.StateVersionFile("p", "..", time.Unix(0, 0).UTC(), "../../id", "../../../evil"),
 		s.Join("..", "..", "..", "etc", "passwd"),
 		s.Join("/absolute/escape"),
-		s.OAuthClient("../../escape"),
+		s.OAuthClientFile("../../escape", "../../oauth-client.json"),
+		s.OAuthTokenFile("../../escape", "../../ot"),
+		s.HYOKKeyVersionFile("../../escape", "../../kv"),
+		s.User("../../escape"),
 		s.RegistryModuleFile("../../../etc", "..", "../..", "passwd"),
 		s.RegistryProviderFile("../../..", "../../etc", "provider.json"),
 		s.RegistryGPGKey("..", "../../../root/.ssh/authorized_keys"),

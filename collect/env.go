@@ -123,6 +123,15 @@ func (e *Env) IsCollectionComplete(key string) bool {
 	return e.ledger.IsCollectionComplete(key)
 }
 
+// ShouldFetch reports whether the current pass still needs to fetch the object
+// at relPath: a settled object is skipped, while an absent or errored one is
+// fetched. A collector that reads one API object and splits it into several
+// derived files consults it to skip that read once every derived file is
+// settled, so a re-run refetches only while a gap remains.
+func (e *Env) ShouldFetch(relPath string) bool {
+	return e.ledger.ShouldFetch(relPath)
+}
+
 // Collector archives one domain object family into a shared [Env].
 //
 // Each domain package implements it over the [Env] it is constructed with; the
