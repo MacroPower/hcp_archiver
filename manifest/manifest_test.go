@@ -523,6 +523,42 @@ func TestLedger_AppendOnlyFlushLeavesLog(t *testing.T) {
 	assert.True(t, errd.Transient)
 }
 
+func TestLedger_FlushFailureKeepsStateForRetry(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("running as root defeats the read-only directory that forces the append failure")
+	}
+
+	path := t.TempDir()
+
+	ledger, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	ledger.StartRun()
+	ledger.RecordDone("projects/p/workspaces/w/runs/r/run.json", manifest.Signature{Size: 1})
+	ledger.RecordDone("org.json", manifest.Signature{Size: 2})
+
+	// A read-only root makes every shard's log append fail; the delta a flush
+	// drained up front must be restored rather than dropped.
+	require.NoError(t, os.Chmod(path, 0o500))
+	require.Error(t, ledger.Flush(), "an append into a read-only root must fail")
+
+	// A retry after the write barrier lifts must re-append the same delta, so
+	// the records the failed flush drained are still there to persist.
+	require.NoError(t, os.Chmod(path, 0o755))
+	require.NoError(t, ledger.Flush())
+
+	reloaded, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	for _, relPath := range []string{"projects/p/workspaces/w/runs/r/run.json", "org.json"} {
+		entry, ok := reloaded.Entry(relPath)
+		require.True(t, ok, "entry %q survives the failed-then-retried flush", relPath)
+		assert.Equal(t, manifest.StatusDone, entry.Status)
+	}
+}
+
 func TestLedger_CompactionOnFinishClearsLog(t *testing.T) {
 	t.Parallel()
 

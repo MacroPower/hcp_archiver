@@ -774,9 +774,21 @@ func (l *Ledger) Flush() error {
 
 	l.mu.Unlock()
 
-	for _, w := range work {
+	for i, w := range work {
 		n, err := appendLog(w.sh.logPath(), w.recs)
 		if err != nil {
+			// The drained records never reached the log; put them and every
+			// not-yet-appended shard's records back so a retry re-appends them
+			// rather than dropping the delta (and, mid-migration, retiring the
+			// legacy source over shards that were never persisted).
+			l.mu.Lock()
+
+			for _, rem := range work[i:] {
+				rem.sh.restoreDirty(rem.recs)
+			}
+
+			l.mu.Unlock()
+
 			return fmt.Errorf("append shard log %q: %w", w.sh.dir, err)
 		}
 

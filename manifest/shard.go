@@ -253,6 +253,25 @@ func (s *shard) drainDirty() []walRecord {
 	return recs
 }
 
+// restoreDirty re-marks the state carried by recs as dirty, undoing a
+// [shard.drainDirty] whose records never reached the log. It runs under the
+// owning ledger's write lock, so a failed flush can put the shard back and a
+// retry re-appends the same delta rather than dropping it.
+func (s *shard) restoreDirty(recs []walRecord) {
+	for i := range recs {
+		switch recs[i].Kind {
+		case walEntry:
+			s.dirtyEntries[recs[i].Path] = struct{}{}
+		case walWatermark:
+			s.dirtyWatermarks[recs[i].Key] = struct{}{}
+		case walCompleted:
+			s.dirtyCompleted[recs[i].Key] = struct{}{}
+		case walRun:
+			s.runDirty = true
+		}
+	}
+}
+
 // document builds the shard's full snapshot document. It runs under the owning
 // ledger's read lock.
 func (s *shard) document() document {
