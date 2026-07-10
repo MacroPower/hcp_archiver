@@ -20,6 +20,7 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/archiver"
 	"go.jacobcolvin.com/hcp_archiver/config"
 	"go.jacobcolvin.com/hcp_archiver/progress"
+	"go.jacobcolvin.com/hcp_archiver/view"
 )
 
 const appName = "hcp_archiver"
@@ -184,8 +185,42 @@ func newRootCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newVersionCmd())
+	cmd.AddCommand(newViewCmd())
 
 	return cmd
+}
+
+// newViewCmd returns a command that browses an existing archive in an
+// interactive terminal UI mirroring the HCP interface: organizations open into
+// projects, workspaces, runs, and state versions. The directory may be the
+// archive root or a single organization's directory; it defaults to the
+// current directory.
+func newViewCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "view [archive-dir]",
+		Short: "Browse an archive in an interactive terminal UI",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cc *cobra.Command, args []string) error {
+			dir := "."
+			if len(args) == 1 {
+				dir = args[0]
+			}
+
+			ctx, stop := signal.NotifyContext(cc.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
+			err := view.Browse(ctx, dir, cc.InOrStdin(), cc.OutOrStdout())
+			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return nil
+				}
+
+				return err
+			}
+
+			return nil
+		},
+	}
 }
 
 // runArchive resolves the flags into a configuration and archives under a

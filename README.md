@@ -96,6 +96,23 @@ subtree:
 hcp_archiver --output ./archive
 ```
 
+### Browsing an archive
+
+`view` opens an archive in an interactive terminal UI that mirrors the HCP
+interface: an organization opens into its projects, a project into its
+workspaces, and a workspace into its runs, state versions, and variables, with
+any archived document (run summaries, plan and apply logs, raw state, the whole
+file tree) readable in a scrolling viewer. It needs no token and no network.
+
+```bash
+hcp_archiver view ./archive          # the archive root, or one org's directory
+```
+
+Navigation descends with `enter`, returns with `esc`, filters any list with
+`/`, and quits with `q`. The browser reads the archive's physical forms
+transparently, so an object displays the same whether it is still a loose file
+or has been sealed into an NDJSON roll-up or a zip bundle.
+
 ### Resuming and re-running
 
 The output directory is the unit of resume: run the same command again and the

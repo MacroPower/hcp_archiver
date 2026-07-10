@@ -1,0 +1,75 @@
+package view
+
+import (
+	"fmt"
+
+	"charm.land/bubbles/v2/viewport"
+
+	tea "charm.land/bubbletea/v2"
+)
+
+// viewerScreen scrolls one archived document: JSON metadata, a log, or a state
+// blob.
+//
+// Create instances with [newViewerScreen].
+type viewerScreen struct {
+	name string
+	vp   viewport.Model
+}
+
+// newViewerScreen creates a new [viewerScreen] named name (its breadcrumb
+// segment) over content. Long lines soft-wrap, so a log line or a minified
+// document stays readable without horizontal scrolling.
+func newViewerScreen(name, content string) *viewerScreen {
+	vp := viewport.New()
+	vp.SoftWrap = true
+	vp.SetContent(content)
+
+	return &viewerScreen{name: name, vp: vp}
+}
+
+// update handles navigation keys itself and forwards scrolling to the
+// viewport.
+func (s *viewerScreen) update(msg tea.Msg) tea.Cmd {
+	if key, ok := msg.(tea.KeyPressMsg); ok {
+		switch key.String() {
+		case "esc", "backspace":
+			return pop()
+		case "q":
+			return tea.Quit
+		case "g", "home":
+			s.vp.GotoTop()
+
+			return nil
+
+		case "G", "end":
+			s.vp.GotoBottom()
+
+			return nil
+		}
+	}
+
+	var cmd tea.Cmd
+
+	s.vp, cmd = s.vp.Update(msg)
+
+	return cmd
+}
+
+// view renders the viewport over a footer carrying the scroll position and the
+// key hints.
+func (s *viewerScreen) view() string {
+	footer := fmt.Sprintf("%3.f%% · ↑/↓ scroll · g/G top/bottom · esc back · q quit",
+		s.vp.ScrollPercent()*100)
+
+	return s.vp.View() + "\n" + styleFooter.Render(footer)
+}
+
+// crumb names the screen's breadcrumb segment.
+func (s *viewerScreen) crumb() string { return s.name }
+
+// setSize sizes the viewport to the screen body, minus its footer line.
+func (s *viewerScreen) setSize(width, height int) {
+	s.vp.SetWidth(width)
+	s.vp.SetHeight(max(height-1, 0))
+}
