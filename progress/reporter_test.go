@@ -27,8 +27,8 @@ func (f fakeSource) Tally() manifest.Tally {
 	return f.tally
 }
 
-// clockAt returns a clock whose time advances by the values it is given on each
-// call, starting from base.
+// fixedClock returns a clock that yields each of times in turn on successive
+// calls, holding the last value once they are exhausted.
 func fixedClock(times ...time.Time) func() time.Time {
 	i := 0
 
