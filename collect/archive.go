@@ -66,6 +66,17 @@ func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Conte
 		return e.fail(ctx, relPath, err)
 	}
 
+	// A nil reader with no error carries nothing to archive: some readers answer
+	// an absent artifact with a nil body (a 304 Not Modified on a conditional
+	// fetch, a workspace with no readme). Treat it like an empty stream, recording
+	// a settled gap and writing nothing, rather than dereferencing nil in the Peek
+	// below.
+	if r == nil {
+		e.ledger.RecordNotApplicable(relPath)
+
+		return nil
+	}
+
 	// Some clients hand back an [io.ReadCloser] over a live response body (stack
 	// state descriptions, step artifacts); close it once streamed so the
 	// connection and file descriptor are not leaked.
