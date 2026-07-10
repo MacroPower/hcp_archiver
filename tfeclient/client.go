@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
+	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-tfe"
 	"golang.org/x/time/rate"
 )
@@ -20,6 +22,12 @@ const (
 	// limiter.
 	DefaultBurst = 30
 )
+
+// DefaultResponseHeaderTimeout bounds the time [New]'s own HTTP client waits for
+// a response's headers, so a stalled connection cannot wedge a worker (and with
+// it the sequential org loop) forever. It bounds only the time to first byte,
+// not the body, so a large streaming download is not capped.
+const DefaultResponseHeaderTimeout = 60 * time.Second
 
 // Client is the single, worker-safe point of contact with HCP Terraform.
 //
@@ -36,11 +44,12 @@ type Client struct {
 
 // config holds the resolved settings a [Client] is built from.
 type config struct {
-	httpClient *http.Client
-	address    string
-	token      string
-	limit      rate.Limit
-	burst      int
+	httpClient            *http.Client
+	address               string
+	token                 string
+	limit                 rate.Limit
+	burst                 int
+	responseHeaderTimeout time.Duration
 }
 
 // Option configures a [Client] during [New].
@@ -49,6 +58,7 @@ type config struct {
 //   - [WithToken]
 //   - [WithAddress]
 //   - [WithRateLimit]
+//   - [WithResponseHeaderTimeout]
 //   - [WithHTTPClient]
 type Option func(*config)
 
@@ -86,6 +96,21 @@ func WithRateLimit(perSecond float64, burst int) Option {
 	}
 }
 
+// WithResponseHeaderTimeout bounds how long a request waits for the response
+// headers (its time to first byte) when [New] builds its own HTTP client, so a
+// stalled connection cannot hang a worker indefinitely. It does not bound the
+// body transfer, so a large streaming state, log, or tarball download still
+// runs uncapped. A non-positive value keeps [DefaultResponseHeaderTimeout], and
+// a caller-supplied [WithHTTPClient] takes precedence over it. Returns an
+// [Option].
+func WithResponseHeaderTimeout(timeout time.Duration) Option {
+	return func(c *config) {
+		if timeout > 0 {
+			c.responseHeaderTimeout = timeout
+		}
+	}
+}
+
 // WithHTTPClient sets the underlying [*http.Client]. A nil value keeps
 // go-tfe's pooled default. Returns an [Option].
 func WithHTTPClient(hc *http.Client) Option {
@@ -100,15 +125,7 @@ func WithHTTPClient(hc *http.Client) Option {
 // and one shared [rate.Limiter]. It returns [ErrMissingToken] if no token was
 // supplied via [WithToken].
 func New(opts ...Option) (*Client, error) {
-	cfg := config{
-		address: tfe.DefaultAddress,
-		limit:   DefaultRateLimit,
-		burst:   DefaultBurst,
-	}
-
-	for _, opt := range opts {
-		opt(&cfg)
-	}
+	cfg := newConfig(opts)
 
 	if cfg.token == "" {
 		return nil, fmt.Errorf("new client: %w", ErrMissingToken)
@@ -118,7 +135,7 @@ func New(opts ...Option) (*Client, error) {
 		Address:           cfg.address,
 		Token:             cfg.token,
 		RetryServerErrors: true,
-		HTTPClient:        cfg.httpClient,
+		HTTPClient:        resolveHTTPClient(&cfg),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("new tfe client: %w", err)
@@ -128,6 +145,43 @@ func New(opts ...Option) (*Client, error) {
 		tfe:     tc,
 		limiter: rate.NewLimiter(cfg.limit, cfg.burst),
 	}, nil
+}
+
+// newConfig resolves the default settings and applies each option over them.
+func newConfig(opts []Option) config {
+	cfg := config{
+		address:               tfe.DefaultAddress,
+		limit:                 DefaultRateLimit,
+		burst:                 DefaultBurst,
+		responseHeaderTimeout: DefaultResponseHeaderTimeout,
+	}
+
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	return cfg
+}
+
+// resolveHTTPClient returns the caller-supplied HTTP client when one was set, or
+// otherwise builds a pooled client whose transport bounds the time to first
+// byte.
+//
+// Without one, go-tfe falls back to [cleanhttp.DefaultPooledClient], which sets
+// no ResponseHeaderTimeout and leaves Client.Timeout zero, so one stalled
+// connection wedges a worker forever. The body transfer stays unbounded (a
+// non-zero Client.Timeout would cap a legitimately large streaming state, log,
+// or tarball download), so this narrows "hang forever" to the header wait
+// rather than eliminating a mid-body stall.
+func resolveHTTPClient(cfg *config) *http.Client {
+	if cfg.httpClient != nil {
+		return cfg.httpClient
+	}
+
+	tr := cleanhttp.DefaultPooledTransport()
+	tr.ResponseHeaderTimeout = cfg.responseHeaderTimeout
+
+	return &http.Client{Transport: tr}
 }
 
 // TFE returns the underlying go-tfe client so collectors can build closures

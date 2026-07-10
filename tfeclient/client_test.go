@@ -5,8 +5,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/go-tfe"
 	"github.com/stretchr/testify/assert"
@@ -120,6 +122,83 @@ func TestDoInvokesFnAndReturnsError(t *testing.T) {
 		require.Error(t, err)
 		assert.False(t, called)
 	})
+}
+
+func TestResponseHeaderTimeoutBoundsStalledConnection(t *testing.T) {
+	t.Parallel()
+
+	// The server blocks before writing any response header, so with a tiny header
+	// timeout the request must fail promptly rather than hang the worker.
+	release := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		<-release
+	}))
+	// Cleanups run last-registered-first: unblock the handler before closing the
+	// server, so the close does not deadlock on the still-blocked request.
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+
+	client := tfeclient.ResolveHTTPClient(tfeclient.WithResponseHeaderTimeout(50 * time.Millisecond))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+	require.NoError(t, err)
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	elapsed := time.Since(start)
+
+	if resp != nil {
+		require.NoError(t, resp.Body.Close())
+	}
+
+	require.Error(t, err, "a stalled connection must fail rather than hang")
+	assert.Less(t, elapsed, 5*time.Second, "the failure is bounded by the header timeout")
+}
+
+func TestResponseHeaderTimeoutAllowsSlowBody(t *testing.T) {
+	t.Parallel()
+
+	// Headers arrive at once, then the body dribbles out over writes that in total
+	// far exceed the header timeout. The transfer must still succeed: the timeout
+	// bounds only the time to first byte, so large streaming downloads are safe.
+	const chunks = 5
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+
+		for range chunks {
+			time.Sleep(20 * time.Millisecond)
+
+			_, werr := io.WriteString(w, "chunk")
+			if werr != nil {
+				return
+			}
+
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := tfeclient.ResolveHTTPClient(tfeclient.WithResponseHeaderTimeout(10 * time.Millisecond))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+
+	defer func() { assert.NoError(t, resp.Body.Close()) }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, strings.Repeat("chunk", chunks), string(body))
 }
 
 func TestPaginate(t *testing.T) {
