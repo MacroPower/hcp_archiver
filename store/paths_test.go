@@ -72,7 +72,7 @@ func TestStore_pathBuilders(t *testing.T) {
 		},
 		"registry module file": {
 			build: func(s *store.Store) string { return s.RegistryModuleFile("ns", "vpc", "aws", "module.json") },
-			want:  "registry/modules/ns-vpc-aws/module.json",
+			want:  "registry/modules/ns/vpc/aws/module.json",
 		},
 		"registry no-code module": {
 			build: func(s *store.Store) string { return s.RegistryNoCodeModule("nocode-1") },
@@ -80,11 +80,11 @@ func TestStore_pathBuilders(t *testing.T) {
 		},
 		"registry provider file": {
 			build: func(s *store.Store) string { return s.RegistryProviderFile("ns", "aws", "provider.json") },
-			want:  "registry/providers/ns-aws/provider.json",
+			want:  "registry/providers/ns/aws/provider.json",
 		},
 		"registry gpg key": {
 			build: func(s *store.Store) string { return s.RegistryGPGKey("ns", "ABCD1234") },
-			want:  "registry/gpg-keys/ns-ABCD1234.json",
+			want:  "registry/gpg-keys/ns/ABCD1234.json",
 		},
 		"config version tarball": {
 			build: func(s *store.Store) string { return s.ConfigVersionTarball("cv-1") },
@@ -167,6 +167,49 @@ func TestStore_pathBuilders(t *testing.T) {
 	}
 }
 
+func TestStore_registryPathsDoNotCollide(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(t.TempDir())
+
+	// A namespace, name, and provider all legally contain hyphens, so joining them
+	// with a hyphen aliased distinct keys onto one path and one ledger entry.
+	// Nesting each as its own level keeps the two ambiguous tuples distinct.
+	tests := map[string]struct {
+		a string
+		b string
+	}{
+		"module dir": {
+			a: s.RegistryModuleDir("foo-bar", "baz", "aws"),
+			b: s.RegistryModuleDir("foo", "bar-baz", "aws"),
+		},
+		"module file": {
+			a: s.RegistryModuleFile("foo-bar", "baz", "aws", "module.json"),
+			b: s.RegistryModuleFile("foo", "bar-baz", "aws", "module.json"),
+		},
+		"provider dir": {
+			a: s.RegistryProviderDir("foo-bar", "baz"),
+			b: s.RegistryProviderDir("foo", "bar-baz"),
+		},
+		"provider file": {
+			a: s.RegistryProviderFile("foo-bar", "baz", "provider.json"),
+			b: s.RegistryProviderFile("foo", "bar-baz", "provider.json"),
+		},
+		"gpg key": {
+			a: s.RegistryGPGKey("foo-bar", "baz"),
+			b: s.RegistryGPGKey("foo", "bar-baz"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.NotEqual(t, tc.a, tc.b, "distinct registry keys must map to distinct paths")
+		})
+	}
+}
+
 func TestStore_stateVersionStemSortsByCreationTime(t *testing.T) {
 	t.Parallel()
 
@@ -210,6 +253,9 @@ func TestStore_sanitizationConfinesToRoot(t *testing.T) {
 		s.Join("..", "..", "..", "etc", "passwd"),
 		s.Join("/absolute/escape"),
 		s.OAuthClient("../../escape"),
+		s.RegistryModuleFile("../../../etc", "..", "../..", "passwd"),
+		s.RegistryProviderDir("../../..", "../../etc"),
+		s.RegistryGPGKey("..", "../../../root/.ssh/authorized_keys"),
 	}
 
 	for _, rel := range hostile {

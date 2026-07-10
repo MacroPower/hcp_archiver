@@ -129,10 +129,14 @@ func (s *Store) HYOKConfiguration(id string) string {
 	return cleanJoin("hyok-configurations", seg(id)+".json")
 }
 
-// RegistryModuleDir returns the directory for a registry module, keyed on its
-// namespace, name, and provider.
+// RegistryModuleDir returns the directory for a registry module, nesting its
+// namespace, name, and provider as directory levels.
+//
+// Each is its own level rather than one hyphen-joined segment because all three
+// legally contain hyphens, so joining them would alias distinct modules onto one
+// path (and one ledger entry); seg maps "/" to "_", so the nesting is injective.
 func (s *Store) RegistryModuleDir(namespace, name, provider string) string {
-	return cleanJoin("registry", "modules", seg(namespace)+"-"+seg(name)+"-"+seg(provider))
+	return cleanJoin("registry", "modules", seg(namespace), seg(name), seg(provider))
 }
 
 // RegistryModuleFile returns the relative path of a leaf named file under a
@@ -141,7 +145,9 @@ func (s *Store) RegistryModuleFile(namespace, name, provider, file string) strin
 	return cleanJoin(
 		"registry",
 		"modules",
-		seg(namespace)+"-"+seg(name)+"-"+seg(provider),
+		seg(namespace),
+		seg(name),
+		seg(provider),
 		seg(file),
 	)
 }
@@ -152,22 +158,24 @@ func (s *Store) RegistryNoCodeModule(id string) string {
 	return cleanJoin("registry", "no-code-modules", seg(id)+".json")
 }
 
-// RegistryProviderDir returns the directory for a registry provider, keyed on
-// its namespace and name.
+// RegistryProviderDir returns the directory for a registry provider, nesting its
+// namespace and name as directory levels so two providers whose hyphenated
+// namespace and name would otherwise join to the same segment stay distinct.
 func (s *Store) RegistryProviderDir(namespace, name string) string {
-	return cleanJoin("registry", "providers", seg(namespace)+"-"+seg(name))
+	return cleanJoin("registry", "providers", seg(namespace), seg(name))
 }
 
 // RegistryProviderFile returns the relative path of a leaf named file under a
 // registry provider's directory (e.g. provider.json).
 func (s *Store) RegistryProviderFile(namespace, name, file string) string {
-	return cleanJoin("registry", "providers", seg(namespace)+"-"+seg(name), seg(file))
+	return cleanJoin("registry", "providers", seg(namespace), seg(name), seg(file))
 }
 
-// RegistryGPGKey returns the relative path of a registry GPG key file, keyed on
-// its namespace and key id.
+// RegistryGPGKey returns the relative path of a registry GPG key file, nesting
+// its namespace and key id as directory levels so a hyphenated namespace and
+// key id cannot alias onto one path.
 func (s *Store) RegistryGPGKey(namespace, keyID string) string {
-	return cleanJoin("registry", "gpg-keys", seg(namespace)+"-"+seg(keyID)+".json")
+	return cleanJoin("registry", "gpg-keys", seg(namespace), seg(keyID)+".json")
 }
 
 // ConfigVersionTarball returns the relative path of a configuration version
