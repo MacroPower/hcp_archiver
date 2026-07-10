@@ -184,9 +184,9 @@ func (e *Env) recordDone(relPath string, res store.WriteResult) {
 // classifies it so, so a re-run retries it and never mistakes a rate-limit blip
 // for a gone object.
 func (e *Env) fail(ctx context.Context, relPath string, cause error) error {
-	ctxErr := ctx.Err()
-	if ctxErr != nil {
-		return fmt.Errorf("archive %q: %w", relPath, ctxErr)
+	canceled := e.canceled(ctx, relPath)
+	if canceled != nil {
+		return canceled
 	}
 
 	if tfeclient.IsTerminal(cause) {
@@ -210,12 +210,24 @@ func (e *Env) fail(ctx context.Context, relPath string, cause error) error {
 // never a permanent absence, so it records an errored (non-transient) object a
 // re-run retries. A cancellation of the passed context still propagates.
 func (e *Env) failWrite(ctx context.Context, relPath string, cause error) error {
+	canceled := e.canceled(ctx, relPath)
+	if canceled != nil {
+		return canceled
+	}
+
+	e.ledger.RecordErrored(relPath, cause, false)
+
+	return nil
+}
+
+// canceled reports a cancellation of ctx as an archive error, or nil when ctx
+// is still live. Both [Env.fail] and [Env.failWrite] short-circuit on it so a
+// wind-down propagates rather than being recorded as an object's outcome.
+func (e *Env) canceled(ctx context.Context, relPath string) error {
 	ctxErr := ctx.Err()
 	if ctxErr != nil {
 		return fmt.Errorf("archive %q: %w", relPath, ctxErr)
 	}
-
-	e.ledger.RecordErrored(relPath, cause, false)
 
 	return nil
 }
