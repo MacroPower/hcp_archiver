@@ -1,0 +1,203 @@
+package seal_test
+
+import (
+	"archive/zip"
+	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.jacobcolvin.com/hcp_archiver/seal"
+)
+
+// writeSource writes data to name under dir and returns its path.
+func writeSource(t *testing.T, dir, name string, data []byte) string {
+	t.Helper()
+
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+
+	return path
+}
+
+// sha256hex returns the lowercase hex SHA-256 of data.
+func sha256hex(data []byte) string {
+	sum := sha256.Sum256(data)
+
+	return hex.EncodeToString(sum[:])
+}
+
+// extract reads one member's bytes out of a bundle.
+func extract(t *testing.T, bundlePath, name string) []byte {
+	t.Helper()
+
+	zr, err := zip.OpenReader(bundlePath)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, zr.Close()) })
+
+	for _, f := range zr.File {
+		if f.Name != name {
+			continue
+		}
+
+		rc, openErr := f.Open()
+		require.NoError(t, openErr)
+
+		data, readErr := io.ReadAll(rc)
+		require.NoError(t, rc.Close())
+		require.NoError(t, readErr)
+
+		return data
+	}
+
+	t.Fatalf("member %q not found in %s", name, bundlePath)
+
+	return nil
+}
+
+// readSidecar parses a bundle's sidecar index.
+func readSidecar(t *testing.T, path string) []seal.Entry {
+	t.Helper()
+
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, f.Close()) })
+
+	var out []seal.Entry
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
+			continue
+		}
+
+		var e seal.Entry
+
+		require.NoError(t, json.Unmarshal(scanner.Bytes(), &e))
+
+		out = append(out, e)
+	}
+
+	require.NoError(t, scanner.Err())
+
+	return out
+}
+
+func TestSeal_BundlesAndRemovesSources(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	logData := []byte("plan: 3 to add, 0 to change, 0 to destroy\n")
+	stateData := []byte(`{"version":4,"serial":7,"outputs":{}}`)
+
+	planLog := writeSource(t, dir, "plan.log", logData)
+	state := writeSource(t, dir, "state.json", stateData)
+
+	// The bundle lives in a directory the seal creates as it commits.
+	bundlePath := filepath.Join(dir, "bundles", "logs.gen0001.zip")
+
+	entries, err := seal.Seal(bundlePath, []seal.Member{
+		{Name: "runs/r1/plan.log", Source: planLog, Compress: true},
+		{Name: "state-versions/s1.tfstate.json", Source: state, Compress: false},
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+
+	// The bundle and sidecar exist; the loose sources are gone.
+	_, statErr := os.Stat(bundlePath)
+	require.NoError(t, statErr)
+
+	_, statErr = os.Stat(bundlePath + ".sidecar.ndjson")
+	require.NoError(t, statErr)
+
+	for _, src := range []string{planLog, state} {
+		_, statErr = os.Stat(src)
+		assert.True(t, os.IsNotExist(statErr), "the sealed source %s is removed", src)
+	}
+
+	// The entries record the method, size, and a correct digest per member.
+	byName := make(map[string]seal.Entry, len(entries))
+	for _, e := range entries {
+		byName[e.Name] = e
+	}
+
+	assert.Equal(t, "deflate", byName["runs/r1/plan.log"].Method)
+	assert.Equal(t, "store", byName["state-versions/s1.tfstate.json"].Method)
+	assert.Equal(t, int64(len(stateData)), byName["state-versions/s1.tfstate.json"].Size)
+	assert.Equal(t, sha256hex(stateData), byName["state-versions/s1.tfstate.json"].SHA256)
+
+	// Extraction reproduces the original bytes for both methods.
+	assert.Equal(t, logData, extract(t, bundlePath, "runs/r1/plan.log"))
+	assert.Equal(t, stateData, extract(t, bundlePath, "state-versions/s1.tfstate.json"))
+}
+
+func TestSeal_StoredMemberStaysGreppable(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	secret := []byte("outputs.db_password = s3cr3t-value")
+	state := writeSource(t, dir, "state.json", secret)
+
+	bundlePath := filepath.Join(dir, "state.gen0001.zip")
+
+	_, err := seal.Seal(bundlePath, []seal.Member{
+		{Name: "state.json", Source: state, Compress: false},
+	})
+	require.NoError(t, err)
+
+	//nolint:gosec // Reading a test-controlled bundle path.
+	raw, err := os.ReadFile(bundlePath)
+	require.NoError(t, err)
+
+	// A stored member's bytes sit uncompressed in the zip, so a raw byte search
+	// (grep -a) finds the plaintext without decompression.
+	assert.True(t, bytes.Contains(raw, secret), "a stored member stays greppable on disk")
+}
+
+func TestSeal_EmptyMembersWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	bundlePath := filepath.Join(t.TempDir(), "logs.zip")
+
+	entries, err := seal.Seal(bundlePath, nil)
+	require.NoError(t, err)
+	assert.Nil(t, entries)
+
+	_, statErr := os.Stat(bundlePath)
+	assert.True(t, os.IsNotExist(statErr), "no bundle is written for an empty seal")
+}
+
+func TestSeal_SidecarRecordsEveryMember(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	a := writeSource(t, dir, "a.log", []byte("aaa"))
+	b := writeSource(t, dir, "b.log", []byte("bbbb"))
+
+	bundlePath := filepath.Join(dir, "logs.gen0002.zip")
+
+	entries, err := seal.Seal(bundlePath, []seal.Member{
+		{Name: "runs/r/a.log", Source: a, Compress: true},
+		{Name: "runs/r/b.log", Source: b, Compress: true},
+	})
+	require.NoError(t, err)
+
+	sidecar := readSidecar(t, bundlePath+".sidecar.ndjson")
+	require.Len(t, sidecar, len(entries))
+
+	// The sidecar records exactly what Seal returned, keyed for a search that
+	// never opens the zip.
+	assert.Equal(t, entries, sidecar)
+
+	for _, e := range sidecar {
+		assert.Equal(t, "logs.gen0002.zip", e.Bundle)
+	}
+}
