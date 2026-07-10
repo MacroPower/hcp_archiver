@@ -3,9 +3,14 @@ package registry
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
 )
+
+// msgListSkipped is the static log message emitted when a registry list read
+// does not complete and the family is skipped for this run.
+const msgListSkipped = "registry list read did not complete; skipping collection this run"
 
 // Collector archives an organization's private registry: modules, providers,
 // and the GPG public keys that sign them.
@@ -75,14 +80,21 @@ func (c *Collector) Collect(ctx context.Context) error {
 
 // listFailed maps a collection-level list error onto the best-effort contract:
 // a cancellation of ctx propagates so the run can wind down, while any other
-// enumeration failure is swallowed so an unreachable or disabled registry
-// family does not abort the archive (a re-run retries, having recorded nothing
-// settled).
-func (c *Collector) listFailed(ctx context.Context, family string) error {
+// enumeration failure is logged and swallowed so an unreachable or disabled
+// registry family does not abort the archive (a re-run retries, having recorded
+// nothing settled). It is logged, not silent, so an operator sees that a family
+// was omitted this run, matching the org-scoped and stacks collectors.
+func (c *Collector) listFailed(ctx context.Context, family string, cause error) error {
 	ctxErr := ctx.Err()
 	if ctxErr != nil {
 		return fmt.Errorf("list registry %s: %w", family, ctxErr)
 	}
+
+	slog.WarnContext(ctx, msgListSkipped,
+		slog.String("family", family),
+		slog.String("org", c.org),
+		slog.Any("error", cause),
+	)
 
 	return nil
 }

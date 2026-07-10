@@ -29,7 +29,7 @@ func (c *Collector) collectModules(ctx context.Context) error {
 		},
 	)
 	if err != nil {
-		return c.listFailed(ctx, "modules")
+		return c.listFailed(ctx, "modules", err)
 	}
 
 	for _, mod := range modules {

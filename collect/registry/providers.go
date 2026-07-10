@@ -30,7 +30,7 @@ func (c *Collector) collectProviders(ctx context.Context) error {
 		},
 	)
 	if err != nil {
-		return c.listFailed(ctx, "providers")
+		return c.listFailed(ctx, "providers", err)
 	}
 
 	for _, prov := range providers {
@@ -88,7 +88,7 @@ func (c *Collector) archiveProviderDetail(ctx context.Context, prov *tfe.Registr
 		},
 	)
 	if err != nil {
-		return c.listFailed(ctx, "provider-versions")
+		return c.listFailed(ctx, "provider-versions", err)
 	}
 
 	for _, ver := range versions {
