@@ -825,13 +825,25 @@ func (l *Ledger) Flush() error {
 // writes the shard's full document via an atomic temp-and-rename, then removes
 // the log, so the snapshot alone reflects the shard and its log starts empty.
 //
-// The snapshot is written before the log is removed, so a crash between the two
-// leaves the log's records applied on top of a complete snapshot rather than
-// losing them; because a shard's entries are only ever added to, the snapshot is
-// a superset of the log it replaces. The marshal holds a read lock, briefly
-// blocking recording workers, but spans one shard rather than the whole ledger.
+// It compacts only a shard with no pending dirty state, so the snapshot it
+// writes reflects exactly what the log already holds. The snapshot is written
+// before the log is removed, so a crash between the two replays the log's
+// records onto a snapshot that already accounts for them rather than losing or
+// regressing an entry. A shard re-dirtied since the last drain (a worker
+// recorded during the flush) is skipped and folded on a later flush, once its
+// newest state has reached the log; without that guard the snapshot could
+// capture an in-memory status the log does not yet carry, and a crash before the
+// log removal would replay the stale log record over the newer snapshot. The
+// marshal holds a read lock, briefly blocking recording workers, but spans one
+// shard rather than the whole ledger.
 func (l *Ledger) compactShard(sh *shard) error {
 	l.mu.RLock()
+
+	if sh.hasDirty() {
+		l.mu.RUnlock()
+
+		return nil
+	}
 
 	doc := sh.document()
 	data, err := json.MarshalIndent(doc, "", "  ")
