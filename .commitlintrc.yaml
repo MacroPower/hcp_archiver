@@ -33,6 +33,7 @@ rules:
       - orgscope
       - progress
       - registry
+      - seal
       - serialize
       - stacks
       - store
