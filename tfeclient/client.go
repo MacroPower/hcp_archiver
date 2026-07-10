@@ -3,7 +3,6 @@ package tfeclient
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -302,50 +301,4 @@ func (c *Client) DownloadConfigurationVersion(ctx context.Context, cvID string) 
 	}
 
 	return data, nil
-}
-
-// PlanLogs opens the logs of a plan by its id. The returned reader streams the
-// log and performs its own network I/O as it is read, so those reads are not
-// bounded by the shared limiter.
-func (c *Client) PlanLogs(ctx context.Context, planID string) (io.Reader, error) {
-	var r io.Reader
-
-	err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
-		var e error
-
-		r, e = tc.Plans.Logs(ctx, planID)
-		if e != nil {
-			return fmt.Errorf("read plan logs: %w", e)
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return r, nil
-}
-
-// ApplyLogs opens the logs of an apply by its id. The returned reader streams
-// the log and performs its own network I/O as it is read, so those reads are
-// not bounded by the shared limiter.
-func (c *Client) ApplyLogs(ctx context.Context, applyID string) (io.Reader, error) {
-	var r io.Reader
-
-	err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
-		var e error
-
-		r, e = tc.Applies.Logs(ctx, applyID)
-		if e != nil {
-			return fmt.Errorf("read apply logs: %w", e)
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return r, nil
 }
