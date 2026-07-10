@@ -99,7 +99,10 @@ func WriteReader(name string, r io.Reader, opts ...Option) error {
 // itself flushed so the rename survives a crash.
 //
 // Any missing parent directory of name is created with the directory mode (see
-// [WithDirMode]). The written file takes the file mode (see [WithFileMode]).
+// [WithDirMode]), and every directory the write creates is flushed to stable
+// storage, so a first write into a fresh subtree (and the .ledger subtree it may
+// bring into being) is durable, not just its leaf. The written file takes the
+// file mode (see [WithFileMode]).
 //
 // When fn returns an error, or any step of the write fails, the staging file is
 // removed and name is left exactly as it was, whether pre-existing or absent.
@@ -115,9 +118,9 @@ func Write(name string, fn func(io.Writer) error, opts ...Option) error {
 
 	dir := filepath.Dir(name)
 
-	err := os.MkdirAll(dir, cfg.dirMode)
+	err := mkdirAllSynced(dir, cfg.dirMode)
 	if err != nil {
-		return fmt.Errorf("create parent directory %q: %w", dir, err)
+		return err
 	}
 
 	tmp, err := os.CreateTemp(dir, tmpPattern)
@@ -187,7 +190,9 @@ func stage(f *os.File, tmpName, name string, mode fs.FileMode, fn func(io.Writer
 // survives a crash. Callers pass newline-terminated data.
 //
 // Any missing parent directory of name is created with the directory mode (see
-// [WithDirMode]); a created file takes the file mode (see [WithFileMode]).
+// [WithDirMode]), and every directory created for it is flushed, so a first
+// append into a fresh subtree is durable; a created file takes the file mode
+// (see [WithFileMode]).
 func Append(name string, data []byte, opts ...Option) (int64, error) {
 	cfg := config{
 		fileMode: DefaultFileMode,
@@ -200,9 +205,9 @@ func Append(name string, data []byte, opts ...Option) (int64, error) {
 
 	dir := filepath.Dir(name)
 
-	err := os.MkdirAll(dir, cfg.dirMode)
+	err := mkdirAllSynced(dir, cfg.dirMode)
 	if err != nil {
-		return 0, fmt.Errorf("create parent directory %q: %w", dir, err)
+		return 0, err
 	}
 
 	//nolint:gosec // The append target is chosen by the caller by design.
@@ -282,6 +287,69 @@ func lastRecordBoundary(f *os.File) (int64, error) {
 	}
 
 	return 0, nil
+}
+
+// mkdirAllSynced creates dir and any missing ancestor, then flushes each newly
+// created directory's parent so the dentries linking the new subtree are
+// durable, not just the leaf's.
+func mkdirAllSynced(dir string, mode fs.FileMode) error {
+	return mkdirAllSync(dir, mode, syncDir)
+}
+
+// mkdirAllSync is [mkdirAllSynced] with the directory-sync function injected, so
+// a test can record which directories are flushed.
+//
+// It fast-paths an already-existing directory with a single Stat and no fsync,
+// the hot path taken by every write after the first into a directory. Otherwise
+// it scans upward from dir collecting the levels that do not yet exist — exactly
+// the ones [os.MkdirAll] creates — creates them in one MkdirAll call (keeping its
+// race, mode, and ENOTDIR handling), then flushes the parent of every scanned
+// level. The parents are flushed unconditionally, even one a concurrent creator
+// won the race to make, because the dentry still needs flushing from this
+// process and a redundant fsync is harmless.
+func mkdirAllSync(dir string, mode fs.FileMode, sync func(string) error) error {
+	info, err := os.Stat(dir)
+	if err == nil && info.IsDir() {
+		return nil
+	}
+
+	var missing []string
+
+	for level := dir; ; {
+		_, statErr := os.Stat(level)
+		if statErr == nil {
+			break
+		}
+
+		if !errors.Is(statErr, fs.ErrNotExist) {
+			return fmt.Errorf("stat directory %q: %w", level, statErr)
+		}
+
+		missing = append(missing, level)
+
+		parent := filepath.Dir(level)
+		if parent == level {
+			break
+		}
+
+		level = parent
+	}
+
+	err = os.MkdirAll(dir, mode)
+	if err != nil {
+		return fmt.Errorf("create parent directory %q: %w", dir, err)
+	}
+
+	for _, level := range missing {
+		parent := filepath.Dir(level)
+
+		err = sync(parent)
+		if err != nil {
+			return fmt.Errorf("sync created directory %q: %w", parent, err)
+		}
+	}
+
+	return nil
 }
 
 // syncDir flushes dir so a rename recorded within it is durable across a crash.

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -223,6 +224,99 @@ type failingReader struct{}
 
 func (failingReader) Read(p []byte) (int, error) {
 	return copy(p, "partial"), errBoom
+}
+
+func TestMkdirAllSync_flushesEveryCreatedAncestor(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	// The root already exists; a, b, c, and d are the four levels created below it.
+	target := filepath.Join(root, "a", "b", "c", "d")
+
+	var synced []string
+
+	rec := func(dir string) error {
+		synced = append(synced, dir)
+
+		return nil
+	}
+
+	require.NoError(t, atomicfile.MkdirAllSync(target, 0o700, rec))
+
+	// The parent of every created level is flushed exactly once, so each new
+	// directory's dentry is durable, not just the leaf's.
+	want := []string{
+		root,
+		filepath.Join(root, "a"),
+		filepath.Join(root, "a", "b"),
+		filepath.Join(root, "a", "b", "c"),
+	}
+	assert.ElementsMatch(t, want, synced, "each created level's parent is flushed once")
+
+	info, err := os.Stat(target)
+	require.NoError(t, err)
+	assert.True(t, info.IsDir(), "the full subtree exists")
+}
+
+func TestMkdirAllSync_existingDirTakesHotPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	target := filepath.Join(root, "a", "b")
+
+	count := 0
+	rec := func(string) error {
+		count++
+
+		return nil
+	}
+
+	require.NoError(t, atomicfile.MkdirAllSync(target, 0o700, rec))
+	assert.Positive(t, count, "the first creation flushes the new levels")
+
+	// A second write into the now-existing directory must flush nothing, holding
+	// the hot-path perf contract: an ordinary write costs no ancestor fsync.
+	count = 0
+
+	require.NoError(t, atomicfile.MkdirAllSync(target, 0o700, rec))
+	assert.Zero(t, count, "a second call into the existing directory flushes nothing")
+}
+
+func TestWrite_concurrentSiblingSubtrees(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	const workers = 8
+
+	var wg sync.WaitGroup
+
+	wg.Add(workers)
+
+	errs := make([]error, workers)
+	leaf := func(i int) string {
+		return filepath.Join(root, "shared", "nested", fmt.Sprintf("w%d", i), "object")
+	}
+
+	for i := range workers {
+		go func() {
+			defer wg.Done()
+
+			// Every worker shares the "shared/nested" ancestors, so they race to
+			// create them; the unconditional per-level fsync must tolerate that.
+			errs[i] = atomicfile.WriteFile(leaf(i), []byte("body"))
+		}()
+	}
+
+	wg.Wait()
+
+	for i := range workers {
+		require.NoError(t, errs[i], "worker %d wrote without error", i)
+
+		got, err := os.ReadFile(leaf(i))
+		require.NoError(t, err)
+		assert.Equal(t, []byte("body"), got, "worker %d's file landed", i)
+	}
 }
 
 func TestAppend_roundTrip(t *testing.T) {
