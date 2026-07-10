@@ -46,7 +46,7 @@ func (c *Collector) collectStateVersions(ctx context.Context, project string, ws
 		return collect.Item{
 			RelPath:   st.StateVersionFile(project, wsName, sv.CreatedAt, sv.ID, "meta.json"),
 			CreatedAt: sv.CreatedAt,
-			Terminal:  true,
+			Terminal:  stateVersionTerminal(sv.Status),
 			Archive: func(ctx context.Context) error {
 				return c.archiveStateVersion(ctx, project, wsName, sv)
 			},
@@ -65,7 +65,13 @@ func (c *Collector) archiveStateVersion(ctx context.Context, project, ws string,
 	rawPath := st.StateVersionFile(project, ws, sv.CreatedAt, sv.ID, "tfstate.json")
 
 	if sv.DownloadURL == "" {
-		c.env.NotApplicable(rawPath)
+		// A pending state version's URL is only transiently empty; recording it
+		// settled would permanently lose the state once it finalizes. Record
+		// nothing so a later pass re-fetches once the URL populates. A finalized or
+		// discarded version's empty URL is a genuine, permanent absence.
+		if stateVersionTerminal(sv.Status) {
+			c.env.NotApplicable(rawPath)
+		}
 	} else {
 		downloadURL := sv.DownloadURL
 
@@ -80,7 +86,9 @@ func (c *Collector) archiveStateVersion(ctx context.Context, project, ws string,
 	jsonPath := st.StateVersionFile(project, ws, sv.CreatedAt, sv.ID, "json")
 
 	if sv.JSONDownloadURL == "" {
-		c.env.NotApplicable(jsonPath)
+		if stateVersionTerminal(sv.Status) {
+			c.env.NotApplicable(jsonPath)
+		}
 	} else {
 		jsonURL := sv.JSONDownloadURL
 
@@ -100,6 +108,19 @@ func (c *Collector) archiveStateVersion(ctx context.Context, project, ws string,
 				Include: []tfe.StateVersionIncludeOpt{tfe.SVrun},
 			})
 		})
+}
+
+// stateVersionTerminal reports whether a state version has settled so it needs
+// no further refresh.
+//
+// Only a pending version is still non-terminal: its raw and JSON download URLs
+// are transiently empty until it finalizes, so treating it as terminal would
+// settle those blobs as not-applicable and permanently lose irreplaceable state
+// once they populate. Marking it non-terminal keeps the collection re-walking
+// (through the walk's settled machinery) until it finalizes. A finalized or
+// discarded version is terminal.
+func stateVersionTerminal(status tfe.StateVersionStatus) bool {
+	return status != tfe.StateVersionPending
 }
 
 // hasNextPage reports whether pagination points at a further page, tolerating a
