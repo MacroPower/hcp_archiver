@@ -38,9 +38,7 @@ func shardKey(key string) string {
 	segs := strings.Split(key, "/")
 
 	switch {
-	case len(segs) >= 4 && segs[0] == "projects" && segs[2] == "workspaces":
-		return path.Join(segs[0], segs[1], segs[2], segs[3])
-	case len(segs) >= 4 && segs[0] == "projects" && segs[2] == "stacks":
+	case len(segs) >= 4 && segs[0] == "projects" && (segs[2] == "workspaces" || segs[2] == "stacks"):
 		return path.Join(segs[0], segs[1], segs[2], segs[3])
 	case segs[0] == "config-versions":
 		return "config-versions"
