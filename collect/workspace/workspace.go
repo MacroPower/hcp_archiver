@@ -120,7 +120,7 @@ func (c *Collector) collectReadme(ctx context.Context, project string, ws *tfe.W
 				return nil
 			})
 			if err != nil {
-				return nil, fmt.Errorf("read readme: %w", err)
+				return nil, err //nolint:wrapcheck // Wrapped in the Do closure.
 			}
 
 			if r == nil {
