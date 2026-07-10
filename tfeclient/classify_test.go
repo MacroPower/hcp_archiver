@@ -65,6 +65,18 @@ func TestClassify(t *testing.T) {
 			err:  fmt.Errorf("list github app installations: %w", errors.New("forbidden")),
 			want: tfeclient.KindForbidden,
 		},
+		"forbidden status line is forbidden": {
+			err:  errors.New("403 Forbidden"),
+			want: tfeclient.KindForbidden,
+		},
+		"path containing forbidden with a non-403 cause is unknown": {
+			err: fmt.Errorf(
+				"fetch %q: %w",
+				"workspaces/forbidden-experiments/runs",
+				errors.New("500 Internal Server Error"),
+			),
+			want: tfeclient.KindUnknown,
+		},
 	}
 
 	for name, tc := range tests {

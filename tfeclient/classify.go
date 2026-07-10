@@ -109,12 +109,37 @@ func isTimeout(err error) bool {
 }
 
 // isForbidden reports whether err carries the go-tfe v1 client's rendering of
-// an HTTP 403, whose joined payload title is "forbidden". The status code is not
-// preserved on the error, so the text is the only structural signal available.
+// an HTTP 403. The status code is not preserved on the error, so the client
+// renders a 403 as a bare error whose text is the joined JSON:API payload titles
+// ("forbidden", optionally with a detail on the following lines) or the raw
+// status line ("403 Forbidden"), which is the only structural signal available.
+//
+// The match runs against the unwrapped root cause, one line at a time, so an
+// archive path or an unrelated error body that merely contains the word (a path
+// segment like "forbidden-experiments", a 500 whose detail mentions it) is not
+// misclassified as an access denial.
 func isForbidden(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	return strings.Contains(strings.ToLower(err.Error()), "forbidden")
+	root := err
+
+	for {
+		unwrapped := errors.Unwrap(root)
+		if unwrapped == nil {
+			break
+		}
+
+		root = unwrapped
+	}
+
+	for line := range strings.SplitSeq(root.Error(), "\n") {
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "forbidden", "403 forbidden":
+			return true
+		}
+	}
+
+	return false
 }
