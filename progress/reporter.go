@@ -1,12 +1,14 @@
 package progress
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -41,20 +43,23 @@ type TallySource interface {
 // count the archiver sets and advances) and are independent of the object
 // tally read from source.
 type Reporter struct {
-	w         io.Writer
-	in        io.Reader
-	source    TallySource
-	now       func() time.Time
-	ttyForce  *bool
-	sink      LogSink
-	interrupt func()
-	start     time.Time
-	phase     string
-	mode      config.ProgressMode
-	interval  time.Duration
-	total     int
-	completed int
-	mu        sync.Mutex
+	phaseStart time.Time
+	start      time.Time
+	in         io.Reader
+	source     TallySource
+	sink       LogSink
+	w          io.Writer
+	now        func() time.Time
+	ttyForce   *bool
+	interrupt  func()
+	tasks      map[*Task]struct{}
+	mode       config.ProgressMode
+	phase      string
+	taskSeq    uint64
+	interval   time.Duration
+	total      int
+	completed  int
+	mu         sync.Mutex
 }
 
 // Option configures a [Reporter] passed to [New].
@@ -152,6 +157,7 @@ func New(w io.Writer, mode config.ProgressMode, source TallySource, opts ...Opti
 		in:       os.Stdin,
 		source:   source,
 		now:      time.Now,
+		tasks:    make(map[*Task]struct{}),
 		interval: config.DefaultProgressInterval,
 		total:    -1,
 		mode:     mode,
@@ -162,6 +168,7 @@ func New(w io.Writer, mode config.ProgressMode, source TallySource, opts ...Opti
 	}
 
 	r.start = r.now()
+	r.phaseStart = r.start
 	r.mode = r.resolve(mode)
 
 	return r
@@ -221,16 +228,26 @@ func (r *Reporter) SetPhase(phase string) {
 	r.phase = phase
 }
 
-// SetTotal sets the current phase's unit-progress denominator and resets the
-// completed counter to zero, so each phase starts its bar fresh. A non-positive
-// value marks the phase indeterminate, rendering a spinner instead of a bar. It
-// is safe to call concurrently.
+// SetTotal sets the current phase's unit-progress denominator, resets the
+// completed counter to zero so each phase starts its bar fresh, and restarts
+// the phase clock that anchors the eta estimate. A non-positive value marks the
+// phase indeterminate, rendering a spinner instead of a bar. It is safe to call
+// concurrently.
 func (r *Reporter) SetTotal(total int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.total = total
 	r.completed = 0
+	r.phaseStart = r.now()
+
+	// A new phase orphans any task still registered; end them so a straggling
+	// Advance cannot leak units into the new phase's count.
+	for t := range r.tasks {
+		t.ended = true
+	}
+
+	clear(r.tasks)
 }
 
 // Advance adds n to the phase's completed unit count, moving the bar toward its
@@ -242,14 +259,124 @@ func (r *Reporter) Advance(n int) {
 	r.completed += n
 }
 
-// snapshot is one rendered line's worth of derived state, computed under lock.
+// Task tracks one named work item within the current phase (one workspace in
+// the workspaces phase), so the panel can show progress inside a long item and
+// the phase bar can move as the item's units land rather than only when the
+// whole item finishes. Create instances with [Reporter.StartTask]. A Task is
+// safe for concurrent use.
+type Task struct {
+	r     *Reporter
+	name  string
+	seq   uint64
+	total int
+	done  int
+	ended bool
+}
+
+// StartTask registers a task named name carrying total phase units and returns
+// its [Task]. Registering moves nothing; units flow into the phase's completed
+// count through [Task.Advance] and [Task.Done]. Tasks render in registration
+// order, so the panel's rows hold still as their bars move. It is safe to call
+// concurrently.
+func (r *Reporter) StartTask(name string, total int) *Task {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.taskSeq++
+
+	t := &Task{r: r, name: name, seq: r.taskSeq, total: total}
+	r.tasks[t] = struct{}{}
+
+	return t
+}
+
+// Advance adds n units to the task and the same n to the phase's completed
+// count, moving both bars. A task carries exactly its registered total in phase
+// units, so advances past that total are absorbed: an item that turns out
+// larger than its estimated weight (a workspace whose run listing outgrows its
+// advertised run count) reads complete while the extra work drains, rather than
+// pushing either bar past what the item was budgeted. Advances after
+// [Task.Done] are dropped so a straggler cannot double-count. It is safe to
+// call concurrently.
+func (t *Task) Advance(n int) {
+	t.r.mu.Lock()
+	defer t.r.mu.Unlock()
+
+	if t.ended {
+		return
+	}
+
+	n = min(n, t.total-t.done)
+	if n <= 0 {
+		return
+	}
+
+	t.done += n
+	t.r.completed += n
+}
+
+// Done settles the task: it commits any un-advanced remainder to the phase's
+// completed count, so an item that failed midway or stopped early on settled
+// history still moves the bar by its full weight, and removes the task from the
+// panel. It is idempotent and safe to call concurrently.
+func (t *Task) Done() {
+	t.r.mu.Lock()
+	defer t.r.mu.Unlock()
+
+	if t.ended {
+		return
+	}
+
+	t.ended = true
+	delete(t.r.tasks, t)
+
+	if remainder := t.total - t.done; remainder > 0 {
+		t.done = t.total
+		t.r.completed += remainder
+	}
+}
+
+// taskProgress is one in-flight task's state captured into a snapshot.
+type taskProgress struct {
+	name  string
+	total int
+	done  int
+}
+
+// takeTasks copies the registered tasks in registration order, so the panel's
+// rows hold still while their bars move. The caller holds the mutex.
+func (r *Reporter) takeTasks() []taskProgress {
+	if len(r.tasks) == 0 {
+		return nil
+	}
+
+	ordered := make([]*Task, 0, len(r.tasks))
+	for t := range r.tasks {
+		ordered = append(ordered, t)
+	}
+
+	slices.SortFunc(ordered, func(a, b *Task) int {
+		return cmp.Compare(a.seq, b.seq)
+	})
+
+	tasks := make([]taskProgress, 0, len(ordered))
+	for _, t := range ordered {
+		tasks = append(tasks, taskProgress{name: t.name, total: t.total, done: t.done})
+	}
+
+	return tasks
+}
+
+// snapshot is one rendered frame's worth of derived state, computed under lock.
 type snapshot struct {
-	phase     string
-	tally     manifest.Tally
-	elapsed   time.Duration
-	rate      float64
-	total     int
-	completed int
+	phase        string
+	tasks        []taskProgress
+	tally        manifest.Tally
+	elapsed      time.Duration
+	phaseElapsed time.Duration
+	rate         float64
+	total        int
+	completed    int
 }
 
 // hasBar reports whether the phase is determinate, so the view renders a bar and
@@ -258,11 +385,49 @@ func (s snapshot) hasBar() bool {
 	return s.total > 0
 }
 
+// hasTask reports whether any work item is in flight, so the view renders the
+// per-item progress under the phase bar.
+func (s snapshot) hasTask() bool {
+	return len(s.tasks) > 0
+}
+
+// largestTask returns the in-flight task with the most remaining units, ties
+// broken by name: the one item the line-oriented modes report, and the item
+// that will hold the phase open longest. It must not be called on a snapshot
+// with no tasks.
+func (s snapshot) largestTask() taskProgress {
+	best := s.tasks[0]
+
+	for _, t := range s.tasks[1:] {
+		tRem, bestRem := t.total-t.done, best.total-best.done
+		if tRem > bestRem || (tRem == bestRem && t.name < best.name) {
+			best = t
+		}
+	}
+
+	return best
+}
+
+// eta estimates the current phase's remaining time by extrapolating its elapsed
+// time over the units still outstanding. It reports false when no estimate
+// exists: an indeterminate phase, no unit landed yet, a finished (or
+// overcounted) phase, or a phase clock that has not advanced.
+func (s snapshot) eta() (time.Duration, bool) {
+	if !s.hasBar() || s.completed <= 0 || s.completed >= s.total || s.phaseElapsed <= 0 {
+		return 0, false
+	}
+
+	perUnit := s.phaseElapsed / time.Duration(s.completed)
+
+	return perUnit * time.Duration(s.total-s.completed), true
+}
+
 // take builds a [snapshot] from the current tally and clock. The caller holds
 // the mutex.
 func (r *Reporter) take() snapshot {
 	t := r.source.Tally()
-	elapsed := r.now().Sub(r.start)
+	now := r.now()
+	elapsed := now.Sub(r.start)
 
 	rate := 0.0
 	if elapsed > 0 {
@@ -270,12 +435,14 @@ func (r *Reporter) take() snapshot {
 	}
 
 	return snapshot{
-		tally:     t,
-		phase:     r.phase,
-		elapsed:   elapsed,
-		rate:      rate,
-		total:     r.total,
-		completed: r.completed,
+		tally:        t,
+		phase:        r.phase,
+		tasks:        r.takeTasks(),
+		elapsed:      elapsed,
+		phaseElapsed: now.Sub(r.phaseStart),
+		rate:         rate,
+		total:        r.total,
+		completed:    r.completed,
 	}
 }
 
@@ -355,17 +522,25 @@ func (r *Reporter) Run(ctx context.Context, interval time.Duration) error {
 	}
 }
 
+// quitGrace is how long a ctx-canceled panel gets to process the quit request
+// and erase itself in a final render before it is killed outright, so a wedged
+// program can never hang the run's shutdown.
+const quitGrace = 2 * time.Second
+
 // runTUI runs the Bubble Tea panel until ctx is done or the operator quits.
 //
-// It binds the program to ctx so an external SIGINT (mapped upstream to a ctx
-// cancel) or the archiver's own cancel stops it, and registers the program on
-// the log sink so log lines route through the one renderer, clearing it again
-// on return so the fallback is restored before the next org logs. A ctx-driven
-// stop surfaces as [tea.ErrProgramKilled], which is mapped to a clean nil.
+// A ctx cancel (an external SIGINT mapped upstream, or the archiver's own
+// cancel) requests a graceful quit rather than killing the program: the
+// model's final render then erases the panel, so the closing log lines and
+// summary flow on a clean tail instead of around a stale frame, which a kill
+// would strand by skipping that render. A program that fails to quit within
+// [quitGrace] is killed, and the kill's [tea.ErrProgramKilled] is mapped to a
+// clean nil. It registers the program on the log sink so log lines route
+// through the one renderer, clearing it again on return so the fallback is
+// restored before the next org logs.
 func (r *Reporter) runTUI(ctx context.Context) error {
 	program := tea.NewProgram(
 		newTUIModel(r.lockedTake, r.interrupt),
-		tea.WithContext(ctx),
 		tea.WithOutput(r.w),
 		tea.WithInput(r.in),
 		tea.WithoutSignalHandler(),
@@ -375,6 +550,25 @@ func (r *Reporter) runTUI(ctx context.Context) error {
 		r.sink.SetProgram(program)
 		defer r.sink.SetProgram(nil)
 	}
+
+	finished := make(chan struct{})
+	defer close(finished)
+
+	go func() {
+		select {
+		case <-finished:
+			return
+		case <-ctx.Done():
+		}
+
+		program.Send(quitRequestMsg{})
+
+		select {
+		case <-finished:
+		case <-time.After(quitGrace):
+			program.Kill()
+		}
+	}()
 
 	_, err := program.Run()
 	if err != nil {
@@ -449,6 +643,16 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 		)
 	} else if snap.hasBar() {
 		fmt.Fprintf(&b, " completed=%d/%d", snap.completed, snap.total)
+
+		if eta, ok := snap.eta(); ok {
+			fmt.Fprintf(&b, " eta=%s", compactDuration(eta))
+		}
+	}
+
+	if !summary && snap.hasTask() {
+		task := snap.largestTask()
+		fmt.Fprintf(&b, " task=%q taskCompleted=%d/%d tasks=%d",
+			task.name, task.done, task.total, len(snap.tasks))
 	}
 
 	fmt.Fprintf(
@@ -463,43 +667,64 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 }
 
 // summaryBlock formats the styled multi-line summary written when the run ends
-// on an interactive terminal, ending in a newline.
+// on an interactive terminal, ending in a newline. A left rule frames the block
+// as one unit, and the heading's glyph carries the outcome at a glance: a green
+// check for a clean run, and the errored or forbidden mark (errors taking
+// precedence) when anything went wrong. The block only counts failures; the
+// archiver logs each one in full, above the block, where nothing truncates the
+// error text.
 func (r *Reporter) summaryBlock(snap snapshot) string {
 	t := snap.tally
+
+	glyph := styleDone.Render(glyphDone)
+
+	switch {
+	case t.Errored > 0:
+		glyph = styleErrored.Render(glyphErrored)
+	case t.Forbidden > 0:
+		glyph = styleForbidden.Render(glyphForbidden)
+	}
 
 	title := "archive complete"
 	if t.Resumed {
 		title += " (resumed)"
 	}
 
-	head := styleSummaryHead.Render(title)
+	lines := []string{
+		glyph + " " + styleSummaryHead.Render(title),
+		// Zero widths keep the summary's counts tight; the live panel pads them
+		// so its columns hold still.
+		statusCounts(t, 0, 0, 0),
+		styleMeta.Render(fmt.Sprintf(
+			"absent %d · skipped %d · n/a %d · total %d · %s · %s",
+			t.AbsentPermanently,
+			t.Skipped,
+			t.NotApplicable,
+			t.Total(),
+			humanBytes(t.BytesDownloaded),
+			snap.elapsed.Round(time.Second),
+		)),
+	}
 
-	// Zero widths keep the summary's counts tight; the live panel pads them so
-	// its columns hold still.
-	counts := "  " + statusCounts(t, 0, 0, 0)
-
-	rest := styleMeta.Render(fmt.Sprintf(
-		"  absent=%d skipped=%d n/a=%d total=%d bytes=%s elapsed=%s",
-		t.AbsentPermanently,
-		t.Skipped,
-		t.NotApplicable,
-		t.Total(),
-		humanBytes(t.BytesDownloaded),
-		snap.elapsed.Round(time.Second),
-	))
-
-	return head + "\n" + counts + "\n" + rest + "\n"
+	return styleSummaryRule.Render(strings.Join(lines, "\n")) + "\n"
 }
 
 // jsonLine is the machine-readable shape emitted one per line.
 //
 // PhaseTotal and PhaseCompleted report the current phase's weighted unit
-// progress and are present only while a phase is determinate.
+// progress and are present only while a phase is determinate. Task, TaskTotal,
+// and TaskCompleted report the in-flight work item with the most remaining
+// units, with TasksActive counting every registered item; all are present only
+// while at least one is registered.
 type jsonLine struct {
 	PhaseTotal        *int    `json:"phaseTotal,omitempty"`
 	PhaseCompleted    *int    `json:"phaseCompleted,omitempty"`
+	TaskTotal         *int    `json:"taskTotal,omitempty"`
+	TaskCompleted     *int    `json:"taskCompleted,omitempty"`
 	Phase             string  `json:"phase,omitempty"`
+	Task              string  `json:"task,omitempty"`
 	Target            string  `json:"target,omitempty"`
+	TasksActive       int     `json:"tasksActive,omitempty"`
 	Done              int     `json:"done"`
 	AbsentPermanently int     `json:"absentPermanently"`
 	Skipped           int     `json:"skipped"`
@@ -541,6 +766,16 @@ func (r *Reporter) writeJSON(snap snapshot, summary bool) error {
 		completed := snap.completed
 		line.PhaseTotal = &total
 		line.PhaseCompleted = &completed
+	}
+
+	if !summary && snap.hasTask() {
+		task := snap.largestTask()
+		taskTotal := task.total
+		taskDone := task.done
+		line.Task = task.name
+		line.TaskTotal = &taskTotal
+		line.TaskCompleted = &taskDone
+		line.TasksActive = len(snap.tasks)
 	}
 
 	data, err := json.Marshal(line)

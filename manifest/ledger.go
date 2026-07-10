@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -731,6 +732,44 @@ func (l *Ledger) Tally() Tally {
 		BytesDownloaded:   l.bytes,
 		Resumed:           l.resumed,
 	}
+}
+
+// Failures returns every object currently recorded as [StatusErrored] or
+// [StatusForbidden], errored entries first and each class sorted by path, so a
+// run summary can name what failed rather than only count it.
+func (l *Ledger) Failures() []Failure {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	var out []Failure
+
+	for _, sh := range l.shards {
+		for relPath, e := range sh.entries {
+			if e.Status != StatusErrored && e.Status != StatusForbidden {
+				continue
+			}
+
+			out = append(out, Failure{
+				RelPath: relPath,
+				Error:   e.LastError,
+				Status:  e.Status,
+			})
+		}
+	}
+
+	slices.SortFunc(out, func(a, b Failure) int {
+		if a.Status != b.Status {
+			if a.Status == StatusErrored {
+				return -1
+			}
+
+			return 1
+		}
+
+		return strings.Compare(a.RelPath, b.RelPath)
+	})
+
+	return out
 }
 
 // StartRun opens a new run: it advances the run count and start time and resets

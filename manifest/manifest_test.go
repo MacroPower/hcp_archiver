@@ -305,6 +305,30 @@ func TestLedger_TallyMatchesRecords(t *testing.T) {
 	assert.Equal(t, 7, tally.Total())
 }
 
+func TestLedger_Failures(t *testing.T) {
+	t.Parallel()
+
+	ledger, err := manifest.Load(t.TempDir())
+	require.NoError(t, err)
+
+	ledger.StartRun()
+	ledger.RecordDone("a", manifest.Signature{Size: 1})
+	ledger.RecordForbidden("z-forbidden", errors.New("access denied"))
+	ledger.RecordErrored("m-errored", errors.New("boom"), true)
+	ledger.RecordErrored("b-errored", errors.New("kaput"), false)
+	// An object that errored and later succeeded is not a failure.
+	ledger.RecordErrored("c", errors.New("transient"), true)
+	ledger.RecordDone("c", manifest.Signature{Size: 1})
+
+	want := []manifest.Failure{
+		{RelPath: "b-errored", Error: "kaput", Status: manifest.StatusErrored},
+		{RelPath: "m-errored", Error: "boom", Status: manifest.StatusErrored},
+		{RelPath: "z-forbidden", Error: "access denied", Status: manifest.StatusForbidden},
+	}
+
+	assert.Equal(t, want, ledger.Failures(), "errored first, sorted by path within a status")
+}
+
 func TestLedger_CumulativeAcrossRuns(t *testing.T) {
 	t.Parallel()
 

@@ -12,8 +12,11 @@ import (
 // collectRuns archives the workspace's runs newest-first. A run's summary is
 // mutable and refreshes while the run is in flight; its children are immutable
 // and are fetched only once the run reaches a terminal state, so an in-flight
-// run does not record premature absences for logs it has yet to produce.
-func (c *Collector) collectRuns(ctx context.Context, project string, ws *tfe.Workspace) error {
+// run does not record premature absences for logs it has yet to produce. The
+// progress callback, when non-nil, is called with 1 after each run is handled,
+// including a settled run the primitives skip, so progress tracks the walk
+// itself rather than only fresh downloads.
+func (c *Collector) collectRuns(ctx context.Context, project string, ws *tfe.Workspace, progress func(n int)) error {
 	st := c.env.Store()
 	key := st.Join(st.WorkspaceDir(project, ws.Name), "runs")
 	wsID := ws.ID
@@ -54,7 +57,12 @@ func (c *Collector) collectRuns(ctx context.Context, project string, ws *tfe.Wor
 			CreatedAt: run.CreatedAt,
 			Terminal:  runTerminal(run.Status),
 			Archive: func(ctx context.Context) error {
-				return c.archiveRun(ctx, project, wsName, run)
+				err := c.archiveRun(ctx, project, wsName, run)
+				if err == nil && progress != nil {
+					progress(1)
+				}
+
+				return err
 			},
 		}
 	}

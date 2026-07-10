@@ -123,6 +123,8 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) error {
 			a.logFlushError(ctx, orgName, ferr)
 		}
 
+		a.logFailures(ctx, orgName, ledger)
+
 		serr := reporter.Summary()
 		if serr != nil {
 			a.logger.LogAttrs(ctx, slog.LevelWarn, "progress_summary_error",
@@ -157,6 +159,22 @@ func (a *Archiver) flushLoop(ctx context.Context, orgName string, ledger *manife
 				a.logFlushError(ctx, orgName, err)
 			}
 		}
+	}
+}
+
+// logFailures writes one error log per object still recorded errored or
+// forbidden when the organization's run closes. The log stream truncates
+// nothing, so the full failure text survives there, and the summary that
+// follows only counts the failures. The per-object errors are recorded
+// silently as the walk proceeds, so this is where they surface.
+func (a *Archiver) logFailures(ctx context.Context, orgName string, ledger *manifest.Ledger) {
+	for _, f := range ledger.Failures() {
+		a.logger.LogAttrs(ctx, slog.LevelError, "object_archive_error",
+			slog.String("org", orgName),
+			slog.String("status", string(f.Status)),
+			slog.String("path", f.RelPath),
+			slog.String("error", f.Error),
+		)
 	}
 }
 

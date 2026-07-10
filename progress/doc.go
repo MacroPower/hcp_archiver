@@ -6,7 +6,9 @@
 // Bubble Tea panel pinned to the bottom of the screen: a spinner and the current
 // phase and target on the first line, colored per-status counts with bytes,
 // rate, and elapsed time on the second, and, when the phase is determinate, a
-// progress bar. Log output routes through a [LogSink] so log lines scroll in
+// progress bar with an estimated time remaining. The panel's rate averages a
+// short trailing window, so it reflects current throughput and visibly drops on
+// a stall. Log output routes through a [LogSink] so log lines scroll in
 // scrollback above the panel instead of corrupting it. Off a terminal (a pipe,
 // a redirect, or a test buffer) the same signal falls back to a logfmt line.
 // The machine mode ([config.ProgressModeJSON]) is one JSON object per line for
@@ -17,10 +19,22 @@
 // sets and advances, distinct from the object tally. During the workspaces phase
 // each workspace is weighted by one plus its run count, so the bar reflects real
 // work and reaches 100% as the last workspace finishes; phases with no cheap
-// pre-count show a spinner instead. The logfmt line reports the same as
-// completed=x/y and the JSON line as phaseTotal and phaseCompleted, present only
-// while a phase is determinate. A final summary prints when the run ends: totals
-// per status class, wall time, and anything that errored.
+// pre-count show a spinner instead. Long work items register as a [Task], whose
+// unit advances flow into the phase bar as they land, so one huge workspace
+// cannot park the bar for its whole duration. While tasks are in flight, the
+// panel lists each one under the combined phase bar on its own line (bar,
+// percent, unit fraction, and name), in registration order so rows hold still,
+// and caps the list to a screenful with the overflow counted. The target stays
+// empty while
+// tasks name the work: workspaces archive concurrently, so no single name is
+// the target. The line-oriented modes stay single-line and report the item with
+// the most remaining work: logfmt as completed=x/y with an eta once units have
+// landed (plus task=, taskCompleted=, and tasks= while items are in flight),
+// and JSON as phaseTotal and phaseCompleted with task, taskTotal,
+// taskCompleted, and tasksActive, each present only while determinate. A final
+// summary prints when the run ends with the totals per status class and the
+// wall time; the archiver logs each object still errored or forbidden in full
+// just above it, so failure text is never truncated to fit the panel.
 //
 // The per-status counts are cumulative: they reflect every object the ledger has
 // recorded by its current status, across runs, so a resumed run opens with the

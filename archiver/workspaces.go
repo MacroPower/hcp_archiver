@@ -98,9 +98,14 @@ func (a *Archiver) collectWorkspaces(
 ) error {
 	// Enter the phase indeterminate: the (possibly multi-page) listing below has
 	// no count yet, so the bar is a spinner rather than the projects phase's
-	// stale full bar until the weighted total is known.
+	// stale full bar until the weighted total is known. The target clears for
+	// the whole phase: workspaces archive concurrently, so no single name is
+	// the target, and the per-task progress names each in-flight workspace.
+	// Clearing also keeps the projects phase's last target from lingering into
+	// this phase and beyond.
 	reporter.SetPhase(phaseWorkspaces)
 	reporter.SetTotal(-1)
+	env.SetTarget("")
 
 	workspaces, err := tfeclient.Paginate(ctx, env.Client(),
 		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.Workspace, *tfe.Pagination, error) {
@@ -147,15 +152,20 @@ func (a *Archiver) collectWorkspaces(
 
 	for _, ws := range workspaces {
 		g.Go(func() error {
-			// Commit this workspace's weight on every return path so a failed
-			// workspace still advances the bar; otherwise it could never reach
-			// 100%. Deferring keeps that guarantee structural rather than
-			// dependent on statement order above later returns.
-			defer reporter.Advance(1 + ws.RunsCount)
-
 			project := projectNameFor(names, ws)
 
-			err := wsc.CollectWorkspace(gctx, project, ws)
+			// Track the workspace as a task so the panel can show progress inside
+			// it, and so each run archived advances the phase bar as it lands
+			// rather than the whole weight arriving when the workspace finishes.
+			// The name matches the target's project/workspace form. Done commits
+			// any remainder on every return path (a failed workspace, or a walk
+			// that stopped early on settled history), so the bar still reaches
+			// 100%; deferring keeps that guarantee structural rather than
+			// dependent on statement order above later returns.
+			task := reporter.StartTask(project+"/"+ws.Name, 1+ws.RunsCount)
+			defer task.Done()
+
+			err := wsc.CollectWorkspace(gctx, project, ws, task.Advance)
 			if err != nil && gctx.Err() == nil {
 				// Best-effort: a non-cancellation failure (e.g. a transient
 				// list error) for one workspace is logged and does not cancel

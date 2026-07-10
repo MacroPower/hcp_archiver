@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 
 	"github.com/hashicorp/go-tfe"
@@ -12,7 +13,36 @@ import (
 
 	"go.jacobcolvin.com/hcp_archiver/archiver"
 	"go.jacobcolvin.com/hcp_archiver/config"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
 )
+
+func TestLogFailures(t *testing.T) {
+	t.Parallel()
+
+	ledger, err := manifest.Load(t.TempDir())
+	require.NoError(t, err)
+
+	ledger.StartRun()
+	ledger.RecordDone("ok.json", manifest.Signature{Size: 1})
+
+	longErr := "list github app installations: list github app installations: " +
+		"bad request no github app oauth token, the token must be created by the github app owner"
+	ledger.RecordErrored("github-app-installations.json", errors.New(longErr), false)
+
+	buf := &bytes.Buffer{}
+	a := archiver.New(
+		&config.Config{},
+		archiver.WithLogger(slog.New(slog.NewTextHandler(buf, nil))),
+	)
+
+	archiver.LogFailures(a, t.Context(), "acme", ledger)
+
+	out := buf.String()
+	assert.Contains(t, out, "object_archive_error")
+	assert.Contains(t, out, "path=github-app-installations.json")
+	assert.Contains(t, out, "status=errored")
+	assert.Contains(t, out, longErr, "the full error text survives, untruncated")
+}
 
 func TestNew(t *testing.T) {
 	t.Parallel()

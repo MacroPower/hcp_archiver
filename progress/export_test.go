@@ -19,23 +19,39 @@ var SplitLogLines = splitLogLines
 // stay in the external package without reaching into unexported fields. Whether
 // a bar renders is derived from Total, matching production.
 type PanelSnapshot struct {
-	Phase     string
-	Tally     manifest.Tally
-	Elapsed   time.Duration
-	Rate      float64
-	Total     int
-	Completed int
+	Phase        string
+	Tasks        []PanelTask
+	Tally        manifest.Tally
+	Elapsed      time.Duration
+	PhaseElapsed time.Duration
+	Rate         float64
+	Total        int
+	Completed    int
+}
+
+// PanelTask mirrors one in-flight work item fed to the panel by a test.
+type PanelTask struct {
+	Name  string
+	Total int
+	Done  int
 }
 
 // snap converts the test inputs into the internal snapshot.
 func (ps PanelSnapshot) snap() snapshot {
+	tasks := make([]taskProgress, 0, len(ps.Tasks))
+	for _, t := range ps.Tasks {
+		tasks = append(tasks, taskProgress{name: t.Name, total: t.Total, done: t.Done})
+	}
+
 	return snapshot{
-		phase:     ps.Phase,
-		tally:     ps.Tally,
-		elapsed:   ps.Elapsed,
-		rate:      ps.Rate,
-		total:     ps.Total,
-		completed: ps.Completed,
+		phase:        ps.Phase,
+		tasks:        tasks,
+		tally:        ps.Tally,
+		elapsed:      ps.Elapsed,
+		phaseElapsed: ps.PhaseElapsed,
+		rate:         ps.Rate,
+		total:        ps.Total,
+		completed:    ps.Completed,
 	}
 }
 
@@ -48,10 +64,10 @@ func RenderPanel(ps PanelSnapshot) string {
 }
 
 // RenderPanelAt renders the panel after a window-size message of the given
-// width, exercising the bar resize and line clipping.
-func RenderPanelAt(ps PanelSnapshot, width int) string {
+// dimensions, exercising the bar resize, line clipping, and task-line budget.
+func RenderPanelAt(ps PanelSnapshot, width, height int) string {
 	m := newTUIModel(nil, nil)
-	m.Update(tea.WindowSizeMsg{Width: width, Height: 24})
+	m.Update(tea.WindowSizeMsg{Width: width, Height: height})
 
 	return m.render(ps.snap())
 }

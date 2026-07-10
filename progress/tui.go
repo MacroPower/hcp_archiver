@@ -18,12 +18,13 @@ import (
 // Fixed column widths that keep the panel from reflowing as values change. Every
 // field before the trailing target (line one) or metadata (line two) occupies a
 // constant width, so a growing count or an appearing bar never shifts what
-// follows it. The bar and percent hold their columns whether the phase is
+// follows it. The bar, percent, and eta hold their columns whether the phase is
 // determinate or not, so the target stays put across phase transitions.
 const (
-	barWidth   = 30 // determinate bar and indeterminate marquee track.
+	barWidth   = 25 // determinate bar and indeterminate marquee track.
 	phaseWidth = 10 // widest phase name ("workspaces").
 	pctWidth   = 4  // "100%" down to "  0%".
+	etaWidth   = 10 // "eta 59m59s", the widest value compactDuration emits.
 
 	marqueeBlock = 5 // moving block width within the indeterminate track.
 
@@ -36,6 +37,11 @@ const (
 	countForbiddenWidth = 4
 )
 
+// maxTaskLines caps how many in-flight work items the panel lists, so a large
+// worker pool cannot grow the panel past a screenful; the overflow line counts
+// the rest. The default workspace concurrency (4) fits well within it.
+const maxTaskLines = 8
+
 // Bar cell glyphs, matching the determinate bar's defaults so the marquee looks
 // like the same component.
 const (
@@ -43,20 +49,42 @@ const (
 	barEmptyChar = "░"
 )
 
+// rateWindow bounds the span of throughput samples the panel averages over, so
+// the rate readout tracks what the run is doing now (and visibly drops on a
+// stall) rather than a lifetime average that goes stale as the run ages.
+const rateWindow = 5 * time.Second
+
+// rateSample is one throughput observation: the run's cumulative byte count at
+// a point on its elapsed clock.
+type rateSample struct {
+	at    time.Duration
+	bytes int64
+}
+
+// quitRequestMsg asks the model to quit gracefully: it marks the model
+// quitting, whose view is empty, so the program's final render erases the
+// panel and the log stream and summary flow on a clean tail instead of around
+// a stale frame. The reporter sends it when its context is canceled.
+type quitRequestMsg struct{}
+
 // tuiModel is the Bubble Tea model backing the human view on a terminal.
 //
 // It owns no counters of its own: each render pulls a fresh [snapshot] through
 // take, so the panel always mirrors the live ledger. The spinner is both the
-// liveness indicator and the repaint clock. Its tick drives re-renders and
-// advances the indeterminate marquee, so the bar and counts move without any
-// separate ticker. Create instances with [newTUIModel].
+// liveness indicator and the repaint clock. Its tick drives re-renders,
+// advances the indeterminate marquee, and records a throughput sample, so the
+// bar, counts, and rate move without any separate ticker. Create instances with
+// [newTUIModel].
 type tuiModel struct {
+	bar       progressbar.Model
 	take      func() snapshot
 	interrupt func()
-	bar       progressbar.Model
+	samples   []rateSample
 	spin      spinner.Model
 	width     int
+	height    int
 	tick      int
+	quitting  bool
 }
 
 // newTUIModel creates a new [tuiModel] that renders snapshots from take and, on
@@ -67,8 +95,11 @@ func newTUIModel(take func() snapshot, interrupt func()) *tuiModel {
 	spin := spinner.New(spinner.WithSpinner(spinner.Dot))
 	spin.Style = styleSpinner
 
-	bar := progressbar.New(progressbar.WithWidth(barWidth), progressbar.WithoutPercentage())
-	bar.FullColor = barFullColor
+	bar := progressbar.New(
+		progressbar.WithWidth(barWidth),
+		progressbar.WithoutPercentage(),
+		progressbar.WithColors(barBlendStart, barBlendEnd),
+	)
 	bar.EmptyColor = barEmptyColor
 
 	return &tuiModel{
@@ -84,11 +115,18 @@ func (m *tuiModel) Init() tea.Cmd {
 	return m.spin.Tick
 }
 
-// Update advances the spinner and marquee on each tick, records the terminal
-// width, and, on ctrl+c or q, runs the interrupt callback before quitting. Raw
-// mode suppresses the kernel's SIGINT, so the quit keys are handled here.
+// Update advances the spinner, marquee, and throughput window on each tick,
+// records the terminal size, and quits on a [quitRequestMsg] or, running the
+// interrupt callback first, on ctrl+c or q (raw mode suppresses the kernel's
+// SIGINT, so the quit keys are handled here). Every quit path marks the model
+// quitting so the final render erases the panel.
 func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case quitRequestMsg:
+		m.quitting = true
+
+		return m, tea.Quit
+
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -96,14 +134,18 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.interrupt()
 			}
 
+			m.quitting = true
+
 			return m, tea.Quit
 		}
 
 	case tea.WindowSizeMsg:
-		// Record the width to clip each line, and shrink the bar so the panel
-		// never wraps to a third line. A fresh model (as the golden tests use)
-		// keeps the full barWidth and does not clip.
+		// Record the size to clip each line and bound the task list, and shrink
+		// the bar so the panel never wraps onto an extra line. A fresh model (as
+		// the golden tests use) keeps the full barWidth and does not clip.
 		m.width = msg.Width
+		m.height = msg.Height
+
 		if msg.Width > 0 {
 			m.bar.SetWidth(min(barWidth, msg.Width))
 		}
@@ -114,6 +156,10 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 
 		m.tick++
+		if m.take != nil {
+			m.observe(m.take())
+		}
+
 		m.spin, cmd = m.spin.Update(msg)
 
 		return m, cmd
@@ -123,16 +169,54 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the current snapshot into an inline (non-alt-screen) view, so log
-// lines printed by the sink stay in scrollback above the pinned panel.
+// lines printed by the sink stay in scrollback above the pinned panel. A
+// quitting model renders nothing, so the program's final render erases the
+// panel rather than stranding its last frame in the output flow.
 func (m *tuiModel) View() tea.View {
+	if m.quitting {
+		return tea.NewView("")
+	}
+
 	return tea.NewView(m.render(m.take()))
 }
 
-// render formats a snapshot as the two-line panel. Line one carries the spinner,
-// a fixed-width phase, the bar or its indeterminate marquee, the percent, and the
-// target; line two carries the colored per-status counts and the byte, rate, and
-// elapsed metadata. Every field before the trailing target and metadata holds a
-// constant width, so the panel does not reflow as values change.
+// observe appends one throughput sample and trims the window's tail, keeping at
+// least two samples so a rate can always be derived once ticks have flowed.
+func (m *tuiModel) observe(snap snapshot) {
+	m.samples = append(m.samples, rateSample{at: snap.elapsed, bytes: snap.tally.BytesDownloaded})
+
+	for len(m.samples) > 2 && m.samples[len(m.samples)-1].at-m.samples[0].at > rateWindow {
+		m.samples = m.samples[1:]
+	}
+}
+
+// throughput returns the download rate over the sampled window, in bytes per
+// second. Before two distinct samples exist (a fresh model, or a test render
+// with no ticks) it falls back to the snapshot's lifetime average.
+func (m *tuiModel) throughput(snap snapshot) float64 {
+	if len(m.samples) < 2 {
+		return snap.rate
+	}
+
+	first, last := m.samples[0], m.samples[len(m.samples)-1]
+
+	span := (last.at - first.at).Seconds()
+	if span <= 0 {
+		return snap.rate
+	}
+
+	return float64(last.bytes-first.bytes) / span
+}
+
+// render formats a snapshot as the panel. Line one is the combined view: the
+// spinner, a fixed-width phase, the bar or its indeterminate marquee, the
+// percent, the eta, and the target. One line per in-flight work item follows,
+// each with its own bar, percent, unit fraction, and name, in registration
+// order so rows hold still as their bars move; items past the cap are counted
+// on an overflow line. The last line carries the colored
+// per-status counts and the byte, rate, and elapsed metadata. Every field
+// before a line's trailing name or metadata holds a constant width, so the
+// panel does not reflow as values change.
 func (m *tuiModel) render(snap snapshot) string {
 	var line1 strings.Builder
 
@@ -153,8 +237,20 @@ func (m *tuiModel) render(snap snapshot) string {
 		fmt.Fprintf(&line1, " %s", strings.Repeat(" ", pctWidth))
 	}
 
+	// The eta column blanks when no estimate exists (an indeterminate phase, or
+	// a determinate one before its first unit lands) but keeps its width, so the
+	// target never moves as estimates come and go.
+	if eta, ok := snap.eta(); ok {
+		fmt.Fprintf(&line1, " %s", styleCount.Render(padRight("eta "+compactDuration(eta), etaWidth)))
+	} else {
+		fmt.Fprintf(&line1, " %s", strings.Repeat(" ", etaWidth))
+	}
+
 	if snap.tally.Target != "" {
-		fmt.Fprintf(&line1, " %s", styleTarget.Render(snap.tally.Target))
+		fmt.Fprintf(&line1, " %s %s",
+			styleTargetMark.Render("▸"),
+			styleTarget.Render(snap.tally.Target),
+		)
 	}
 
 	// The resumed tag rides at the end of the line so nothing follows it, and it
@@ -164,16 +260,69 @@ func (m *tuiModel) render(snap snapshot) string {
 	}
 
 	t := snap.tally
-	line2 := fmt.Sprintf("  %s  %s",
+	counts := fmt.Sprintf("  %s %s",
 		statusCounts(t, countDoneWidth, countErroredWidth, countForbiddenWidth),
-		styleMeta.Render(fmt.Sprintf("%s  %s/s  %s",
+		styleMeta.Render(fmt.Sprintf("│ %s · %s/s · %s",
 			humanBytes(t.BytesDownloaded),
-			humanBytes(int64(snap.rate)),
+			humanBytes(int64(m.throughput(snap))),
 			snap.elapsed.Round(time.Second),
 		)),
 	)
 
-	return m.fit(line1.String()) + "\n" + m.fit(line2)
+	lines := []string{m.fit(line1.String())}
+
+	visible := min(len(snap.tasks), m.taskLineBudget())
+	for _, task := range snap.tasks[:visible] {
+		lines = append(lines, m.fit(m.renderTask(task)))
+	}
+
+	if hidden := len(snap.tasks) - visible; hidden > 0 {
+		lines = append(lines, m.fit("  "+styleMeta.Render(fmt.Sprintf("… +%d more active", hidden))))
+	}
+
+	lines = append(lines, m.fit(counts))
+
+	return strings.Join(lines, "\n")
+}
+
+// taskLineBudget bounds how many task lines the panel may show: the fixed cap,
+// tightened on a short terminal so the panel (its first line, the task lines,
+// a possible overflow line, and the counts line) never outgrows the screen. An
+// unknown height (before the first size message, and in the golden tests)
+// keeps the fixed cap.
+func (m *tuiModel) taskLineBudget() int {
+	if m.height <= 0 {
+		return maxTaskLines
+	}
+
+	return min(maxTaskLines, max(m.height-3, 0))
+}
+
+// renderTask formats one in-flight work item's line: its bar aligned under the
+// phase bar, its percent, its unit fraction in the eta column, and its name in
+// the target position, so the panel's lines read as one grid. The items shown
+// are independent of line one's target (the target is wherever a worker last
+// started), so each line names its own item.
+func (m *tuiModel) renderTask(task taskProgress) string {
+	var b strings.Builder
+
+	b.WriteString(strings.Repeat(" ", phaseWidth+3))
+
+	percent := min(max(float64(task.done)/float64(task.total), 0), 1)
+	b.WriteString(m.bar.ViewAs(percent))
+	fmt.Fprintf(&b, " %s", styleCount.Render(fmt.Sprintf("%3d%%", int(percent*100))))
+
+	// The fraction rides in the eta column; a fraction outgrowing the reserve
+	// shifts only its own trailing name.
+	fraction := fmt.Sprintf("%d/%d", task.done, task.total)
+	fmt.Fprintf(&b, " %s", styleCount.Render(fmt.Sprintf("%-*s", etaWidth, fraction)))
+
+	fmt.Fprintf(&b, " %s %s",
+		styleTargetMark.Render("▸"),
+		styleTarget.Render(task.name),
+	)
+
+	return b.String()
 }
 
 // fit clips a rendered line to the terminal width so the panel never wraps onto
@@ -187,20 +336,41 @@ func (m *tuiModel) fit(line string) string {
 }
 
 // statusCounts renders the styled done/errored/forbidden triple shared by the
-// live panel and the summary block. The width arguments left-pad each count so
-// the live panel's columns stay put as values grow; pass zero widths for the
-// summary's tight spacing.
+// live panel and the summary block, each count led by its status glyph. The
+// width arguments left-pad each count so the live panel's columns stay put as
+// values grow; pass zero widths for the summary's tight spacing.
 func statusCounts(t manifest.Tally, doneWidth, erroredWidth, forbiddenWidth int) string {
 	return fmt.Sprintf("%s %s %s",
-		styleDone.Render(fmt.Sprintf("done=%-*d", doneWidth, t.Done)),
-		styleErrored.Render(fmt.Sprintf("errored=%-*d", erroredWidth, t.Errored)),
-		styleForbidden.Render(fmt.Sprintf("forbidden=%-*d", forbiddenWidth, t.Forbidden)),
+		styleDone.Render(fmt.Sprintf(glyphDone+" done %-*d", doneWidth, t.Done)),
+		styleErrored.Render(fmt.Sprintf(glyphErrored+" errored %-*d", erroredWidth, t.Errored)),
+		styleForbidden.Render(fmt.Sprintf(glyphForbidden+" forbidden %-*d", forbiddenWidth, t.Forbidden)),
 	)
+}
+
+// compactDuration formats d for the eta column: bare seconds under a minute,
+// minutes and seconds under an hour, then hours and minutes, saturating at
+// ">99h" so the widest value ("eta 59m59s") bounds the column.
+func compactDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+
+	switch {
+	case d < 0:
+		return "0s"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm%ds", int(d/time.Minute), int(d%time.Minute/time.Second))
+	case d < 100*time.Hour:
+		return fmt.Sprintf("%dh%dm", int(d/time.Hour), int(d%time.Hour/time.Minute))
+	default:
+		return ">99h"
+	}
 }
 
 // marquee renders an indeterminate bar of width cells: a block that ping-pongs
 // across the track, its position derived from tick so a fresh model (tick zero)
-// renders it deterministically at the left edge.
+// renders it deterministically at the left edge. The block carries the same
+// blend as the determinate bar's fill, so the two read as one component.
 func marquee(width, tick int) string {
 	if width <= 0 {
 		return ""
@@ -221,7 +391,11 @@ func marquee(width, tick int) string {
 	var b strings.Builder
 
 	writeRun(&b, styleBarTrack, barEmptyChar, start)
-	writeRun(&b, styleBarBlock, barFullChar, block)
+
+	for _, c := range lipgloss.Blend1D(block, barBlendStart, barBlendEnd) {
+		b.WriteString(lipgloss.NewStyle().Foreground(c).Render(barFullChar))
+	}
+
 	writeRun(&b, styleBarTrack, barEmptyChar, width-start-block)
 
 	return b.String()
@@ -238,7 +412,7 @@ func writeRun(b *strings.Builder, style lipgloss.Style, char string, n int) {
 }
 
 // padRight returns s padded with spaces to width, or truncated to width. Phase
-// names are ASCII, so byte length equals cell width.
+// names and eta values are ASCII, so byte length equals cell width.
 func padRight(s string, width int) string {
 	if len(s) >= width {
 		return s[:width]

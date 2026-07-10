@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -158,6 +159,112 @@ func TestReporter_HumanLine_UnknownTotal(t *testing.T) {
 
 	require.NoError(t, r.Report())
 	assert.NotContains(t, buf.String(), "completed=")
+}
+
+func TestReporter_Tasks(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+
+	newReporter := func(buf *bytes.Buffer) *progress.Reporter {
+		return progress.New(buf, config.ProgressModeHuman, fakeSource{},
+			progress.WithClock(fixedClock(base, base.Add(time.Second))))
+	}
+
+	t.Run("advance flows into phase completed", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		r := newReporter(buf)
+		r.SetPhase("workspaces")
+		r.SetTotal(100)
+
+		task := r.StartTask("big", 60)
+		task.Advance(10)
+
+		require.NoError(t, r.Report())
+		assert.Contains(t, buf.String(), "completed=10/100")
+		assert.Contains(t, buf.String(), `task="big" taskCompleted=10/60`)
+	})
+
+	t.Run("advances past the total are absorbed", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		r := newReporter(buf)
+		r.SetTotal(100)
+
+		// The task's total is an estimate; the real listing can outgrow it.
+		task := r.StartTask("underestimated", 30)
+		for range 58 {
+			task.Advance(1)
+		}
+
+		require.NoError(t, r.Report())
+		assert.Contains(t, buf.String(), "completed=30/100",
+			"the phase count never exceeds the task's budgeted weight")
+		assert.Contains(t, buf.String(), "taskCompleted=30/30",
+			"the task reads complete, not overfull")
+
+		task.Done()
+		task.Advance(1)
+
+		buf.Reset()
+		require.NoError(t, r.Report())
+		assert.Contains(t, buf.String(), "completed=30/100", "done adds nothing after an overrun")
+	})
+
+	t.Run("done commits the remainder once", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		r := newReporter(buf)
+		r.SetTotal(100)
+
+		task := r.StartTask("big", 60)
+		task.Advance(10)
+		task.Done()
+		task.Done()
+		task.Advance(5)
+
+		require.NoError(t, r.Report())
+		assert.Contains(t, buf.String(), "completed=60/100",
+			"remainder committed exactly once; post-done advances dropped")
+		assert.NotContains(t, buf.String(), "task=", "a settled task leaves the panel")
+	})
+
+	t.Run("displays the task with the most remaining", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		r := newReporter(buf)
+		r.SetTotal(100)
+
+		small := r.StartTask("small", 5)
+		r.StartTask("big", 80)
+
+		require.NoError(t, r.Report())
+		assert.Contains(t, buf.String(), `task="big"`)
+
+		_ = small
+	})
+
+	t.Run("a new phase orphans stale tasks", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		r := newReporter(buf)
+		r.SetTotal(10)
+
+		task := r.StartTask("stale", 8)
+		r.SetTotal(20)
+		task.Advance(3)
+
+		require.NoError(t, r.Report())
+		assert.Contains(t, buf.String(), "completed=0/20",
+			"an orphaned task's advances stay out of the new phase")
+		assert.NotContains(t, buf.String(), "task=")
+	})
 }
 
 func TestReporter_JSONLine(t *testing.T) {
@@ -367,6 +474,42 @@ func TestReporter_Run(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("run did not stop after cancel")
+	}
+}
+
+func TestReporter_Run_PanelQuitsOnCancel(t *testing.T) {
+	t.Parallel()
+
+	// The panel path must shut down gracefully on a ctx cancel (erasing its
+	// final frame) and must never hang the run's close-out.
+	pr, pw := io.Pipe()
+	t.Cleanup(func() {
+		assert.NoError(t, pw.Close())
+	})
+
+	buf := &bytes.Buffer{}
+	r := progress.New(buf, config.ProgressModeHuman, fakeSource{},
+		progress.WithTTY(true),
+		progress.WithInput(pr),
+	)
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	done := make(chan error, 1)
+	go func() {
+		done <- r.Run(ctx, 0)
+	}()
+
+	// Give the program a moment to start and paint before canceling, so the
+	// quit path exercises a live renderer.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("panel did not stop after cancel")
 	}
 }
 

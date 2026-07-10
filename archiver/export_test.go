@@ -6,6 +6,8 @@ var (
 	ResolveOrgs = resolveOrgs
 	// ProjectNameFor exposes projectNameFor for tests.
 	ProjectNameFor = projectNameFor
+	// LogFailures exposes (*Archiver).logFailures for tests.
+	LogFailures = (*Archiver).logFailures
 )
 
 // DefaultProjectName exposes defaultProjectName for tests.

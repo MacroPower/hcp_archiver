@@ -38,3 +38,15 @@ type Tally struct {
 func (t Tally) Total() int {
 	return t.Done + t.AbsentPermanently + t.Skipped + t.Errored + t.Forbidden + t.NotApplicable
 }
+
+// Failure is one object still recorded errored or forbidden, with the text of
+// its last failure, so a run summary can name what failed rather than only
+// count it. Instances are produced by [Ledger.Failures].
+type Failure struct {
+	// RelPath is the object's archive-relative path and ledger key.
+	RelPath string
+	// Error is the text of the last recorded failure.
+	Error string
+	// Status is the failure class, [StatusErrored] or [StatusForbidden].
+	Status Status
+}

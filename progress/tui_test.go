@@ -1,6 +1,7 @@
 package progress_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/golden"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/progress"
@@ -26,10 +28,11 @@ func barPanel() progress.PanelSnapshot {
 			Forbidden:       1,
 			BytesDownloaded: 3*1024*1024 + 512*1024,
 		},
-		Elapsed:   90 * time.Second,
-		Rate:      128 * 1024,
-		Total:     20,
-		Completed: 7,
+		Elapsed:      90 * time.Second,
+		PhaseElapsed: 63 * time.Second,
+		Rate:         128 * 1024,
+		Total:        20,
+		Completed:    7,
 	}
 }
 
@@ -45,6 +48,96 @@ func TestRenderPanel_Indeterminate(t *testing.T) {
 	// An indeterminate phase swaps the bar for a marquee and blanks the percent,
 	// holding the same columns so the target does not move.
 	golden.RequireEqual(t, []byte(progress.RenderPanel(indeterminatePanel())))
+}
+
+func TestRenderPanel_Tasks(t *testing.T) {
+	t.Parallel()
+
+	// In-flight work items each get a line between the phase bar and the
+	// counts: their own bar, percent, unit fraction, and name, in registration
+	// order. The target is empty during the workspaces phase, since the task
+	// lines carry the names, so line one ends at its eta column.
+	panel := barPanel()
+	panel.Tally.Target = ""
+	panel.Tasks = []progress.PanelTask{
+		{Name: "acme/big-workspace", Total: 5001, Done: 600},
+		{Name: "acme/mid-workspace", Total: 60, Done: 31},
+		{Name: "acme/tiny", Total: 4, Done: 3},
+	}
+
+	golden.RequireEqual(t, []byte(progress.RenderPanel(panel)))
+}
+
+func TestRenderPanel_TaskOverflow(t *testing.T) {
+	t.Parallel()
+
+	// A pool larger than the cap lists the first eight items and counts the
+	// rest on an overflow line.
+	panel := barPanel()
+	panel.Tally.Target = ""
+
+	for i := range 11 {
+		panel.Tasks = append(panel.Tasks, progress.PanelTask{
+			Name:  fmt.Sprintf("acme/ws-%02d", i),
+			Total: 10 + i,
+			Done:  i,
+		})
+	}
+
+	golden.RequireEqual(t, []byte(progress.RenderPanel(panel)))
+}
+
+func TestRenderPanel_TaskAlignsWithPhaseBar(t *testing.T) {
+	t.Parallel()
+
+	// Every task line's bar starts at the same column as the phase bar, so the
+	// panel reads as one grid.
+	panel := barPanel()
+	panel.Tasks = []progress.PanelTask{
+		{Name: "ws", Total: 10, Done: 5},
+		{Name: "ws2", Total: 8, Done: 1},
+	}
+
+	rendered := strings.Split(progress.RenderPanel(panel), "\n")
+	require.Len(t, rendered, 4)
+
+	for _, line := range rendered[1:3] {
+		assert.Equal(t, barColumn(t, rendered[0]), barColumn(t, line),
+			"task bar column matches phase bar column")
+	}
+}
+
+func TestRenderPanel_TaskLinesFitTerminalHeight(t *testing.T) {
+	t.Parallel()
+
+	// A short terminal tightens the task budget so the whole panel fits: at
+	// six rows there is room for three task lines beside the first line, the
+	// overflow line, and the counts.
+	panel := barPanel()
+	for i := range 11 {
+		panel.Tasks = append(panel.Tasks, progress.PanelTask{
+			Name:  fmt.Sprintf("acme/ws-%02d", i),
+			Total: 10,
+			Done:  i,
+		})
+	}
+
+	rendered := progress.RenderPanelAt(panel, 80, 6)
+	lines := strings.Split(rendered, "\n")
+
+	assert.Len(t, lines, 6, "panel height matches the terminal")
+	assert.Contains(t, ansi.Strip(rendered), "+8 more active")
+}
+
+// barColumn returns the display column at which a rendered line's bar begins.
+func barColumn(t *testing.T, line string) int {
+	t.Helper()
+
+	stripped := ansi.Strip(line)
+	i := strings.IndexRune(stripped, '▌')
+	require.GreaterOrEqual(t, i, 0, "line carries a bar")
+
+	return ansi.StringWidth(stripped[:i])
 }
 
 func TestRenderPanel_Resumed(t *testing.T) {
@@ -96,7 +189,7 @@ func TestRenderPanel_CountRolloverIsStable(t *testing.T) {
 	a := line2(after)
 
 	assert.Equal(t, ansi.StringWidth(b), ansi.StringWidth(a), "line width holds")
-	assert.Equal(t, strings.Index(b, "errored="), strings.Index(a, "errored="),
+	assert.Equal(t, strings.Index(b, "errored"), strings.Index(a, "errored"),
 		"errored column holds as done rolls over")
 	assert.Equal(t, indexOfMeta(b), indexOfMeta(a), "metadata column holds")
 }

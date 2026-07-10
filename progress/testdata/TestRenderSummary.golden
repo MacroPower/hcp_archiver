@@ -1,3 +1,3 @@
-[1;38;2;122;162;247marchive complete[m
-  [38;2;158;206;106mdone=100[m [38;2;247;118;142merrored=4[m [38;2;224;175;104mforbidden=6[m
-[38;2;138;143;152m  absent=3 skipped=2 n/a=1 total=116 bytes=5.0 MiB elapsed=3m20s[m
+[38;2;122;162;247m│[m [38;2;247;118;142m✗[m [1;38;2;122;162;247marchive complete[m                                        
+[38;2;122;162;247m│[m [38;2;158;206;106m✓ done 100[m [38;2;247;118;142m✗ errored 4[m [38;2;224;175;104m⊘ forbidden 6[m                      
+[38;2;122;162;247m│[m [38;2;138;143;152mabsent 3 · skipped 2 · n/a 1 · total 116 · 5.0 MiB · 3m20s[m

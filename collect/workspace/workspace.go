@@ -14,11 +14,26 @@ import (
 // the name of the workspace's project, resolved by the orchestrator, so the
 // collector can build project-scoped paths.
 //
+// The progress callback, when non-nil, is called with 1 after each run the walk
+// handles, so the orchestrator can move its unit-progress accounting while a
+// large workspace is still in flight rather than only when it finishes. The
+// count of callbacks is the walk's own, not the workspace's advertised run
+// count: a walk that stops early on settled history reports fewer, and a run
+// listing that outgrows the advertised count (speculative runs, a stale
+// counter) reports more, so the orchestrator reconciles against its own budget.
+//
+// It does not touch the progress target: workspaces archive concurrently, so
+// no single name is the target, and progress reporting names the in-flight
+// workspaces through their tasks instead.
+//
 // It returns only on a context cancellation; a single missing or failed object
 // is recorded in the ledger and does not abort the collector.
-func (c *Collector) CollectWorkspace(ctx context.Context, projectName string, ws *tfe.Workspace) error {
-	c.env.SetTarget(projectName + "/" + ws.Name)
-
+func (c *Collector) CollectWorkspace(
+	ctx context.Context,
+	projectName string,
+	ws *tfe.Workspace,
+	progress func(n int),
+) error {
 	err := c.collectWorkspaceSettings(ctx, projectName, ws)
 	if err != nil {
 		return err
@@ -29,7 +44,7 @@ func (c *Collector) CollectWorkspace(ctx context.Context, projectName string, ws
 		return err
 	}
 
-	return c.collectRuns(ctx, projectName, ws)
+	return c.collectRuns(ctx, projectName, ws, progress)
 }
 
 // collectWorkspaceSettings archives the workspace record and its adjacent
