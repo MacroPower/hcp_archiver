@@ -113,3 +113,45 @@ func TestArchiveConfigurationVersionRetryGate(t *testing.T) {
 	f.attrs(t, ingPath, "ingress-attributes", "ia-3")
 	assert.Equal(t, manifest.StatusDone, f.status(cvPath), "the settled record is left untouched")
 }
+
+func TestArchivePlanSummary(t *testing.T) {
+	t.Parallel()
+
+	f := newWSFixture(t, http.NewServeMux())
+	st := f.store
+
+	// The plan summary is value-in-hand; settle the heavy log and JSON so no fetch
+	// is attempted and the test isolates on the summary write.
+	f.preSettle(st.RunFile("proj", "ws", "run-1", "plan.log"))
+	f.preSettle(st.RunFile("proj", "ws", "run-1", "plan.json"))
+
+	run := &tfe.Run{
+		ID:   "run-1",
+		Plan: &tfe.Plan{ID: "plan-1", HasChanges: true, ResourceAdditions: 3, ResourceDestructions: 1},
+	}
+	require.NoError(t, f.collector.ArchivePlan(t.Context(), "proj", "ws", run))
+
+	attrs := f.attrs(t, st.RunFile("proj", "ws", "run-1", "plan-summary.json"), "plans", "plan-1")
+	assert.Equal(t, true, attrs["has-changes"])
+	assert.InDelta(t, 3, attrs["resource-additions"], 0)
+	assert.InDelta(t, 1, attrs["resource-destructions"], 0)
+}
+
+func TestArchiveApplySummary(t *testing.T) {
+	t.Parallel()
+
+	f := newWSFixture(t, http.NewServeMux())
+	st := f.store
+
+	f.preSettle(st.RunFile("proj", "ws", "run-1", "apply.log"))
+
+	run := &tfe.Run{
+		ID:    "run-1",
+		Apply: &tfe.Apply{ID: "apply-1", ResourceAdditions: 5, ResourceChanges: 2},
+	}
+	require.NoError(t, f.collector.ArchiveApply(t.Context(), "proj", "ws", run))
+
+	attrs := f.attrs(t, st.RunFile("proj", "ws", "run-1", "apply-summary.json"), "applies", "apply-1")
+	assert.InDelta(t, 5, attrs["resource-additions"], 0)
+	assert.InDelta(t, 2, attrs["resource-changes"], 0)
+}

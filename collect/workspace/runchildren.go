@@ -115,8 +115,13 @@ func (c *Collector) archiveConfigVersionIngress(
 	return c.object(ctx, ingPath, cv.IngressAttributes)
 }
 
-// archivePlan archives the run's plan log and, when the Terraform version offers
-// it, the structured plan JSON.
+// archivePlan archives the run's plan summary, its plan log, and, when the
+// Terraform version offers it, the structured plan JSON.
+//
+// The plan is already hydrated on the run by the pager's include but renders as a
+// bare id ref on run.json, so its summary attributes (resource counts, change
+// flags) are archived directly. The structured plan.json (the full ReadJSONOutput
+// artifact) is kept alongside as before.
 func (c *Collector) archivePlan(ctx context.Context, project, ws string, run *tfe.Run) error {
 	if run.Plan == nil {
 		return nil
@@ -125,7 +130,12 @@ func (c *Collector) archivePlan(ctx context.Context, project, ws string, run *tf
 	st := c.env.Store()
 	planID := run.Plan.ID
 
-	err := c.logBlob(ctx, st.RunFile(project, ws, run.ID, "plan.log"),
+	err := c.object(ctx, st.RunFile(project, ws, run.ID, "plan-summary.json"), run.Plan)
+	if err != nil {
+		return err
+	}
+
+	err = c.logBlob(ctx, st.RunFile(project, ws, run.ID, "plan.log"),
 		func(ctx context.Context, tc *tfe.Client) (io.Reader, error) {
 			return tc.Plans.Logs(ctx, planID)
 		})
@@ -139,7 +149,11 @@ func (c *Collector) archivePlan(ctx context.Context, project, ws string, run *tf
 		})
 }
 
-// archiveApply archives the run's apply log.
+// archiveApply archives the run's apply summary and its apply log.
+//
+// Like the plan, the apply is hydrated on the run but renders as a bare id ref,
+// so its summary attributes (resource counts) are archived directly alongside the
+// log.
 func (c *Collector) archiveApply(ctx context.Context, project, ws string, run *tfe.Run) error {
 	if run.Apply == nil {
 		return nil
@@ -147,6 +161,11 @@ func (c *Collector) archiveApply(ctx context.Context, project, ws string, run *t
 
 	st := c.env.Store()
 	applyID := run.Apply.ID
+
+	err := c.object(ctx, st.RunFile(project, ws, run.ID, "apply-summary.json"), run.Apply)
+	if err != nil {
+		return err
+	}
 
 	return c.logBlob(ctx, st.RunFile(project, ws, run.ID, "apply.log"),
 		func(ctx context.Context, tc *tfe.Client) (io.Reader, error) {

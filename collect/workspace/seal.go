@@ -31,6 +31,8 @@ var (
 	runRollups = map[string]string{
 		"config-version.json":         "config-versions.ndjson",
 		"config-version-ingress.json": "config-versions.ndjson",
+		"plan-summary.json":           "plan-summaries.ndjson",
+		"apply-summary.json":          "apply-summaries.ndjson",
 		"cost-estimate.json":          "cost-estimates.ndjson",
 		"comments.json":               "comments.ndjson",
 		"run-events.json":             "run-events.ndjson",

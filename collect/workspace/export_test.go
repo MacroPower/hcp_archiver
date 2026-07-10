@@ -21,6 +21,16 @@ func (c *Collector) ArchiveConfigurationVersion(
 	return c.archiveConfigurationVersion(ctx, project, ws, run)
 }
 
+// ArchivePlan exposes archivePlan to the external test package.
+func (c *Collector) ArchivePlan(ctx context.Context, project, ws string, run *tfe.Run) error {
+	return c.archivePlan(ctx, project, ws, run)
+}
+
+// ArchiveApply exposes archiveApply to the external test package.
+func (c *Collector) ArchiveApply(ctx context.Context, project, ws string, run *tfe.Run) error {
+	return c.archiveApply(ctx, project, ws, run)
+}
+
 // ArchiveStateVersion exposes archiveStateVersion to the external test package.
 func (c *Collector) ArchiveStateVersion(
 	ctx context.Context,
