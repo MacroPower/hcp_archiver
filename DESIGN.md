@@ -477,11 +477,11 @@ read.
 
 ### What stays loose vs. what seals
 
-| Tier | Objects | Storage class | Form |
-| --- | --- | --- | --- |
-| Loose, mutable, greppable | the 9 per-ws settings files (`workspace.json`, `variables.json`, `tags.json`, team access, notification configs, ...), ledger shards, sidecar indexes | Standard | one file per relpath |
-| Coalesced roll-ups | the 7 immutable run children + state-version `meta.json` + frozen `run.json` | Standard | per-ws `*.ndjson`, keyed by relpath |
-| Cold bundles | `plan.log` / `plan.json` / `apply.log` / `cost-estimate.log` / `policy-check-*.log`; raw + json state | Deep Archive | write-once generational `logs.zip` + `state.zip`, sidecar-indexed |
+| Tier                      | Objects                                                                                                                                               | Storage class | Form                                                              |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- | ----------------------------------------------------------------- |
+| Loose, mutable, greppable | the 9 per-ws settings files (`workspace.json`, `variables.json`, `tags.json`, team access, notification configs, ...), ledger shards, sidecar indexes | Standard      | one file per relpath                                              |
+| Coalesced roll-ups        | the 7 immutable run children + state-version `meta.json` + frozen `run.json`                                                                          | Standard      | per-ws `*.ndjson`, keyed by relpath                               |
+| Cold bundles              | `plan.log` / `plan.json` / `apply.log` / `cost-estimate.log` / `policy-check-*.log`; raw + json state                                                 | Deep Archive  | write-once generational `logs.zip` + `state.zip`, sidecar-indexed |
 
 At 1000 workspaces x 200 frozen runs x 30 state versions (config-version tarballs
 excluded, equal either way), object count holds near ~30k where one file per
