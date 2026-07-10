@@ -251,6 +251,14 @@ func Paginate[T any](
 			break
 		}
 
+		// The server drives pagination through NextPage, and a well-formed response
+		// always advances it. A NextPage that does not move past the current page (a
+		// misbehaving server, a cycle) would otherwise loop forever, re-fetching the
+		// same page and growing all without bound; stop with what was gathered.
+		if pg.NextPage <= page {
+			break
+		}
+
 		page = pg.NextPage
 	}
 
