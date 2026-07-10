@@ -308,7 +308,15 @@ func (m *tuiModel) renderTask(task taskProgress) string {
 
 	b.WriteString(strings.Repeat(" ", phaseWidth+3))
 
-	percent := min(max(float64(task.done)/float64(task.total), 0), 1)
+	// Guard the division: a task with no total (the same total==0 case the phase
+	// bar skips via hasBar) would otherwise divide by zero into a NaN or an
+	// infinity and render a garbage percent.
+	var percent float64
+
+	if task.total > 0 {
+		percent = min(max(float64(task.done)/float64(task.total), 0), 1)
+	}
+
 	b.WriteString(m.bar.ViewAs(percent))
 	fmt.Fprintf(&b, " %s", styleCount.Render(fmt.Sprintf("%3d%%", int(percent*100))))
 
