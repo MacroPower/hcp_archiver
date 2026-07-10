@@ -243,3 +243,156 @@ func verifyMember(f *zip.File, entry *Entry) error {
 
 	return nil
 }
+
+// rollupLine is one member's record in a roll-up: its archive-relative path, the
+// SHA-256 of its content, and the content itself carried byte for byte as a JSON
+// string.
+type rollupLine struct {
+	Path    string `json:"path"`
+	SHA256  string `json:"sha256"`
+	Content string `json:"content"`
+}
+
+// Rollup appends each member's content, keyed by its archive-relative name, as
+// one JSON line to the roll-up at rollupPath, then removes the loose sources.
+//
+// Unlike a bundle, a roll-up stays plain and greppable: the content is carried
+// byte for byte as an escaped JSON string, so an extract reproduces the original
+// file and a field token is still found by a raw search. The batch is appended
+// and flushed, the appended tail is read back and byte-compared, and only then
+// are the sources removed, so an interrupted roll-up loses nothing and re-runs.
+//
+// A roll-up only grows: immutable metadata folds into it exactly once, so no line
+// is ever rewritten. A crash between the flushed append and a source's removal
+// re-folds that member next run, appending an identical line a reader dedupes by
+// path. An empty member set appends nothing.
+func Rollup(rollupPath string, members []Member) error {
+	if len(members) == 0 {
+		return nil
+	}
+
+	payload, err := encodeRollup(members)
+	if err != nil {
+		return err
+	}
+
+	start, err := appendPayload(rollupPath, payload)
+	if err != nil {
+		return err
+	}
+
+	err = verifyAppended(rollupPath, start, payload)
+	if err != nil {
+		return err
+	}
+
+	for i := range members {
+		err = os.Remove(members[i].Source)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("remove rolled-up source %q: %w", members[i].Source, err)
+		}
+	}
+
+	return nil
+}
+
+// encodeRollup reads each member's content and renders the batch as
+// newline-terminated JSON lines.
+func encodeRollup(members []Member) ([]byte, error) {
+	var buf bytes.Buffer
+
+	for i := range members {
+		//nolint:gosec // The source path is composed by the caller from its archive root.
+		data, err := os.ReadFile(members[i].Source)
+		if err != nil {
+			return nil, fmt.Errorf("read source %q: %w", members[i].Source, err)
+		}
+
+		sum := sha256.Sum256(data)
+
+		encoded, err := json.Marshal(&rollupLine{
+			Path:    members[i].Name,
+			SHA256:  hex.EncodeToString(sum[:]),
+			Content: string(data),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("encode roll-up line for %q: %w", members[i].Name, err)
+		}
+
+		buf.Write(encoded)
+		buf.WriteByte('\n')
+	}
+
+	return buf.Bytes(), nil
+}
+
+// appendPayload appends payload to the roll-up, flushes it to stable storage, and
+// returns the offset the append began at so the write can be verified.
+func appendPayload(path string, payload []byte) (int64, error) {
+	err := os.MkdirAll(filepath.Dir(path), atomicfile.DefaultDirMode)
+	if err != nil {
+		return 0, fmt.Errorf("create roll-up directory: %w", err)
+	}
+
+	var start int64
+
+	info, err := os.Stat(path)
+
+	switch {
+	case err == nil:
+		start = info.Size()
+	case errors.Is(err, fs.ErrNotExist):
+		start = 0
+	default:
+		return 0, fmt.Errorf("stat roll-up %q: %w", path, err)
+	}
+
+	//nolint:gosec // The roll-up path is composed by the caller from its archive root.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, atomicfile.DefaultFileMode)
+	if err != nil {
+		return 0, fmt.Errorf("open roll-up %q: %w", path, err)
+	}
+
+	_, writeErr := f.Write(payload)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+
+	switch {
+	case writeErr != nil:
+		return 0, fmt.Errorf("append roll-up %q: %w", path, writeErr)
+	case syncErr != nil:
+		return 0, fmt.Errorf("sync roll-up %q: %w", path, syncErr)
+	case closeErr != nil:
+		return 0, fmt.Errorf("close roll-up %q: %w", path, closeErr)
+	}
+
+	return start, nil
+}
+
+// verifyAppended confirms the bytes written at start read back exactly, so the
+// sources are only removed once the appended lines are durable and intact.
+func verifyAppended(path string, start int64, payload []byte) error {
+	//nolint:gosec // The roll-up path is composed by the caller from its archive root.
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open roll-up %q to verify: %w", path, err)
+	}
+
+	got := make([]byte, len(payload))
+
+	_, readErr := f.ReadAt(got, start)
+	closeErr := f.Close()
+
+	switch {
+	case readErr != nil && !errors.Is(readErr, io.EOF):
+		return fmt.Errorf("read roll-up %q tail to verify: %w", path, readErr)
+	case closeErr != nil:
+		return fmt.Errorf("close roll-up %q after verify: %w", path, closeErr)
+	}
+
+	if !bytes.Equal(got, payload) {
+		return fmt.Errorf("roll-up %q failed verification after append", path)
+	}
+
+	return nil
+}

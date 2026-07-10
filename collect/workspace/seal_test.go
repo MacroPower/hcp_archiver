@@ -1,6 +1,8 @@
 package workspace_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -60,6 +62,36 @@ func (f sealFixture) markComplete(project, ws string) {
 	f.ledger.MarkCollectionComplete(f.store.StateVersionDir(project, ws))
 }
 
+// rollupContent reads back the byte-for-byte content a roll-up recorded for an
+// archive-relative path.
+func rollupContent(t *testing.T, st *store.Store, project, ws, rollup, relPath string) []byte {
+	t.Helper()
+
+	data, err := os.ReadFile(st.AbsPath(st.Join(st.RollupDir(project, ws), rollup)))
+	require.NoError(t, err)
+
+	for line := range bytes.SplitSeq(data, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+
+		var entry struct {
+			Path    string `json:"path"`
+			Content string `json:"content"`
+		}
+
+		require.NoError(t, json.Unmarshal(line, &entry))
+
+		if entry.Path == relPath {
+			return []byte(entry.Content)
+		}
+	}
+
+	t.Fatalf("path %q not found in roll-up %s", relPath, rollup)
+
+	return nil
+}
+
 func TestSealWorkspace_BundlesFrozenArtifacts(t *testing.T) {
 	t.Parallel()
 
@@ -67,13 +99,14 @@ func TestSealWorkspace_BundlesFrozenArtifacts(t *testing.T) {
 	st := f.store
 	project, ws := "prod", "api"
 
-	// A frozen run: heavy children plus loose metadata.
+	// A frozen run: heavy children, immutable small children, and run.json.
 	f.writeDone(t, st.RunFile(project, ws, "run-1", "run.json"), []byte(`{"id":"run-1"}`))
 	f.writeDone(t, st.RunFile(project, ws, "run-1", "plan.log"), []byte("plan output"))
 	f.writeDone(t, st.RunFile(project, ws, "run-1", "plan.json"), []byte(`{"plan":true}`))
 	f.writeDone(t, st.RunFile(project, ws, "run-1", "apply.log"), []byte("apply output"))
 	f.writeDone(t, st.RunFile(project, ws, "run-1", "policy-check-pc1.log"), []byte("policy log"))
-	f.writeDone(t, st.RunFile(project, ws, "run-1", "run-events.json"), []byte(`[]`))
+	f.writeDone(t, st.RunFile(project, ws, "run-1", "config-version.json"), []byte(`{"cv":"cv-1"}`))
+	f.writeDone(t, st.RunFile(project, ws, "run-1", "run-events.json"), []byte("[\n  {}\n]"))
 
 	// A state version: raw and JSON blobs plus the meta sidecar.
 	sv := st.StateVersionDir(project, ws)
@@ -85,36 +118,43 @@ func TestSealWorkspace_BundlesFrozenArtifacts(t *testing.T) {
 
 	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
 
-	// The heavy run artifacts and state blobs are bundled away.
-	for _, sealed := range []string{
+	// The heavy artifacts are bundled and the immutable small metadata is
+	// coalesced; both remove their loose originals.
+	for _, gone := range []string{
 		st.RunFile(project, ws, "run-1", "plan.log"),
 		st.RunFile(project, ws, "run-1", "plan.json"),
 		st.RunFile(project, ws, "run-1", "apply.log"),
 		st.RunFile(project, ws, "run-1", "policy-check-pc1.log"),
+		st.RunFile(project, ws, "run-1", "config-version.json"),
+		st.RunFile(project, ws, "run-1", "run-events.json"),
 		st.Join(sv, "20260101T000000Z-sv-1.tfstate.json"),
 		st.Join(sv, "20260101T000000Z-sv-1.json"),
-	} {
-		assert.False(t, f.exists(sealed), "%s should be sealed away", sealed)
-	}
-
-	// The greppable metadata stays loose.
-	for _, loose := range []string{
-		st.RunFile(project, ws, "run-1", "run.json"),
-		st.RunFile(project, ws, "run-1", "run-events.json"),
 		st.Join(sv, "20260101T000000Z-sv-1.meta.json"),
 	} {
-		assert.True(t, f.exists(loose), "%s should stay loose", loose)
+		assert.False(t, f.exists(gone), "%s should be sealed or coalesced away", gone)
 	}
 
-	// The bundles and sidecars exist.
-	for _, bundle := range []string{
+	// Only run.json, the mutable summary, stays loose.
+	assert.True(t, f.exists(st.RunFile(project, ws, "run-1", "run.json")), "run.json stays loose")
+
+	// The bundles, their sidecars, and the roll-ups exist.
+	for _, out := range []string{
 		st.Join(st.BundleDir(project, ws), "logs.gen0001.zip"),
 		st.Join(st.BundleDir(project, ws), "logs.gen0001.zip.sidecar.ndjson"),
 		st.Join(st.BundleDir(project, ws), "state.gen0001.zip"),
 		st.Join(st.BundleDir(project, ws), "state.gen0001.zip.sidecar.ndjson"),
+		st.Join(st.RollupDir(project, ws), "config-versions.ndjson"),
+		st.Join(st.RollupDir(project, ws), "run-events.ndjson"),
+		st.Join(st.RollupDir(project, ws), "state-versions.ndjson"),
 	} {
-		assert.True(t, f.exists(bundle), "%s should exist", bundle)
+		assert.True(t, f.exists(out), "%s should exist", out)
 	}
+
+	// A coalesced line carries the original bytes verbatim: a multi-line indented
+	// JSON round-trips through the roll-up's escaped content field.
+	original := []byte("[\n  {}\n]")
+	assert.Equal(t, original, rollupContent(t, f.store, project, ws, "run-events.ndjson",
+		st.RunFile(project, ws, "run-1", "run-events.json")))
 }
 
 func TestSealWorkspace_SkipsIncompleteCollections(t *testing.T) {

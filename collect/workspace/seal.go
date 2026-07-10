@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,28 +16,47 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/seal"
 )
 
-// runHeavyNames are the fixed-name heavy, audit-only run artifacts that seal into
-// a workspace's logs bundle; per-check policy-check-<id>.log files join them by
-// pattern.
-var runHeavyNames = map[string]struct{}{
-	"plan.log":          {},
-	"plan.json":         {},
-	"apply.log":         {},
-	"cost-estimate.log": {},
-}
+var (
+	// Heavy, audit-only run artifacts that seal into a workspace's logs bundle;
+	// per-check policy-check-<id>.log files join them by pattern.
+	runHeavyNames = map[string]struct{}{
+		"plan.log":          {},
+		"plan.json":         {},
+		"apply.log":         {},
+		"cost-estimate.log": {},
+	}
 
-// SealWorkspace packs the workspace's frozen cold artifacts into generational zip
-// bundles beside its loose metadata, then removes the loose originals.
+	// Immutable run-child filenames, each mapped to the roll-up it coalesces into;
+	// run.json is absent, being mutable, and stays loose.
+	runRollups = map[string]string{
+		"config-version.json":     "config-versions.ndjson",
+		"cost-estimate.json":      "cost-estimates.ndjson",
+		"comments.json":           "comments.ndjson",
+		"run-events.json":         "run-events.ndjson",
+		"policy-checks.json":      "policy-checks.ndjson",
+		"task-stages.json":        "task-stages.ndjson",
+		"tf-policy-outcomes.json": "tf-policy-outcomes.ndjson",
+	}
+)
+
+// stateMetaRollup is the roll-up the immutable state-version meta sidecars
+// coalesce into.
+const stateMetaRollup = "state-versions.ndjson"
+
+// SealWorkspace packs the workspace's frozen cold artifacts into bundles and
+// roll-ups beside its loose metadata, then removes the loose originals.
 //
 // The heavy, audit-only run artifacts (plan and apply logs, the structured plan
 // JSON, policy-check logs) seal into a deflated logs bundle; the raw and
 // JSON-format state blobs seal into a stored state bundle, kept uncompressed so
-// the irreplaceable state stays greppable on disk. Only settled artifacts of a
-// fully-walked collection are sealed, and each loose source is removed only after
-// its bundle verifies, so a sealing pass is safe to interrupt and re-run. The
-// greppable metadata (run.json, the state meta sidecar, the small run children)
-// stays loose, and nothing is re-fetched: the ledger keys are unchanged, so a
-// re-run treats a sealed object exactly as it did the loose one.
+// the irreplaceable state stays greppable on disk; and the immutable small
+// metadata (the per-run children and per-state-version meta sidecars) coalesces
+// into per-workspace NDJSON roll-ups. Only run.json, the mutable run summary,
+// stays a loose file. Only settled artifacts of a fully-walked collection are
+// sealed, and each loose source is removed only after its bundle or roll-up is
+// durable and verified, so a pass is safe to interrupt and re-run. Nothing is
+// re-fetched: the ledger keys are unchanged, so a re-run treats a sealed object
+// exactly as it did the loose one.
 func (c *Collector) SealWorkspace(ctx context.Context, project, ws string) error {
 	logs, err := c.frozenRunArtifacts(project, ws)
 	if err != nil {
@@ -48,12 +68,22 @@ func (c *Collector) SealWorkspace(ctx context.Context, project, ws string) error
 		return fmt.Errorf("gather frozen state artifacts: %w", err)
 	}
 
+	metadata, err := c.frozenMetadata(project, ws)
+	if err != nil {
+		return fmt.Errorf("gather frozen metadata: %w", err)
+	}
+
 	err = c.sealBundle(ctx, project, ws, "logs", logs)
 	if err != nil {
 		return err
 	}
 
-	return c.sealBundle(ctx, project, ws, "state", states)
+	err = c.sealBundle(ctx, project, ws, "state", states)
+	if err != nil {
+		return err
+	}
+
+	return c.coalesce(ctx, project, ws, metadata)
 }
 
 // frozenRunArtifacts returns the workspace's loose, settled heavy run artifacts,
@@ -129,6 +159,59 @@ func (c *Collector) frozenStateArtifacts(project, ws string) ([]seal.Member, err
 	return members, nil
 }
 
+// frozenMetadata returns the workspace's loose, settled immutable metadata
+// grouped by the roll-up it coalesces into: the immutable per-run children and
+// the per-state-version meta sidecars, excluding the mutable run.json, which
+// stays loose. Each collection contributes only once it has been walked to its
+// end.
+func (c *Collector) frozenMetadata(project, ws string) (map[string][]seal.Member, error) {
+	st := c.env.Store()
+	out := make(map[string][]seal.Member)
+
+	runsKey := st.Join(st.WorkspaceDir(project, ws), "runs")
+	if c.env.IsCollectionComplete(runsKey) {
+		runIDs, err := subdirs(st.AbsPath(runsKey))
+		if err != nil {
+			return nil, err
+		}
+
+		for _, runID := range runIDs {
+			names, filesErr := metadataRunFiles(st.AbsPath(st.RunDir(project, ws, runID)))
+			if filesErr != nil {
+				return nil, filesErr
+			}
+
+			for _, name := range names {
+				relPath := st.RunFile(project, ws, runID, name)
+				if c.settled(relPath) {
+					rollup := runRollups[name]
+					out[rollup] = append(out[rollup], seal.Member{Name: relPath, Source: st.AbsPath(relPath)})
+				}
+			}
+		}
+	}
+
+	svKey := st.StateVersionDir(project, ws)
+	if c.env.IsCollectionComplete(svKey) {
+		names, err := stateMetaFiles(st.AbsPath(svKey))
+		if err != nil {
+			return nil, err
+		}
+
+		for _, name := range names {
+			relPath := st.Join(svKey, name)
+			if c.settled(relPath) {
+				out[stateMetaRollup] = append(
+					out[stateMetaRollup],
+					seal.Member{Name: relPath, Source: st.AbsPath(relPath)},
+				)
+			}
+		}
+	}
+
+	return out, nil
+}
+
 // settled reports whether the object at relPath is recorded done, the gate that
 // keeps a seal to artifacts the ledger has fully archived.
 func (c *Collector) settled(relPath string) bool {
@@ -160,6 +243,33 @@ func (c *Collector) sealBundle(ctx context.Context, project, ws, prefix string, 
 	_, err = seal.Seal(bundlePath, members)
 	if err != nil {
 		return fmt.Errorf("seal %s bundle: %w", prefix, err)
+	}
+
+	return nil
+}
+
+// coalesce folds each roll-up's frozen members into its NDJSON file, a no-op when
+// there is nothing to coalesce. Roll-up files are processed in a stable order so
+// the pass is deterministic.
+func (c *Collector) coalesce(ctx context.Context, project, ws string, rollups map[string][]seal.Member) error {
+	if len(rollups) == 0 {
+		return nil
+	}
+
+	if ctx.Err() != nil {
+		return fmt.Errorf("coalesce metadata: %w", ctx.Err())
+	}
+
+	rollupDir := c.env.Store().AbsPath(c.env.Store().RollupDir(project, ws))
+
+	for _, name := range slices.Sorted(maps.Keys(rollups)) {
+		members := rollups[name]
+		sortMembers(members)
+
+		err := seal.Rollup(filepath.Join(rollupDir, name), members)
+		if err != nil {
+			return fmt.Errorf("coalesce %s: %w", name, err)
+		}
 	}
 
 	return nil
@@ -219,6 +329,56 @@ func isHeavyRunFile(name string) bool {
 	}
 
 	return strings.HasPrefix(name, "policy-check-") && strings.HasSuffix(name, ".log")
+}
+
+// metadataRunFiles lists the immutable run-child filenames present in a run
+// directory that coalesce into roll-ups.
+func metadataRunFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("read %q: %w", dir, err)
+	}
+
+	var out []string
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+
+		if _, ok := runRollups[e.Name()]; ok {
+			out = append(out, e.Name())
+		}
+	}
+
+	return out, nil
+}
+
+// stateMetaFiles lists the immutable state-version meta sidecars in a
+// state-versions directory.
+func stateMetaFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("read %q: %w", dir, err)
+	}
+
+	var out []string
+
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".meta.json") {
+			out = append(out, e.Name())
+		}
+	}
+
+	return out, nil
 }
 
 // stateBlobFiles lists the raw and JSON-format state blobs in a state-versions

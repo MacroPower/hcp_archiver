@@ -201,3 +201,100 @@ func TestSeal_SidecarRecordsEveryMember(t *testing.T) {
 		assert.Equal(t, "logs.gen0002.zip", e.Bundle)
 	}
 }
+
+// rollupRecord mirrors the roll-up line shape for reading back a roll-up in tests.
+type rollupRecord struct {
+	Path    string `json:"path"`
+	SHA256  string `json:"sha256"`
+	Content string `json:"content"`
+}
+
+// readRollup parses a roll-up's NDJSON lines.
+func readRollup(t *testing.T, path string) []rollupRecord {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	var out []rollupRecord
+
+	for line := range bytes.SplitSeq(data, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+
+		var r rollupRecord
+
+		require.NoError(t, json.Unmarshal(line, &r))
+
+		out = append(out, r)
+	}
+
+	return out
+}
+
+func TestRollup_CoalescesAndRemovesSources(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// A multi-line indented JSON, the shape the small metadata takes on disk.
+	body := []byte("{\n  \"id\": \"run-1\"\n}")
+	src := writeSource(t, dir, "run.json", body)
+	events := writeSource(t, dir, "events.json", []byte(`[]`))
+
+	rollupPath := filepath.Join(dir, "rollups", "runs.ndjson")
+
+	require.NoError(t, seal.Rollup(rollupPath, []seal.Member{
+		{Name: "runs/r1/run.json", Source: src},
+		{Name: "runs/r1/events.json", Source: events},
+	}))
+
+	// The loose sources are coalesced away.
+	for _, s := range []string{src, events} {
+		_, statErr := os.Stat(s)
+		assert.True(t, os.IsNotExist(statErr), "%s coalesced away", s)
+	}
+
+	lines := readRollup(t, rollupPath)
+	require.Len(t, lines, 2)
+
+	byPath := make(map[string]rollupRecord, len(lines))
+	for _, l := range lines {
+		byPath[l.Path] = l
+	}
+
+	// The content round-trips byte for byte, digest and all, so an extract
+	// reproduces the original multi-line file.
+	assert.Equal(t, string(body), byPath["runs/r1/run.json"].Content)
+	assert.Equal(t, sha256hex(body), byPath["runs/r1/run.json"].SHA256)
+}
+
+func TestRollup_AppendsToExisting(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	rollupPath := filepath.Join(dir, "runs.ndjson")
+
+	first := writeSource(t, dir, "a.json", []byte(`{"a":1}`))
+	require.NoError(t, seal.Rollup(rollupPath, []seal.Member{{Name: "a", Source: first}}))
+
+	second := writeSource(t, dir, "b.json", []byte(`{"b":2}`))
+	require.NoError(t, seal.Rollup(rollupPath, []seal.Member{{Name: "b", Source: second}}))
+
+	// A roll-up only grows: the second fold appends after the first.
+	lines := readRollup(t, rollupPath)
+	require.Len(t, lines, 2)
+	assert.Equal(t, "a", lines[0].Path)
+	assert.Equal(t, "b", lines[1].Path)
+}
+
+func TestRollup_EmptyWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	rollupPath := filepath.Join(t.TempDir(), "runs.ndjson")
+
+	require.NoError(t, seal.Rollup(rollupPath, nil))
+
+	_, statErr := os.Stat(rollupPath)
+	assert.True(t, os.IsNotExist(statErr), "no roll-up is written for an empty fold")
+}

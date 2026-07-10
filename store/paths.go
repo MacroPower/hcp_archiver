@@ -207,6 +207,12 @@ func (s *Store) BundleDir(project, ws string) string {
 	return cleanJoin("projects", seg(project), "workspaces", seg(ws), "bundles")
 }
 
+// RollupDir returns the directory that holds a workspace's NDJSON roll-ups, the
+// coalesced form of its frozen immutable per-run and per-state-version metadata.
+func (s *Store) RollupDir(project, ws string) string {
+	return cleanJoin("projects", seg(project), "workspaces", seg(ws), "rollups")
+}
+
 // StateVersionDir returns the directory that holds a workspace's state-version
 // files.
 func (s *Store) StateVersionDir(project, ws string) string {
