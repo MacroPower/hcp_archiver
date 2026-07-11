@@ -74,13 +74,14 @@ var ErrMemberName = errors.New("member name must be a clean archive-relative pat
 
 // checkMemberNames verifies every member names a clean path that stays within
 // the archive tree, so an extract cannot escape its destination directory. Names
-// are slash-separated bundle paths: an empty name, a leading slash (absolute),
-// or any empty, ".", or ".." segment is rejected, which covers "//", a trailing
+// are slash-separated bundle paths: an empty name, a leading slash (absolute), a
+// backslash anywhere (a Windows separator a '/'-only split would step over), or
+// any empty, ".", or ".." segment is rejected, which covers "//", a trailing
 // slash, and every traversal form without depending on the host separator.
 func checkMemberNames(members []Member) error {
 	for i := range members {
 		name := members[i].Name
-		if name == "" || strings.HasPrefix(name, "/") {
+		if name == "" || strings.HasPrefix(name, "/") || strings.ContainsRune(name, '\\') {
 			return fmt.Errorf("%w: %q", ErrMemberName, name)
 		}
 

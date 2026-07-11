@@ -181,12 +181,15 @@ func TestSeal_RejectsMemberNameEscapingArchive(t *testing.T) {
 	tests := map[string]struct {
 		name string
 	}{
-		"parent traversal": {name: "../../../etc/cron.d/x"},
-		"absolute path":    {name: "/etc/passwd"},
-		"interior dotdot":  {name: "runs/../../escape"},
-		"trailing slash":   {name: "runs/"},
-		"bare dotdot":      {name: ".."},
-		"empty name":       {name: ""},
+		"parent traversal":    {name: "../../../etc/cron.d/x"},
+		"absolute path":       {name: "/etc/passwd"},
+		"interior dotdot":     {name: "runs/../../escape"},
+		"trailing slash":      {name: "runs/"},
+		"bare dotdot":         {name: ".."},
+		"empty name":          {name: ""},
+		"backslash traversal": {name: `runs\..\..\escape`},
+		"backslash separator": {name: `runs\run-1\plan.json`},
+		"unc-style prefix":    {name: `\\host\share\x`},
 	}
 
 	for tn, tc := range tests {
