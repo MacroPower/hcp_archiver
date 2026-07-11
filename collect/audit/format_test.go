@@ -22,22 +22,27 @@ func TestPageName(t *testing.T) {
 		"zero cursor formats to the epoch stamp": {
 			since: time.Time{},
 			page:  1,
-			want:  "00010101T000000Z-p0001.json",
+			want:  "00010101T000000.000000000Z-p0001.json",
 		},
 		"a cursor stamps in UTC without colons": {
 			since: time.Date(2026, time.July, 8, 13, 4, 5, 0, time.UTC),
 			page:  2,
-			want:  "20260708T130405Z-p0002.json",
+			want:  "20260708T130405.000000000Z-p0002.json",
 		},
 		"a non-UTC cursor is normalized to UTC": {
 			since: time.Date(2026, time.July, 8, 9, 4, 5, 0, time.FixedZone("EST", -4*60*60)),
 			page:  3,
-			want:  "20260708T130405Z-p0003.json",
+			want:  "20260708T130405.000000000Z-p0003.json",
+		},
+		"sub-second cursors keep their fractional precision": {
+			since: time.Date(2026, time.July, 8, 13, 4, 5, 987654321, time.UTC),
+			page:  1,
+			want:  "20260708T130405.987654321Z-p0001.json",
 		},
 		"high page numbers keep sorting past four digits": {
 			since: time.Time{},
 			page:  12345,
-			want:  "00010101T000000Z-p12345.json",
+			want:  "00010101T000000.000000000Z-p12345.json",
 		},
 	}
 
@@ -57,6 +62,18 @@ func TestPageNameOrdersByPage(t *testing.T) {
 
 	assert.Less(t, audit.PageName(since, 1), audit.PageName(since, 2))
 	assert.Less(t, audit.PageName(since, 2), audit.PageName(since, 10))
+}
+
+func TestPageNameDistinguishesSameSecondCursors(t *testing.T) {
+	t.Parallel()
+
+	// Two watermarks in the same wall-clock second must not collide, or the
+	// later run's page would settle under a name the earlier run already wrote.
+	early := time.Date(2026, time.July, 8, 13, 4, 5, 500_000_000, time.UTC)
+	late := time.Date(2026, time.July, 8, 13, 4, 5, 900_000_000, time.UTC)
+
+	assert.NotEqual(t, audit.PageName(early, 1), audit.PageName(late, 1))
+	assert.Less(t, audit.PageName(early, 1), audit.PageName(late, 1))
 }
 
 func TestNewestTimestamp(t *testing.T) {
