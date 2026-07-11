@@ -9,7 +9,9 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 	"go.jacobcolvin.com/hcp_archiver/serialize"
@@ -46,8 +48,16 @@ func (s *Store) Root() string {
 
 // AbsPath returns the on-disk absolute path for an archive-relative path,
 // joining it beneath the root.
+//
+// The result is confined to the root even when relPath carries ".." segments:
+// relPath is cleaned as if rooted at "/", which collapses any leading ".." that
+// would otherwise escape, before being joined under the root. A legitimately
+// clean archive-relative path is unchanged, so this is a boundary the write and
+// read methods enforce rather than trust their callers to respect.
 func (s *Store) AbsPath(relPath string) string {
-	return filepath.Join(s.root, filepath.FromSlash(relPath))
+	clean := strings.TrimPrefix(path.Clean("/"+filepath.ToSlash(relPath)), "/")
+
+	return filepath.Join(s.root, filepath.FromSlash(clean))
 }
 
 // Exists reports whether the object at an archive-relative path is present on
