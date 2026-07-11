@@ -168,10 +168,13 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 		}
 
 		// A NextPage that does not advance past the current page — a misbehaving
-		// server or a cycle — would otherwise re-list the same page forever under
-		// the shared limiter; stop with what was gathered, matching Paginate.
+		// server or a cycle — means the walk cannot reach the pages the server
+		// still claims exist. Halt without advancing the watermark, exactly like
+		// the fetch- and write-error paths, so the next run retries from the same
+		// cursor rather than stepping past the unreached pages' events under a
+		// watermark it would never revisit.
 		if p.NextPage <= page {
-			break
+			return nil
 		}
 
 		page = p.NextPage
