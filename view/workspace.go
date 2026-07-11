@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // ErrObjectNotFound indicates an archive-relative path is present in none of
@@ -29,6 +30,7 @@ type Workspace struct {
 	Project string
 	Name    string
 	dir     string
+	mu      sync.Mutex
 }
 
 // sealedRef locates one sealed object: the roll-up line or bundle member that
@@ -145,6 +147,13 @@ func (w *Workspace) sealedNames(dirPrefix string) ([]string, error) {
 // from the roll-ups and bundle sidecars. Keys are archive-relative paths, the
 // same keys the ledger records, so a lookup is exact.
 func (w *Workspace) index() (map[string]sealedRef, error) {
+	// Bubble Tea runs its commands on separate goroutines, so two descents into
+	// the same workspace can build the index at once. Serialize the whole
+	// check-build-store so the lazy field is written under the lock rather than
+	// raced on.
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	if w.idx != nil {
 		return w.idx, nil
 	}
