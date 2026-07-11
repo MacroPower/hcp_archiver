@@ -37,10 +37,20 @@ func (m *Ci) BinarySnapshot(
 	if err != nil {
 		return nil, err
 	}
-	goos, goarch, _ := strings.Cut(string(platform), "/")
-	return ctr.
+	goos, goarch, variant := parsePlatform(platform)
+	ctr = ctr.
 		WithEnvVariable("GOOS", goos).
-		WithEnvVariable("GOARCH", goarch).
+		WithEnvVariable("GOARCH", goarch)
+	// A variant-qualified platform (e.g. "linux/arm/v7", "linux/arm64/v8.0")
+	// must not fold the variant into GOARCH; map it to the microarchitecture
+	// env var Go expects instead.
+	switch {
+	case variant != "" && goarch == "arm":
+		ctr = ctr.WithEnvVariable("GOARM", strings.TrimPrefix(variant, "v"))
+	case variant != "" && goarch == "arm64":
+		ctr = ctr.WithEnvVariable("GOARM64", variant)
+	}
+	return ctr.
 		// GoReleaser does not create the --output parent directory.
 		WithDirectory("/out", dag.Directory()).
 		WithExec([]string{
@@ -48,6 +58,21 @@ func (m *Ci) BinarySnapshot(
 			"--single-target", "--output", "/out/hcp_archiver",
 		}).
 		File("/out/hcp_archiver"), nil
+}
+
+// parsePlatform splits a dagger.Platform ("os/arch" or "os/arch/variant") into
+// its GOOS, GOARCH, and optional variant, so a variant-qualified platform does
+// not fold the variant into GOARCH.
+func parsePlatform(platform dagger.Platform) (goos, goarch, variant string) {
+	parts := strings.SplitN(string(platform), "/", 3)
+	goos = parts[0]
+	if len(parts) > 1 {
+		goarch = parts[1]
+	}
+	if len(parts) > 2 {
+		variant = parts[2]
+	}
+	return goos, goarch, variant
 }
 
 // BuildImages builds multi-arch runtime container images from a GoReleaser
