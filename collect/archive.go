@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/store"
@@ -50,6 +51,15 @@ func (e *Env) Mutable(ctx context.Context, relPath string, fetch func(context.Co
 // not be buffered or redacted. Like [Env.Object] it skips a settled object and
 // records the outcome; error handling matches [Env.Object].
 //
+// Unlike the buffered fetches, whose HTTP exchanges ride the API client's
+// internal retry layer, a streamed log is read in chunks the go-tfe reader
+// requests on the raw HTTP client, so a single network blip mid-stream fails
+// the whole stream with no retry beneath this call. A fetch or mid-stream
+// error that classifies transient is therefore retried here, re-running fetch
+// after a doubling backoff (see [WithBlobRetry]), before the failure is
+// recorded. The write is atomic, so a restarted stream never commits a
+// partial file.
+//
 // An empty stream carries nothing to archive. Some endpoints answer an absent
 // artifact with 204 No Content (a stack step that only planned, for one), which
 // the client hands back as an empty reader with no error; writing it would leave
@@ -61,9 +71,49 @@ func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Conte
 		return nil
 	}
 
+	var cause error
+
+	for attempt := 0; ; attempt++ {
+		settled, err := e.streamBlob(ctx, relPath, fetch)
+		if settled {
+			return err
+		}
+
+		cause = err
+
+		// A cancellation classifies transient, but sleeping on a dead context
+		// only delays the wind-down; propagate it before considering a retry.
+		canceled := e.canceled(ctx, relPath)
+		if canceled != nil {
+			return canceled
+		}
+
+		if attempt >= e.blobRetries || !tfeclient.IsTransient(cause) {
+			break
+		}
+
+		err = sleep(ctx, retryDelay(e.blobRetryDelay, attempt))
+		if err != nil {
+			return fmt.Errorf("archive %q: %w", relPath, err)
+		}
+	}
+
+	return e.fail(ctx, relPath, cause)
+}
+
+// streamBlob runs one fetch-and-stream attempt for [Env.Blob]. Settled is true
+// when the attempt reached a final outcome — recorded done, a recorded
+// not-applicable gap, a recorded local write failure, or a cancellation
+// propagating as err — and false when the fetch or a mid-stream read failed,
+// returning that cause for the caller to classify and perhaps retry.
+func (e *Env) streamBlob(
+	ctx context.Context,
+	relPath string,
+	fetch func(context.Context) (io.Reader, error),
+) (bool, error) {
 	r, err := fetch(ctx)
 	if err != nil {
-		return e.fail(ctx, relPath, err)
+		return false, err
 	}
 
 	// A nil reader with no error carries nothing to archive: some readers answer
@@ -74,12 +124,13 @@ func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Conte
 	if r == nil {
 		e.ledger.RecordNotApplicable(relPath)
 
-		return nil
+		return true, nil
 	}
 
 	// Some clients hand back an [io.ReadCloser] over a live response body (stack
-	// state descriptions, step artifacts); close it once streamed so the
-	// connection and file descriptor are not leaked.
+	// state descriptions, step artifacts); close it once streamed — and before a
+	// retry opens a fresh one — so the connection and file descriptor are not
+	// leaked.
 	if rc, ok := r.(io.Closer); ok {
 		defer rc.Close() //nolint:errcheck // Best-effort close of an already-consumed body.
 	}
@@ -93,7 +144,7 @@ func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Conte
 	if errors.Is(peekErr, io.EOF) {
 		e.ledger.RecordNotApplicable(relPath)
 
-		return nil
+		return true, nil
 	}
 
 	// Distinguish a mid-stream read failure from a local write failure: the
@@ -105,15 +156,53 @@ func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Conte
 	res, err := e.store.WriteReader(relPath, rec)
 	if err != nil {
 		if rec.err != nil {
-			return e.fail(ctx, relPath, rec.err)
+			return false, rec.err
 		}
 
-		return e.failWrite(ctx, relPath, err)
+		return true, e.failWrite(ctx, relPath, err)
 	}
 
 	e.recordDone(relPath, res)
 
-	return nil
+	return true, nil
+}
+
+// maxBlobRetryDelay caps the doubling retry backoff so a generously configured
+// retry count cannot stretch one object's in-run wait into minutes.
+const maxBlobRetryDelay = 30 * time.Second
+
+// retryDelay returns base doubled attempt times, capped at maxBlobRetryDelay.
+// A non-positive base stays non-positive, so a test-configured zero delay
+// retries immediately.
+func retryDelay(base time.Duration, attempt int) time.Duration {
+	d := base
+	for range attempt {
+		d *= 2
+		if d >= maxBlobRetryDelay {
+			return maxBlobRetryDelay
+		}
+	}
+
+	return d
+}
+
+// sleep waits d or until ctx is done, whichever comes first, returning the
+// context's error when it ended the wait. A non-positive d only checks the
+// context.
+func sleep(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err() //nolint:wrapcheck // The caller adds the object context.
+	}
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err() //nolint:wrapcheck // The caller adds the object context.
+	case <-timer.C:
+		return nil
+	}
 }
 
 // recordingReader remembers the first non-EOF error its reads return, so a

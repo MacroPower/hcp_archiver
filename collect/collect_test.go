@@ -31,7 +31,7 @@ func fixedClock() func() time.Time {
 
 // newEnv builds an [collect.Env] over a real store and ledger rooted in the
 // test's temp dir, plus the ledger so a test can inspect and seed it.
-func newEnv(t *testing.T) (*collect.Env, *store.Store, *manifest.Ledger) {
+func newEnv(t *testing.T, opts ...collect.Option) (*collect.Env, *store.Store, *manifest.Ledger) {
 	t.Helper()
 
 	root := t.TempDir()
@@ -40,7 +40,7 @@ func newEnv(t *testing.T) (*collect.Env, *store.Store, *manifest.Ledger) {
 	ledger, err := manifest.Load(st.Root(), manifest.WithClock(fixedClock()))
 	require.NoError(t, err)
 
-	env := collect.NewEnv(nil, st, ledger)
+	env := collect.NewEnv(nil, st, ledger, opts...)
 
 	return env, st, ledger
 }
@@ -302,10 +302,11 @@ func TestEnvBlobMidStreamReadErrorRecordsTransient(t *testing.T) {
 	// A stream that yields bytes and then fails with a network timeout is a fetch
 	// failure, not a local write failure: it must route through the fetch
 	// classification and record errored+transient so a re-run retries it and the
-	// failure log names the real cause.
+	// failure log names the real cause. In-run retrying is disabled so the
+	// recorded outcome of a single attempt is what is under test.
 	const relPath = "projects/example/workspaces/ws/runs/run-1/apply.log"
 
-	env, st, ledger := newEnv(t)
+	env, st, ledger := newEnv(t, collect.WithBlobRetry(0, 0))
 
 	err := env.Blob(t.Context(), relPath, func(_ context.Context) (io.Reader, error) {
 		return io.MultiReader(strings.NewReader("partial"), iotest.ErrReader(timeoutError{})), nil
@@ -321,6 +322,145 @@ func TestEnvBlobMidStreamReadErrorRecordsTransient(t *testing.T) {
 	exists, existErr := st.Exists(relPath)
 	require.NoError(t, existErr)
 	assert.False(t, exists, "a failed stream commits no file")
+}
+
+func TestEnvBlobRetry(t *testing.T) {
+	t.Parallel()
+
+	const relPath = "projects/example/workspaces/ws/runs/run-1/apply.log"
+
+	fullPayload := strings.Repeat("apply output line\n", 8)
+
+	tests := map[string]struct {
+		fetch         func(attempts *int) func(context.Context) (io.Reader, error)
+		retries       int
+		wantAttempts  int
+		wantStatus    manifest.Status
+		wantTransient bool
+		wantContent   string
+	}{
+		"a transient fetch error is retried to success": {
+			retries: 2,
+			fetch: func(attempts *int) func(context.Context) (io.Reader, error) {
+				return func(_ context.Context) (io.Reader, error) {
+					*attempts++
+					if *attempts == 1 {
+						return nil, timeoutError{}
+					}
+
+					return strings.NewReader(fullPayload), nil
+				}
+			},
+			wantAttempts: 2,
+			wantStatus:   manifest.StatusDone,
+			wantContent:  fullPayload,
+		},
+		"a transient mid-stream error is retried to success": {
+			retries: 2,
+			fetch: func(attempts *int) func(context.Context) (io.Reader, error) {
+				return func(_ context.Context) (io.Reader, error) {
+					*attempts++
+					if *attempts == 1 {
+						return io.MultiReader(strings.NewReader("partial"), iotest.ErrReader(timeoutError{})), nil
+					}
+
+					return strings.NewReader(fullPayload), nil
+				}
+			},
+			wantAttempts: 2,
+			wantStatus:   manifest.StatusDone,
+			wantContent:  fullPayload,
+		},
+		"exhausted retries record errored transient": {
+			retries: 2,
+			fetch: func(attempts *int) func(context.Context) (io.Reader, error) {
+				return func(_ context.Context) (io.Reader, error) {
+					*attempts++
+
+					return nil, timeoutError{}
+				}
+			},
+			wantAttempts:  3,
+			wantStatus:    manifest.StatusErrored,
+			wantTransient: true,
+		},
+		"an unclassified error is not retried": {
+			retries: 2,
+			fetch: func(attempts *int) func(context.Context) (io.Reader, error) {
+				return func(_ context.Context) (io.Reader, error) {
+					*attempts++
+
+					return nil, errors.New("boom")
+				}
+			},
+			wantAttempts: 1,
+			wantStatus:   manifest.StatusErrored,
+		},
+		"a terminal error is not retried": {
+			retries: 2,
+			fetch: func(attempts *int) func(context.Context) (io.Reader, error) {
+				return func(_ context.Context) (io.Reader, error) {
+					*attempts++
+
+					return nil, tfe.ErrResourceNotFound
+				}
+			},
+			wantAttempts: 1,
+			wantStatus:   manifest.StatusAbsentPermanently,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env, st, ledger := newEnv(t, collect.WithBlobRetry(tc.retries, 0))
+
+			attempts := 0
+
+			err := env.Blob(t.Context(), relPath, tc.fetch(&attempts))
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.wantAttempts, attempts)
+
+			entry, ok := ledger.Entry(relPath)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantStatus, entry.Status)
+			assert.Equal(t, tc.wantTransient, entry.Transient)
+
+			if tc.wantContent != "" {
+				got, readErr := os.ReadFile(st.AbsPath(relPath))
+				require.NoError(t, readErr)
+				assert.Equal(t, tc.wantContent, string(got),
+					"the committed file holds the retried full payload, never a partial stream")
+			}
+		})
+	}
+}
+
+func TestEnvBlobRetryPropagatesCancellation(t *testing.T) {
+	t.Parallel()
+
+	// A cancellation mid-fetch classifies transient, but it must propagate and
+	// record nothing rather than burn retries against a dead context.
+	env, _, ledger := newEnv(t, collect.WithBlobRetry(2, 0))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	attempts := 0
+
+	err := env.Blob(ctx, "projects/example/workspaces/ws/runs/run-1/apply.log",
+		func(ctx context.Context) (io.Reader, error) {
+			attempts++
+
+			return nil, ctx.Err()
+		})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 1, attempts, "a canceled context is never retried")
+
+	_, ok := ledger.Entry("projects/example/workspaces/ws/runs/run-1/apply.log")
+	assert.False(t, ok, "a canceled fetch must not record an outcome")
 }
 
 func TestEnvBlobWriteFailureRecordsNonTransient(t *testing.T) {

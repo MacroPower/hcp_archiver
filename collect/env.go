@@ -9,6 +9,18 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
+// Default in-run retry settings for transient blob failures.
+const (
+	// DefaultBlobRetries is the default number of additional attempts
+	// [Env.Blob] makes after a fetch or mid-stream failure that classifies
+	// transient.
+	DefaultBlobRetries = 2
+
+	// DefaultBlobRetryDelay is the default wait before [Env.Blob]'s first
+	// retry; each subsequent retry doubles it.
+	DefaultBlobRetryDelay = 2 * time.Second
+)
+
 // Env is the shared environment every domain collector composes to archive an
 // object end to end.
 //
@@ -24,16 +36,32 @@ import (
 // each concurrency-safe, so the orchestrator can share one Env across the
 // workspace workers it runs in parallel. Create instances with [NewEnv].
 type Env struct {
-	client *tfeclient.Client
-	store  *store.Store
-	ledger *manifest.Ledger
+	client         *tfeclient.Client
+	store          *store.Store
+	ledger         *manifest.Ledger
+	blobRetries    int
+	blobRetryDelay time.Duration
 }
 
 // Option configures an [Env] passed to [NewEnv].
 //
 // Options of this type:
+//   - [WithBlobRetry]
 //   - [WithTarget]
 type Option func(*Env)
+
+// WithBlobRetry sets how [Env.Blob] retries a transient fetch or mid-stream
+// failure within the run: retries is the number of additional attempts after
+// the first, and delay is the wait before the first retry, doubling on each
+// retry after that. A zero or negative retries disables in-run retrying,
+// leaving the failure to the next run; a non-positive delay retries
+// immediately. It returns an [Option].
+func WithBlobRetry(retries int, delay time.Duration) Option {
+	return func(e *Env) {
+		e.blobRetries = retries
+		e.blobRetryDelay = delay
+	}
+}
 
 // WithTarget sets the initial progress target (the org, project, or workspace
 // shown by progress reporting) before any walk updates it. It returns an
@@ -50,9 +78,11 @@ func WithTarget(target string) Option {
 // and ledger, then hands it to every collector it runs against the org.
 func NewEnv(client *tfeclient.Client, st *store.Store, ledger *manifest.Ledger, opts ...Option) *Env {
 	e := &Env{
-		client: client,
-		store:  st,
-		ledger: ledger,
+		client:         client,
+		store:          st,
+		ledger:         ledger,
+		blobRetries:    DefaultBlobRetries,
+		blobRetryDelay: DefaultBlobRetryDelay,
 	}
 
 	for _, opt := range opts {
