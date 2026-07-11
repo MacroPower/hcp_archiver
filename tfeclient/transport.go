@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -63,6 +64,7 @@ func (e *idleReadError) Temporary() bool { return true }
 // HTTP/2 would silently break the bound.
 type idleTransport struct {
 	next        http.RoundTripper
+	logger      *slog.Logger
 	wireBytes   *atomic.Int64
 	rateLimited *atomic.Int64
 	idleTimeout time.Duration
@@ -74,7 +76,12 @@ type idleTransport struct {
 // internal retry loop, so every rate-limited attempt is observed here even
 // though the caller only ever sees the final outcome.
 func (t *idleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	start := time.Now()
+
 	resp, err := t.next.RoundTrip(req)
+
+	t.logRoundTrip(req, resp, err, time.Since(start))
+
 	if err != nil {
 		return resp, err //nolint:wrapcheck // A transparent transport wrapper.
 	}
@@ -90,6 +97,32 @@ func (t *idleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	return resp, nil
+}
+
+// logRoundTrip emits one debug line for the attempt that just completed on the
+// wire, carrying the method, URL, elapsed time, and the status the attempt saw
+// (or the transport error when it never got a response). It sits below the
+// go-tfe client's internal retry loop, so a retried request logs once per
+// attempt, and the elapsed time covers only the headers: the body streams to
+// the caller after RoundTrip returns.
+func (t *idleTransport) logRoundTrip(req *http.Request, resp *http.Response, err error, elapsed time.Duration) {
+	if t.logger == nil {
+		return
+	}
+
+	attrs := []slog.Attr{
+		slog.String("method", req.Method),
+		slog.String("url", req.URL.Redacted()),
+		slog.Duration("duration", elapsed),
+	}
+
+	if err != nil {
+		attrs = append(attrs, slog.String("error", err.Error()))
+	} else {
+		attrs = append(attrs, slog.Int("status", resp.StatusCode))
+	}
+
+	t.logger.LogAttrs(req.Context(), slog.LevelDebug, "http_request", attrs...)
 }
 
 // idleBody is a response body whose every read is bounded by an idle timer:

@@ -1,8 +1,10 @@
 package tfeclient_test
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -129,6 +131,68 @@ func TestIdleReadTimeoutAllowsSlowBodyAndCountsWireBytes(t *testing.T) {
 	want := strings.Repeat("chunk", chunks)
 	assert.Equal(t, want, string(body))
 	assert.Equal(t, int64(len(want)), counter.Load(), "the wire counter sees every byte served")
+}
+
+func TestLoggerDebugLogsEveryRequest(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	var buf bytes.Buffer
+
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	client := tfeclient.ResolveHTTPClient(tfeclient.WithLogger(logger))
+
+	const requests = 3
+
+	for range requests {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/api/v2/ping", http.NoBody)
+		require.NoError(t, err)
+
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+	}
+
+	logged := buf.String()
+
+	assert.Equal(t, requests, strings.Count(logged, "http_request"),
+		"every request on the wire logs exactly one debug line")
+	assert.Contains(t, logged, "method=GET")
+	assert.Contains(t, logged, "url="+srv.URL+"/api/v2/ping")
+	assert.Contains(t, logged, "status=404")
+	assert.Contains(t, logged, "duration=")
+}
+
+func TestLoggerDebugLogsTransportError(t *testing.T) {
+	t.Parallel()
+
+	// A server that closes immediately leaves nothing listening, so the round
+	// trip fails before any response; the debug line carries the error instead
+	// of a status.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.Close()
+
+	var buf bytes.Buffer
+
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	client := tfeclient.ResolveHTTPClient(tfeclient.WithLogger(logger))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req) //nolint:bodyclose // The request errors, so there is no body.
+	require.Error(t, err)
+	require.Nil(t, resp)
+
+	logged := buf.String()
+
+	assert.Contains(t, logged, "http_request")
+	assert.Contains(t, logged, "error=")
+	assert.NotContains(t, logged, "status=", "a failed attempt logs its error, not a status")
 }
 
 func TestIdleReadNilWireCounterIsSafe(t *testing.T) {

@@ -3,6 +3,7 @@ package tfeclient
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -68,6 +69,7 @@ type Client struct {
 // config holds the resolved settings a [Client] is built from.
 type config struct {
 	httpClient            *http.Client
+	logger                *slog.Logger
 	wireBytes             *atomic.Int64
 	rateLimited           *atomic.Int64
 	gate                  Gate
@@ -90,6 +92,7 @@ type config struct {
 //   - [WithWireBytes]
 //   - [WithRateLimitCounter]
 //   - [WithGate]
+//   - [WithLogger]
 //   - [WithHTTPClient]
 type Option func(*config)
 
@@ -193,6 +196,21 @@ func WithGate(g Gate) Option {
 	}
 }
 
+// WithLogger sets the logger every request is traced through when [New] builds
+// its own HTTP client. Each attempt on the wire emits one [slog.LevelDebug]
+// line carrying the method, URL, elapsed time to headers, and the status (or
+// transport error) that attempt saw; the go-tfe client retries rate-limited
+// and server-error responses internally, so a retried request logs once per
+// attempt. Downloads log their full signed artifact URL, so treat the debug
+// output as sensitively as the token itself. A nil logger disables the
+// logging, and a caller-supplied [WithHTTPClient] takes precedence over it.
+// Returns an [Option].
+func WithLogger(logger *slog.Logger) Option {
+	return func(c *config) {
+		c.logger = logger
+	}
+}
+
 // WithHTTPClient sets the underlying [*http.Client]. A nil value leaves the
 // client to build its own pooled default, whose transport bounds the time to
 // first byte (see [WithResponseHeaderTimeout]); go-tfe's own pooled default is
@@ -290,6 +308,7 @@ func resolveHTTPClient(cfg *config) *http.Client {
 
 	return &http.Client{Transport: &idleTransport{
 		next:        tr,
+		logger:      cfg.logger,
 		idleTimeout: cfg.idleReadTimeout,
 		wireBytes:   cfg.wireBytes,
 		rateLimited: cfg.rateLimited,

@@ -160,6 +160,7 @@ func (a *Archiver) Run(ctx context.Context) error {
 		tfeclient.WithWireBytes(a.wireBytes),
 		tfeclient.WithRateLimitCounter(a.rateLimited),
 		tfeclient.WithGate(a.pool),
+		tfeclient.WithLogger(a.logger),
 	)
 	if err != nil {
 		return fmt.Errorf("build client: %w", err)
