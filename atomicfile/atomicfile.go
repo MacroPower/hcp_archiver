@@ -239,20 +239,24 @@ func Append(name string, data []byte, opts ...Option) (int64, error) {
 	// already present skips the directory sync below, trusting that the creating
 	// append made the entry durable here. Syncing only after a successful data
 	// write would break that trust: a creating append that failed before the
-	// sync would leave an entry that no later append ever flushes. A plain
-	// append changes only the file's own data, already flushed by
-	// appendCommitted, so it needs no directory sync at all.
+	// sync would leave an entry that no later append ever flushes. So on a
+	// setup failure the empty file is removed, forcing a retry back onto the
+	// creating path that re-runs this sync rather than the existing-file path
+	// that skips it. A plain append changes only the file's own data, already
+	// flushed by appendCommitted, so it needs no directory sync at all.
 	if created {
 		err = f.Chmod(cfg.fileMode)
 		if err != nil {
-			f.Close() //nolint:errcheck,gosec // Best-effort close on the chmod-failure path.
+			f.Close()       //nolint:errcheck,gosec // Best-effort close on the chmod-failure path.
+			os.Remove(name) //nolint:errcheck,gosec // Best-effort drop so a retry re-creates and re-syncs it.
 
 			return 0, fmt.Errorf("chmod append target %q: %w", name, err)
 		}
 
 		err = syncDir(dir)
 		if err != nil {
-			f.Close() //nolint:errcheck,gosec // Best-effort close on the sync-failure path.
+			f.Close()       //nolint:errcheck,gosec // Best-effort close on the sync-failure path.
+			os.Remove(name) //nolint:errcheck,gosec // Best-effort drop so a retry re-creates and re-syncs it.
 
 			return 0, fmt.Errorf("sync parent directory %q: %w", dir, err)
 		}
