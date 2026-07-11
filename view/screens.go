@@ -717,8 +717,10 @@ func firstLine(s string) string {
 
 	const maxLen = 60
 
-	if len(s) > maxLen {
-		return s[:maxLen] + "…"
+	// Truncate on a rune boundary: a byte-count cut would split a multi-byte
+	// rune whose bytes straddle maxLen and emit invalid UTF-8 into the list.
+	if r := []rune(s); len(r) > maxLen {
+		return string(r[:maxLen]) + "…"
 	}
 
 	return s
