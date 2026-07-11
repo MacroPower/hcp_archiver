@@ -461,8 +461,17 @@ func TestDownloadPlanLog(t *testing.T) {
 					return
 				}
 			})
-			mux.HandleFunc("/artifact/plan-1", func(w http.ResponseWriter, _ *http.Request) {
+			mux.HandleFunc("/artifact/plan-1", func(w http.ResponseWriter, r *http.Request) {
 				artifactHits.Add(1)
+
+				// Archivist rejects the SDK's JSON:API accept header with a
+				// 400, so the fake does too; the download must send an accept
+				// that admits text/plain.
+				if !strings.Contains(r.Header.Get("Accept"), "*/*") {
+					w.WriteHeader(http.StatusBadRequest)
+
+					return
+				}
 
 				_, werr := io.WriteString(w, tc.served)
 				if werr != nil {
@@ -501,7 +510,15 @@ func TestDownloadApplyLog(t *testing.T) {
 			return
 		}
 	})
-	mux.HandleFunc("/artifact/apply-1", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/artifact/apply-1", func(w http.ResponseWriter, r *http.Request) {
+		// Mirrors archivist's rejection of the JSON:API accept header; see
+		// TestDownloadPlanLog.
+		if !strings.Contains(r.Header.Get("Accept"), "*/*") {
+			w.WriteHeader(http.StatusBadRequest)
+
+			return
+		}
+
 		_, werr := io.WriteString(w, "\x02apply output\x03")
 		if werr != nil {
 			return

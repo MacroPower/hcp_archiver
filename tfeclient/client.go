@@ -527,6 +527,12 @@ func (c *Client) downloadLog(ctx context.Context, logURL string) ([]byte, error)
 			return fmt.Errorf("new log request: %w", e)
 		}
 
+		// The SDK stamps every GET with the JSON:API accept header, but the
+		// signed URL is served by archivist, which answers 400 Bad Request to
+		// any request that does not accept text/plain. Its own log reader
+		// sends no accept header at all; match that permissively.
+		req.Header.Set("Accept", "text/plain, */*")
+
 		var buf bytes.Buffer
 
 		e = req.Do(ctx, &buf)
