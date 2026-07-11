@@ -19,10 +19,10 @@ import (
 // or permanently absent) returns without fetching, so an immutable artifact is
 // never re-downloaded on a re-run. Otherwise it runs fetch, serializes and
 // writes the result atomically, and records the object done with its content
-// signature. A terminal fetch error (a 404 or 410) records the object as
-// permanently absent; any other error records it as errored so a re-run retries
-// it. Only a cancellation of ctx propagates; every other outcome is recorded and
-// returns nil so one bad object never aborts the run.
+// signature. A terminal fetch error (a 404) records the object as permanently
+// absent; any other error, a 410 among them, records it as errored so a re-run
+// retries it. Only a cancellation of ctx propagates; every other outcome is
+// recorded and returns nil so one bad object never aborts the run.
 func (e *Env) Object(ctx context.Context, relPath string, fetch func(context.Context) (any, error)) error {
 	if !e.ledger.ShouldFetch(relPath) {
 		return nil

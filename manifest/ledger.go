@@ -384,7 +384,7 @@ func (l *Ledger) RecordDone(relPath string, sig Signature) {
 	})
 }
 
-// RecordAbsent records relPath as permanently gone (a 404 or 410).
+// RecordAbsent records relPath as permanently gone (a 404).
 func (l *Ledger) RecordAbsent(relPath string) {
 	l.record(relPath, StatusAbsentPermanently, func(now time.Time, e *Entry) {
 		e.FetchedAt = now
