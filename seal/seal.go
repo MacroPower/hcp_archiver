@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 )
@@ -66,11 +67,21 @@ type Entry struct {
 	CRC32 uint32 `json:"crc32"`
 }
 
-// ErrMemberName rejects a [Member] whose name is not a clean archive-relative
-// path. Its name is reproduced verbatim as the entry path inside the bundle, so
-// a name with a ".." segment or a leading slash would let an extractor write
-// outside the destination directory (a Zip-Slip); [Seal] and [Rollup] refuse it.
-var ErrMemberName = errors.New("member name must be a clean archive-relative path")
+var (
+	// ErrMemberName rejects a [Member] whose name is not a clean archive-relative
+	// path. Its name is reproduced verbatim as the entry path inside the bundle,
+	// so a name with a ".." segment or a leading slash would let an extractor
+	// write outside the destination directory (a Zip-Slip); [Seal] and [Rollup]
+	// refuse it.
+	ErrMemberName = errors.New("member name must be a clean archive-relative path")
+
+	// ErrContentNotUTF8 marks a roll-up source whose bytes are not valid UTF-8. A
+	// roll-up carries content as a JSON string, which cannot represent arbitrary
+	// bytes: encoding coerces an invalid byte to U+FFFD, so the stored content
+	// would no longer reproduce the source or match its recorded digest. Such a
+	// source is refused rather than silently mangled.
+	ErrContentNotUTF8 = errors.New("roll-up content must be valid UTF-8")
+)
 
 // checkMemberNames verifies every member names a clean path that stays within
 // the archive tree, so an extract cannot escape its destination directory. Names
@@ -310,7 +321,9 @@ type rollupLine struct {
 // A roll-up only grows: immutable metadata folds into it exactly once, so no line
 // is ever rewritten. A crash between the flushed append and a source's removal
 // re-folds that member next run, appending an identical line a reader dedupes by
-// path. An empty member set appends nothing.
+// path. An empty member set appends nothing. A source whose bytes are not valid
+// UTF-8 cannot be carried losslessly as a JSON string and is refused with
+// [ErrContentNotUTF8] rather than mangled.
 func Rollup(rollupPath string, members []Member) error {
 	if len(members) == 0 {
 		return nil
@@ -364,6 +377,13 @@ func encodeRollup(members []Member) ([]byte, error) {
 		data, err := os.ReadFile(members[i].Source)
 		if err != nil {
 			return nil, fmt.Errorf("read source %q: %w", members[i].Source, err)
+		}
+
+		// A JSON string cannot carry invalid UTF-8: the encoder replaces it with
+		// U+FFFD, desyncing the stored content from the digest taken over the raw
+		// bytes. Refuse it so the recorded content stays byte-for-byte recoverable.
+		if !utf8.Valid(data) {
+			return nil, fmt.Errorf("%w: %q", ErrContentNotUTF8, members[i].Name)
 		}
 
 		sum := sha256.Sum256(data)

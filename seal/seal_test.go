@@ -325,6 +325,28 @@ func TestRollup_AppendsToExisting(t *testing.T) {
 	assert.Equal(t, "b", lines[1].Path)
 }
 
+func TestRollup_RejectsNonUTF8Content(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	rollupPath := filepath.Join(dir, "runs.ndjson")
+
+	// A lone 0xFF is not valid UTF-8; a JSON string cannot carry it byte for byte,
+	// so the roll-up must refuse it rather than mangle it into U+FFFD and desync
+	// the stored content from its recorded digest.
+	src := writeSource(t, dir, "bad.bin", []byte{0x68, 0x69, 0xff})
+
+	err := seal.Rollup(rollupPath, []seal.Member{{Name: "bad", Source: src}})
+	require.ErrorIs(t, err, seal.ErrContentNotUTF8)
+
+	// Nothing is written and the source is left in place: the refusal is total.
+	_, statErr := os.Stat(rollupPath)
+	assert.True(t, os.IsNotExist(statErr), "no roll-up is written")
+
+	_, srcErr := os.Stat(src)
+	require.NoError(t, srcErr, "the source is left in place")
+}
+
 func TestRollup_EmptyWritesNothing(t *testing.T) {
 	t.Parallel()
 
