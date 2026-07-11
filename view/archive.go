@@ -106,8 +106,15 @@ func (o *Org) Root() string {
 }
 
 // AbsPath returns the on-disk absolute path for an archive-relative path.
+//
+// The result is confined to the root even when relPath carries ".." segments:
+// relPath is cleaned as if rooted at "/", collapsing any leading ".." that would
+// otherwise escape, before being joined under the root. A clean archive-relative
+// path is unchanged.
 func (o *Org) AbsPath(relPath string) string {
-	return filepath.Join(o.root, filepath.FromSlash(relPath))
+	clean := strings.TrimPrefix(path.Clean("/"+filepath.ToSlash(relPath)), "/")
+
+	return filepath.Join(o.root, filepath.FromSlash(clean))
 }
 
 // ReadFile reads a loose file at an archive-relative path.
