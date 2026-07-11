@@ -85,14 +85,16 @@ type quitRequestMsg struct{}
 // [newTUIModel].
 type tuiModel struct {
 	bar       progressbar.Model
+	spin      spinner.Model
 	take      func() snapshot
 	interrupt func()
 	samples   []rateSample
-	spin      spinner.Model
+	snap      snapshot
 	width     int
 	height    int
 	tick      int
 	quitting  bool
+	sampled   bool
 }
 
 // newTUIModel creates a new [tuiModel] that renders snapshots from take and, on
@@ -165,7 +167,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.tick++
 		if m.take != nil {
-			m.observe(m.take())
+			// Snapshot once per tick and cache it, so the View that follows this
+			// Update renders the same snapshot the sample was drawn from rather
+			// than locking the reporter and re-tallying the ledger a second time.
+			m.snap = m.take()
+			m.sampled = true
+			m.observe(m.snap)
 		}
 
 		m.spin, cmd = m.spin.Update(msg)
@@ -185,7 +192,15 @@ func (m *tuiModel) View() tea.View {
 		return tea.NewView("")
 	}
 
-	return tea.NewView(m.render(m.take()))
+	// Render the snapshot the last tick cached; take a fresh one only before the
+	// first tick has sampled (or in a render-only test with no take), so a normal
+	// tick-then-repaint costs one snapshot, not two.
+	snap := m.snap
+	if !m.sampled && m.take != nil {
+		snap = m.take()
+	}
+
+	return tea.NewView(m.render(snap))
 }
 
 // observe appends one throughput sample and trims the window's tail, keeping at
