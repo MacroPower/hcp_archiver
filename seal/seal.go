@@ -94,8 +94,8 @@ func checkMemberNames(members []Member) error {
 	return nil
 }
 
-// Seal packs members into a zip bundle at bundlePath, writes a sidecar index
-// beside it, verifies every member reads back intact, and only then removes the
+// Seal packs members into a zip bundle at bundlePath, verifies every member
+// reads back intact, writes a sidecar index beside it, and only then removes the
 // loose sources. It returns the sidecar entries.
 //
 // The bundle and sidecar are each committed atomically, and the sources are
@@ -139,12 +139,12 @@ func Seal(bundlePath string, members []Member) ([]Entry, error) {
 		return nil, fmt.Errorf("write bundle %q: %w", bundlePath, err)
 	}
 
-	err = writeSidecar(bundlePath+sidecarSuffix, entries)
+	err = verifyBundle(bundlePath, entries)
 	if err != nil {
 		return nil, err
 	}
 
-	err = verifyBundle(bundlePath, entries)
+	err = writeSidecar(bundlePath+sidecarSuffix, entries)
 	if err != nil {
 		return nil, err
 	}
