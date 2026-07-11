@@ -131,7 +131,7 @@ func (c *Controller) step() {
 	switch {
 	case hits > 0:
 		c.throttled = true
-		next = max(c.min, prev/2)
+		next = min(c.max, max(c.min, prev/2))
 
 	case c.throttled:
 		next = min(c.max, prev+1)
