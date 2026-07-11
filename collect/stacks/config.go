@@ -71,26 +71,33 @@ func (c *Collector) archiveConfiguration(
 		return wrap(err)
 	}
 
-	schemaFile := st.StackConfigurationFile(project, stackName, cfg.ID, "json-schemas.json")
+	// The provider JSON schemas are immutable but exist only once the
+	// configuration finishes preparing; fetch them only when it is terminal, so a
+	// still-preparing configuration does not record a premature settled gap for
+	// schemas it has yet to produce. Diagnostics stay mutable below, so a prep
+	// error is still captured while the configuration is in flight.
+	if configTerminal(cfg.Status) {
+		schemaFile := st.StackConfigurationFile(project, stackName, cfg.ID, "json-schemas.json")
 
-	err = c.env.Bytes(ctx, schemaFile, func(ctx context.Context) ([]byte, error) {
-		var raw []byte
+		err = c.env.Bytes(ctx, schemaFile, func(ctx context.Context) ([]byte, error) {
+			var raw []byte
 
-		e := c.env.Client().Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
-			var d error
+			e := c.env.Client().Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
+				var d error
 
-			raw, d = tc.StackConfigurations.JSONSchemas(ctx, cfg.ID)
-			if d != nil {
-				return fmt.Errorf("read stack configuration json schemas: %w", d)
-			}
+				raw, d = tc.StackConfigurations.JSONSchemas(ctx, cfg.ID)
+				if d != nil {
+					return fmt.Errorf("read stack configuration json schemas: %w", d)
+				}
 
-			return nil
+				return nil
+			})
+
+			return raw, wrap(e)
 		})
-
-		return raw, wrap(e)
-	})
-	if err != nil {
-		return wrap(err)
+		if err != nil {
+			return wrap(err)
+		}
 	}
 
 	diagFile := st.StackConfigurationFile(project, stackName, cfg.ID, "diagnostics.json")
@@ -215,8 +222,8 @@ func (c *Collector) collectRuns(ctx context.Context, project, stackName, configI
 	return nil
 }
 
-// archiveRun archives one deployment run's metadata and its per-step artifacts.
-// Only a context cancellation propagates.
+// archiveRun archives one deployment run's mutable metadata and, once the run is
+// terminal, its per-step artifacts. Only a context cancellation propagates.
 func (c *Collector) archiveRun(
 	ctx context.Context,
 	project, stackName, configID, groupID string,
@@ -229,6 +236,14 @@ func (c *Collector) archiveRun(
 	})
 	if err != nil {
 		return wrap(err)
+	}
+
+	// A run's steps carry immutable per-step artifacts (the plan and apply
+	// descriptions). Fetch them only once the run is terminal, so an in-flight run
+	// does not record a premature settled gap for an artifact it has yet to
+	// produce, mirroring the workspace run collector.
+	if !runTerminal(run.Status) {
+		return nil
 	}
 
 	return c.tolerate(ctx, c.collectSteps(ctx, project, stackName, configID, groupID, run.ID))
