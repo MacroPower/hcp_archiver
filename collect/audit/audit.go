@@ -167,6 +167,13 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 			break
 		}
 
+		// A NextPage that does not advance past the current page — a misbehaving
+		// server or a cycle — would otherwise re-list the same page forever under
+		// the shared limiter; stop with what was gathered, matching Paginate.
+		if p.NextPage <= page {
+			break
+		}
+
 		page = p.NextPage
 	}
 
