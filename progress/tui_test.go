@@ -100,7 +100,7 @@ func TestRenderPanel_TaskAlignsWithPhaseBar(t *testing.T) {
 	}
 
 	rendered := strings.Split(progress.RenderPanel(panel), "\n")
-	require.Len(t, rendered, 4)
+	require.Len(t, rendered, 5)
 
 	for _, line := range rendered[1:3] {
 		assert.Equal(t, barColumn(t, rendered[0]), barColumn(t, line),
@@ -112,8 +112,8 @@ func TestRenderPanel_TaskLinesFitTerminalHeight(t *testing.T) {
 	t.Parallel()
 
 	// A short terminal tightens the task budget so the whole panel fits: at
-	// six rows there is room for three task lines beside the first line, the
-	// overflow line, and the counts.
+	// six rows there is room for two task lines beside the first line, the
+	// overflow line, the counts, and the metadata.
 	panel := barPanel()
 	for i := range 11 {
 		panel.Tasks = append(panel.Tasks, progress.PanelTask{
@@ -127,7 +127,7 @@ func TestRenderPanel_TaskLinesFitTerminalHeight(t *testing.T) {
 	lines := strings.Split(rendered, "\n")
 
 	assert.Len(t, lines, 6, "panel height matches the terminal")
-	assert.Contains(t, ansi.Strip(rendered), "+8 more active")
+	assert.Contains(t, ansi.Strip(rendered), "+9 more active")
 }
 
 // barColumn returns the display column at which a rendered line's bar begins.
@@ -168,11 +168,12 @@ func line1(panel progress.PanelSnapshot) string {
 	return ansi.Strip(strings.SplitN(progress.RenderPanel(panel), "\n", 2)[0])
 }
 
-// line2 renders a panel and returns its stripped, undecorated second line.
+// line2 renders a panel and returns its stripped, undecorated second line, the
+// status counts on a task-less panel.
 func line2(panel progress.PanelSnapshot) string {
-	parts := strings.SplitN(progress.RenderPanel(panel), "\n", 2)
+	parts := strings.Split(progress.RenderPanel(panel), "\n")
 
-	return ansi.Strip(parts[len(parts)-1])
+	return ansi.Strip(parts[1])
 }
 
 func TestRenderPanel_CountRolloverIsStable(t *testing.T) {
@@ -192,7 +193,8 @@ func TestRenderPanel_CountRolloverIsStable(t *testing.T) {
 	assert.Equal(t, ansi.StringWidth(b), ansi.StringWidth(a), "line width holds")
 	assert.Equal(t, strings.Index(b, "errored"), strings.Index(a, "errored"),
 		"errored column holds as done rolls over")
-	assert.Equal(t, indexOfMeta(b), indexOfMeta(a), "metadata column holds")
+	assert.Equal(t, strings.Index(b, "retried"), strings.Index(a, "retried"),
+		"retried column holds as done rolls over")
 }
 
 func TestRenderPanel_OvercompleteIsStable(t *testing.T) {
@@ -230,12 +232,6 @@ func TestRenderPanel_BarToggleIsStable(t *testing.T) {
 	assert.Equal(t, ansi.StringWidth(d), ansi.StringWidth(i), "line width holds")
 	assert.Equal(t, strings.Index(d, "acme/prod"), strings.Index(i, "acme/prod"),
 		"target column holds whether or not the bar is shown")
-}
-
-// indexOfMeta returns the column of the metadata's byte figure on a stripped
-// line-two string, the first field after the per-status counts.
-func indexOfMeta(line string) int {
-	return strings.Index(line, "MiB")
 }
 
 func TestRenderSummary(t *testing.T) {

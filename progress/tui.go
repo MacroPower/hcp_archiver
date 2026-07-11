@@ -264,7 +264,7 @@ func (m *tuiModel) render(snap snapshot) string {
 	}
 
 	t := snap.tally
-	meta := fmt.Sprintf("│ %s · %s/s · %s",
+	meta := fmt.Sprintf("%s · %s/s · %s",
 		humanBytes(t.BytesDownloaded),
 		humanBytes(int64(m.throughput(snap))),
 		snap.elapsed.Round(time.Second),
@@ -278,13 +278,14 @@ func (m *tuiModel) render(snap snapshot) string {
 		meta += fmt.Sprintf(" · %d/%d workers", snap.workers, snap.maxWorkers)
 	}
 
-	counts := fmt.Sprintf("  %s %s",
-		statusCounts(t, countDoneWidth, countErroredWidth, countForbiddenWidth, countRetriedWidth),
-		styleMeta.Render(meta),
-	)
+	// The counts and the metadata close the panel on separate lines, so the
+	// status columns stay readable instead of sharing a row with the byte and
+	// rate readout.
+	counts := "  " + statusCounts(t, countDoneWidth, countErroredWidth, countForbiddenWidth, countRetriedWidth)
 
+	metaLine := "  " + styleMeta.Render(meta)
 	if snap.rateLimited > 0 {
-		counts += " " + styleRateLimited.Render(fmt.Sprintf("· 429s %d", snap.rateLimited))
+		metaLine += " " + styleRateLimited.Render(fmt.Sprintf("· 429s %d", snap.rateLimited))
 	}
 
 	lines := []string{m.fit(line1.String())}
@@ -298,22 +299,22 @@ func (m *tuiModel) render(snap snapshot) string {
 		lines = append(lines, m.fit("  "+styleMeta.Render(fmt.Sprintf("… +%d more active", hidden))))
 	}
 
-	lines = append(lines, m.fit(counts))
+	lines = append(lines, m.fit(counts), m.fit(metaLine))
 
 	return strings.Join(lines, "\n")
 }
 
 // taskLineBudget bounds how many task lines the panel may show: the fixed cap,
 // tightened on a short terminal so the panel (its first line, the task lines,
-// a possible overflow line, and the counts line) never outgrows the screen. An
-// unknown height (before the first size message, and in the golden tests)
-// keeps the fixed cap.
+// a possible overflow line, the counts line, and the metadata line) never
+// outgrows the screen. An unknown height (before the first size message, and
+// in the golden tests) keeps the fixed cap.
 func (m *tuiModel) taskLineBudget() int {
 	if m.height <= 0 {
 		return maxTaskLines
 	}
 
-	return min(maxTaskLines, max(m.height-3, 0))
+	return min(maxTaskLines, max(m.height-4, 0))
 }
 
 // renderTask formats one in-flight work item's line: its bar aligned under the
