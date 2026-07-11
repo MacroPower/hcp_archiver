@@ -168,7 +168,7 @@ func newProjectsScreen(org *Org) (screen, error) {
 			title: project,
 			desc:  countNoun(len(workspaces), "workspace", "workspaces"),
 			open: func() (screen, error) {
-				return newWorkspacesScreen(org, project)
+				return newWorkspacesScreen(org, project, workspaces)
 			},
 		})
 	}
@@ -177,11 +177,17 @@ func newProjectsScreen(org *Org) (screen, error) {
 }
 
 // newWorkspacesScreen lists one project's workspaces, and its stacks when it
-// has any.
-func newWorkspacesScreen(org *Org, project string) (screen, error) {
-	workspaces, err := org.Workspaces(project)
-	if err != nil {
-		return nil, err
+// has any. When workspaces is non-nil the caller has already listed them (the
+// projects screen reads them to size its count label); a nil listing is read
+// here so the screen also stands alone.
+func newWorkspacesScreen(org *Org, project string, workspaces []string) (screen, error) {
+	if workspaces == nil {
+		var err error
+
+		workspaces, err = org.Workspaces(project)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	stacks, err := org.Stacks(project)
