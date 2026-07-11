@@ -50,16 +50,17 @@ func Marshal(v any) ([]byte, error) {
 	return out, nil
 }
 
-// addressable returns v unchanged unless it is a non-pointer struct value, in
-// which case it returns a pointer to an addressable copy.
+// addressable returns v unchanged unless it is a non-pointer struct or array
+// value, in which case it returns a pointer to an addressable copy.
 //
 // The safety pass sets fields through reflection, which requires an addressable
-// value; a struct passed by value yields unaddressable fields, so without this
-// its secrets and ephemeral URLs would silently survive. Slice, array, and
-// pointer values already expose addressable elements, so they pass through.
+// value; a struct or array passed by value yields unaddressable elements, so
+// without this its secrets and ephemeral URLs would silently survive. Slice and
+// pointer values already expose addressable elements, and a map value is
+// redacted through an addressable copy by the safety pass, so they pass through.
 func addressable(v any) any {
 	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Struct {
+	if rv.Kind() != reflect.Struct && rv.Kind() != reflect.Array {
 		return v
 	}
 
@@ -155,7 +156,23 @@ func sanitize(rv reflect.Value, seen map[uintptr]bool) {
 			return
 		}
 
-		sanitize(rv.Elem(), seen)
+		elem := rv.Elem()
+
+		// A struct or array held in an interface is not addressable, so the
+		// safety pass cannot set through it in place. Sanitize an addressable
+		// copy and store it back into the interface, mirroring the map case, so a
+		// secret reachable only through an interface value is redacted rather than
+		// written in cleartext. A pointer or scalar is walked directly.
+		if rv.CanSet() && (elem.Kind() == reflect.Struct || elem.Kind() == reflect.Array) {
+			cp := reflect.New(elem.Type()).Elem()
+			cp.Set(elem)
+			sanitize(cp, seen)
+			rv.Set(cp)
+
+			return
+		}
+
+		sanitize(elem, seen)
 
 	case reflect.Slice, reflect.Array:
 		for i := range rv.Len() {

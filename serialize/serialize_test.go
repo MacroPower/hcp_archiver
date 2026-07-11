@@ -11,6 +11,20 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/serialize"
 )
 
+// plainSecret is a non-jsonapi struct carrying a sensitive Value, so it takes
+// the encoding/json fallback rather than the jsonapi encoder and can exercise
+// redaction of a secret reached only through an unaddressable reflected value.
+type plainSecret struct {
+	Value     string
+	Sensitive bool
+}
+
+// ifaceHolder nests a value behind an interface field, where the concrete struct
+// the interface holds is not addressable.
+type ifaceHolder struct {
+	Inner any
+}
+
 func TestMarshal(t *testing.T) {
 	t.Parallel()
 
@@ -102,6 +116,16 @@ func TestMarshal(t *testing.T) {
 				SanitizedStateUploadURL: new("https://archivist.example/sanitized?token=secret"),
 			},
 			wantNotContains: []string{"archivist.example", "token=secret"},
+		},
+		"sensitive value in a by-value array is redacted": {
+			input:           [1]plainSecret{{Value: "hunter2", Sensitive: true}},
+			wantContains:    []string{serialize.Redacted},
+			wantNotContains: []string{"hunter2"},
+		},
+		"sensitive value behind an interface field is redacted": {
+			input:           &ifaceHolder{Inner: plainSecret{Value: "hunter2", Sensitive: true}},
+			wantContains:    []string{serialize.Redacted},
+			wantNotContains: []string{"hunter2"},
 		},
 	}
 
