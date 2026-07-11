@@ -167,6 +167,13 @@ func sanitize(rv reflect.Value, seen map[uintptr]bool) {
 			return
 		}
 
+		// A scalar element type carries nothing sanitize can redact, so a
+		// scalar-valued map needs neither the visit-tracking nor the per-entry
+		// copy-and-rewrite below.
+		if !mayContainSecret(rv.Type().Elem()) {
+			return
+		}
+
 		ptr := rv.Pointer()
 		if seen[ptr] {
 			return
@@ -191,6 +198,20 @@ func sanitize(rv reflect.Value, seen map[uintptr]bool) {
 		sanitizeStruct(rv, seen)
 
 	default:
+	}
+}
+
+// mayContainSecret reports whether a value of type t can reach a field sanitize
+// redacts. Only a pointer, interface, slice, array, map, or struct can carry
+// one; a scalar kind is a leaf sanitize walks past untouched. It mirrors the
+// acting cases of sanitize's type switch, so gating on it changes no output.
+func mayContainSecret(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Slice,
+		reflect.Array, reflect.Map, reflect.Struct:
+		return true
+	default:
+		return false
 	}
 }
 
