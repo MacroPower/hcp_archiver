@@ -97,8 +97,7 @@ func runTerminal(status tfe.RunStatus) bool {
 		tfe.RunPlannedAndFinished,
 		tfe.RunDiscarded,
 		tfe.RunErrored,
-		tfe.RunCanceled,
-		tfe.RunPolicySoftFailed:
+		tfe.RunCanceled:
 		return true
 	case tfe.RunStatus("force_canceled"):
 		return true
