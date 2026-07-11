@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 )
@@ -65,6 +66,34 @@ type Entry struct {
 	CRC32 uint32 `json:"crc32"`
 }
 
+// ErrMemberName rejects a [Member] whose name is not a clean archive-relative
+// path. Its name is reproduced verbatim as the entry path inside the bundle, so
+// a name with a ".." segment or a leading slash would let an extractor write
+// outside the destination directory (a Zip-Slip); [Seal] and [Rollup] refuse it.
+var ErrMemberName = errors.New("member name must be a clean archive-relative path")
+
+// checkMemberNames verifies every member names a clean path that stays within
+// the archive tree, so an extract cannot escape its destination directory. Names
+// are slash-separated bundle paths: an empty name, a leading slash (absolute),
+// or any empty, ".", or ".." segment is rejected, which covers "//", a trailing
+// slash, and every traversal form without depending on the host separator.
+func checkMemberNames(members []Member) error {
+	for i := range members {
+		name := members[i].Name
+		if name == "" || strings.HasPrefix(name, "/") {
+			return fmt.Errorf("%w: %q", ErrMemberName, name)
+		}
+
+		for seg := range strings.SplitSeq(name, "/") {
+			if seg == "" || seg == "." || seg == ".." {
+				return fmt.Errorf("%w: %q", ErrMemberName, name)
+			}
+		}
+	}
+
+	return nil
+}
+
 // Seal packs members into a zip bundle at bundlePath, writes a sidecar index
 // beside it, verifies every member reads back intact, and only then removes the
 // loose sources. It returns the sidecar entries.
@@ -72,10 +101,16 @@ type Entry struct {
 // The bundle and sidecar are each committed atomically, and the sources are
 // removed last, so a failure at any step leaves the loose files in place as the
 // canonical copy and the next run re-seals. An empty member set writes nothing
-// and returns no entries.
+// and returns no entries. A member whose name is not a clean archive-relative
+// path is rejected with [ErrMemberName].
 func Seal(bundlePath string, members []Member) ([]Entry, error) {
 	if len(members) == 0 {
 		return nil, nil
+	}
+
+	nameErr := checkMemberNames(members)
+	if nameErr != nil {
+		return nil, nameErr
 	}
 
 	entries := make([]Entry, 0, len(members))
@@ -278,6 +313,11 @@ type rollupLine struct {
 func Rollup(rollupPath string, members []Member) error {
 	if len(members) == 0 {
 		return nil
+	}
+
+	nameErr := checkMemberNames(members)
+	if nameErr != nil {
+		return nameErr
 	}
 
 	payload, err := encodeRollup(members)

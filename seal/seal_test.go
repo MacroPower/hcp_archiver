@@ -175,6 +175,40 @@ func TestSeal_EmptyMembersWritesNothing(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "no bundle is written for an empty seal")
 }
 
+func TestSeal_RejectsMemberNameEscapingArchive(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		name string
+	}{
+		"parent traversal": {name: "../../../etc/cron.d/x"},
+		"absolute path":    {name: "/etc/passwd"},
+		"interior dotdot":  {name: "runs/../../escape"},
+		"trailing slash":   {name: "runs/"},
+		"bare dotdot":      {name: ".."},
+		"empty name":       {name: ""},
+	}
+
+	for tn, tc := range tests {
+		t.Run(tn, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			src := writeSource(t, dir, "payload", []byte("data"))
+
+			_, sealErr := seal.Seal(filepath.Join(dir, "bundle.zip"), []seal.Member{
+				{Name: tc.name, Source: src},
+			})
+			require.ErrorIs(t, sealErr, seal.ErrMemberName)
+
+			rollupErr := seal.Rollup(filepath.Join(dir, "rollup.ndjson"), []seal.Member{
+				{Name: tc.name, Source: src},
+			})
+			require.ErrorIs(t, rollupErr, seal.ErrMemberName)
+		})
+	}
+}
+
 func TestSeal_SidecarRecordsEveryMember(t *testing.T) {
 	t.Parallel()
 
