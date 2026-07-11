@@ -163,11 +163,13 @@ func WithIdleReadTimeout(timeout time.Duration) Option {
 	}
 }
 
-// WithWireBytes sets a shared counter that accumulates every response-body
-// byte as it is read off the wire when [New] builds its own HTTP client, so a
+// WithWireBytes sets a shared counter that accumulates response-body bytes as
+// they are delivered to the reader when [New] builds its own HTTP client, so a
 // progress view can derive live throughput while a large transfer is still in
-// flight. A nil counter disables counting, and a caller-supplied
-// [WithHTTPClient] takes precedence over it. Returns an [Option].
+// flight. The tally is of delivered bytes after any transport-level
+// decompression, not raw compressed bytes on the wire. A nil counter disables
+// counting, and a caller-supplied [WithHTTPClient] takes precedence over it.
+// Returns an [Option].
 func WithWireBytes(counter *atomic.Int64) Option {
 	return func(c *config) {
 		c.wireBytes = counter

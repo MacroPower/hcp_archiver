@@ -161,12 +161,13 @@ func WithInterrupt(fn func()) Option {
 	}
 }
 
-// WithWireBytes sets the shared counter of raw response-body bytes read off
-// the wire, which the terminal UI's throughput window samples so the rate
-// reads live while a large transfer is still in flight rather than only when
-// whole objects commit. The displayed byte total stays the tally's committed
-// archive bytes; only the rate's source changes. A nil counter keeps the rate
-// sourced from committed bytes. It returns an [Option].
+// WithWireBytes sets the shared counter of response-body bytes as they are
+// delivered to the reader -- after any transport decompression, so not raw
+// compressed bytes on the wire -- which the terminal UI's throughput window
+// samples so the rate reads live while a large transfer is still in flight
+// rather than only when whole objects commit. The displayed byte total stays
+// the tally's committed archive bytes; only the rate's source changes. A nil
+// counter keeps the rate sourced from committed bytes. It returns an [Option].
 func WithWireBytes(counter *atomic.Int64) Option {
 	return func(r *Reporter) {
 		r.wireBytes = counter
