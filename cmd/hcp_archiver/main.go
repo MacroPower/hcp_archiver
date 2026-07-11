@@ -208,7 +208,7 @@ func newViewCmd() *cobra.Command {
 				dir = args[0]
 			}
 
-			ctx, stop := signal.NotifyContext(cc.Context(), os.Interrupt, syscall.SIGTERM)
+			ctx, stop := signalContext(cc.Context())
 			defer stop()
 
 			err := view.Browse(ctx, dir, cc.InOrStdin(), cc.OutOrStdout())
@@ -225,17 +225,59 @@ func newViewCmd() *cobra.Command {
 	}
 }
 
+// signalContext returns a context canceled on the first SIGINT or SIGTERM and
+// arms a force-quit on the second: the first signal begins graceful shutdown,
+// and a second, arriving while that shutdown is still underway, terminates the
+// process immediately with code 130 so a hung shutdown can still be aborted by
+// the operator. The returned stop releases the handler and, called on normal
+// completion, disarms the force-quit. It replaces a bare
+// [signal.NotifyContext], whose second signal is merely buffered and ignored.
+func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+
+	// Buffer two so a rapid double interrupt is not dropped before the first is
+	// consumed.
+	sig := make(chan os.Signal, 2)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+
+	done := make(chan struct{})
+
+	go func() {
+		defer signal.Stop(sig)
+
+		select {
+		case <-done:
+			return
+		case <-sig:
+			cancel()
+		}
+
+		select {
+		case <-done:
+		case <-sig:
+			//nolint:mnd // 130 is the conventional 128+SIGINT exit for ctrl+c.
+			os.Exit(130)
+		}
+	}()
+
+	return ctx, func() {
+		cancel()
+		close(done)
+	}
+}
+
 // runArchive resolves the flags into a configuration and archives under a
-// signal-aware context. A graceful interrupt exits cleanly. It passes logWriter
-// as the log sink so, while the terminal UI runs, the collectors' log output
-// routes through the one renderer that owns the screen.
+// signal-aware context. A graceful interrupt exits cleanly, and a second forces
+// an immediate quit. It passes logWriter as the log sink so, while the terminal
+// UI runs, the collectors' log output routes through the one renderer that owns
+// the screen.
 func runArchive(cmd *cobra.Command, af *archiveFlags, logWriter *progress.LogWriter) error {
 	cfg, err := af.config()
 	if err != nil {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signalContext(cmd.Context())
 	defer stop()
 
 	a := archiver.New(
