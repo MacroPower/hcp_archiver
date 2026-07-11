@@ -122,7 +122,11 @@ func TestVersionFilenames(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t, "version-1.2.3.json", versionFilename("1.2.3"))
-	assert.Equal(t, "version-1.2.3-platforms.json", providerPlatformsFilename("1.2.3"))
+	assert.Equal(t, "platforms-1.2.3.json", providerPlatformsFilename("1.2.3"))
+
+	// The two schemes cannot collide: a version literally named "1.2.3-platforms"
+	// keeps a distinct leaf from version "1.2.3"'s platform file.
+	assert.NotEqual(t, versionFilename("1.2.3-platforms"), providerPlatformsFilename("1.2.3"))
 }
 
 func TestNoCodeVariablesPath(t *testing.T) {

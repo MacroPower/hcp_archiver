@@ -20,16 +20,18 @@ const versionLatest = "latest"
 
 // versionFilename returns the leaf a module or provider version's frozen
 // metadata is archived under, keyed on its version. Both registries share the
-// scheme, which [providerPlatformsFilename] extends for a provider's platform
-// list.
+// scheme; a provider's platform list sits beside it under
+// [providerPlatformsFilename], whose distinct prefix cannot alias a version.
 func versionFilename(version string) string {
 	return "version-" + version + ".json"
 }
 
 // providerPlatformsFilename returns the leaf a provider version's platform list
-// is archived under, keyed on its version.
+// is archived under, keyed on its version. Its "platforms-" prefix is one
+// versionFilename never emits, so a provider version literally named
+// "<v>-platforms" cannot alias onto version "<v>"'s platform file.
 func providerPlatformsFilename(version string) string {
-	return "version-" + version + "-platforms.json"
+	return "platforms-" + version + ".json"
 }
 
 // noCodeVariablesPath derives the variable-options leaf beside a no-code
