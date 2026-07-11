@@ -280,9 +280,7 @@ func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string,
 		// object rather than aborting the run walk, so a re-run retries it and
 		// one poisoned run never strands the older runs behind it. Only a
 		// cancellation propagates.
-		return wrapArchive(relPath, c.env.Object(ctx, relPath, func(context.Context) (any, error) {
-			return nil, err
-		}))
+		return c.recordErrored(ctx, relPath, err)
 	}
 
 	writeErr := c.object(ctx, relPath, checks)
