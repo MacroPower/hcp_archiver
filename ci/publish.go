@@ -176,6 +176,14 @@ func (m *Ci) Release(
 	}
 	ctr = ctr.WithSecretVariable("GITHUB_TOKEN", githubToken)
 
+	// releaserBase bootstraps a tagless git repo (the release pipeline ignores
+	// .git), but goreleaser release resolves the release version from a git tag
+	// and aborts with ErrNoTag when none is present. Tag the bootstrapped HEAD
+	// with the release version so both goreleaser's tag lookup and its git
+	// validate step find it; setting GORELEASER_CURRENT_TAG alone would satisfy
+	// the lookup but not validate's exact-match against a real tag.
+	ctr = ctr.WithExec([]string{"git", "-C", "/src", "tag", tag})
+
 	// Conditionally forward OIDC credentials for GoReleaser blob signing.
 	// Cosign (invoked by GoReleaser's signs section) detects
 	// ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN and fetches fresh OIDC tokens
