@@ -594,6 +594,42 @@ func TestLogReader(t *testing.T) {
 	}
 }
 
+// bytesThenErr yields data once, then returns err on every subsequent read, so a
+// reader can be driven to a non-EOF read fault at a chosen point in the stream.
+type bytesThenErr struct {
+	err  error
+	data []byte
+	off  int
+}
+
+func (r *bytesThenErr) Read(p []byte) (int, error) {
+	if r.off < len(r.data) {
+		n := copy(p, r.data[r.off:])
+		r.off += n
+
+		return n, nil
+	}
+
+	return 0, r.err
+}
+
+func TestLogReaderSurfacesPeekError(t *testing.T) {
+	t.Parallel()
+
+	errBoom := errors.New("boom")
+
+	// A framed stream delivers its trailing ETX, then the underlying read faults
+	// with a non-EOF error before EOF is reached. The ETX must not be emitted as
+	// content; the fault surfaces instead.
+	src := &bytesThenErr{data: []byte("\x02abc\x03"), err: errBoom}
+	r := tfeclient.NewLogReader(io.NopCloser(src))
+
+	got, err := io.ReadAll(r)
+	require.ErrorIs(t, err, errBoom)
+	assert.Equal(t, "abc", string(got))
+	require.NoError(t, r.Close())
+}
+
 // readByteAtATime drains r one byte per Read call, so a reader is exercised at
 // the smallest possible buffer size.
 func readByteAtATime(t *testing.T, r io.Reader) string {

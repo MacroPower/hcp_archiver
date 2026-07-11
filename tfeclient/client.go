@@ -646,11 +646,18 @@ func (l *logReader) next() (byte, error) {
 	}
 
 	// A framed stream's trailing ETX is dropped; an interior ETX (more bytes
-	// still follow) is kept.
+	// still follow) is kept. A peek that ends the stream (io.EOF) marks the ETX as
+	// trailing and drops it; any other peek error means the trailing-vs-interior
+	// call cannot be made, so surface it rather than emit a framing byte the SDK
+	// path would have stripped (and defer the error one byte).
 	if l.framed && b == 0x03 {
 		_, peekErr := l.br.Peek(1)
-		if errors.Is(peekErr, io.EOF) {
+
+		switch {
+		case errors.Is(peekErr, io.EOF):
 			return 0, io.EOF
+		case peekErr != nil:
+			return 0, peekErr //nolint:wrapcheck // A transparent reader wrapper.
 		}
 	}
 
