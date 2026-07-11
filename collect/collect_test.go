@@ -970,7 +970,7 @@ func TestWalkHistoryLimit(t *testing.T) {
 		oldest       time.Time
 		count        int
 		wantArchived []string
-		wantComplete bool
+		wantSettled  bool
 	}{
 		"count bound stops before the excluded tail": {
 			count:        2,
@@ -992,7 +992,7 @@ func TestWalkHistoryLimit(t *testing.T) {
 		},
 		"zero bounds leave the walk unbounded": {
 			wantArchived: []string{r3.relPath, r2.relPath, r1.relPath},
-			wantComplete: true,
+			wantSettled:  true,
 		},
 	}
 
@@ -1038,9 +1038,13 @@ func TestWalkHistoryLimit(t *testing.T) {
 
 			assert.Len(t, archived, len(tc.wantArchived), "nothing beyond the bounds is archived")
 
-			assert.Equal(t, tc.wantComplete, ledger.IsCollectionComplete("runs"),
-				"only a walk that reaches the collection's true end records completion")
-			assert.Equal(t, tc.wantComplete, ledger.IsCollectionSettled("runs"),
+			// A fully-walked slice records completion whether bounded or not, so
+			// the seal phase can bundle it; only a walk that reached the true end
+			// also records settlement, which keeps the early stop disabled for a
+			// bounded walk so a later wider limit still pages down.
+			assert.True(t, ledger.IsCollectionComplete("runs"),
+				"a fully-walked slice records completion whether or not it is bounded")
+			assert.Equal(t, tc.wantSettled, ledger.IsCollectionSettled("runs"),
 				"only a walk that reaches the collection's true end records settlement")
 		})
 	}

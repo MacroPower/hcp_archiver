@@ -104,11 +104,13 @@ func WithArchivePrefix(prefix string) WalkOption {
 // first element outside every configured bound starts an excluded tail: the
 // walk stops there without archiving it or anything older.
 //
-// Because the excluded tail is deliberately left unarchived, a limit-stopped
-// walk records neither collection completion nor settlement, so it never
-// enables the early stop and a later walk with a wider (or no) limit still
-// pages down to its own boundary. A zero count and a zero oldest leave the
-// walk unbounded, the default. It returns a [WalkOption].
+// A limit-stopped walk has fully walked its in-bounds slice, so it records
+// collection completion (which lets the seal phase bundle that cold slice) but
+// withholds settlement. Withholding settlement keeps the early stop disabled —
+// the stop needs both — so a later walk with a wider (or no) limit still pages
+// down to its own boundary rather than mistaking the excluded tail for settled
+// history. A zero count and a zero oldest leave the walk unbounded, the
+// default. It returns a [WalkOption].
 func WithHistoryLimit(count int, oldest time.Time) WalkOption {
 	return func(c *walkConfig) {
 		c.historyCount = count
@@ -166,9 +168,10 @@ func WithHistoryLimit(count int, oldest time.Time) WalkOption {
 //
 // A history limit ([WithHistoryLimit]) bounds the walk to the newest slice of
 // the collection: the first listed element outside every configured bound ends
-// the walk before that element archives, and neither completion nor settlement
-// is recorded, since the excluded tail is deliberately unarchived history
-// rather than settled history.
+// the walk before that element archives. Completion is recorded once that
+// in-bounds slice is fully walked, so the seal phase can bundle it, but
+// settlement is withheld, so the early stop stays disabled and a later wider
+// limit still pages down into the excluded tail.
 //
 // Within a page the elements' Archive closures run concurrently, so any free
 // worker can serve a large collection rather than one walking it alone; the
@@ -268,11 +271,16 @@ func Walk[T any](
 			return nil
 		}
 
-		// A limit stop leaves the excluded tail unarchived, so it records neither
-		// completion nor settlement: those marks would let the early stop mistake
-		// the tail for settled history, and a later wider limit must still be able
-		// to page down into it.
+		// A limit stop has fully walked its in-bounds slice, so it records
+		// completion: the seal phase bundles a collection's cold artifacts only
+		// once it is complete, and the excluded tail is left loose regardless. It
+		// withholds settlement, which stays reserved for a walk that reached the
+		// true end; leaving it unset keeps the early stop disabled, since that
+		// needs both completion and settlement, so a later wider limit still pages
+		// down into the tail rather than mistaking it for settled history.
 		if outOfBounds {
+			env.ledger.MarkCollectionComplete(key)
+
 			return nil
 		}
 
