@@ -21,12 +21,22 @@ import (
 // flushed durably to disk while its collectors run.
 const defaultFlushInterval = 10 * time.Second
 
-// ErrRunIncomplete reports that the run finished without archiving every
-// organization: at least one returned a non-cancellation error or recorded only
-// failures with nothing captured. The per-organization and per-object details
-// are logged as the run proceeds; this sentinel lets the command exit non-zero
-// so a scheduled run does not report success over an empty or broken archive.
-var ErrRunIncomplete = errors.New("archive run incomplete")
+var (
+	// ErrRunIncomplete reports that the run finished without archiving every
+	// organization: at least one returned a non-cancellation error or recorded
+	// only failures with nothing captured. The per-organization and per-object
+	// details are logged as the run proceeds; this sentinel lets the command exit
+	// non-zero so a scheduled run does not report success over an empty or broken
+	// archive.
+	ErrRunIncomplete = errors.New("archive run incomplete")
+
+	// ErrNoOrganizations reports that auto-discovery resolved no organizations to
+	// archive: the token sees none, whether the account is genuinely empty or the
+	// token has been scoped down. Reporting success over a wholly empty archive
+	// would defeat the same guarantee as [ErrRunIncomplete], so the run surfaces
+	// this instead.
+	ErrNoOrganizations = errors.New("no organizations to archive")
+)
 
 // Archiver drives a single archive run across one or more organizations.
 //
@@ -214,6 +224,13 @@ func (a *Archiver) Run(ctx context.Context) error {
 	orgs, err := a.resolveOrgs(runCtx)
 	if err != nil {
 		return fmt.Errorf("resolve organizations: %w", err)
+	}
+
+	// Auto-discovery found nothing to archive. The loop below would fall straight
+	// through and return a clean success over an empty archive, so surface the
+	// empty result rather than let a scheduled run report success on it.
+	if len(orgs) == 0 {
+		return ErrNoOrganizations
 	}
 
 	incomplete := false
