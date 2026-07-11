@@ -131,6 +131,7 @@ func (t *idleTransport) logRoundTrip(req *http.Request, resp *http.Response, err
 type idleBody struct {
 	body    io.ReadCloser
 	wire    *atomic.Int64
+	timer   *time.Timer
 	timeout time.Duration
 	fired   atomic.Bool
 }
@@ -144,14 +145,21 @@ type idleBody struct {
 // as unknown and lose the transient label. A clean EOF is never substituted:
 // the transfer completed, however close the race.
 func (b *idleBody) Read(p []byte) (int, error) {
-	timer := time.AfterFunc(b.timeout, func() {
-		b.fired.Store(true)
-		b.body.Close() //nolint:errcheck,gosec // Best-effort unblock of a stalled read.
-	})
+	// Reads are serial (io.Copy drives one at a time), so a single timer is
+	// armed once and reset per read rather than allocated and dropped on the
+	// timer heap every call — tens of thousands of times for a large blob.
+	if b.timer == nil {
+		b.timer = time.AfterFunc(b.timeout, func() {
+			b.fired.Store(true)
+			b.body.Close() //nolint:errcheck,gosec // Best-effort unblock of a stalled read.
+		})
+	} else {
+		b.timer.Reset(b.timeout)
+	}
 
 	n, err := b.body.Read(p)
 
-	if !timer.Stop() {
+	if !b.timer.Stop() {
 		b.fired.Store(true)
 	}
 
