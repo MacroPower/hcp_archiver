@@ -113,6 +113,14 @@ func (c *Collector) archiveStateVersion(ctx context.Context, project, ws string,
 		}
 	}
 
+	if !stateVersionTerminal(sv.Status) {
+		// A pending version's meta would record status=pending with empty
+		// finalized fields and then settle, so it would never be refreshed once
+		// the version finalizes. Record nothing until it is terminal, matching the
+		// raw and JSON blobs above, so a later walk captures the complete metadata.
+		return nil
+	}
+
 	svID := sv.ID
 
 	return objectOne(ctx, c, st.StateVersionFile(project, ws, sv.CreatedAt, sv.ID, "meta.json"),
