@@ -126,7 +126,7 @@ func (s *shard) load() error {
 
 	s.snapshotBytes = int64(len(data))
 
-	recs, err := replayLog(s.logPath())
+	recs, logBytes, err := replayLog(s.logPath())
 	if err != nil {
 		return err
 	}
@@ -138,10 +138,7 @@ func (s *shard) load() error {
 		}
 	}
 
-	fi, err := os.Stat(s.logPath())
-	if err == nil {
-		s.logBytes = fi.Size()
-	}
+	s.logBytes = logBytes
 
 	return nil
 }

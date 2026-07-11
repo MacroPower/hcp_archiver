@@ -82,21 +82,21 @@ func appendLog(path string, recs []walRecord) (int64, error) {
 	return int64(buf.Len()), nil
 }
 
-// replayLog reads the append-only log at path and returns its records in order,
-// or nil when no log exists.
+// replayLog reads the append-only log at path and returns its records in order
+// along with the log's size in bytes, or nil and zero when no log exists.
 //
 // Bytes after the final newline are an incomplete trailing write with no commit
 // marker and are dropped; a complete, newline-terminated line that fails to
 // parse is genuine corruption and returns [ErrCorruptManifest].
-func replayLog(path string) ([]walRecord, error) {
+func replayLog(path string) ([]walRecord, int64, error) {
 	//nolint:gosec // The log path is derived from the operator-chosen manifest path.
 	data, err := os.ReadFile(path)
 
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return nil, nil
+		return nil, 0, nil
 	case err != nil:
-		return nil, fmt.Errorf("read log %q: %w", path, err)
+		return nil, 0, fmt.Errorf("read log %q: %w", path, err)
 	}
 
 	// Split on the newline commit marker. The final element holds any bytes after
@@ -116,11 +116,11 @@ func replayLog(path string) ([]walRecord, error) {
 
 		err = json.Unmarshal(line, &rec)
 		if err != nil {
-			return nil, fmt.Errorf("%w: log record: %w", ErrCorruptManifest, err)
+			return nil, 0, fmt.Errorf("%w: log record: %w", ErrCorruptManifest, err)
 		}
 
 		recs = append(recs, rec)
 	}
 
-	return recs, nil
+	return recs, int64(len(data)), nil
 }
