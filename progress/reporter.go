@@ -678,7 +678,9 @@ func (r *Reporter) runTUI(ctx context.Context) error {
 	return nil
 }
 
-// render writes one snapshot in the resolved mode. The caller holds the mutex.
+// render writes one snapshot in the resolved mode. It reads only the snapshot
+// and static reporter state, so it runs with the state mutex released; the
+// caller holds writeMu to serialize the writes among themselves.
 func (r *Reporter) render(snap snapshot, summary bool) error {
 	switch r.mode {
 	case config.ProgressModeHuman:
