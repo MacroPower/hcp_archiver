@@ -22,6 +22,10 @@ const snapshotFileName = "snapshot.json"
 // logFileName is a shard's append-only log of changes since its snapshot.
 const logFileName = "log.ndjson"
 
+// configVersionsSegment is the archive path segment, and the shard key, for the
+// org-wide configuration-version objects, which key to their own shard.
+const configVersionsSegment = "config-versions"
+
 // shardKey routes an archive-relative key (an object's path or an append-mostly
 // collection's high-water-mark key) to the shard that owns it.
 //
@@ -36,8 +40,8 @@ func shardKey(key string) string {
 	switch {
 	case len(segs) >= 4 && segs[0] == "projects" && (segs[2] == "workspaces" || segs[2] == "stacks"):
 		return path.Join(segs[0], segs[1], segs[2], segs[3])
-	case segs[0] == "config-versions":
-		return "config-versions"
+	case segs[0] == configVersionsSegment:
+		return configVersionsSegment
 	default:
 		return ""
 	}

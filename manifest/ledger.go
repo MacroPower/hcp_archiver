@@ -181,59 +181,110 @@ func (l *Ledger) shardDir(sk string) string {
 }
 
 // discoverShards finds the .ledger directories beneath root and maps each to its
-// shard key. It globs the known structural depths rather than walking the whole
-// tree, so discovery costs the number of workspaces and stacks, not the number
-// of archived objects.
+// shard key. It reads the known structural depths with [os.ReadDir] rather than
+// walking the whole tree, so discovery costs the number of workspaces and
+// stacks, not the number of archived objects; and it never feeds root through a
+// glob, so an operator-chosen root containing a glob metacharacter ('*', '?',
+// '[') cannot silently hide a shard and re-archive the organization from empty.
 func discoverShards(root string) (map[string]string, error) {
-	patterns := []string{
-		filepath.Join(root, ledgerDirName),
-		filepath.Join(root, "config-versions", ledgerDirName),
-		filepath.Join(root, "projects", "*", "workspaces", "*", ledgerDirName),
-		filepath.Join(root, "projects", "*", "stacks", "*", ledgerDirName),
-	}
-
 	out := make(map[string]string)
 
-	for _, pattern := range patterns {
-		matches, err := filepath.Glob(pattern)
-		if err != nil {
-			return nil, fmt.Errorf("glob shards %q: %w", pattern, err)
+	add := func(dir string) error {
+		info, statErr := os.Stat(dir)
+		if statErr != nil {
+			// A shard directory that fails to stat for any reason other than
+			// being gone (a permission change, a flaky network filesystem) must
+			// not be silently dropped: doing so hides its persisted entries and
+			// re-archives the whole subtree from empty. Only a genuinely removed
+			// shard is skipped.
+			if errors.Is(statErr, fs.ErrNotExist) {
+				return nil
+			}
+
+			return fmt.Errorf("stat shard %q: %w", dir, statErr)
 		}
 
-		for _, dir := range matches {
-			info, statErr := os.Stat(dir)
-			if statErr != nil {
-				// A shard the glob just matched but that now fails to stat for
-				// any reason other than being gone (a permission change, a flaky
-				// network filesystem) must not be silently dropped: doing so
-				// hides its persisted entries and re-archives the whole subtree
-				// from empty. Only a genuinely removed shard is skipped.
-				if errors.Is(statErr, fs.ErrNotExist) {
-					continue
+		if !info.IsDir() {
+			return nil
+		}
+
+		rel, relErr := filepath.Rel(root, filepath.Dir(dir))
+		if relErr != nil {
+			return fmt.Errorf("relativize shard %q: %w", dir, relErr)
+		}
+
+		sk := filepath.ToSlash(rel)
+		if sk == "." {
+			sk = ""
+		}
+
+		out[sk] = dir
+
+		return nil
+	}
+
+	// The two fixed-depth shards live at literal paths.
+	for _, dir := range []string{
+		filepath.Join(root, ledgerDirName),
+		filepath.Join(root, configVersionsSegment, ledgerDirName),
+	} {
+		err := add(dir)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Per-workspace and per-stack shards live two levels under each project.
+	projectsDir := filepath.Join(root, "projects")
+
+	projects, err := readSubdirs(projectsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, proj := range projects {
+		for _, kind := range []string{"workspaces", "stacks"} {
+			kindDir := filepath.Join(projectsDir, proj, kind)
+
+			children, childErr := readSubdirs(kindDir)
+			if childErr != nil {
+				return nil, childErr
+			}
+
+			for _, child := range children {
+				err = add(filepath.Join(kindDir, child, ledgerDirName))
+				if err != nil {
+					return nil, err
 				}
-
-				return nil, fmt.Errorf("stat shard %q: %w", dir, statErr)
 			}
-
-			if !info.IsDir() {
-				continue
-			}
-
-			rel, relErr := filepath.Rel(root, filepath.Dir(dir))
-			if relErr != nil {
-				return nil, fmt.Errorf("relativize shard %q: %w", dir, relErr)
-			}
-
-			sk := filepath.ToSlash(rel)
-			if sk == "." {
-				sk = ""
-			}
-
-			out[sk] = dir
 		}
 	}
 
 	return out, nil
+}
+
+// readSubdirs returns the immediate subdirectory names of dir, or nil when dir
+// does not exist. A read error other than a missing directory is returned so a
+// permission or filesystem fault does not silently hide shards below it.
+func readSubdirs(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("read %q: %w", dir, err)
+	}
+
+	names := make([]string, 0, len(entries))
+
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+
+	return names, nil
 }
 
 // shardFor returns the shard that owns key, creating it if absent. Callers that
