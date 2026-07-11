@@ -43,23 +43,53 @@ type StateVersion struct {
 // metaSuffix marks a state version's metadata sidecar.
 const metaSuffix = ".meta.json"
 
-// runArtifactRank orders a run's artifact leaves the way an operator reads
-// them: execution output first, then the structured plan, then the surrounding
-// metadata. Unranked names (per-check policy logs, future leaves) sort after
-// these, alphabetically.
-var runArtifactRank = map[string]int{
-	"plan.log":                1,
-	"plan.json":               2,
-	"apply.log":               3,
-	"cost-estimate.log":       4,
-	"config-version.json":     5,
-	"cost-estimate.json":      6,
-	"comments.json":           7,
-	"run-events.json":         8,
-	"policy-checks.json":      9,
-	"task-stages.json":        10,
-	"tf-policy-outcomes.json": 11,
-}
+var (
+	// RunArtifacts lists a run's artifact leaves in the order an operator reads
+	// them -- execution output first, then the structured plan, then the
+	// surrounding metadata -- each paired with the description its list row
+	// shows. Both runArtifactRank and artifactDesc derive from this one table,
+	// so an artifact's ordering and its label cannot drift apart. A leaf absent
+	// here (a per-check policy log, a future leaf) sorts after these
+	// alphabetically and falls back to its filename.
+	runArtifacts = []struct {
+		name string
+		desc string
+	}{
+		{"plan.log", "plan output"},
+		{"plan.json", "structured plan (JSON)"},
+		{"apply.log", "apply output"},
+		{"cost-estimate.log", "cost estimate breakdown"},
+		{"config-version.json", "configuration version and ingress attributes"},
+		{"cost-estimate.json", "cost estimate"},
+		{"comments.json", "run comments"},
+		{"run-events.json", "actor-attributed event timeline"},
+		{"policy-checks.json", "Sentinel policy checks"},
+		{"task-stages.json", "task stages and results"},
+		{"tf-policy-outcomes.json", "native Terraform policy outcomes"},
+	}
+
+	// RunArtifactRank maps each ranked artifact leaf to its reading order,
+	// derived from runArtifacts.
+	runArtifactRank = func() map[string]int {
+		m := make(map[string]int, len(runArtifacts))
+		for i, a := range runArtifacts {
+			m[a.name] = i + 1
+		}
+
+		return m
+	}()
+
+	// ArtifactDesc names each run artifact for its list row, derived from
+	// runArtifacts; an unrecognized leaf falls back to its filename.
+	artifactDesc = func() map[string]string {
+		m := make(map[string]string, len(runArtifacts))
+		for _, a := range runArtifacts {
+			m[a.name] = a.desc
+		}
+
+		return m
+	}()
+)
 
 // Runs returns the workspace's archived runs, newest first.
 //

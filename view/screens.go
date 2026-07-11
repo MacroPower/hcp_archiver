@@ -390,29 +390,11 @@ func newRunsScreen(ws *Workspace) (screen, error) {
 	return newListScreen("runs", rows), nil
 }
 
-var (
-	// ArtifactDesc names each run artifact for its list row; unrecognized leaves
-	// fall back to their filename.
-	artifactDesc = map[string]string{
-		"plan.log":                "plan output",
-		"plan.json":               "structured plan (JSON)",
-		"apply.log":               "apply output",
-		"cost-estimate.log":       "cost estimate breakdown",
-		"config-version.json":     "configuration version and ingress attributes",
-		"cost-estimate.json":      "cost estimate",
-		"comments.json":           "run comments",
-		"run-events.json":         "actor-attributed event timeline",
-		"policy-checks.json":      "Sentinel policy checks",
-		"task-stages.json":        "task stages and results",
-		"tf-policy-outcomes.json": "native Terraform policy outcomes",
-	}
-
-	// BinaryExts marks archived blobs the text viewer cannot usefully show.
-	binaryExts = map[string]struct{}{
-		".zip": {},
-		".gz":  {},
-	}
-)
+// binaryExts marks archived blobs the text viewer cannot usefully show.
+var binaryExts = map[string]struct{}{
+	".zip": {},
+	".gz":  {},
+}
 
 // newRunScreen is one run's detail: its summary and each archived artifact.
 func newRunScreen(ws *Workspace, run Run) (screen, error) {
