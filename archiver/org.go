@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -32,7 +33,9 @@ func (a *Archiver) resolveOrgs(ctx context.Context) ([]string, error) {
 // without a network.
 func resolveOrgs(ctx context.Context, orgs []string, list func(context.Context) ([]string, error)) ([]string, error) {
 	if len(orgs) > 0 {
-		return orgs, nil
+		// Clone so the returned slice never aliases the caller's config backing
+		// array; the run loop owns its list.
+		return slices.Clone(orgs), nil
 	}
 
 	return list(ctx)
