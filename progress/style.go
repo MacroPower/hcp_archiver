@@ -11,6 +11,15 @@ const (
 	glyphRetried   = "↻"
 )
 
+// Metadata glyphs leading the panel's closing readouts, mirroring the status
+// glyphs above them so the panel's last two lines read as one grid.
+const (
+	glyphBytes   = "⇣"
+	glyphRate    = "⇢"
+	glyphElapsed = "◷"
+	glyphWorkers = "⚙"
+)
+
 // Palette for the live view. In lipgloss v2 [lipgloss.Color] is a function
 // returning an [image/color.Color], and [lipgloss.Style.Render] always emits
 // truecolor; Bubble Tea downsamples the composed view to the terminal's

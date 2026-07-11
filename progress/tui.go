@@ -36,6 +36,13 @@ const (
 	countErroredWidth   = 4
 	countForbiddenWidth = 4
 	countRetriedWidth   = 4
+
+	// The metadata readouts pad to the width of the status column above them
+	// (its label plus digit reserve), so the panel's closing two lines align as
+	// one grid. The worker readout closes the line and needs no pad.
+	metaBytesWidth   = len("done ") + countDoneWidth
+	metaRateWidth    = len("errored ") + countErroredWidth
+	metaElapsedWidth = len("forbidden ") + countForbiddenWidth
 )
 
 // maxTaskLines caps how many in-flight work items the panel lists, so a large
@@ -264,10 +271,14 @@ func (m *tuiModel) render(snap snapshot) string {
 	}
 
 	t := snap.tally
-	meta := fmt.Sprintf("%s · %s/s · %s",
-		humanBytes(t.BytesDownloaded),
-		humanBytes(int64(m.throughput(snap))),
-		snap.elapsed.Round(time.Second),
+
+	// The metadata line mirrors the counts line above it: each readout sits
+	// under a status column, led by its own glyph and padded to that column's
+	// width, so the panel's two closing lines read as one grid.
+	meta := fmt.Sprintf("%s %-*s %s %-*s %s %-*s",
+		glyphBytes, metaBytesWidth, humanBytes(t.BytesDownloaded),
+		glyphRate, metaRateWidth, humanBytes(int64(m.throughput(snap)))+"/s",
+		glyphElapsed, metaElapsedWidth, snap.elapsed.Round(time.Second).String(),
 	)
 
 	// The worker readout shows the adaptive pool moving: its size against the
@@ -275,12 +286,9 @@ func (m *tuiModel) render(snap snapshot) string {
 	// total rides beside it in amber, so a shrunken pool carries its own
 	// explanation.
 	if snap.hasWorkers() {
-		meta += fmt.Sprintf(" · %d/%d workers", snap.workers, snap.maxWorkers)
+		meta += fmt.Sprintf(" "+glyphWorkers+" %d/%d workers", snap.workers, snap.maxWorkers)
 	}
 
-	// The counts and the metadata close the panel on separate lines, so the
-	// status columns stay readable instead of sharing a row with the byte and
-	// rate readout.
 	counts := "  " + statusCounts(t, countDoneWidth, countErroredWidth, countForbiddenWidth, countRetriedWidth)
 
 	metaLine := "  " + styleMeta.Render(meta)

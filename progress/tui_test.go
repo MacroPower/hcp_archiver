@@ -197,6 +197,39 @@ func TestRenderPanel_CountRolloverIsStable(t *testing.T) {
 		"retried column holds as done rolls over")
 }
 
+func TestRenderPanel_MetaAlignsWithCounts(t *testing.T) {
+	t.Parallel()
+
+	// Each metadata glyph sits in the display column of the status glyph above
+	// it, so the panel's two closing lines read as one grid.
+	panel := barPanel()
+	panel.Workers = 4
+	panel.MaxWorkers = 16
+
+	lines := strings.Split(progress.RenderPanel(panel), "\n")
+	require.Len(t, lines, 3)
+
+	counts := ansi.Strip(lines[1])
+	meta := ansi.Strip(lines[2])
+
+	pairs := map[string]string{"✓": "⇣", "✗": "⇢", "⊘": "◷", "↻": "⚙"}
+	for status, readout := range pairs {
+		assert.Equal(t, column(t, counts, status), column(t, meta, readout),
+			"%s sits under %s", readout, status)
+	}
+}
+
+// column returns the display column at which line's first occurrence of sub
+// begins.
+func column(t *testing.T, line, sub string) int {
+	t.Helper()
+
+	i := strings.Index(line, sub)
+	require.GreaterOrEqual(t, i, 0, "line carries %q", sub)
+
+	return ansi.StringWidth(line[:i])
+}
+
 func TestRenderPanel_OvercompleteIsStable(t *testing.T) {
 	t.Parallel()
 
