@@ -364,10 +364,13 @@ func Rollup(rollupPath string, members []Member) error {
 func encodeRollup(members []Member) ([]byte, error) {
 	var buf bytes.Buffer
 
-	// A roll-up must stay greppable, so encode with HTML escaping off. The default
-	// json.Marshal rewrites &, <, and > (and U+2028/U+2029) into \u escapes, which
-	// a raw search over the roll-up would then miss for any content carrying them
-	// (a URL query string, an angle-bracketed tag). Encode also appends the
+	// A roll-up must stay greppable, so encode with HTML escaping off: the default
+	// encoder rewrites &, <, and > into \u escapes a raw search over the roll-up
+	// would then miss for any content carrying them (a URL query string, an
+	// angle-bracketed tag). U+2028 and U+2029 stay \u-escaped even with HTML
+	// escaping off, since encoding/json always escapes those two, so a raw search
+	// for a token carrying them still misses it; they decode losslessly, so an
+	// extract and the recorded digest are unaffected. Encode also appends the
 	// trailing newline that frames each record.
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
