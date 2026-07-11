@@ -27,9 +27,13 @@ type LogSink interface {
 // funnels the write through to a fallback writer, the behavior when no TUI is
 // active.
 //
-// It satisfies [LogSink]. A LogWriter is safe for concurrent use: writes and
-// program registration are guarded by a mutex. Create instances with
-// [NewLogWriter].
+// It satisfies [LogSink]. The mutex guards the program registration, so a
+// concurrent SetProgram and Write never race on the program pointer and each
+// Write sees a consistent one; the lock is released before the underlying write,
+// so concurrent writes serialize only as far as their destination does. The
+// program's Send is safe for concurrent use, and the fallback must be too (the
+// production fallback is stderr behind a write-serializing slog handler). Create
+// instances with [NewLogWriter].
 type LogWriter struct {
 	fallback io.Writer
 	program  *tea.Program
