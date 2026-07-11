@@ -6,12 +6,14 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/config"
 	"go.jacobcolvin.com/hcp_archiver/progress"
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
+	"go.jacobcolvin.com/hcp_archiver/workpool"
 )
 
 // defaultFlushInterval is the cadence at which each organization's ledger is
@@ -23,19 +25,29 @@ const defaultFlushInterval = 10 * time.Second
 // It is the composition root: from a validated [config.Config] it builds the
 // shared client and, per organization, a fresh store, ledger, collection
 // environment, and progress reporter, then schedules the domain collectors and
-// owns the cross-cutting runtime (the worker pool, the flush and progress
-// tickers, graceful shutdown, and the closing run record). It holds no
-// per-object API knowledge; that lives in the collectors it runs.
+// owns the cross-cutting runtime (the adaptive worker pool, the flush and
+// progress tickers, graceful shutdown, and the closing run record). It holds
+// no per-object API knowledge; that lives in the collectors it runs.
+//
+// The worker pool is the run's one parallelism bound: every API request takes
+// a slot through the client's gate, so slots flow to whatever work is ready
+// (several small workspaces, or many pieces of one large workspace) rather
+// than being pinned one-per-workspace. Every run starts at one worker; a
+// controller scales the pool between there and the configured ceiling from
+// the run's observed rate limiting, so the run finds its own parallelism
+// rather than trusting a configured starting point.
 //
 // Create instances with [New].
 type Archiver struct {
 	cfg           *config.Config
 	client        *tfeclient.Client
+	pool          *workpool.Pool
 	logger        *slog.Logger
 	w             io.Writer
 	logSink       progress.LogSink
 	cancelRun     context.CancelFunc
 	wireBytes     *atomic.Int64
+	rateLimited   *atomic.Int64
 	flushInterval time.Duration
 }
 
@@ -101,6 +113,7 @@ func New(cfg *config.Config, opts ...Option) *Archiver {
 		cfg:           cfg,
 		w:             os.Stderr,
 		wireBytes:     new(atomic.Int64),
+		rateLimited:   new(atomic.Int64),
 		flushInterval: defaultFlushInterval,
 	}
 
@@ -131,12 +144,22 @@ func (a *Archiver) Run(ctx context.Context) error {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
+	// One pool of worker slots serves the whole run: every request the client
+	// makes takes a slot through the gate, so parallelism follows the work
+	// rather than a fixed per-workspace assignment. It starts at one worker and
+	// leaves the ramp-up to the controller's slow start, and hangs on the
+	// archiver so each org's progress reporter can watch its live size.
+	a.pool = workpool.NewPool(1)
+
 	// Orgs run sequentially and each reporter windows deltas of the counter, so
-	// one shared monotonic wire-byte counter serves the whole run.
+	// one shared monotonic wire-byte counter serves the whole run; the
+	// rate-limit counter feeds the pool's controller the same way.
 	a.client, err = tfeclient.New(
 		tfeclient.WithToken(a.cfg.Token),
 		tfeclient.WithAddress(a.cfg.Address),
 		tfeclient.WithWireBytes(a.wireBytes),
+		tfeclient.WithRateLimitCounter(a.rateLimited),
+		tfeclient.WithGate(a.pool),
 	)
 	if err != nil {
 		return fmt.Errorf("build client: %w", err)
@@ -146,6 +169,36 @@ func (a *Archiver) Run(ctx context.Context) error {
 	defer cancel()
 
 	a.cancelRun = cancel
+
+	// Scale the pool from the observed rate limiting for as long as the run
+	// lives: double while the server has never pushed back, shed workers the
+	// moment it does, and probe back up toward the ceiling while it stays
+	// silent. The live worker count and 429 total render in the progress
+	// views, so each resize is only a debug event for forensics rather than
+	// log noise.
+	controller := workpool.NewController(a.pool, a.rateLimited.Load,
+		workpool.WithBounds(1, a.cfg.MaxConcurrency),
+		workpool.WithOnResize(func(prev, next int, hits int64) {
+			a.logger.LogAttrs(runCtx, slog.LevelDebug, "worker_pool_resize",
+				slog.Int("from", prev),
+				slog.Int("to", next),
+				slog.Int64("rate_limited", hits),
+			)
+		}),
+	)
+
+	var controllerWG sync.WaitGroup
+
+	controllerWG.Go(func() {
+		controller.Run(runCtx)
+	})
+
+	// The controller only returns once runCtx is canceled, so cancel before
+	// waiting; deferring the pair keeps the wait after the cancel under LIFO.
+	defer func() {
+		cancel()
+		controllerWG.Wait()
+	}()
 
 	orgs, err := a.resolveOrgs(runCtx)
 	if err != nil {

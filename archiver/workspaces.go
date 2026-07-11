@@ -82,12 +82,17 @@ func (a *Archiver) collectProjects(
 }
 
 // collectWorkspaces archives every workspace in the organization, fanning them
-// across a bounded worker pool sized by the configured concurrency.
+// across the run's shared worker pool.
 //
 // Enumeration hydrates each workspace's project relation so its project name
-// resolves from names. Work within one workspace is sequential; workspaces run
-// concurrently. A worker returns non-nil only on a cancellation, which cancels
-// the pool.
+// resolves from names. The goroutine per workspace is only a coordinator: it
+// holds no worker slot itself, and every request it causes takes one from the
+// client's gate, so slots flow across workspace boundaries — many small
+// workspaces at once, or many workers inside one large workspace — and the
+// pool's live size, not this fan-out, bounds the real parallelism. The
+// fan-out is capped at the pool's ceiling so the in-flight task list stays
+// meaningful. A workspace goroutine returns non-nil only on a cancellation,
+// which cancels the group.
 func (a *Archiver) collectWorkspaces(
 	ctx context.Context,
 	env *collect.Env,
@@ -147,7 +152,7 @@ func (a *Archiver) collectWorkspaces(
 
 	var counters errgroup.Group
 
-	counters.SetLimit(a.cfg.WorkspaceConcurrency)
+	counters.SetLimit(a.cfg.MaxConcurrency)
 
 	for i, ws := range workspaces {
 		counters.Go(func() error {
@@ -176,7 +181,7 @@ func (a *Archiver) collectWorkspaces(
 	reporter.SetTotal(totalWeight)
 
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(a.cfg.WorkspaceConcurrency)
+	g.SetLimit(a.cfg.MaxConcurrency)
 
 	for i, ws := range workspaces {
 		g.Go(func() error {

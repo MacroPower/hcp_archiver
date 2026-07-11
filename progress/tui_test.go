@@ -255,3 +255,44 @@ func TestRenderSummary(t *testing.T) {
 
 	golden.RequireEqual(t, []byte(progress.RenderSummary(panel)))
 }
+
+func TestRenderPanel_Workers(t *testing.T) {
+	t.Parallel()
+
+	// The adaptive worker readout rides in the metadata segment, and once any
+	// rate limiting has been observed the amber 429 total follows it, so a
+	// shrunken pool carries its own explanation.
+	panel := barPanel()
+	panel.Workers = 4
+	panel.MaxWorkers = 16
+	panel.RateLimited = 12
+
+	golden.RequireEqual(t, []byte(progress.RenderPanel(panel)))
+}
+
+func TestRenderPanel_WorkersCleanRunOmits429s(t *testing.T) {
+	t.Parallel()
+
+	panel := barPanel()
+	panel.Workers = 16
+	panel.MaxWorkers = 16
+
+	out := ansi.Strip(progress.RenderPanel(panel))
+	assert.Contains(t, out, "16/16 workers")
+	assert.NotContains(t, out, "429", "a run never rate limited shows no 429 readout")
+}
+
+func TestRenderSummary_RateLimited(t *testing.T) {
+	t.Parallel()
+
+	panel := progress.PanelSnapshot{
+		Tally: manifest.Tally{
+			Done:            100,
+			BytesDownloaded: 5 * 1024 * 1024,
+		},
+		Elapsed:     200 * time.Second,
+		RateLimited: 42,
+	}
+
+	golden.RequireEqual(t, []byte(progress.RenderSummary(panel)))
+}

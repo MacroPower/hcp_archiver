@@ -17,7 +17,10 @@ import (
 // The orchestrator enumerates projects and workspaces itself and fans
 // workspaces across a worker pool, so the collector exposes granular methods
 // ([Collector.CollectProject] and [Collector.CollectWorkspace]) rather than the
-// single-method collector contract. Work within one workspace is sequential.
+// single-method collector contract. Work within one workspace fans out too:
+// the state-version and run walks run concurrently and each page's items
+// archive concurrently, with the client's request gate bounding the whole
+// run's real parallelism.
 //
 // Create instances with [New].
 type Collector struct {

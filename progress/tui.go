@@ -263,14 +263,28 @@ func (m *tuiModel) render(snap snapshot) string {
 	}
 
 	t := snap.tally
+	meta := fmt.Sprintf("│ %s · %s/s · %s",
+		humanBytes(t.BytesDownloaded),
+		humanBytes(int64(m.throughput(snap))),
+		snap.elapsed.Round(time.Second),
+	)
+
+	// The worker readout shows the adaptive pool moving: its size against the
+	// ceiling it may scale to. Once any rate limiting has been observed the 429
+	// total rides beside it in amber, so a shrunken pool carries its own
+	// explanation.
+	if snap.hasWorkers() {
+		meta += fmt.Sprintf(" · %d/%d workers", snap.workers, snap.maxWorkers)
+	}
+
 	counts := fmt.Sprintf("  %s %s",
 		statusCounts(t, countDoneWidth, countErroredWidth, countForbiddenWidth),
-		styleMeta.Render(fmt.Sprintf("│ %s · %s/s · %s",
-			humanBytes(t.BytesDownloaded),
-			humanBytes(int64(m.throughput(snap))),
-			snap.elapsed.Round(time.Second),
-		)),
+		styleMeta.Render(meta),
 	)
+
+	if snap.rateLimited > 0 {
+		counts += " " + styleRateLimited.Render(fmt.Sprintf("· 429s %d", snap.rateLimited))
+	}
 
 	lines := []string{m.fit(line1.String())}
 

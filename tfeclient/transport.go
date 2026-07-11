@@ -54,7 +54,8 @@ func (e *idleReadError) Timeout() bool { return true }
 func (e *idleReadError) Temporary() bool { return true }
 
 // idleTransport wraps every response body in an [idleBody], bounding mid-body
-// stalls and optionally counting raw wire bytes as they arrive.
+// stalls and optionally counting raw wire bytes as they arrive and
+// rate-limited responses as they land.
 //
 // The idle bound works by closing the body from a timer, which unblocks a
 // pending Read only under HTTP/1 connection semantics; the client this wraps
@@ -63,16 +64,23 @@ func (e *idleReadError) Temporary() bool { return true }
 type idleTransport struct {
 	next        http.RoundTripper
 	wireBytes   *atomic.Int64
+	rateLimited *atomic.Int64
 	idleTimeout time.Duration
 }
 
 // RoundTrip delegates to the wrapped transport and instruments the response
 // body of any successful exchange; the [http.RoundTripper] contract guarantees
-// a non-nil body when the error is nil.
+// a non-nil body when the error is nil. It sits below the go-tfe client's
+// internal retry loop, so every rate-limited attempt is observed here even
+// though the caller only ever sees the final outcome.
 func (t *idleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.next.RoundTrip(req)
 	if err != nil {
 		return resp, err //nolint:wrapcheck // A transparent transport wrapper.
+	}
+
+	if t.rateLimited != nil && resp.StatusCode == http.StatusTooManyRequests {
+		t.rateLimited.Add(1)
 	}
 
 	resp.Body = &idleBody{

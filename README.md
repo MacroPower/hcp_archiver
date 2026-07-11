@@ -49,7 +49,7 @@ hcp_archiver version
 What and how to archive lives in a YAML configuration file; only per-run and
 secret settings are flags or environment variables. Point `--config` (`-c`) at
 the file or set `HCP_ARCHIVER_CONFIG`; with neither, the built-in defaults apply
-(every visible organization, default surfaces only, concurrency 4).
+(every visible organization, default surfaces only, up to 16 workers).
 
 ```yaml
 # yaml-language-server: $schema=./config/config.schema.json
@@ -61,8 +61,10 @@ address: https://app.terraform.io
 organizations:
   - my-org
 
-# Workspaces archived at once, within the per-token rate limit.
-concurrency: 4
+# Ceiling on archive workers (in-flight API requests). Every run starts at one
+# worker and scales itself: doubling while the API stays quiet, halving when it
+# rate-limits the run, and creeping back up after.
+maxConcurrency: 16
 
 # Heavy or org-specific surfaces, each off by default.
 scope:
@@ -189,7 +191,9 @@ Settings are grouped by how much they vary; see
 - **Configuration file** (every key optional, defaulted per field): `address`
   (the API endpoint, default `https://app.terraform.io`), `organizations` (a
   list; empty or omitted archives every organization the token can see in turn),
-  `concurrency` (size of the worker pool over workspaces), and a `scope` block
+  `maxConcurrency` (the ceiling on archive workers; every run starts at one
+  worker, shared across workspaces, and scales itself up while the API stays
+  quiet and down while it rate-limits the run), and a `scope` block
   of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
   `registryDetail`, `auditTrail`), each off by default.
 

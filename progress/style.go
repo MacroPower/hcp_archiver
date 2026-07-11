@@ -46,6 +46,10 @@ var (
 	// Resumed tag, dimmed so it reads as an aside.
 	styleResumed = lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("#8A8F98"))
 
+	// Rate-limited (429) readout, in the forbidden amber: not an error, but a
+	// warning that explains a shrunken worker pool.
+	styleRateLimited = lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68"))
+
 	// Ends of the blend the filled bar sweeps, spinner purple into phase blue,
 	// shared with the indeterminate marquee so the two read as one component.
 	barBlendStart = lipgloss.Color("#7D56F4")

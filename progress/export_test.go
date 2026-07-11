@@ -26,8 +26,11 @@ type PanelSnapshot struct {
 	PhaseElapsed time.Duration
 	Rate         float64
 	WireBytes    int64
+	RateLimited  int64
 	Total        int
 	Completed    int
+	Workers      int
+	MaxWorkers   int
 }
 
 // PanelTask mirrors one in-flight work item fed to the panel by a test.
@@ -52,8 +55,11 @@ func (ps PanelSnapshot) snap() snapshot {
 		phaseElapsed: ps.PhaseElapsed,
 		rate:         ps.Rate,
 		wireBytes:    ps.WireBytes,
+		rateLimited:  ps.RateLimited,
 		total:        ps.Total,
 		completed:    ps.Completed,
+		workers:      ps.Workers,
+		maxWorkers:   ps.MaxWorkers,
 	}
 }
 

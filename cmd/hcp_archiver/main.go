@@ -101,7 +101,7 @@ func (af *archiveFlags) config() (*config.Config, error) {
 	return config.New(
 		config.WithAddress(file.Address),
 		config.WithOrganizations(file.Organizations),
-		config.WithWorkspaceConcurrency(file.Concurrency),
+		config.WithMaxConcurrency(file.MaxConcurrency),
 		config.WithStacks(file.Scope.Stacks),
 		config.WithHYOK(file.Scope.HYOK),
 		config.WithRegistryDetail(file.Scope.RegistryDetail),

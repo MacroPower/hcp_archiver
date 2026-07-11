@@ -7,21 +7,26 @@ import (
 	"strings"
 
 	"github.com/hashicorp/go-tfe"
+	"golang.org/x/sync/errgroup"
 )
 
 // CollectWorkspace archives one workspace: its settings and adjacent metadata,
-// then its append-mostly state versions and runs. The projectName argument is
-// the name of the workspace's project, resolved by the orchestrator, so the
-// collector can build project-scoped paths.
+// then its append-mostly state versions and runs. The two walks run
+// concurrently once the settings land, and each walk's page items archive
+// concurrently too, so a large workspace draws on every free worker rather
+// than being drained by one. The projectName argument is the name of the
+// workspace's project, resolved by the orchestrator, so the collector can
+// build project-scoped paths.
 //
 // The progress callback, when non-nil, is called with 1 once the settings land
 // and after each state version and run the walks handle, so the orchestrator
 // can move its unit-progress accounting while a large workspace is still in
-// flight rather than only when it finishes. The count of callbacks is the
-// walks' own, not the totals [Collector.Counts] probed: a walk that stops early
-// on settled history reports fewer, and a listing that grows while the archive
-// is in flight reports more, so the orchestrator reconciles against its own
-// budget.
+// flight rather than only when it finishes. The concurrent walks invoke it
+// from their own goroutines, so it must be safe for concurrent use. The count
+// of callbacks is the walks' own, not the totals [Collector.Counts] probed: a
+// walk that stops early on settled history reports fewer, and a listing that
+// grows while the archive is in flight reports more, so the orchestrator
+// reconciles against its own budget.
 //
 // It does not touch the progress target: workspaces archive concurrently, so
 // no single name is the target, and progress reporting names the in-flight
@@ -46,12 +51,25 @@ func (c *Collector) CollectWorkspace(
 		progress(1)
 	}
 
-	err = c.collectStateVersions(ctx, projectName, ws, progress)
+	// The two collections are independent and the ledger, store, and progress
+	// callback are all concurrency-safe, so their walks share the workspace's
+	// wall-clock. Real parallelism stays bounded by the client's request gate.
+	g, gctx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		return c.collectStateVersions(gctx, projectName, ws, progress)
+	})
+
+	g.Go(func() error {
+		return c.collectRuns(gctx, projectName, ws, progress)
+	})
+
+	err = g.Wait()
 	if err != nil {
-		return err
+		return err //nolint:wrapcheck // Walk errors already carry their context.
 	}
 
-	return c.collectRuns(ctx, projectName, ws, progress)
+	return nil
 }
 
 // collectWorkspaceSettings archives the workspace record and its adjacent

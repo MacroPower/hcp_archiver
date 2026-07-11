@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 )
 
@@ -118,6 +120,16 @@ func WithArchivePrefix(prefix string) WalkOption {
 // a synthetic id (a stack walk) passes the real archive prefix through
 // [WithArchivePrefix] so the gate scans the right shard.
 //
+// Within a page the elements' Archive closures run concurrently, so any free
+// worker can serve a large collection rather than one walking it alone; the
+// shared client's request gate bounds the real parallelism, and the next page
+// is not fetched until the current page's elements land, which keeps the
+// early-stop decision and memory use those of the sequential walk. The stop
+// boundary itself is decided in listing order from the ledger before the
+// page's closures run, which matches the sequential decision because each
+// element's frozen state depends only on its own entry, never on a page
+// sibling's archive.
+//
 // Only a context cancellation surfaced by an Archive closure or a page fetch
 // aborts the walk; every per-object error is recorded by the primitives and the
 // walk continues.
@@ -146,6 +158,14 @@ func Walk[T any](
 			return fmt.Errorf("list %q page %d: %w", key, pageNum, err)
 		}
 
+		// Decide the page's boundary in listing order first: include each element
+		// up to and including the first frozen one the settled gate lets the walk
+		// stop on, exactly the elements the sequential walk would have archived.
+		// The boundary element is still archived so a run that has just settled
+		// gets its final refresh.
+		include := make([]Item, 0, len(items))
+		stopped := false
+
 		for _, listed := range items {
 			item := describe(listed)
 
@@ -154,18 +174,36 @@ func Walk[T any](
 			entry, ok := env.ledger.Entry(item.RelPath)
 			frozen := ok && entry.Status == manifest.StatusDone && item.Terminal
 
-			archiveErr := item.Archive(ctx)
-			if archiveErr != nil {
-				return archiveErr
-			}
+			include = append(include, item)
 
 			if !item.Terminal {
 				sawNonTerminal = true
 			}
 
 			if frozen && earlyStopAllowed && !sawNonTerminal {
-				return nil
+				stopped = true
+
+				break
 			}
+		}
+
+		// Archive the included elements concurrently; the elements' paths are
+		// distinct, so concurrent archives never contend on one ledger entry.
+		g, gctx := errgroup.WithContext(ctx)
+
+		for _, item := range include {
+			g.Go(func() error {
+				return item.Archive(gctx)
+			})
+		}
+
+		err = g.Wait()
+		if err != nil {
+			return err //nolint:wrapcheck // Archive closures already return contextual errors.
+		}
+
+		if stopped {
+			return nil
 		}
 
 		if !hasNext {

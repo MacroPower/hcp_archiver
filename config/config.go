@@ -11,8 +11,10 @@ import (
 const (
 	// DefaultAddress is the HCP Terraform API address used when none is given.
 	DefaultAddress = "https://app.terraform.io"
-	// DefaultWorkspaceConcurrency is the number of workspaces archived at once.
-	DefaultWorkspaceConcurrency = 4
+	// DefaultMaxConcurrency is the ceiling the worker count may scale up to
+	// while no rate limiting is observed. Every run starts at one worker and
+	// scales itself toward the ceiling.
+	DefaultMaxConcurrency = 16
 	// DefaultProgressMode is the progress mode used when none is given.
 	DefaultProgressMode = ProgressModeAuto
 	// DefaultProgressInterval is the reporting cadence used when none is given.
@@ -38,8 +40,8 @@ var (
 	ErrMissingToken = errors.New("api token is required (set HCP_TOKEN, TFC_TOKEN, or TFE_TOKEN)")
 	// ErrMissingOutputDir indicates that no output directory was supplied.
 	ErrMissingOutputDir = errors.New("output directory is required")
-	// ErrInvalidConcurrency indicates a workspace concurrency below one.
-	ErrInvalidConcurrency = errors.New("workspace concurrency must be at least 1")
+	// ErrInvalidMaxConcurrency indicates a concurrency ceiling below one.
+	ErrInvalidMaxConcurrency = errors.New("max concurrency must be at least 1")
 	// ErrInvalidProgressMode indicates an unrecognized progress mode.
 	ErrInvalidProgressMode = errors.New("invalid progress mode")
 	// ErrInvalidProgressInterval indicates a progress interval of zero or less.
@@ -65,8 +67,12 @@ type Config struct {
 	Organizations []string
 	// ProgressInterval is the cadence at which progress is reported.
 	ProgressInterval time.Duration
-	// WorkspaceConcurrency is the number of workspaces archived concurrently.
-	WorkspaceConcurrency int
+	// MaxConcurrency is the ceiling the worker count may scale up to while no
+	// rate limiting is observed. A worker is one in-flight API request, not one
+	// workspace: workers pull whatever unit of work is ready, so several can
+	// serve a single large workspace at once. Every run starts at one worker
+	// and scales itself toward the ceiling.
+	MaxConcurrency int
 	// RecheckAbsent forces re-probing of objects previously recorded as
 	// permanently gone.
 	RecheckAbsent bool
@@ -90,7 +96,7 @@ type Config struct {
 //   - [WithOutputDir]
 //   - [WithProgressMode]
 //   - [WithProgressInterval]
-//   - [WithWorkspaceConcurrency]
+//   - [WithMaxConcurrency]
 //   - [WithRecheckAbsent]
 //   - [WithStacks]
 //   - [WithHYOK]
@@ -147,11 +153,11 @@ func WithProgressInterval(interval time.Duration) Option {
 	}
 }
 
-// WithWorkspaceConcurrency sets the number of workspaces archived concurrently.
-// It returns an [Option].
-func WithWorkspaceConcurrency(n int) Option {
+// WithMaxConcurrency sets the ceiling the worker count may scale up to while
+// no rate limiting is observed. It returns an [Option].
+func WithMaxConcurrency(n int) Option {
 	return func(c *Config) {
-		c.WorkspaceConcurrency = n
+		c.MaxConcurrency = n
 	}
 }
 
@@ -201,10 +207,10 @@ func WithAuditTrail(enabled bool) Option {
 // variables but performs no other I/O.
 func New(opts ...Option) (*Config, error) {
 	c := &Config{
-		Address:              DefaultAddress,
-		ProgressMode:         DefaultProgressMode,
-		ProgressInterval:     DefaultProgressInterval,
-		WorkspaceConcurrency: DefaultWorkspaceConcurrency,
+		Address:          DefaultAddress,
+		ProgressMode:     DefaultProgressMode,
+		ProgressInterval: DefaultProgressInterval,
+		MaxConcurrency:   DefaultMaxConcurrency,
 	}
 
 	for _, opt := range opts {
@@ -225,9 +231,9 @@ func New(opts ...Option) (*Config, error) {
 
 // Validate reports whether the [Config] is internally consistent.
 //
-// It returns [ErrMissingToken], [ErrMissingOutputDir], [ErrInvalidConcurrency],
-// [ErrInvalidProgressMode], or [ErrInvalidProgressInterval] wrapped with context
-// on the first problem found.
+// It returns [ErrMissingToken], [ErrMissingOutputDir],
+// [ErrInvalidMaxConcurrency], [ErrInvalidProgressMode], or
+// [ErrInvalidProgressInterval] wrapped with context on the first problem found.
 func (c *Config) Validate() error {
 	if c.Token == "" {
 		return ErrMissingToken
@@ -237,8 +243,8 @@ func (c *Config) Validate() error {
 		return ErrMissingOutputDir
 	}
 
-	if c.WorkspaceConcurrency < 1 {
-		return fmt.Errorf("%w: %d", ErrInvalidConcurrency, c.WorkspaceConcurrency)
+	if c.MaxConcurrency < 1 {
+		return fmt.Errorf("%w: %d", ErrInvalidMaxConcurrency, c.MaxConcurrency)
 	}
 
 	if !c.ProgressMode.valid() {

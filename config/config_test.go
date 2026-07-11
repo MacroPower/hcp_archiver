@@ -22,7 +22,7 @@ func TestNew_Defaults(t *testing.T) {
 	assert.Equal(t, "tok", cfg.Token)
 	assert.Equal(t, config.DefaultAddress, cfg.Address)
 	assert.Empty(t, cfg.Organizations)
-	assert.Equal(t, config.DefaultWorkspaceConcurrency, cfg.WorkspaceConcurrency)
+	assert.Equal(t, config.DefaultMaxConcurrency, cfg.MaxConcurrency)
 	assert.Equal(t, config.ProgressModeAuto, cfg.ProgressMode)
 	assert.Equal(t, config.DefaultProgressInterval, cfg.ProgressInterval)
 	assert.False(t, cfg.RecheckAbsent)
@@ -53,7 +53,7 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 		config.WithOutputDir("/tmp/archive"),
 		config.WithAddress("https://tfe.example.com"),
 		config.WithOrganizations([]string{"acme"}),
-		config.WithWorkspaceConcurrency(8),
+		config.WithMaxConcurrency(32),
 		config.WithProgressMode(config.ProgressModeJSON),
 		config.WithProgressInterval(10*time.Second),
 		config.WithRecheckAbsent(true),
@@ -66,7 +66,7 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 
 	assert.Equal(t, "https://tfe.example.com", cfg.Address)
 	assert.Equal(t, []string{"acme"}, cfg.Organizations)
-	assert.Equal(t, 8, cfg.WorkspaceConcurrency)
+	assert.Equal(t, 32, cfg.MaxConcurrency)
 	assert.Equal(t, config.ProgressModeJSON, cfg.ProgressMode)
 	assert.Equal(t, 10*time.Second, cfg.ProgressInterval)
 	assert.True(t, cfg.RecheckAbsent)
@@ -189,21 +189,21 @@ func TestNew_ValidationErrors(t *testing.T) {
 			opts:    []config.Option{config.WithToken("tok")},
 			wantErr: config.ErrMissingOutputDir,
 		},
-		"zero concurrency": {
+		"zero max concurrency": {
 			opts: []config.Option{
 				config.WithToken("tok"),
 				config.WithOutputDir("/tmp/archive"),
-				config.WithWorkspaceConcurrency(0),
+				config.WithMaxConcurrency(0),
 			},
-			wantErr: config.ErrInvalidConcurrency,
+			wantErr: config.ErrInvalidMaxConcurrency,
 		},
-		"negative concurrency": {
+		"negative max concurrency": {
 			opts: []config.Option{
 				config.WithToken("tok"),
 				config.WithOutputDir("/tmp/archive"),
-				config.WithWorkspaceConcurrency(-1),
+				config.WithMaxConcurrency(-1),
 			},
-			wantErr: config.ErrInvalidConcurrency,
+			wantErr: config.ErrInvalidMaxConcurrency,
 		},
 		"invalid progress mode": {
 			opts: []config.Option{

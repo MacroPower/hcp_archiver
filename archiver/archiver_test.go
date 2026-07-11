@@ -48,11 +48,11 @@ func TestNew(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{
-		Token:                "secret",
-		Address:              config.DefaultAddress,
-		OutputDir:            t.TempDir(),
-		ProgressMode:         config.ProgressModeQuiet,
-		WorkspaceConcurrency: config.DefaultWorkspaceConcurrency,
+		Token:          "secret",
+		Address:        config.DefaultAddress,
+		OutputDir:      t.TempDir(),
+		ProgressMode:   config.ProgressModeQuiet,
+		MaxConcurrency: config.DefaultMaxConcurrency,
 	}
 
 	buf := &bytes.Buffer{}
@@ -66,10 +66,10 @@ func TestRunInvalidConfig(t *testing.T) {
 
 	// A config missing its output directory fails validation before any I/O.
 	cfg := &config.Config{
-		Token:                "secret",
-		Address:              config.DefaultAddress,
-		ProgressMode:         config.ProgressModeQuiet,
-		WorkspaceConcurrency: config.DefaultWorkspaceConcurrency,
+		Token:          "secret",
+		Address:        config.DefaultAddress,
+		ProgressMode:   config.ProgressModeQuiet,
+		MaxConcurrency: config.DefaultMaxConcurrency,
 	}
 
 	a := archiver.New(cfg, archiver.WithWriter(&bytes.Buffer{}))

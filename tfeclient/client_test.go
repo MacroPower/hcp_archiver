@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -275,4 +277,137 @@ func TestPaginate(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []int{7}, got)
 	})
+}
+
+// recordingGate records the order of gate and fn events so tests can assert
+// that Do brackets fn with an acquire and a release.
+type recordingGate struct {
+	mu         sync.Mutex
+	events     []string
+	acquireErr error
+}
+
+func (g *recordingGate) Acquire(_ context.Context) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.acquireErr != nil {
+		return g.acquireErr
+	}
+
+	g.events = append(g.events, "acquire")
+
+	return nil
+}
+
+func (g *recordingGate) Release() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.events = append(g.events, "release")
+}
+
+func (g *recordingGate) record(event string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.events = append(g.events, event)
+}
+
+func TestDoGate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("brackets fn with acquire and release", func(t *testing.T) {
+		t.Parallel()
+
+		gate := &recordingGate{}
+		c := newOfflineClient(t, tfeclient.WithGate(gate))
+
+		err := c.Do(t.Context(), func(_ context.Context, _ *tfe.Client) error {
+			gate.record("fn")
+
+			return nil
+		})
+		require.NoError(t, err)
+
+		assert.Equal(t, []string{"acquire", "fn", "release"}, gate.events)
+	})
+
+	t.Run("releases the slot when fn errors", func(t *testing.T) {
+		t.Parallel()
+
+		gate := &recordingGate{}
+		c := newOfflineClient(t, tfeclient.WithGate(gate))
+
+		sentinel := errors.New("from fn")
+
+		err := c.Do(t.Context(), func(_ context.Context, _ *tfe.Client) error {
+			return sentinel
+		})
+		require.ErrorIs(t, err, sentinel)
+
+		assert.Equal(t, []string{"acquire", "release"}, gate.events)
+	})
+
+	t.Run("acquire error propagates and skips fn", func(t *testing.T) {
+		t.Parallel()
+
+		sentinel := errors.New("gate closed")
+		gate := &recordingGate{acquireErr: sentinel}
+		c := newOfflineClient(t, tfeclient.WithGate(gate))
+
+		called := false
+
+		err := c.Do(t.Context(), func(_ context.Context, _ *tfe.Client) error {
+			called = true
+
+			return nil
+		})
+
+		require.ErrorIs(t, err, sentinel)
+		assert.False(t, called, "fn must not run without a slot")
+		assert.Empty(t, gate.events, "a denied acquire leaves nothing to release")
+	})
+}
+
+func TestRateLimitCounterCounts429s(t *testing.T) {
+	t.Parallel()
+
+	// The counter observes raw wire responses below any retry loop: two 429
+	// answers followed by a 200 must count exactly two, and the eventual
+	// success must count nothing.
+	status := []int{
+		http.StatusTooManyRequests,
+		http.StatusTooManyRequests,
+		http.StatusOK,
+	}
+
+	var mu sync.Mutex
+
+	call := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+
+		code := status[min(call, len(status)-1)]
+		call++
+		mu.Unlock()
+
+		w.WriteHeader(code)
+	}))
+	t.Cleanup(srv.Close)
+
+	counter := new(atomic.Int64)
+	client := tfeclient.ResolveHTTPClient(tfeclient.WithRateLimitCounter(counter))
+
+	for range status {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+		require.NoError(t, err)
+
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+	}
+
+	assert.Equal(t, int64(2), counter.Load())
 }

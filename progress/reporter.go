@@ -30,6 +30,14 @@ type TallySource interface {
 	Tally() manifest.Tally
 }
 
+// WorkerSource reports the live size of the run's worker pool, so the view can
+// show the adaptive concurrency moving as the run is throttled and recovers.
+// The workpool package's Pool satisfies it through its Size method.
+type WorkerSource interface {
+	// Size returns the pool's current capacity in worker slots.
+	Size() int
+}
+
 // Reporter renders the live status of an archive run to a writer.
 //
 // It reads a [TallySource] and formats snapshots in the resolved
@@ -45,24 +53,27 @@ type TallySource interface {
 // count the archiver sets and advances) and are independent of the object
 // tally read from source.
 type Reporter struct {
-	phaseStart time.Time
-	start      time.Time
-	in         io.Reader
-	source     TallySource
-	sink       LogSink
-	w          io.Writer
-	now        func() time.Time
-	ttyForce   *bool
-	interrupt  func()
-	wireBytes  *atomic.Int64
-	tasks      map[*Task]struct{}
-	mode       config.ProgressMode
-	phase      string
-	taskSeq    uint64
-	interval   time.Duration
-	total      int
-	completed  int
-	mu         sync.Mutex
+	phaseStart  time.Time
+	start       time.Time
+	in          io.Reader
+	source      TallySource
+	workers     WorkerSource
+	sink        LogSink
+	w           io.Writer
+	now         func() time.Time
+	ttyForce    *bool
+	interrupt   func()
+	wireBytes   *atomic.Int64
+	rateLimited *atomic.Int64
+	tasks       map[*Task]struct{}
+	mode        config.ProgressMode
+	phase       string
+	taskSeq     uint64
+	interval    time.Duration
+	total       int
+	completed   int
+	maxWorkers  int
+	mu          sync.Mutex
 }
 
 // Option configures a [Reporter] passed to [New].
@@ -76,6 +87,8 @@ type Reporter struct {
 //   - [WithLogSink]
 //   - [WithInterrupt]
 //   - [WithWireBytes]
+//   - [WithWorkers]
+//   - [WithRateLimited]
 type Option func(*Reporter)
 
 // WithInterval sets the default cadence used by [Reporter.Run] when it is
@@ -156,6 +169,30 @@ func WithInterrupt(fn func()) Option {
 func WithWireBytes(counter *atomic.Int64) Option {
 	return func(r *Reporter) {
 		r.wireBytes = counter
+	}
+}
+
+// WithWorkers sets the [WorkerSource] whose live size, together with ceiling
+// (the count the pool may scale up to), every output form renders, so the
+// adaptive concurrency is visible as it sheds under rate limiting and
+// recovers. A nil source or non-positive ceiling leaves the worker readout
+// off. It returns an [Option].
+func WithWorkers(source WorkerSource, ceiling int) Option {
+	return func(r *Reporter) {
+		if source != nil && ceiling > 0 {
+			r.workers = source
+			r.maxWorkers = ceiling
+		}
+	}
+}
+
+// WithRateLimited sets the shared counter of rate-limited (HTTP 429) responses
+// observed on the wire, which the views surface alongside the worker readout
+// so an operator can see why the pool shrank. A nil counter leaves the readout
+// off. It returns an [Option].
+func WithRateLimited(counter *atomic.Int64) Option {
+	return func(r *Reporter) {
+		r.rateLimited = counter
 	}
 }
 
@@ -392,8 +429,17 @@ type snapshot struct {
 	phaseElapsed time.Duration
 	rate         float64
 	wireBytes    int64
+	rateLimited  int64
 	total        int
 	completed    int
+	workers      int
+	maxWorkers   int
+}
+
+// hasWorkers reports whether the reporter was built over a worker source, so
+// the views render the adaptive worker readout only when one exists.
+func (s snapshot) hasWorkers() bool {
+	return s.workers > 0
 }
 
 // hasBar reports whether the phase is determinate, so the view renders a bar and
@@ -458,6 +504,17 @@ func (r *Reporter) take() snapshot {
 		wire = r.wireBytes.Load()
 	}
 
+	workers := 0
+	if r.workers != nil {
+		workers = r.workers.Size()
+	}
+
+	var rateLimited int64
+
+	if r.rateLimited != nil {
+		rateLimited = r.rateLimited.Load()
+	}
+
 	return snapshot{
 		tally:        t,
 		phase:        r.phase,
@@ -466,8 +523,11 @@ func (r *Reporter) take() snapshot {
 		phaseElapsed: now.Sub(r.phaseStart),
 		rate:         rate,
 		wireBytes:    wire,
+		rateLimited:  rateLimited,
 		total:        r.total,
 		completed:    r.completed,
+		workers:      workers,
+		maxWorkers:   r.maxWorkers,
 	}
 }
 
@@ -680,6 +740,16 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 			task.name, task.done, task.total, len(snap.tasks))
 	}
 
+	// The worker readout is a live figure, so only progress lines carry it; the
+	// rate-limited total is a run outcome worth keeping on the summary too.
+	if !summary && snap.hasWorkers() {
+		fmt.Fprintf(&b, " workers=%d/%d", snap.workers, snap.maxWorkers)
+	}
+
+	if snap.rateLimited > 0 {
+		fmt.Fprintf(&b, " rateLimited=%d", snap.rateLimited)
+	}
+
 	fmt.Fprintf(
 		&b,
 		" bytes=%s elapsed=%s rate=%s/s\n",
@@ -715,20 +785,28 @@ func (r *Reporter) summaryBlock(snap snapshot) string {
 		title += " (resumed)"
 	}
 
+	meta := fmt.Sprintf(
+		"absent %d · skipped %d · n/a %d · total %d · %s · %s",
+		t.AbsentPermanently,
+		t.Skipped,
+		t.NotApplicable,
+		t.Total(),
+		humanBytes(t.BytesDownloaded),
+		snap.elapsed.Round(time.Second),
+	)
+
 	lines := []string{
 		glyph + " " + styleSummaryHead.Render(title),
 		// Zero widths keep the summary's counts tight; the live panel pads them
 		// so its columns hold still.
 		statusCounts(t, 0, 0, 0),
-		styleMeta.Render(fmt.Sprintf(
-			"absent %d · skipped %d · n/a %d · total %d · %s · %s",
-			t.AbsentPermanently,
-			t.Skipped,
-			t.NotApplicable,
-			t.Total(),
-			humanBytes(t.BytesDownloaded),
-			snap.elapsed.Round(time.Second),
-		)),
+		styleMeta.Render(meta),
+	}
+
+	// How throttled the run was is an outcome worth closing on; the amber
+	// readout mirrors the live panel's so the two connect at a glance.
+	if snap.rateLimited > 0 {
+		lines[2] += " " + styleRateLimited.Render(fmt.Sprintf("· rate limited %d", snap.rateLimited))
 	}
 
 	return styleSummaryRule.Render(strings.Join(lines, "\n")) + "\n"
@@ -740,7 +818,10 @@ func (r *Reporter) summaryBlock(snap snapshot) string {
 // progress and are present only while a phase is determinate. Task, TaskTotal,
 // and TaskCompleted report the in-flight work item with the most remaining
 // units, with TasksActive counting every registered item; all are present only
-// while at least one is registered.
+// while at least one is registered. Workers and MaxWorkers report the adaptive
+// worker pool's live size and ceiling, present only when the reporter watches
+// a pool; RateLimited is the cumulative count of rate-limited (429) responses,
+// present once any were observed.
 type jsonLine struct {
 	PhaseTotal        *int    `json:"phaseTotal,omitempty"`
 	PhaseCompleted    *int    `json:"phaseCompleted,omitempty"`
@@ -750,6 +831,9 @@ type jsonLine struct {
 	Task              string  `json:"task,omitempty"`
 	Target            string  `json:"target,omitempty"`
 	TasksActive       int     `json:"tasksActive,omitempty"`
+	Workers           int     `json:"workers,omitempty"`
+	MaxWorkers        int     `json:"maxWorkers,omitempty"`
+	RateLimited       int64   `json:"rateLimited,omitempty"`
 	Done              int     `json:"done"`
 	AbsentPermanently int     `json:"absentPermanently"`
 	Skipped           int     `json:"skipped"`
@@ -782,8 +866,14 @@ func (r *Reporter) writeJSON(snap snapshot, summary bool) error {
 		BytesDownloaded:   t.BytesDownloaded,
 		ElapsedSeconds:    snap.elapsed.Seconds(),
 		BytesPerSecond:    snap.rate,
+		RateLimited:       snap.rateLimited,
 		Summary:           summary,
 		Resumed:           t.Resumed,
+	}
+
+	if snap.hasWorkers() {
+		line.Workers = snap.workers
+		line.MaxWorkers = snap.maxWorkers
 	}
 
 	if snap.hasBar() {

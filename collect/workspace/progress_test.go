@@ -4,12 +4,35 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/hashicorp/go-tfe"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// progressRecorder collects progress callback values behind a lock; the
+// callback must be safe for concurrent use, since walks fan out within a
+// workspace.
+type progressRecorder struct {
+	mu    sync.Mutex
+	calls []int
+}
+
+func (p *progressRecorder) advance(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.calls = append(p.calls, n)
+}
+
+func (p *progressRecorder) recorded() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return append([]int(nil), p.calls...)
+}
 
 // svListPayload is a two-item state-version listing, newest first, whose
 // finalized items carry no download URLs so archiving them needs no blob
@@ -64,14 +87,12 @@ func TestCollectStateVersionsAdvancesProgressPerVersion(t *testing.T) {
 
 	ws := &tfe.Workspace{ID: "ws-1", Name: "ws"}
 
-	var calls []int
+	rec := &progressRecorder{}
 
-	err := collector.CollectStateVersions(t.Context(), "proj", ws, func(n int) {
-		calls = append(calls, n)
-	})
+	err := collector.CollectStateVersions(t.Context(), "proj", ws, rec.advance)
 	require.NoError(t, err)
 
-	assert.Equal(t, []int{1, 1}, calls, "each state version advances one unit as it lands")
+	assert.Equal(t, []int{1, 1}, rec.recorded(), "each state version advances one unit as it lands")
 }
 
 func TestCollectWorkspaceAdvancesSettingsUnit(t *testing.T) {
@@ -88,12 +109,10 @@ func TestCollectWorkspaceAdvancesSettingsUnit(t *testing.T) {
 	// that would need another list endpoint.
 	ws := &tfe.Workspace{ID: "ws-1", Name: "ws", GlobalRemoteState: true}
 
-	var calls []int
+	rec := &progressRecorder{}
 
-	err := collector.CollectWorkspace(t.Context(), "proj", ws, func(n int) {
-		calls = append(calls, n)
-	})
+	err := collector.CollectWorkspace(t.Context(), "proj", ws, rec.advance)
 	require.NoError(t, err)
 
-	assert.Equal(t, []int{1}, calls, "completing the settings pass advances exactly one unit")
+	assert.Equal(t, []int{1}, rec.recorded(), "completing the settings pass advances exactly one unit")
 }

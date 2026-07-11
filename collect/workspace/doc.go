@@ -1,7 +1,10 @@
 // Package workspace archives the project-scoped core of an organization: each
 // project and its settings, then every workspace beneath it together with the
-// append-mostly history of state versions and runs. Work within a single
-// workspace is sequential, while the orchestrator runs workspaces concurrently.
+// append-mostly history of state versions and runs. The orchestrator runs
+// workspaces concurrently, and work within a single workspace fans out too:
+// the state-version and run walks proceed side by side and each page's items
+// archive concurrently, with the shared client's request gate bounding the
+// run's real parallelism.
 //
 // # Projects and workspace settings
 //

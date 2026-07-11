@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -438,6 +439,9 @@ func TestWalkPagesPastNonTerminalBoundary(t *testing.T) {
 	// the newer boundary; settled is unset, so the fix keeps paging.
 	ledger.MarkCollectionComplete("runs")
 
+	// A page's items archive concurrently, so the recording map needs a lock.
+	var mu sync.Mutex
+
 	archived := map[string]int{}
 
 	pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
@@ -455,7 +459,10 @@ func TestWalkPagesPastNonTerminalBoundary(t *testing.T) {
 			Terminal:  it.terminal,
 			Archive: func(ctx context.Context) error {
 				return env.Mutable(ctx, it.relPath, func(_ context.Context) (any, error) {
+					mu.Lock()
+
 					archived[it.relPath]++
+					mu.Unlock()
 
 					return cannedProject(), nil
 				})
@@ -573,6 +580,9 @@ func TestWalkResumesIncompleteCollection(t *testing.T) {
 	ledger.RecordDone(r3.relPath, manifest.Signature{Hash: "prior", Size: 1})
 	ledger.RecordDone(r2.relPath, manifest.Signature{Hash: "prior", Size: 1})
 
+	// A page's items archive concurrently, so the recording map needs a lock.
+	var mu sync.Mutex
+
 	archived := map[string]int{}
 
 	pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
@@ -590,7 +600,10 @@ func TestWalkResumesIncompleteCollection(t *testing.T) {
 			Terminal:  it.terminal,
 			Archive: func(ctx context.Context) error {
 				return env.Object(ctx, it.relPath, func(_ context.Context) (any, error) {
+					mu.Lock()
+
 					archived[it.relPath]++
+					mu.Unlock()
 
 					return cannedProject(), nil
 				})
@@ -813,4 +826,60 @@ func TestWalkPropagatesPageError(t *testing.T) {
 		return collect.Item{}
 	})
 	require.ErrorIs(t, err, wantErr)
+}
+
+func TestWalkArchivesPageItemsConcurrently(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
+
+	// Two fresh items on one page. Each Archive closure blocks until the other
+	// has started, so the walk completes only if the page's items run
+	// concurrently; a sequential walk would park the first closure until its
+	// timeout and fail the test with its error.
+	r2 := walkItem{relPath: "runs/r2/run.json", createdAt: base.Add(2 * time.Hour), terminal: true}
+	r1 := walkItem{relPath: "runs/r1/run.json", createdAt: base.Add(1 * time.Hour), terminal: true}
+
+	env, _, _ := newEnv(t)
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+
+	go func() {
+		<-started
+		<-started
+		close(release)
+	}()
+
+	pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
+		if page == 1 {
+			return []walkItem{r2, r1}, false, nil
+		}
+
+		return nil, false, nil
+	}
+
+	describe := func(it walkItem) collect.Item {
+		return collect.Item{
+			RelPath:   it.relPath,
+			CreatedAt: it.createdAt,
+			Terminal:  it.terminal,
+			Archive: func(ctx context.Context) error {
+				started <- it.relPath
+
+				select {
+				case <-release:
+				case <-time.After(5 * time.Second):
+					return errors.New("page sibling never started: items archived sequentially")
+				}
+
+				return env.Object(ctx, it.relPath, func(_ context.Context) (any, error) {
+					return cannedProject(), nil
+				})
+			},
+		}
+	}
+
+	err := collect.Walk(t.Context(), env, "runs", pager, describe)
+	require.NoError(t, err)
 }

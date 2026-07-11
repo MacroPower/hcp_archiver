@@ -8,7 +8,13 @@
 // rate, and elapsed time on the second, and, when the phase is determinate, a
 // progress bar with an estimated time remaining. The panel's rate averages a
 // short trailing window, so it reflects current throughput and visibly drops on
-// a stall. Log output routes through a [LogSink] so log lines scroll in
+// a stall. A reporter built over a [WorkerSource] also shows the adaptive
+// worker pool beside the rate (its live size against the ceiling it may scale
+// to) and, once any rate limiting has been observed, an amber running total of
+// 429 responses, so the pool shrinking under throttling explains itself;
+// logfmt carries the same as workers= and rateLimited=, JSON as workers,
+// maxWorkers, and rateLimited, and the closing summary keeps the run's
+// rate-limited total. Log output routes through a [LogSink] so log lines scroll in
 // scrollback above the panel instead of corrupting it. Off a terminal (a pipe,
 // a redirect, or a test buffer) the same signal falls back to a logfmt line.
 // The machine mode ([config.ProgressModeJSON]) is one JSON object per line for

@@ -13,8 +13,10 @@ address: https://app.terraform.io
 organizations:
   - my-org
 
-# Number of workspaces archived concurrently, within HCP's per-token rate limit.
-concurrency: 4
+# Ceiling on archive workers (in-flight API requests). Every run starts at one
+# worker and scales itself: up while the API stays quiet, down when it
+# rate-limits the run.
+maxConcurrency: 16
 
 # Heavy or organization-specific surfaces, each off by default. Enable only the
 # ones you want; they add significant time and volume to a run.

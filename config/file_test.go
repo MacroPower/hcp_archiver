@@ -18,7 +18,7 @@ func TestDefaultFile(t *testing.T) {
 	file := config.DefaultFile()
 
 	assert.Equal(t, config.DefaultAddress, file.Address)
-	assert.Equal(t, config.DefaultWorkspaceConcurrency, file.Concurrency)
+	assert.Equal(t, config.DefaultMaxConcurrency, file.MaxConcurrency)
 	assert.Empty(t, file.Organizations)
 	assert.Equal(t, config.FileScope{}, file.Scope)
 }
@@ -35,7 +35,6 @@ func TestLoadFile(t *testing.T) {
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, config.DefaultAddress, file.Address)
-				assert.Equal(t, config.DefaultWorkspaceConcurrency, file.Concurrency)
 				assert.Empty(t, file.Organizations)
 			},
 		},
@@ -44,7 +43,6 @@ func TestLoadFile(t *testing.T) {
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, config.DefaultAddress, file.Address)
-				assert.Equal(t, config.DefaultWorkspaceConcurrency, file.Concurrency)
 				assert.Empty(t, file.Organizations)
 			},
 		},
@@ -69,20 +67,19 @@ func TestLoadFile(t *testing.T) {
 				t.Helper()
 				assert.Equal(t, []string{"acme"}, file.Organizations)
 				assert.Equal(t, config.DefaultAddress, file.Address)
-				assert.Equal(t, config.DefaultWorkspaceConcurrency, file.Concurrency)
 			},
 		},
 		"full document overrides every default": {
 			yaml: "# yaml-language-server: $schema=./config.schema.json\n" +
 				"address: https://tfe.example.com\n" +
 				"organizations:\n  - one\n  - two\n" +
-				"concurrency: 8\n" +
+				"maxConcurrency: 32\n" +
 				"scope:\n  stacks: true\n  hyok: true\n  registryDetail: true\n  auditTrail: true\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, "https://tfe.example.com", file.Address)
 				assert.Equal(t, []string{"one", "two"}, file.Organizations)
-				assert.Equal(t, 8, file.Concurrency)
+				assert.Equal(t, 32, file.MaxConcurrency)
 				assert.True(t, file.Scope.Stacks)
 				assert.True(t, file.Scope.HYOK)
 				assert.True(t, file.Scope.RegistryDetail)

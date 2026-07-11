@@ -5,10 +5,15 @@
 // capability. One rate limiter is shared across all concurrent workers: because
 // N workers each paginating and downloading multiply the request rate, per-
 // request retry alone is not enough, so exactly one client is constructed and
-// shared and the limiter bounds the aggregate rate of the whole run. The
-// package also walks paginated list endpoints (advancing the page number while
-// the response reports a next page) and follows the short-lived signed-URL
-// download flow for state blobs, configuration tarballs, and plan/apply logs.
+// shared and the limiter bounds the aggregate rate of the whole run. An
+// optional [Gate] sits in front of the limiter and bounds how many requests
+// are in flight at once; a resizable gate lets the caller scale the run's
+// parallelism live, and the client's transport counts rate-limited (429)
+// responses into a caller-supplied counter so an adaptive scaler has a
+// pressure signal to react to. The package also walks paginated list
+// endpoints (advancing the page number while the response reports a next
+// page) and follows the short-lived signed-URL download flow for state blobs,
+// configuration tarballs, and plan/apply logs.
 //
 // Failures are classified as transient (rate limits, timeouts, server errors,
 // context cancellation) or terminal, meaning permanent absence such as a 404
