@@ -56,22 +56,36 @@ func resolveNoCodeVersion(pin string, statuses []tfe.RegistryModuleVersionStatus
 	return latestModuleVersion(statuses)
 }
 
-// latestModuleVersion returns the newest concrete version among statuses, or the
-// empty string when none is concrete.
+// latestModuleVersion returns the newest stable concrete version among statuses,
+// falling back to the newest prerelease only when no stable version exists, and
+// the empty string when none is concrete. The registry serves a "latest" pin as
+// the newest stable, so a prerelease must not shadow it when resolving the
+// version whose no-code variable options to archive.
 func latestModuleVersion(statuses []tfe.RegistryModuleVersionStatuses) string {
-	best := ""
+	bestStable := ""
+	bestAny := ""
 
 	for _, s := range statuses {
 		if !isConcreteVersion(s.Version) {
 			continue
 		}
 
-		if best == "" || compareVersions(s.Version, best) > 0 {
-			best = s.Version
+		if bestAny == "" || compareVersions(s.Version, bestAny) > 0 {
+			bestAny = s.Version
+		}
+
+		if _, pre := splitPrerelease(s.Version); pre == "" {
+			if bestStable == "" || compareVersions(s.Version, bestStable) > 0 {
+				bestStable = s.Version
+			}
 		}
 	}
 
-	return best
+	if bestStable != "" {
+		return bestStable
+	}
+
+	return bestAny
 }
 
 // compareVersions orders two dotted version strings by SemVer-style precedence.
