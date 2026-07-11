@@ -202,7 +202,20 @@ func discoverShards(root string) (map[string]string, error) {
 
 		for _, dir := range matches {
 			info, statErr := os.Stat(dir)
-			if statErr != nil || !info.IsDir() {
+			if statErr != nil {
+				// A shard the glob just matched but that now fails to stat for
+				// any reason other than being gone (a permission change, a flaky
+				// network filesystem) must not be silently dropped: doing so
+				// hides its persisted entries and re-archives the whole subtree
+				// from empty. Only a genuinely removed shard is skipped.
+				if errors.Is(statErr, fs.ErrNotExist) {
+					continue
+				}
+
+				return nil, fmt.Errorf("stat shard %q: %w", dir, statErr)
+			}
+
+			if !info.IsDir() {
 				continue
 			}
 
