@@ -271,43 +271,16 @@ func hasSensitiveValue(rv reflect.Value) bool {
 	}
 }
 
-// redactValue overwrites a sensitive Value field of any kind, failing closed so
-// no cleartext survives when the field is not a plain string.
+// redactValue overwrites a sensitive Value field of any kind with the [Redacted]
+// sentinel, failing closed so no cleartext survives when the field is not a
+// plain string.
 //
-// A string or *string takes the [Redacted] sentinel (a nil *string is allocated
-// so its existence is still recorded); an interface takes the sentinel when a
-// string satisfies it, else is zeroed; any other kind is zeroed. A plain string
-// Value redacts identically to [setString], so string-Value output stays
-// byte-for-byte unchanged. This is the safety-critical redactor, where a
-// silently-unredacted non-string secret would be worse than a blanked field.
+// It is [setString] specialized to the redaction marker, kept as a named entry
+// point for the sensitive-Value case. The single fail-closed redactor lives in
+// setString, so a change to that policy reaches both the Token/Secret/HMACKey
+// fields and the sensitive Value field rather than one drifting from the other.
 func redactValue(fv reflect.Value) {
-	switch fv.Kind() {
-	case reflect.String:
-		fv.SetString(Redacted)
-
-	case reflect.Pointer:
-		if fv.Type().Elem().Kind() != reflect.String {
-			fv.Set(reflect.Zero(fv.Type()))
-
-			return
-		}
-
-		p := reflect.New(fv.Type().Elem())
-		p.Elem().SetString(Redacted)
-		fv.Set(p)
-
-	case reflect.Interface:
-		if reflect.TypeFor[string]().Implements(fv.Type()) {
-			fv.Set(reflect.ValueOf(Redacted))
-
-			return
-		}
-
-		fv.Set(reflect.Zero(fv.Type()))
-
-	default:
-		fv.Set(reflect.Zero(fv.Type()))
-	}
+	setString(fv, Redacted)
 }
 
 // setString overwrites a string or *string field with s, allocating a pointer
