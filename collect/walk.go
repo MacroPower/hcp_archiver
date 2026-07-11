@@ -271,6 +271,17 @@ func Walk[T any](
 			return nil
 		}
 
+		// A page with no elements is the end of the listing. A well-behaved pager
+		// reports that with hasNext false, settled by the block below; guard
+		// against a misbehaving pager that keeps advertising a next page over an
+		// empty one, which would otherwise spin this loop with no progress.
+		if len(items) == 0 {
+			env.ledger.MarkCollectionComplete(key)
+			env.ledger.SetCollectionSettled(key, !sawNonTerminal && !env.ledger.HasUnsettledUnder(cfg.archivePrefix))
+
+			return nil
+		}
+
 		// A limit stop has fully walked its in-bounds slice, so it records
 		// completion: the seal phase bundles a collection's cold artifacts only
 		// once it is complete, and the excluded tail is left loose regardless. It
