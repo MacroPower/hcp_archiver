@@ -221,7 +221,7 @@ func discoverShards(root string) (map[string]string, error) {
 
 			rel, relErr := filepath.Rel(root, filepath.Dir(dir))
 			if relErr != nil {
-				continue
+				return nil, fmt.Errorf("relativize shard %q: %w", dir, relErr)
 			}
 
 			sk := filepath.ToSlash(rel)
