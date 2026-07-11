@@ -7,8 +7,10 @@
 // TFC_TOKEN, or TFE_TOKEN and never stored in a file. What and how to archive
 // is stable across runs and lives in a YAML [File]: the API address (default
 // https://app.terraform.io), the organizations to archive (empty means every
-// organization the token can see, each in turn), the workspace concurrency, and
-// a set of scope toggles for the heavy or optional surfaces (Stacks,
+// organization the token can see, each in turn), the workspace concurrency, an
+// optional bound on each workspace's archived run history (a newest-run count
+// and/or an age window, keeping whichever admits more history when both are
+// set), and a set of scope toggles for the heavy or optional surfaces (Stacks,
 // hold-your-own-key configurations, the deeper registry version/platform/binary
 // detail, and the audit trail), each off unless a configuration opts into it.
 // [LoadFile] validates the document against a JSON schema generated from the Go

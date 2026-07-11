@@ -25,6 +25,8 @@ func TestNew_Defaults(t *testing.T) {
 	assert.Equal(t, config.DefaultMaxConcurrency, cfg.MaxConcurrency)
 	assert.Equal(t, config.ProgressModeAuto, cfg.ProgressMode)
 	assert.Equal(t, config.DefaultProgressInterval, cfg.ProgressInterval)
+	assert.Zero(t, cfg.RunHistoryCount)
+	assert.Zero(t, cfg.RunHistoryAge)
 	assert.False(t, cfg.RecheckAbsent)
 	assert.False(t, cfg.Stacks)
 	assert.False(t, cfg.HYOK)
@@ -56,6 +58,8 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 		config.WithMaxConcurrency(32),
 		config.WithProgressMode(config.ProgressModeJSON),
 		config.WithProgressInterval(10*time.Second),
+		config.WithRunHistoryCount(500),
+		config.WithRunHistoryAge(90*24*time.Hour),
 		config.WithRecheckAbsent(true),
 		config.WithStacks(true),
 		config.WithHYOK(true),
@@ -69,6 +73,8 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 	assert.Equal(t, 32, cfg.MaxConcurrency)
 	assert.Equal(t, config.ProgressModeJSON, cfg.ProgressMode)
 	assert.Equal(t, 10*time.Second, cfg.ProgressInterval)
+	assert.Equal(t, 500, cfg.RunHistoryCount)
+	assert.Equal(t, 90*24*time.Hour, cfg.RunHistoryAge)
 	assert.True(t, cfg.RecheckAbsent)
 	assert.True(t, cfg.Stacks)
 	assert.True(t, cfg.HYOK)
@@ -204,6 +210,22 @@ func TestNew_ValidationErrors(t *testing.T) {
 				config.WithMaxConcurrency(-1),
 			},
 			wantErr: config.ErrInvalidMaxConcurrency,
+		},
+		"negative run history count": {
+			opts: []config.Option{
+				config.WithToken("tok"),
+				config.WithOutputDir("/tmp/archive"),
+				config.WithRunHistoryCount(-1),
+			},
+			wantErr: config.ErrInvalidRunHistoryCount,
+		},
+		"negative run history age": {
+			opts: []config.Option{
+				config.WithToken("tok"),
+				config.WithOutputDir("/tmp/archive"),
+				config.WithRunHistoryAge(-time.Hour),
+			},
+			wantErr: config.ErrInvalidRunHistoryAge,
 		},
 		"invalid progress mode": {
 			opts: []config.Option{

@@ -51,6 +51,16 @@ func (c *Collector) ArchiveStateVersion(
 	return c.archiveStateVersion(ctx, project, ws, sv)
 }
 
+// CollectRuns exposes collectRuns to the external test package.
+func (c *Collector) CollectRuns(
+	ctx context.Context,
+	project string,
+	ws *tfe.Workspace,
+	progress func(n int),
+) error {
+	return c.collectRuns(ctx, project, ws, progress)
+}
+
 // CollectStateVersions exposes collectStateVersions to the external test
 // package.
 func (c *Collector) CollectStateVersions(

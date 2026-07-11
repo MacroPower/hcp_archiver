@@ -18,6 +18,14 @@ organizations:
 # rate-limits the run.
 maxConcurrency: 16
 
+# Bound on how much of each workspace's run history is archived, unlimited by
+# default. Each bound is optional: count keeps the newest N runs, age keeps
+# runs created within the window (a Go duration, e.g. 2160h for ~90 days).
+# With both set, whichever admits more history wins.
+# runHistory:
+#   count: 500
+#   age: 2160h
+
 # Heavy or organization-specific surfaces, each off by default. Enable only the
 # ones you want; they add significant time and volume to a run.
 scope:

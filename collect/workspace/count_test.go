@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/go-tfe"
 	"github.com/stretchr/testify/assert"
@@ -32,8 +33,9 @@ func listPayload(total int) string {
 const testOrg = "example-org"
 
 // newCollector builds a workspace collector over a client pointed at srv, with
-// a real store and ledger rooted in the test's temp dir.
-func newCollector(t *testing.T, srv *httptest.Server) *workspace.Collector {
+// a real store and ledger rooted in the test's temp dir, applying any
+// collector options.
+func newCollector(t *testing.T, srv *httptest.Server, opts ...workspace.Option) *workspace.Collector {
 	t.Helper()
 
 	client, err := tfeclient.New(tfeclient.WithToken("test-token"), tfeclient.WithAddress(srv.URL))
@@ -46,7 +48,7 @@ func newCollector(t *testing.T, srv *httptest.Server) *workspace.Collector {
 
 	ledger.StartRun()
 
-	return workspace.New(collect.NewEnv(client, st, ledger), testOrg)
+	return workspace.New(collect.NewEnv(client, st, ledger), testOrg, opts...)
 }
 
 // writeJSONAPI writes body with the JSON:API content type.
@@ -135,6 +137,61 @@ func TestCounts(t *testing.T) {
 
 			assert.Equal(t, tc.wantRuns, runs)
 			assert.Equal(t, tc.wantSVs, svs)
+		})
+	}
+}
+
+func TestCountsClampsToRunHistoryCount(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		oldest   time.Time
+		count    int
+		listed   int
+		wantRuns int
+	}{
+		"a count-only bound clamps the listed total": {
+			count: 10, listed: 74,
+			wantRuns: 10,
+		},
+		"a listed total under the bound stands": {
+			count: 100, listed: 74,
+			wantRuns: 74,
+		},
+		"an age bound keeps the listed total": {
+			count: 10, oldest: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC), listed: 74,
+			wantRuns: 74,
+		},
+		"no bound keeps the listed total": {
+			listed:   74,
+			wantRuns: 74,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			})
+			mux.HandleFunc("/api/v2/workspaces/ws-1/runs", func(w http.ResponseWriter, _ *http.Request) {
+				writeJSONAPI(t, w, listPayload(tc.listed))
+			})
+			mux.HandleFunc("/api/v2/state-versions", func(w http.ResponseWriter, _ *http.Request) {
+				writeJSONAPI(t, w, listPayload(0))
+			})
+
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+
+			collector := newCollector(t, srv, workspace.WithRunHistoryLimit(tc.count, tc.oldest))
+
+			ws := &tfe.Workspace{ID: "ws-1", Name: "ws", RunsCount: tc.listed}
+
+			runs, _ := collector.Counts(t.Context(), ws)
+			assert.Equal(t, tc.wantRuns, runs)
 		})
 	}
 }

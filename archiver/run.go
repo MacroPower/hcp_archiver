@@ -3,6 +3,7 @@ package archiver
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
 	"go.jacobcolvin.com/hcp_archiver/collect/audit"
@@ -32,7 +33,8 @@ func (a *Archiver) collectOrg(
 		return err
 	}
 
-	wsc := workspace.New(env, orgName)
+	wsc := workspace.New(env, orgName,
+		workspace.WithRunHistoryLimit(a.cfg.RunHistoryCount, a.runHistoryOldest()))
 
 	projectNames, err := a.collectProjects(ctx, env, reporter, orgName, wsc)
 	if err != nil {
@@ -64,6 +66,19 @@ func (a *Archiver) collectOrg(
 	}
 
 	return nil
+}
+
+// runHistoryOldest resolves the configured run-history age bound into the
+// oldest run-creation instant the run walks archive, or the zero time when no
+// age bound is configured. It reads the clock once per organization, so every
+// workspace in the organization shares one boundary rather than each walk
+// sliding it forward as the archive progresses.
+func (a *Archiver) runHistoryOldest() time.Time {
+	if a.cfg.RunHistoryAge <= 0 {
+		return time.Time{}
+	}
+
+	return time.Now().Add(-a.cfg.RunHistoryAge)
 }
 
 // runCollector runs one uniform [collect.Collector]. It names the reporter's

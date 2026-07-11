@@ -46,6 +46,10 @@ var (
 	ErrInvalidProgressMode = errors.New("invalid progress mode")
 	// ErrInvalidProgressInterval indicates a progress interval of zero or less.
 	ErrInvalidProgressInterval = errors.New("progress interval must be greater than zero")
+	// ErrInvalidRunHistoryCount indicates a negative run-history count.
+	ErrInvalidRunHistoryCount = errors.New("run history count must not be negative")
+	// ErrInvalidRunHistoryAge indicates a negative run-history age.
+	ErrInvalidRunHistoryAge = errors.New("run history age must not be negative")
 )
 
 // Config holds the already-resolved settings that govern a single archive run.
@@ -73,6 +77,15 @@ type Config struct {
 	// serve a single large workspace at once. Every run starts at one worker
 	// and scales itself toward the ceiling.
 	MaxConcurrency int
+	// RunHistoryAge bounds each workspace's archived run history to runs
+	// created within this window before the archive runs; zero leaves the age
+	// unbounded. When RunHistoryCount is also set, whichever bound admits more
+	// history wins.
+	RunHistoryAge time.Duration
+	// RunHistoryCount bounds each workspace's archived run history to its
+	// newest count runs; zero leaves the count unbounded. When RunHistoryAge is
+	// also set, whichever bound admits more history wins.
+	RunHistoryCount int
 	// RecheckAbsent forces re-probing of objects previously recorded as
 	// permanently gone.
 	RecheckAbsent bool
@@ -97,6 +110,8 @@ type Config struct {
 //   - [WithProgressMode]
 //   - [WithProgressInterval]
 //   - [WithMaxConcurrency]
+//   - [WithRunHistoryCount]
+//   - [WithRunHistoryAge]
 //   - [WithRecheckAbsent]
 //   - [WithStacks]
 //   - [WithHYOK]
@@ -158,6 +173,23 @@ func WithProgressInterval(interval time.Duration) Option {
 func WithMaxConcurrency(n int) Option {
 	return func(c *Config) {
 		c.MaxConcurrency = n
+	}
+}
+
+// WithRunHistoryCount bounds each workspace's archived run history to its
+// newest n runs; zero leaves the count unbounded. It returns an [Option].
+func WithRunHistoryCount(n int) Option {
+	return func(c *Config) {
+		c.RunHistoryCount = n
+	}
+}
+
+// WithRunHistoryAge bounds each workspace's archived run history to runs
+// created within age before the archive runs; zero leaves the age unbounded.
+// It returns an [Option].
+func WithRunHistoryAge(age time.Duration) Option {
+	return func(c *Config) {
+		c.RunHistoryAge = age
 	}
 }
 
@@ -232,7 +264,8 @@ func New(opts ...Option) (*Config, error) {
 // Validate reports whether the [Config] is internally consistent.
 //
 // It returns [ErrMissingToken], [ErrMissingOutputDir],
-// [ErrInvalidMaxConcurrency], [ErrInvalidProgressMode], or
+// [ErrInvalidMaxConcurrency], [ErrInvalidRunHistoryCount],
+// [ErrInvalidRunHistoryAge], [ErrInvalidProgressMode], or
 // [ErrInvalidProgressInterval] wrapped with context on the first problem found.
 func (c *Config) Validate() error {
 	if c.Token == "" {
@@ -245,6 +278,14 @@ func (c *Config) Validate() error {
 
 	if c.MaxConcurrency < 1 {
 		return fmt.Errorf("%w: %d", ErrInvalidMaxConcurrency, c.MaxConcurrency)
+	}
+
+	if c.RunHistoryCount < 0 {
+		return fmt.Errorf("%w: %d", ErrInvalidRunHistoryCount, c.RunHistoryCount)
+	}
+
+	if c.RunHistoryAge < 0 {
+		return fmt.Errorf("%w: %s", ErrInvalidRunHistoryAge, c.RunHistoryAge)
 	}
 
 	if !c.ProgressMode.valid() {

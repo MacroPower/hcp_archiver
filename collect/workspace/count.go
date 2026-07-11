@@ -14,6 +14,11 @@ import (
 // independently when it errors or returns no pagination, the run count to the
 // advertised RunsCount and the state-version count to zero, so counting never
 // blocks archiving.
+//
+// A count-only run-history limit caps what the run walk will archive, so the
+// run total is clamped to it. When an age bound is configured the listed total
+// stands, since the age window admits an unknown number of runs and an
+// undercount would peg the progress bar at 100% while the excess work drains.
 func (c *Collector) Counts(ctx context.Context, ws *tfe.Workspace) (int, int) {
 	runs := ws.RunsCount
 	svs := 0
@@ -38,6 +43,10 @@ func (c *Collector) Counts(ctx context.Context, ws *tfe.Workspace) (int, int) {
 	})
 	if err == nil && runPg != nil {
 		runs = runPg.TotalCount
+	}
+
+	if c.runHistoryCount > 0 && c.runHistoryOldest.IsZero() && runs > c.runHistoryCount {
+		runs = c.runHistoryCount
 	}
 
 	var svPg *tfe.Pagination

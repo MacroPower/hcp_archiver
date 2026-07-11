@@ -42,13 +42,37 @@ type Pager[T any] func(ctx context.Context, page int) (items []T, hasNext bool, 
 
 // walkConfig holds the resolved settings for one [Walk].
 type walkConfig struct {
+	historyOldest time.Time
 	archivePrefix string
+	historyCount  int
+}
+
+// bounded reports whether a history limit is configured.
+func (c *walkConfig) bounded() bool {
+	return c.historyCount > 0 || !c.historyOldest.IsZero()
+}
+
+// withinBounds reports whether the element at listing position idx (zero-based,
+// newest first), created at createdAt, falls inside at least one configured
+// history bound. The count and age bounds are each monotone over a newest-first
+// listing, so the first element outside both is the start of an excluded tail.
+func (c *walkConfig) withinBounds(idx int, createdAt time.Time) bool {
+	if c.historyCount > 0 && idx < c.historyCount {
+		return true
+	}
+
+	if !c.historyOldest.IsZero() && !createdAt.Before(c.historyOldest) {
+		return true
+	}
+
+	return false
 }
 
 // WalkOption configures a [Walk].
 //
 // Options of this type:
 //   - [WithArchivePrefix]
+//   - [WithHistoryLimit]
 type WalkOption func(*walkConfig)
 
 // WithArchivePrefix sets the archive-relative path prefix under which the
@@ -69,6 +93,26 @@ func WithArchivePrefix(prefix string) WalkOption {
 		if prefix != "" {
 			c.archivePrefix = prefix
 		}
+	}
+}
+
+// WithHistoryLimit bounds the walk to the collection's recent history: an
+// element is within the limit while it sits among the newest count listed
+// elements (when count is positive) or was created at or after oldest (when
+// oldest is non-zero), so configuring both keeps whichever window admits more
+// history. Both bounds are monotone over the newest-first listing, so the
+// first element outside every configured bound starts an excluded tail: the
+// walk stops there without archiving it or anything older.
+//
+// Because the excluded tail is deliberately left unarchived, a limit-stopped
+// walk records neither collection completion nor settlement, so it never
+// enables the early stop and a later walk with a wider (or no) limit still
+// pages down to its own boundary. A zero count and a zero oldest leave the
+// walk unbounded, the default. It returns a [WalkOption].
+func WithHistoryLimit(count int, oldest time.Time) WalkOption {
+	return func(c *walkConfig) {
+		c.historyCount = count
+		c.historyOldest = oldest
 	}
 }
 
@@ -120,6 +164,12 @@ func WithArchivePrefix(prefix string) WalkOption {
 // a synthetic id (a stack walk) passes the real archive prefix through
 // [WithArchivePrefix] so the gate scans the right shard.
 //
+// A history limit ([WithHistoryLimit]) bounds the walk to the newest slice of
+// the collection: the first listed element outside every configured bound ends
+// the walk before that element archives, and neither completion nor settlement
+// is recorded, since the excluded tail is deliberately unarchived history
+// rather than settled history.
+//
 // Within a page the elements' Archive closures run concurrently, so any free
 // worker can serve a large collection rather than one walking it alone; the
 // shared client's request gate bounds the real parallelism, and the next page
@@ -151,6 +201,8 @@ func Walk[T any](
 		!env.ledger.HasUnsettledUnder(cfg.archivePrefix)
 
 	sawNonTerminal := false
+	outOfBounds := false
+	listedCount := 0
 
 	for pageNum := 1; ; pageNum++ {
 		items, hasNext, err := page(ctx, pageNum)
@@ -168,6 +220,16 @@ func Walk[T any](
 
 		for _, listed := range items {
 			item := describe(listed)
+
+			// The first element outside every configured history bound starts the
+			// excluded tail; it is not archived and does not advance the mark.
+			if cfg.bounded() && !cfg.withinBounds(listedCount, item.CreatedAt) {
+				outOfBounds = true
+
+				break
+			}
+
+			listedCount++
 
 			env.ledger.AdvanceHighWaterMark(key, item.CreatedAt)
 
@@ -203,6 +265,14 @@ func Walk[T any](
 		}
 
 		if stopped {
+			return nil
+		}
+
+		// A limit stop leaves the excluded tail unarchived, so it records neither
+		// completion nor settlement: those marks would let the early stop mistake
+		// the tail for settled history, and a later wider limit must still be able
+		// to page down into it.
+		if outOfBounds {
 			return nil
 		}
 

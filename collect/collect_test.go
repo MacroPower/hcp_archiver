@@ -812,6 +812,97 @@ func TestWalkFinalPageRecomputesSettledFromArchivePrefix(t *testing.T) {
 		"an errored child under the archive prefix records the collection unsettled")
 }
 
+func TestWalkHistoryLimit(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
+
+	// Three fresh terminal items newest-first, one per page, so a limit stop is
+	// observable both as an unarchived tail and as pages never requested.
+	r3 := walkItem{relPath: "runs/r3/run.json", createdAt: base.Add(3 * time.Hour), terminal: true}
+	r2 := walkItem{relPath: "runs/r2/run.json", createdAt: base.Add(2 * time.Hour), terminal: true}
+	r1 := walkItem{relPath: "runs/r1/run.json", createdAt: base.Add(1 * time.Hour), terminal: true}
+
+	tests := map[string]struct {
+		oldest       time.Time
+		count        int
+		wantArchived []string
+		wantComplete bool
+	}{
+		"count bound stops before the excluded tail": {
+			count:        2,
+			wantArchived: []string{r3.relPath, r2.relPath},
+		},
+		"age bound is inclusive of its boundary instant": {
+			oldest:       r2.createdAt,
+			wantArchived: []string{r3.relPath, r2.relPath},
+		},
+		"a wider count bound wins over a narrower age": {
+			count:        2,
+			oldest:       r3.createdAt,
+			wantArchived: []string{r3.relPath, r2.relPath},
+		},
+		"a wider age bound wins over a narrower count": {
+			count:        1,
+			oldest:       r2.createdAt,
+			wantArchived: []string{r3.relPath, r2.relPath},
+		},
+		"zero bounds leave the walk unbounded": {
+			wantArchived: []string{r3.relPath, r2.relPath, r1.relPath},
+			wantComplete: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env, _, ledger := newEnv(t)
+
+			pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
+				items := []walkItem{r3, r2, r1}
+				if page > len(items) {
+					return nil, false, nil
+				}
+
+				return items[page-1 : page], page < len(items), nil
+			}
+
+			archived := map[string]int{}
+
+			describe := func(it walkItem) collect.Item {
+				return collect.Item{
+					RelPath:   it.relPath,
+					CreatedAt: it.createdAt,
+					Terminal:  it.terminal,
+					Archive: func(ctx context.Context) error {
+						return env.Object(ctx, it.relPath, func(_ context.Context) (any, error) {
+							archived[it.relPath]++
+
+							return cannedProject(), nil
+						})
+					},
+				}
+			}
+
+			err := collect.Walk(t.Context(), env, "runs", pager, describe,
+				collect.WithHistoryLimit(tc.count, tc.oldest))
+			require.NoError(t, err)
+
+			for _, relPath := range tc.wantArchived {
+				assert.Equal(t, 1, archived[relPath], "%s is within the bounds and archives once", relPath)
+			}
+
+			assert.Len(t, archived, len(tc.wantArchived), "nothing beyond the bounds is archived")
+
+			assert.Equal(t, tc.wantComplete, ledger.IsCollectionComplete("runs"),
+				"only a walk that reaches the collection's true end records completion")
+			assert.Equal(t, tc.wantComplete, ledger.IsCollectionSettled("runs"),
+				"only a walk that reaches the collection's true end records settlement")
+		})
+	}
+}
+
 func TestWalkPropagatesPageError(t *testing.T) {
 	t.Parallel()
 

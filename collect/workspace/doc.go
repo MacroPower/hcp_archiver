@@ -34,7 +34,10 @@
 // # Runs and their children
 //
 // Runs are listed newest-first and hydrated with their plan, apply,
-// configuration-version, created-by, and cost-estimate relations. Each of those
+// configuration-version, created-by, and cost-estimate relations. An optional
+// run-history limit ([WithRunHistoryLimit]) bounds each workspace's run walk
+// to its newest runs by count and/or creation age, keeping whichever window
+// admits more history; unbounded by default. Each of those
 // hydrated relations would otherwise collapse to a bare id ref on the run
 // summary, so it is archived as its own record: the configuration-version record
 // and, split out beside it, its ingress attributes (commit SHA, branch, PR) so

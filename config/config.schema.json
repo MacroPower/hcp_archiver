@@ -25,6 +25,11 @@
       "default": 16,
       "minimum": 1
     },
+    "runHistory": {
+      "$ref": "#/$defs/FileRunHistory",
+      "title": "Run History",
+      "description": "RunHistory bounds how much of each workspace's run history is archived;\nunset archives every run."
+    },
     "scope": {
       "$ref": "#/$defs/FileScope",
       "title": "Scope",
@@ -33,6 +38,25 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
+    "FileRunHistory": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer",
+          "title": "Count",
+          "description": "Count keeps the newest count runs of each workspace; zero means\nunbounded.",
+          "minimum": 0
+        },
+        "age": {
+          "type": "string",
+          "title": "Age",
+          "description": "Age keeps each workspace's runs created within this window before the\narchive runs, as a Go duration string such as 2160h; zero means\nunbounded.",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+        }
+      },
+      "description": "FileRunHistory bounds how much of each workspace's run history is archived.\nEach bound is optional and off at its zero value; when both are set the run\nwalk keeps whichever admits more history, so a run is archived while it sits\namong the newest count runs or was created within the age window. With\nneither bound set every run is archived.",
+      "additionalProperties": false
+    },
     "FileScope": {
       "type": "object",
       "properties": {

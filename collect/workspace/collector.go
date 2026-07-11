@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/hashicorp/go-tfe"
 
@@ -24,16 +25,42 @@ import (
 //
 // Create instances with [New].
 type Collector struct {
-	env *collect.Env
-	org string
+	runHistoryOldest time.Time
+	env              *collect.Env
+	org              string
+	runHistoryCount  int
+}
+
+// Option configures a [Collector] passed to [New].
+//
+// The available options are:
+//   - [WithRunHistoryLimit]
+type Option func(*Collector)
+
+// WithRunHistoryLimit bounds each workspace's run walk to recent history: the
+// newest count runs (when count is positive) and any run created at or after
+// oldest (when oldest is non-zero), keeping whichever window admits more when
+// both are set. Zero values leave run history unbounded, the default. It
+// returns an [Option].
+func WithRunHistoryLimit(count int, oldest time.Time) Option {
+	return func(c *Collector) {
+		c.runHistoryCount = count
+		c.runHistoryOldest = oldest
+	}
 }
 
 // New creates a new [Collector] archiving org into env.
-func New(env *collect.Env, org string) *Collector {
-	return &Collector{
+func New(env *collect.Env, org string, opts ...Option) *Collector {
+	c := &Collector{
 		env: env,
 		org: org,
 	}
+
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c
 }
 
 // wrapArchive adds the relative path as context to an archive error, the single

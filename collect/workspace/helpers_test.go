@@ -29,8 +29,8 @@ type wsFixture struct {
 }
 
 // newWSFixture serves mux (with a go-tfe construction ping added) and builds a
-// collector over a client pointed at it.
-func newWSFixture(t *testing.T, mux *http.ServeMux) wsFixture {
+// collector over a client pointed at it, applying any collector options.
+func newWSFixture(t *testing.T, mux *http.ServeMux, opts ...workspace.Option) wsFixture {
 	t.Helper()
 
 	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
@@ -51,7 +51,7 @@ func newWSFixture(t *testing.T, mux *http.ServeMux) wsFixture {
 	ledger.StartRun()
 
 	return wsFixture{
-		collector: workspace.New(collect.NewEnv(client, st, ledger), testOrg),
+		collector: workspace.New(collect.NewEnv(client, st, ledger), testOrg, opts...),
 		store:     st,
 		ledger:    ledger,
 	}

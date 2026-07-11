@@ -1,12 +1,16 @@
 package workspace_test
 
 import (
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/go-tfe"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"go.jacobcolvin.com/hcp_archiver/collect/workspace"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
 )
 
 func TestRunTerminal(t *testing.T) {
@@ -39,6 +43,48 @@ func TestRunTerminal(t *testing.T) {
 			assert.Equal(t, tc.want, workspace.RunTerminal(tc.status))
 		})
 	}
+}
+
+// runListPayload is a three-run listing, newest first and all in flight, so
+// archiving a run writes only its mutable summary and needs no child
+// endpoints.
+const runListPayload = `{
+  "data": [
+    {"id":"run-3","type":"runs","attributes":{"created-at":"2026-07-08T03:00:00Z","status":"planning"}},
+    {"id":"run-2","type":"runs","attributes":{"created-at":"2026-07-08T02:00:00Z","status":"planning"}},
+    {"id":"run-1","type":"runs","attributes":{"created-at":"2026-07-08T01:00:00Z","status":"planning"}}
+  ],
+  "meta":{"pagination":{"current-page":1,"prev-page":null,"next-page":null,"total-pages":1,"total-count":3}}
+}`
+
+func TestCollectRunsHonorsRunHistoryLimit(t *testing.T) {
+	t.Parallel()
+
+	// The count bound admits only the newest run while the age window reaches
+	// back past the second, so the walk archives two runs and stops before the
+	// oldest: the two bounds compose as whichever admits more history.
+	oldest := time.Date(2026, time.July, 8, 2, 0, 0, 0, time.UTC)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/workspaces/ws-1/runs", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONAPI(t, w, runListPayload)
+	})
+
+	f := newWSFixture(t, mux, workspace.WithRunHistoryLimit(1, oldest))
+
+	ws := &tfe.Workspace{ID: "ws-1", Name: "ws"}
+
+	err := f.collector.CollectRuns(t.Context(), "proj", ws, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, manifest.StatusDone, f.status("projects/proj/workspaces/ws/runs/run-3/run.json"))
+	assert.Equal(t, manifest.StatusDone, f.status("projects/proj/workspaces/ws/runs/run-2/run.json"))
+
+	_, ok := f.ledger.Entry("projects/proj/workspaces/ws/runs/run-1/run.json")
+	assert.False(t, ok, "the run outside every bound is not archived")
+
+	assert.False(t, f.ledger.IsCollectionComplete("projects/proj/workspaces/ws/runs"),
+		"a limit-stopped walk does not record the collection complete")
 }
 
 func TestHasNextPage(t *testing.T) {

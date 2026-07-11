@@ -66,6 +66,13 @@ organizations:
 # rate-limits the run, and creeping back up after.
 maxConcurrency: 16
 
+# Bound on each workspace's archived run history, unlimited by default: count
+# keeps the newest N runs, age keeps runs created within the window (a Go
+# duration). With both set, whichever admits more history wins.
+runHistory:
+  count: 500
+  age: 2160h
+
 # Heavy or org-specific surfaces, each off by default.
 scope:
   stacks: true
@@ -193,8 +200,11 @@ Settings are grouped by how much they vary; see
   list; empty or omitted archives every organization the token can see in turn),
   `maxConcurrency` (the ceiling on archive workers; every run starts at one
   worker, shared across workspaces, and scales itself up while the API stays
-  quiet and down while it rate-limits the run), and a `scope` block
-  of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
+  quiet and down while it rate-limits the run), a `runHistory` block bounding
+  each workspace's archived run history (`count` keeps the newest N runs,
+  `age` keeps runs created within a Go-duration window; with both set,
+  whichever admits more history wins; unlimited by default), and a `scope`
+  block of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
   `registryDetail`, `auditTrail`), each off by default.
 
 ## Output layout

@@ -15,7 +15,9 @@ import (
 // run does not record premature absences for logs it has yet to produce. The
 // progress callback, when non-nil, is called with 1 after each run is handled,
 // including a settled run the primitives skip, so progress tracks the walk
-// itself rather than only fresh downloads.
+// itself rather than only fresh downloads. A configured run-history limit
+// ([WithRunHistoryLimit]) passes through to the walk, which stops at the first
+// run outside every configured bound.
 func (c *Collector) collectRuns(ctx context.Context, project string, ws *tfe.Workspace, progress func(n int)) error {
 	st := c.env.Store()
 	key := st.Join(st.WorkspaceDir(project, ws.Name), "runs")
@@ -67,7 +69,8 @@ func (c *Collector) collectRuns(ctx context.Context, project string, ws *tfe.Wor
 		}
 	}
 
-	return wrapArchive(key, collect.Walk(ctx, c.env, key, pager, describe))
+	return wrapArchive(key, collect.Walk(ctx, c.env, key, pager, describe,
+		collect.WithHistoryLimit(c.runHistoryCount, c.runHistoryOldest)))
 }
 
 // archiveRun archives a run's mutable summary and, once the run is terminal, its

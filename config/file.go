@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"go.jacobcolvin.com/niceyaml"
 	"go.jacobcolvin.com/niceyaml/paths"
@@ -57,9 +58,27 @@ type File struct {
 	// rate limiting is observed; every run starts at one worker. It defaults to
 	// [DefaultMaxConcurrency].
 	MaxConcurrency int `json:"maxConcurrency,omitempty" jsonschema:"title=Max Concurrency,minimum=1,default=16"`
+	// RunHistory bounds how much of each workspace's run history is archived;
+	// unset archives every run.
+	RunHistory FileRunHistory `json:"runHistory,omitzero" jsonschema:"title=Run History"`
 	// Scope selects the heavy or optional surfaces to archive, each off by
 	// default.
 	Scope FileScope `json:"scope,omitzero" jsonschema:"title=Scope"`
+}
+
+// FileRunHistory bounds how much of each workspace's run history is archived.
+// Each bound is optional and off at its zero value; when both are set the run
+// walk keeps whichever admits more history, so a run is archived while it sits
+// among the newest count runs or was created within the age window. With
+// neither bound set every run is archived.
+type FileRunHistory struct {
+	// Count keeps the newest count runs of each workspace; zero means
+	// unbounded.
+	Count int `json:"count,omitempty" jsonschema:"title=Count,minimum=0"`
+	// Age keeps each workspace's runs created within this window before the
+	// archive runs, as a Go duration string such as 2160h; zero means
+	// unbounded.
+	Age time.Duration `json:"age,omitempty" jsonschema:"title=Age,type=string,pattern=^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"`
 }
 
 // FileScope holds the opt-in toggles for the heavy or most organization-specific

@@ -102,6 +102,8 @@ func (af *archiveFlags) config() (*config.Config, error) {
 		config.WithAddress(file.Address),
 		config.WithOrganizations(file.Organizations),
 		config.WithMaxConcurrency(file.MaxConcurrency),
+		config.WithRunHistoryCount(file.RunHistory.Count),
+		config.WithRunHistoryAge(file.RunHistory.Age),
 		config.WithStacks(file.Scope.Stacks),
 		config.WithHYOK(file.Scope.HYOK),
 		config.WithRegistryDetail(file.Scope.RegistryDetail),
