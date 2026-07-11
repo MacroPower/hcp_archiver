@@ -128,20 +128,22 @@ func (c *Collector) collectNotApplicable(_ context.Context) error {
 
 // paginate reads every page of an org-scoped list through the shared client.
 //
-// It returns the accumulated items, or a nil slice when the read does not
-// complete: a cancellation of ctx propagates so the run can wind down, while any
-// other read error is logged and skipped so one unavailable collection never
-// aborts the collector.
+// The bool reports whether the read completed: it is true on success (including
+// a successful empty read, whose items are nil) and false when the read is
+// skipped, so a caller that writes a whole-collection file can tell an empty
+// roster from an unavailable one. A cancellation of ctx propagates so the run
+// can wind down, while any other read error is logged and skipped so one
+// unavailable collection never aborts the collector.
 func paginate[T any](
 	ctx context.Context,
 	c *Collector,
 	collection string,
 	fetch func(context.Context, *tfe.Client, tfe.ListOptions) ([]T, *tfe.Pagination, error),
-) ([]T, error) {
+) ([]T, bool, error) {
 	items, err := tfeclient.Paginate(ctx, c.env.Client(), fetch)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("list %s: %w", collection, ctx.Err())
+			return nil, false, fmt.Errorf("list %s: %w", collection, ctx.Err())
 		}
 
 		slog.WarnContext(ctx, msgListSkipped,
@@ -150,10 +152,10 @@ func paginate[T any](
 			slog.Any("error", err),
 		)
 
-		return nil, nil
+		return nil, false, nil
 	}
 
-	return items, nil
+	return items, true, nil
 }
 
 // enumerate lists an org-scoped collection and archives each item through
@@ -169,7 +171,9 @@ func enumerate[T any](
 	fetch func(context.Context, *tfe.Client, tfe.ListOptions) ([]T, *tfe.Pagination, error),
 	archive func(context.Context, T) error,
 ) error {
-	items, err := paginate(ctx, c, collection, fetch)
+	// Each item is archived on its own, so a successful empty read simply
+	// archives nothing; only the completion error matters here, not the flag.
+	items, _, err := paginate(ctx, c, collection, fetch)
 	if err != nil {
 		return err
 	}

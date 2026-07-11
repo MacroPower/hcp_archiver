@@ -115,7 +115,7 @@ func (c *Collector) collectTeamNotifications(ctx context.Context, teamID string)
 // logged and skipped, leaving the prior roster untouched rather than overwriting
 // it with an empty list.
 func (c *Collector) collectMemberships(ctx context.Context) error {
-	memberships, err := paginate(ctx, c, "memberships",
+	memberships, ok, err := paginate(ctx, c, "memberships",
 		func(
 			ctx context.Context,
 			tc *tfe.Client,
@@ -139,7 +139,9 @@ func (c *Collector) collectMemberships(ctx context.Context) error {
 		return err
 	}
 
-	if memberships == nil {
+	// A skipped read leaves the roster for the next run; a successful read, even
+	// an empty one, is recorded so it settles rather than re-fetching forever.
+	if !ok {
 		return nil
 	}
 
