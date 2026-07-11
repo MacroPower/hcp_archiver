@@ -354,14 +354,16 @@ func mkdirAllSync(dir string, mode fs.FileMode, sync func(string) error) error {
 		return nil
 	}
 
+	// Scan upward for the levels that do not yet exist, seeding the scan with the
+	// stat just taken so dir is not stat'd a second time on the cold path. A nil
+	// error here means dir exists but is not a directory; break and let MkdirAll
+	// surface the ENOTDIR.
 	var missing []string
 
-	for level := dir; ; {
-		_, statErr := os.Stat(level)
-		if statErr == nil {
-			break
-		}
+	level := dir
+	statErr := err
 
+	for statErr != nil {
 		if !errors.Is(statErr, fs.ErrNotExist) {
 			return fmt.Errorf("stat directory %q: %w", level, statErr)
 		}
@@ -374,6 +376,7 @@ func mkdirAllSync(dir string, mode fs.FileMode, sync func(string) error) error {
 		}
 
 		level = parent
+		_, statErr = os.Stat(level)
 	}
 
 	err = os.MkdirAll(dir, mode)
