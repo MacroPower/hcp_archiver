@@ -74,6 +74,7 @@ type Reporter struct {
 	completed   int
 	maxWorkers  int
 	mu          sync.Mutex
+	writeMu     sync.Mutex
 }
 
 // Option configures a [Reporter] passed to [New].
@@ -549,11 +550,18 @@ func (r *Reporter) lockedTake() snapshot {
 
 // Report renders one snapshot in the resolved mode. It writes nothing in quiet
 // mode and returns any write error.
+//
+// The snapshot is taken under the state mutex, which is then released before the
+// write, so a slow or back-pressured writer never stalls the hot-path
+// [Task.Advance] and [Reporter.StartTask] callers that contend for that mutex.
+// A dedicated write mutex serializes the writes among themselves.
 func (r *Reporter) Report() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	snap := r.lockedTake()
 
-	return r.render(r.take(), false)
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	return r.render(snap, false)
 }
 
 // Summary renders the final totals per status class, the wall time, and the
@@ -561,14 +569,17 @@ func (r *Reporter) Report() error {
 // block; otherwise it renders the logfmt or JSON summary line. It writes nothing
 // in quiet mode and returns any write error.
 func (r *Reporter) Summary() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	snap := r.lockedTake()
 
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	// The panel check reads only static state, so it needs no state lock here.
 	if r.usesPanel() {
-		return r.writeString(r.summaryBlock(r.take()))
+		return r.writeString(r.summaryBlock(snap))
 	}
 
-	return r.render(r.take(), true)
+	return r.render(snap, true)
 }
 
 // Run drives the live view until ctx is done, then returns nil.
