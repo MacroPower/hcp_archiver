@@ -219,6 +219,36 @@ func TestMarshalRedactsNestedSecret(t *testing.T) {
 	require.True(t, json.Valid(got), "output must be valid JSON")
 }
 
+func TestMarshalRedactsSecretInMap(t *testing.T) {
+	t.Parallel()
+
+	// A secret reachable only through a Go map must still be redacted: the safety
+	// pass descends into map values, both a struct stored by value and a pointer
+	// to one, rather than stopping at the map.
+	type member struct {
+		Secret string `json:"secret"`
+	}
+
+	type org struct {
+		Name    string             `json:"name"`
+		Members map[string]member  `json:"members"`
+		Admins  map[string]*member `json:"admins"`
+	}
+
+	got, err := serialize.Marshal(&org{
+		Name:    "acme",
+		Members: map[string]member{"a": {Secret: "map-value-SECRET"}},
+		Admins:  map[string]*member{"b": {Secret: "map-pointer-SECRET"}},
+	})
+	require.NoError(t, err)
+
+	out := string(got)
+	assert.NotContains(t, out, "map-value-SECRET", "a secret in a map struct value must not leak")
+	assert.NotContains(t, out, "map-pointer-SECRET", "a secret behind a map pointer value must not leak")
+	assert.Contains(t, out, serialize.Redacted)
+	require.True(t, json.Valid(got), "output must be valid JSON")
+}
+
 func TestMarshalHydratedRelationAsIDRef(t *testing.T) {
 	t.Parallel()
 

@@ -162,6 +162,31 @@ func sanitize(rv reflect.Value, seen map[uintptr]bool) {
 			sanitize(rv.Index(i), seen)
 		}
 
+	case reflect.Map:
+		if rv.IsNil() {
+			return
+		}
+
+		ptr := rv.Pointer()
+		if seen[ptr] {
+			return
+		}
+
+		seen[ptr] = true
+
+		for _, k := range rv.MapKeys() {
+			mv := rv.MapIndex(k)
+
+			// Map values are not addressable, so the safety pass cannot set
+			// through them in place. Sanitize an addressable copy and store it
+			// back, so a secret reachable only through a map is redacted rather
+			// than written in cleartext.
+			cp := reflect.New(mv.Type()).Elem()
+			cp.Set(mv)
+			sanitize(cp, seen)
+			rv.SetMapIndex(k, cp)
+		}
+
 	case reflect.Struct:
 		sanitizeStruct(rv, seen)
 
@@ -265,13 +290,18 @@ func redactValue(fv reflect.Value) {
 }
 
 // setString overwrites a string or *string field with s, allocating a pointer
-// when needed so a nil secret still records its existence as redacted.
+// when needed so a nil secret still records its existence as redacted. Any other
+// kind is zeroed rather than left as it was, so a Token, Secret, or HMACKey of
+// an unexpected type fails closed instead of surviving in cleartext, matching
+// [redactValue]. Its only caller guarantees the field is settable.
 func setString(fv reflect.Value, s string) {
 	switch fv.Kind() {
 	case reflect.String:
 		fv.SetString(s)
 	case reflect.Pointer:
 		if fv.Type().Elem().Kind() != reflect.String {
+			fv.Set(reflect.Zero(fv.Type()))
+
 			return
 		}
 
@@ -280,6 +310,7 @@ func setString(fv reflect.Value, s string) {
 		fv.Set(p)
 
 	default:
+		fv.Set(reflect.Zero(fv.Type()))
 	}
 }
 
