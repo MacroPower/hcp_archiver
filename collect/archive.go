@@ -174,10 +174,11 @@ func (e *Env) streamBlob(
 const maxBlobRetryDelay = 30 * time.Second
 
 // retryDelay returns base doubled attempt times, capped at maxBlobRetryDelay.
-// A non-positive base stays non-positive, so a test-configured zero delay
-// retries immediately.
+// The cap binds from the first retry, not just once doubling overshoots it. A
+// non-positive base stays non-positive (min leaves it unchanged), so a
+// test-configured zero delay retries immediately.
 func retryDelay(base time.Duration, attempt int) time.Duration {
-	d := base
+	d := min(base, maxBlobRetryDelay)
 	for range attempt {
 		d *= 2
 		if d >= maxBlobRetryDelay {
