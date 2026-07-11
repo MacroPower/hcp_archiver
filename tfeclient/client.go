@@ -1,6 +1,7 @@
 package tfeclient
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -31,11 +32,11 @@ const (
 const DefaultResponseHeaderTimeout = 60 * time.Second
 
 // DefaultTLSHandshakeTimeout bounds a new connection's TLS handshake when [New]
-// builds its own HTTP client. Chunked log reads dial the artifact host over
-// HTTP/1, so under a saturated link handshake packets queue behind the bulk
-// transfers of concurrent workers; the bound sits above the transport's usual
-// 10 seconds to tolerate that congestion while still failing a dead dial
-// promptly.
+// builds its own HTTP client. Log, state, and tarball downloads dial the
+// artifact host over HTTP/1, so under a saturated link handshake packets queue
+// behind the bulk transfers of concurrent workers; the bound sits above the
+// transport's usual 10 seconds to tolerate that congestion while still failing
+// a dead dial promptly.
 const DefaultTLSHandshakeTimeout = 20 * time.Second
 
 // Gate bounds how many requests may be in flight at once. Acquire blocks
@@ -301,8 +302,8 @@ func resolveHTTPClient(cfg *config) *http.Client {
 	// The archive workload splits across two hosts (the API and the artifact
 	// store) with HTTP/2 disabled, so each concurrent worker holds its own HTTP/1
 	// connection per host. The cleanhttp per-host idle cap of GOMAXPROCS+1 closes
-	// most of those between chunked log reads, forcing a fresh dial and TLS
-	// handshake per chunk under load; letting every pooled connection idle per
+	// most of those between artifact downloads, forcing a fresh dial and TLS
+	// handshake per download under load; letting every pooled connection idle per
 	// host keeps them reusable.
 	tr.MaxIdleConnsPerHost = tr.MaxIdleConns
 
@@ -446,4 +447,119 @@ func (c *Client) DownloadConfigurationVersion(ctx context.Context, cvID string) 
 	}
 
 	return data, nil
+}
+
+// DownloadPlanLog downloads a plan's full log by its id.
+//
+// The plan is read first so its signed log URL is fresh, then the whole log
+// object is fetched in one request. The chunked [tfe.LogReader] behind the
+// SDK's Logs methods exists to tail a live run: it consumes only the first few
+// kilobytes of each response before issuing another request, which makes a
+// large finished log take minutes. An archived run is terminal, so its log is
+// complete and one read suffices. Returns an error wrapping [ErrMissingLogURL]
+// when the plan carries no log URL.
+func (c *Client) DownloadPlanLog(ctx context.Context, planID string) ([]byte, error) {
+	var logURL string
+
+	err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
+		p, e := tc.Plans.Read(ctx, planID)
+		if e != nil {
+			return fmt.Errorf("read plan: %w", e)
+		}
+
+		logURL = p.LogReadURL
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := c.downloadLog(ctx, logURL)
+	if err != nil {
+		return nil, fmt.Errorf("download plan %s log: %w", planID, err)
+	}
+
+	return data, nil
+}
+
+// DownloadApplyLog downloads an apply's full log by its id, with the same
+// single-request semantics as [Client.DownloadPlanLog]. Returns an error
+// wrapping [ErrMissingLogURL] when the apply carries no log URL.
+func (c *Client) DownloadApplyLog(ctx context.Context, applyID string) ([]byte, error) {
+	var logURL string
+
+	err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
+		a, e := tc.Applies.Read(ctx, applyID)
+		if e != nil {
+			return fmt.Errorf("read apply: %w", e)
+		}
+
+		logURL = a.LogReadURL
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := c.downloadLog(ctx, logURL)
+	if err != nil {
+		return nil, fmt.Errorf("download apply %s log: %w", applyID, err)
+	}
+
+	return data, nil
+}
+
+// downloadLog fetches the whole log object at logURL in one request through
+// the shared limiter, using the go-tfe request machinery so retries and error
+// classification match every other request.
+func (c *Client) downloadLog(ctx context.Context, logURL string) ([]byte, error) {
+	if logURL == "" {
+		return nil, ErrMissingLogURL
+	}
+
+	var data []byte
+
+	err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
+		req, e := tc.NewRequest("GET", logURL, nil)
+		if e != nil {
+			return fmt.Errorf("new log request: %w", e)
+		}
+
+		var buf bytes.Buffer
+
+		e = req.Do(ctx, &buf)
+		if e != nil {
+			return fmt.Errorf("get log: %w", e)
+		}
+
+		data = trimLogMarkers(buf.Bytes())
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return data, nil
+}
+
+// trimLogMarkers strips the STX/ETX control characters framing a completed
+// log stream. [tfe.LogReader] removes them while chunking, so trimming keeps
+// a directly downloaded log byte-identical to one archived through it. The
+// ETX is only trimmed behind an STX, mirroring the reader, so a stream that
+// never adopted the framing passes through untouched.
+func trimLogMarkers(b []byte) []byte {
+	if len(b) == 0 || b[0] != 0x02 {
+		return b
+	}
+
+	b = b[1:]
+
+	if n := len(b); n > 0 && b[n-1] == 0x03 {
+		b = b[:n-1]
+	}
+
+	return b
 }

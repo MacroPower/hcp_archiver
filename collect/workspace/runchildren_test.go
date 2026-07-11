@@ -1,7 +1,9 @@
 package workspace_test
 
 import (
+	"io"
 	"net/http"
+	"os"
 	"testing"
 
 	"github.com/hashicorp/go-tfe"
@@ -135,6 +137,71 @@ func TestArchivePlanSummary(t *testing.T) {
 	assert.Equal(t, true, attrs["has-changes"])
 	assert.InDelta(t, 3, attrs["resource-additions"], 0)
 	assert.InDelta(t, 1, attrs["resource-destructions"], 0)
+}
+
+func TestArchivePlanLog(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/plans/plan-1", func(w http.ResponseWriter, r *http.Request) {
+		writeJSONAPI(t, w, marshalJSONAPI(t, &tfe.Plan{
+			ID:         "plan-1",
+			LogReadURL: "http://" + r.Host + "/artifact/plan-1-log",
+		}))
+	})
+	mux.HandleFunc("/artifact/plan-1-log", func(w http.ResponseWriter, _ *http.Request) {
+		_, werr := io.WriteString(w, "\x02plan output\x03")
+		if werr != nil {
+			return
+		}
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+
+	// Settle the structured JSON so the test isolates on the log download.
+	f.preSettle(st.RunFile("proj", "ws", "run-1", "plan.json"))
+
+	run := &tfe.Run{ID: "run-1", Plan: &tfe.Plan{ID: "plan-1"}}
+	require.NoError(t, f.collector.ArchivePlan(t.Context(), "proj", "ws", run))
+
+	logPath := st.RunFile("proj", "ws", "run-1", "plan.log")
+	assert.Equal(t, manifest.StatusDone, f.status(logPath))
+
+	got, err := os.ReadFile(st.AbsPath(logPath))
+	require.NoError(t, err)
+	assert.Equal(t, "plan output", string(got), "the log downloads whole with its STX/ETX framing trimmed")
+}
+
+func TestArchiveApplyLog(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/applies/apply-1", func(w http.ResponseWriter, r *http.Request) {
+		writeJSONAPI(t, w, marshalJSONAPI(t, &tfe.Apply{
+			ID:         "apply-1",
+			LogReadURL: "http://" + r.Host + "/artifact/apply-1-log",
+		}))
+	})
+	mux.HandleFunc("/artifact/apply-1-log", func(w http.ResponseWriter, _ *http.Request) {
+		_, werr := io.WriteString(w, "\x02apply output\x03")
+		if werr != nil {
+			return
+		}
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+
+	run := &tfe.Run{ID: "run-1", Apply: &tfe.Apply{ID: "apply-1"}}
+	require.NoError(t, f.collector.ArchiveApply(t.Context(), "proj", "ws", run))
+
+	logPath := st.RunFile("proj", "ws", "run-1", "apply.log")
+	assert.Equal(t, manifest.StatusDone, f.status(logPath))
+
+	got, err := os.ReadFile(st.AbsPath(logPath))
+	require.NoError(t, err)
+	assert.Equal(t, "apply output", string(got), "the log downloads whole with its STX/ETX framing trimmed")
 }
 
 func TestArchiveApplySummary(t *testing.T) {

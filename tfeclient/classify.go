@@ -9,8 +9,15 @@ import (
 	"github.com/hashicorp/go-tfe"
 )
 
-// ErrMissingToken is returned by [New] when no API token was supplied.
-var ErrMissingToken = errors.New("token is required")
+var (
+	// ErrMissingToken is returned by [New] when no API token was supplied.
+	ErrMissingToken = errors.New("token is required")
+
+	// ErrMissingLogURL is returned by [Client.DownloadPlanLog] and
+	// [Client.DownloadApplyLog] when the read plan or apply carries no signed
+	// log URL to fetch.
+	ErrMissingLogURL = errors.New("log URL is missing")
+)
 
 // Kind classifies an error so a resume can distinguish a temporary blip from a
 // permanent absence.

@@ -3,6 +3,7 @@ package tfeclient_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -386,6 +387,133 @@ func TestDoGate(t *testing.T) {
 		assert.False(t, called, "fn must not run without a slot")
 		assert.Empty(t, gate.events, "a denied acquire leaves nothing to release")
 	})
+}
+
+// newServerClient builds a [tfeclient.Client] against a live test server
+// serving mux, answering the constructor ping itself, so download methods
+// exercise the real request path end to end.
+func newServerClient(t *testing.T, mux *http.ServeMux) *tfeclient.Client {
+	t.Helper()
+
+	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, err := tfeclient.New(tfeclient.WithToken("test-token"), tfeclient.WithAddress(srv.URL))
+	require.NoError(t, err)
+
+	return c
+}
+
+func TestDownloadPlanLog(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		served string
+		hasURL bool
+		want   string
+		err    error
+	}{
+		"trims stx etx framing": {
+			served: "\x02plan output\x03",
+			hasURL: true,
+			want:   "plan output",
+		},
+		"unframed log passes through": {
+			served: "plain output",
+			hasURL: true,
+			want:   "plain output",
+		},
+		"etx kept without a leading stx": {
+			served: "tail\x03",
+			hasURL: true,
+			want:   "tail\x03",
+		},
+		"missing log url": {
+			err: tfeclient.ErrMissingLogURL,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var artifactHits atomic.Int64
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v2/plans/plan-1", func(w http.ResponseWriter, r *http.Request) {
+				logURL := ""
+				if tc.hasURL {
+					logURL = "http://" + r.Host + "/artifact/plan-1"
+				}
+
+				w.Header().Set("Content-Type", "application/vnd.api+json")
+
+				_, werr := fmt.Fprintf(
+					w,
+					`{"data":{"id":"plan-1","type":"plans","attributes":{"log-read-url":%q}}}`,
+					logURL,
+				)
+				if werr != nil {
+					return
+				}
+			})
+			mux.HandleFunc("/artifact/plan-1", func(w http.ResponseWriter, _ *http.Request) {
+				artifactHits.Add(1)
+
+				_, werr := io.WriteString(w, tc.served)
+				if werr != nil {
+					return
+				}
+			})
+
+			c := newServerClient(t, mux)
+
+			got, err := c.DownloadPlanLog(t.Context(), "plan-1")
+
+			if tc.err != nil {
+				require.ErrorIs(t, err, tc.err)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, string(got))
+			assert.Equal(t, int64(1), artifactHits.Load(), "the whole log downloads in one request")
+		})
+	}
+}
+
+func TestDownloadApplyLog(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/applies/apply-1", func(w http.ResponseWriter, r *http.Request) {
+		logURL := "http://" + r.Host + "/artifact/apply-1"
+
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+
+		_, werr := fmt.Fprintf(w, `{"data":{"id":"apply-1","type":"applies","attributes":{"log-read-url":%q}}}`, logURL)
+		if werr != nil {
+			return
+		}
+	})
+	mux.HandleFunc("/artifact/apply-1", func(w http.ResponseWriter, _ *http.Request) {
+		_, werr := io.WriteString(w, "\x02apply output\x03")
+		if werr != nil {
+			return
+		}
+	})
+
+	c := newServerClient(t, mux)
+
+	got, err := c.DownloadApplyLog(t.Context(), "apply-1")
+
+	require.NoError(t, err)
+	assert.Equal(t, "apply output", string(got))
 }
 
 func TestRateLimitCounterCounts429s(t *testing.T) {

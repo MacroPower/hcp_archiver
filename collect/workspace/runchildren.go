@@ -138,9 +138,13 @@ func (c *Collector) archivePlan(ctx context.Context, project, ws string, run *tf
 		return err
 	}
 
-	err = c.logBlob(ctx, st.RunFile(project, ws, run.ID, "plan.log"),
-		func(ctx context.Context, tc *tfe.Client) (io.Reader, error) {
-			return tc.Plans.Logs(ctx, planID)
+	// The log is downloaded whole from its signed URL rather than streamed
+	// through the SDK's chunked log reader, whose request-per-few-kilobytes
+	// pacing makes a large finished log take minutes (see
+	// [tfeclient.Client.DownloadPlanLog]).
+	err = c.bytes(ctx, st.RunFile(project, ws, run.ID, "plan.log"),
+		func(ctx context.Context) ([]byte, error) {
+			return c.env.Client().DownloadPlanLog(ctx, planID)
 		})
 	if err != nil {
 		return err
@@ -170,9 +174,10 @@ func (c *Collector) archiveApply(ctx context.Context, project, ws string, run *t
 		return err
 	}
 
-	return c.logBlob(ctx, st.RunFile(project, ws, run.ID, "apply.log"),
-		func(ctx context.Context, tc *tfe.Client) (io.Reader, error) {
-			return tc.Applies.Logs(ctx, applyID)
+	// Downloaded whole from its signed URL for the same reason as the plan log.
+	return c.bytes(ctx, st.RunFile(project, ws, run.ID, "apply.log"),
+		func(ctx context.Context) ([]byte, error) {
+			return c.env.Client().DownloadApplyLog(ctx, applyID)
 		})
 }
 
