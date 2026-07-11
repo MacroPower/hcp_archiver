@@ -344,10 +344,13 @@ func mkdirAllSynced(dir string, mode fs.FileMode) error {
 // the hot path taken by every write after the first into a directory. Otherwise
 // it scans upward from dir collecting the levels that do not yet exist — exactly
 // the ones [os.MkdirAll] creates — creates them in one MkdirAll call (keeping its
-// race, mode, and ENOTDIR handling), then flushes the parent of every scanned
-// level. The parents are flushed unconditionally, even one a concurrent creator
-// won the race to make, because the dentry still needs flushing from this
-// process and a redundant fsync is harmless.
+// race, mode, and ENOTDIR handling), then chmods and flushes each scanned level.
+// The chmod lands mode exactly: MkdirAll masks it by the process umask, so
+// without it a permissive [WithDirMode] would be silently narrowed, unlike the
+// file path in stage and Append which chmod for the same reason. The parents are
+// flushed unconditionally, even one a concurrent creator won the race to make,
+// because the dentry still needs flushing from this process and a redundant
+// fsync (or chmod to the same mode) is harmless.
 func mkdirAllSync(dir string, mode fs.FileMode, sync func(string) error) error {
 	info, err := os.Stat(dir)
 	if err == nil && info.IsDir() {
@@ -385,6 +388,11 @@ func mkdirAllSync(dir string, mode fs.FileMode, sync func(string) error) error {
 	}
 
 	for _, level := range missing {
+		err = os.Chmod(level, mode)
+		if err != nil {
+			return fmt.Errorf("chmod created directory %q: %w", level, err)
+		}
+
 		parent := filepath.Dir(level)
 
 		err = sync(parent)

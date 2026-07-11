@@ -282,6 +282,27 @@ func TestMkdirAllSync_existingDirTakesHotPath(t *testing.T) {
 	assert.Zero(t, count, "a second call into the existing directory flushes nothing")
 }
 
+func TestMkdirAllSync_chmodsCreatedLevelsPastUmask(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	target := filepath.Join(root, "a", "b")
+
+	noop := func(string) error { return nil }
+
+	// 0o770 carries a group-write bit the common 0o022 umask strips: os.MkdirAll
+	// alone would land 0o750, so mkdirAllSync must chmod each created level to
+	// honor the requested mode exactly, whatever the umask.
+	require.NoError(t, atomicfile.MkdirAllSync(target, 0o770, noop))
+
+	for _, dir := range []string{filepath.Join(root, "a"), target} {
+		info, err := os.Stat(dir)
+		require.NoError(t, err)
+		assert.Equal(t, fs.FileMode(0o770), info.Mode().Perm(),
+			"created directory %q lands the requested mode", dir)
+	}
+}
+
 func TestWrite_concurrentSiblingSubtrees(t *testing.T) {
 	t.Parallel()
 
