@@ -104,8 +104,12 @@ func WriteReader(name string, r io.Reader, opts ...Option) error {
 // bring into being) is durable, not just its leaf. The written file takes the
 // file mode (see [WithFileMode]).
 //
-// When fn returns an error, or any step of the write fails, the staging file is
-// removed and name is left exactly as it was, whether pre-existing or absent.
+// When fn returns an error, or the write fails before the rename, the staging
+// file is removed and name is left exactly as it was, whether pre-existing or
+// absent. Once the rename succeeds name holds the new content; a parent-directory
+// sync failure reported after that point still returns an error, but the new
+// content is in place — only its durability across a crash is unconfirmed, not
+// its presence.
 func Write(name string, fn func(io.Writer) error, opts ...Option) error {
 	cfg := config{
 		fileMode: DefaultFileMode,
@@ -230,7 +234,14 @@ func Append(name string, data []byte, opts ...Option) (int64, error) {
 
 	// A freshly created file is masked by umask on open, so chmod it to land
 	// exactly the requested mode, matching Write; an existing target keeps the
-	// mode it was first created with.
+	// mode it was first created with. Its new directory entry is then flushed
+	// before any data is written, because a later append that finds the file
+	// already present skips the directory sync below, trusting that the creating
+	// append made the entry durable here. Syncing only after a successful data
+	// write would break that trust: a creating append that failed before the
+	// sync would leave an entry that no later append ever flushes. A plain
+	// append changes only the file's own data, already flushed by
+	// appendCommitted, so it needs no directory sync at all.
 	if created {
 		err = f.Chmod(cfg.fileMode)
 		if err != nil {
@@ -238,21 +249,18 @@ func Append(name string, data []byte, opts ...Option) (int64, error) {
 
 			return 0, fmt.Errorf("chmod append target %q: %w", name, err)
 		}
+
+		err = syncDir(dir)
+		if err != nil {
+			f.Close() //nolint:errcheck,gosec // Best-effort close on the sync-failure path.
+
+			return 0, fmt.Errorf("sync parent directory %q: %w", dir, err)
+		}
 	}
 
 	start, err := appendCommitted(f, data)
 	if err != nil {
 		return 0, err
-	}
-
-	// Only a creating append changes the parent directory (its new entry); a later
-	// append changes only the file's own data, already flushed by appendCommitted,
-	// so syncing the directory every time would fsync it needlessly.
-	if created {
-		err = syncDir(dir)
-		if err != nil {
-			return 0, fmt.Errorf("sync parent directory %q: %w", dir, err)
-		}
 	}
 
 	return start, nil
