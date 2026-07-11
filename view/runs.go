@@ -154,6 +154,37 @@ func (w *Workspace) RunArtifacts(runID string) ([]string, error) {
 func (w *Workspace) StateVersions() ([]StateVersion, error) {
 	svDir := path.Join(w.dir, "state-versions")
 
+	stems, err := w.StateVersionNames()
+	if err != nil {
+		return nil, err
+	}
+
+	var versions []StateVersion
+
+	for _, stem := range stems {
+		sv, svErr := w.stateVersion(svDir, stem)
+		if svErr != nil {
+			return nil, svErr
+		}
+
+		versions = append(versions, sv)
+	}
+
+	slices.SortFunc(versions, func(a, b StateVersion) int {
+		return strings.Compare(b.Stem, a.Stem)
+	})
+
+	return versions, nil
+}
+
+// StateVersionNames returns the stems of the workspace's archived state
+// versions, gathered from both loose files and sealed bundles, without opening
+// or decoding any meta sidecar. It is the cheap enumeration behind a count,
+// mirroring how the run count uses subdirNames rather than materializing every
+// version just to size the list.
+func (w *Workspace) StateVersionNames() ([]string, error) {
+	svDir := path.Join(w.dir, "state-versions")
+
 	names, err := looseNames(w.org.AbsPath(svDir))
 	if err != nil {
 		return nil, fmt.Errorf("list state versions: %w", err)
@@ -168,26 +199,17 @@ func (w *Workspace) StateVersions() ([]StateVersion, error) {
 		names = append(names, path.Base(relPath))
 	}
 
-	var versions []StateVersion
+	var stems []string
 
 	for _, name := range dedupe(names) {
 		if !strings.HasSuffix(name, metaSuffix) {
 			continue
 		}
 
-		sv, svErr := w.stateVersion(svDir, strings.TrimSuffix(name, metaSuffix))
-		if svErr != nil {
-			return nil, svErr
-		}
-
-		versions = append(versions, sv)
+		stems = append(stems, strings.TrimSuffix(name, metaSuffix))
 	}
 
-	slices.SortFunc(versions, func(a, b StateVersion) int {
-		return strings.Compare(b.Stem, a.Stem)
-	})
-
-	return versions, nil
+	return stems, nil
 }
 
 // stateVersion builds one state version's summary from its meta sidecar and the

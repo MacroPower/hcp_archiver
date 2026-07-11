@@ -258,7 +258,7 @@ func newWorkspaceScreen(ws *Workspace) (screen, error) {
 		return nil, err
 	}
 
-	stateCount, err := ws.StateVersions()
+	stateNames, err := ws.StateVersionNames()
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +280,7 @@ func newWorkspaceScreen(ws *Workspace) (screen, error) {
 		},
 		{
 			title: "States",
-			desc:  countNoun(len(stateCount), "state version", "state versions"),
+			desc:  countNoun(len(stateNames), "state version", "state versions"),
 			open: func() (screen, error) {
 				return newStatesScreen(ws)
 			},
