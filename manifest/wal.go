@@ -83,11 +83,16 @@ func appendLog(path string, recs []walRecord) (int64, error) {
 }
 
 // replayLog reads the append-only log at path and returns its records in order
-// along with the log's size in bytes, or nil and zero when no log exists.
+// along with the committed log's size in bytes, or nil and zero when no log
+// exists.
 //
 // Bytes after the final newline are an incomplete trailing write with no commit
 // marker and are dropped; a complete, newline-terminated line that fails to
-// parse is genuine corruption and returns [ErrCorruptManifest].
+// parse is genuine corruption and returns [ErrCorruptManifest]. The reported
+// size excludes any such torn fragment so the shard's byte counter matches the
+// committed log on disk: the next append truncates the fragment before writing,
+// so counting it here would leave the counter permanently ahead of the file and
+// trip compaction early until the next fold reset it.
 func replayLog(path string) ([]walRecord, int64, error) {
 	//nolint:gosec // The log path is derived from the operator-chosen manifest path.
 	data, err := os.ReadFile(path)
@@ -101,9 +106,12 @@ func replayLog(path string) ([]walRecord, int64, error) {
 
 	// Split on the newline commit marker. The final element holds any bytes after
 	// the last newline: an incomplete trailing write, dropped by taking all but
-	// the last split.
+	// the last split. Its length is excluded from the committed size below.
 	lines := bytes.Split(data, []byte("\n"))
+	torn := lines[len(lines)-1]
 	lines = lines[:len(lines)-1]
+
+	committed := int64(len(data) - len(torn))
 
 	recs := make([]walRecord, 0, len(lines))
 
@@ -122,5 +130,5 @@ func replayLog(path string) ([]walRecord, int64, error) {
 		recs = append(recs, rec)
 	}
 
-	return recs, int64(len(data)), nil
+	return recs, committed, nil
 }
