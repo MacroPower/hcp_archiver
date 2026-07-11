@@ -8,6 +8,7 @@ const (
 	glyphDone      = "✓"
 	glyphErrored   = "✗"
 	glyphForbidden = "⊘"
+	glyphRetried   = "↻"
 )
 
 // Palette for the live view. In lipgloss v2 [lipgloss.Color] is a function
@@ -34,6 +35,9 @@ var (
 	styleErrored = lipgloss.NewStyle().Foreground(lipgloss.Color("#F7768E"))
 	// Forbidden count, in amber.
 	styleForbidden = lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68"))
+	// Retried count, in cyan: neither success nor failure, but re-work the run
+	// absorbed.
+	styleRetried = lipgloss.NewStyle().Foreground(lipgloss.Color("#7DCFFF"))
 
 	// Summary block heading.
 	styleSummaryHead = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7AA2F7"))

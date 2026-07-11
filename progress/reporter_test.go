@@ -51,6 +51,7 @@ func TestReporter_HumanLine(t *testing.T) {
 		Target:          "org/acme",
 		Done:            10,
 		Errored:         2,
+		Retried:         3,
 		BytesDownloaded: 2 * 1024 * 1024,
 	}}
 
@@ -75,6 +76,7 @@ func TestReporter_HumanLine(t *testing.T) {
 	assert.Contains(t, line, "target=org/acme")
 	assert.Contains(t, line, "done=10")
 	assert.Contains(t, line, "errored=2")
+	assert.Contains(t, line, "retried=3")
 	assert.Contains(t, line, "completed=7/20")
 	assert.Contains(t, line, "bytes=2.0 MiB")
 	assert.Contains(t, line, "elapsed=10s")
@@ -347,6 +349,7 @@ func TestReporter_Summary(t *testing.T) {
 		Errored:           4,
 		Forbidden:         6,
 		NotApplicable:     1,
+		Retried:           5,
 		BytesDownloaded:   5 * 1024 * 1024,
 	}}
 
@@ -370,6 +373,7 @@ func TestReporter_Summary(t *testing.T) {
 		assert.Contains(t, out, "skipped=2")
 		assert.Contains(t, out, "errored=4")
 		assert.Contains(t, out, "forbidden=6")
+		assert.Contains(t, out, "retried=5")
 		assert.Contains(t, out, "n/a=1")
 		assert.Contains(t, out, "total=116")
 		assert.Contains(t, out, "elapsed=3m20s")
@@ -389,13 +393,15 @@ func TestReporter_Summary(t *testing.T) {
 		require.NoError(t, r.Summary())
 
 		var line struct {
-			Summary bool `json:"summary"`
-			Total   int  `json:"total"`
+			Summary bool  `json:"summary"`
+			Total   int   `json:"total"`
+			Retried int64 `json:"retried"`
 		}
 
 		require.NoError(t, json.Unmarshal(buf.Bytes(), &line))
 		assert.True(t, line.Summary)
 		assert.Equal(t, 116, line.Total)
+		assert.Equal(t, int64(5), line.Retried)
 	})
 }
 

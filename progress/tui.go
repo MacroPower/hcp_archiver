@@ -35,6 +35,7 @@ const (
 	countDoneWidth      = 6
 	countErroredWidth   = 4
 	countForbiddenWidth = 4
+	countRetriedWidth   = 4
 )
 
 // maxTaskLines caps how many in-flight work items the panel lists, so a large
@@ -278,7 +279,7 @@ func (m *tuiModel) render(snap snapshot) string {
 	}
 
 	counts := fmt.Sprintf("  %s %s",
-		statusCounts(t, countDoneWidth, countErroredWidth, countForbiddenWidth),
+		statusCounts(t, countDoneWidth, countErroredWidth, countForbiddenWidth, countRetriedWidth),
 		styleMeta.Render(meta),
 	)
 
@@ -360,15 +361,16 @@ func (m *tuiModel) fit(line string) string {
 	return ansi.Truncate(line, m.width, "")
 }
 
-// statusCounts renders the styled done/errored/forbidden triple shared by the
-// live panel and the summary block, each count led by its status glyph. The
-// width arguments left-pad each count so the live panel's columns stay put as
-// values grow; pass zero widths for the summary's tight spacing.
-func statusCounts(t manifest.Tally, doneWidth, erroredWidth, forbiddenWidth int) string {
-	return fmt.Sprintf("%s %s %s",
+// statusCounts renders the styled done/errored/forbidden/retried counts shared
+// by the live panel and the summary block, each count led by its status glyph.
+// The width arguments left-pad each count so the live panel's columns stay put
+// as values grow; pass zero widths for the summary's tight spacing.
+func statusCounts(t manifest.Tally, doneWidth, erroredWidth, forbiddenWidth, retriedWidth int) string {
+	return fmt.Sprintf("%s %s %s %s",
 		styleDone.Render(fmt.Sprintf(glyphDone+" done %-*d", doneWidth, t.Done)),
 		styleErrored.Render(fmt.Sprintf(glyphErrored+" errored %-*d", erroredWidth, t.Errored)),
 		styleForbidden.Render(fmt.Sprintf(glyphForbidden+" forbidden %-*d", forbiddenWidth, t.Forbidden)),
+		styleRetried.Render(fmt.Sprintf(glyphRetried+" retried %-*d", retriedWidth, t.Retried)),
 	)
 }
 

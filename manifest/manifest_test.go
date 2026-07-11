@@ -292,6 +292,8 @@ func TestLedger_TallyMatchesRecords(t *testing.T) {
 	ledger.RecordNotApplicable("f")
 	ledger.RecordForbidden("g", errors.New("forbidden"))
 	ledger.AddBytes(42)
+	ledger.AddRetry()
+	ledger.AddRetry()
 
 	tally := ledger.Tally()
 	assert.Equal(t, 2, tally.Done)
@@ -301,7 +303,13 @@ func TestLedger_TallyMatchesRecords(t *testing.T) {
 	assert.Equal(t, 1, tally.AbsentPermanently)
 	assert.Equal(t, 1, tally.NotApplicable)
 	assert.Equal(t, int64(42), tally.BytesDownloaded)
-	assert.Equal(t, 7, tally.Total())
+	assert.Equal(t, int64(2), tally.Retried)
+	assert.Equal(t, 7, tally.Total(), "retries are activity, not objects, so they never inflate the total")
+
+	// Retries are a per-run activity figure like BytesDownloaded: a new run
+	// starts the count over rather than carrying prior-run re-work forward.
+	ledger.StartRun()
+	assert.Equal(t, int64(0), ledger.Tally().Retried)
 }
 
 func TestLedger_Failures(t *testing.T) {

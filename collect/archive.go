@@ -96,6 +96,8 @@ func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Conte
 		if err != nil {
 			return fmt.Errorf("archive %q: %w", relPath, err)
 		}
+
+		e.ledger.AddRetry()
 	}
 
 	return e.fail(ctx, relPath, cause)

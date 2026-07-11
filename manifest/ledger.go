@@ -72,6 +72,7 @@ type Ledger struct {
 	root             string
 	target           string
 	bytes            int64
+	retried          int64
 	compactThreshold int64
 	mu               sync.RWMutex
 	flushMu          sync.Mutex
@@ -558,6 +559,16 @@ func (l *Ledger) AddBytes(n int64) {
 	l.bytes += n
 }
 
+// AddRetry counts one in-run retry of a transient fetch failure, so progress
+// can show how much of the run is re-work absorbed by retrying rather than
+// surfacing as errored objects.
+func (l *Ledger) AddRetry() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.retried++
+}
+
 // SetTarget sets the current org, project, or workspace shown by progress.
 func (l *Ledger) SetTarget(target string) {
 	l.mu.Lock()
@@ -583,6 +594,7 @@ func (l *Ledger) Tally() Tally {
 		Errored:           l.cumulative[StatusErrored],
 		Forbidden:         l.cumulative[StatusForbidden],
 		NotApplicable:     l.cumulative[StatusNotApplicable],
+		Retried:           l.retried,
 		BytesDownloaded:   l.bytes,
 		Resumed:           l.resumed,
 	}
@@ -642,6 +654,7 @@ func (l *Ledger) StartRun() {
 	l.resumed = l.totalEntries() > 0
 	l.counts = make(map[Status]int)
 	l.bytes = 0
+	l.retried = 0
 	l.target = ""
 
 	for _, sh := range l.shards {

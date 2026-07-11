@@ -428,6 +428,9 @@ func TestEnvBlobRetry(t *testing.T) {
 			assert.Equal(t, tc.wantStatus, entry.Status)
 			assert.Equal(t, tc.wantTransient, entry.Transient)
 
+			assert.Equal(t, int64(tc.wantAttempts-1), ledger.Tally().Retried,
+				"each retry taken is tallied for progress")
+
 			if tc.wantContent != "" {
 				got, readErr := os.ReadFile(st.AbsPath(relPath))
 				require.NoError(t, readErr)

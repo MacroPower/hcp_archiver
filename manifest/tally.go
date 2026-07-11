@@ -27,6 +27,11 @@ type Tally struct {
 	Forbidden int `json:"forbidden"`
 	// NotApplicable counts objects currently recorded as [StatusNotApplicable].
 	NotApplicable int `json:"notApplicable"`
+	// Retried counts this run's in-run retries of transient fetch failures. It
+	// tallies retry attempts rather than objects, so one object retried twice
+	// counts twice, and stays per-run like BytesDownloaded: a retried fetch that
+	// succeeds settles its object done, so retries are activity, not a status.
+	Retried int64 `json:"retried"`
 	// BytesDownloaded is the total bytes downloaded this run.
 	BytesDownloaded int64 `json:"bytesDownloaded"`
 	// Resumed reports whether this run continued a manifest that a prior run had

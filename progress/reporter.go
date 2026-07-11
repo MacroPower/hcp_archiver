@@ -715,7 +715,7 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 		b.WriteString(" resumed=true")
 	}
 
-	fmt.Fprintf(&b, " done=%d errored=%d forbidden=%d", t.Done, t.Errored, t.Forbidden)
+	fmt.Fprintf(&b, " done=%d errored=%d forbidden=%d retried=%d", t.Done, t.Errored, t.Forbidden, t.Retried)
 
 	if summary {
 		fmt.Fprintf(
@@ -799,7 +799,7 @@ func (r *Reporter) summaryBlock(snap snapshot) string {
 		glyph + " " + styleSummaryHead.Render(title),
 		// Zero widths keep the summary's counts tight; the live panel pads them
 		// so its columns hold still.
-		statusCounts(t, 0, 0, 0),
+		statusCounts(t, 0, 0, 0, 0),
 		styleMeta.Render(meta),
 	}
 
@@ -840,6 +840,7 @@ type jsonLine struct {
 	Errored           int     `json:"errored"`
 	Forbidden         int     `json:"forbidden"`
 	NotApplicable     int     `json:"notApplicable"`
+	Retried           int64   `json:"retried"`
 	Total             int     `json:"total"`
 	BytesDownloaded   int64   `json:"bytesDownloaded"`
 	ElapsedSeconds    float64 `json:"elapsedSeconds"`
@@ -862,6 +863,7 @@ func (r *Reporter) writeJSON(snap snapshot, summary bool) error {
 		Errored:           t.Errored,
 		Forbidden:         t.Forbidden,
 		NotApplicable:     t.NotApplicable,
+		Retried:           t.Retried,
 		Total:             t.Total(),
 		BytesDownloaded:   t.BytesDownloaded,
 		ElapsedSeconds:    snap.elapsed.Seconds(),
