@@ -290,9 +290,10 @@ func redactValue(fv reflect.Value) {
 }
 
 // setString overwrites a string or *string field with s, allocating a pointer
-// when needed so a nil secret still records its existence as redacted. Any other
-// kind is zeroed rather than left as it was, so a Token, Secret, or HMACKey of
-// an unexpected type fails closed instead of surviving in cleartext, matching
+// when needed so a nil secret still records its existence as redacted. An
+// interface takes s when a string satisfies it, else is zeroed; any other kind
+// is zeroed rather than left as it was, so a Token, Secret, or HMACKey of an
+// unexpected type fails closed instead of surviving in cleartext, matching
 // [redactValue]. Its only caller guarantees the field is settable.
 func setString(fv reflect.Value, s string) {
 	switch fv.Kind() {
@@ -308,6 +309,15 @@ func setString(fv reflect.Value, s string) {
 		p := reflect.New(fv.Type().Elem())
 		p.Elem().SetString(s)
 		fv.Set(p)
+
+	case reflect.Interface:
+		if reflect.TypeFor[string]().Implements(fv.Type()) {
+			fv.Set(reflect.ValueOf(s))
+
+			return
+		}
+
+		fv.Set(reflect.Zero(fv.Type()))
 
 	default:
 		fv.Set(reflect.Zero(fv.Type()))
