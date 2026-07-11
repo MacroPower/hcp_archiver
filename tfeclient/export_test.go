@@ -1,6 +1,15 @@
 package tfeclient
 
-import "net/http"
+import (
+	"io"
+	"net/http"
+)
+
+// NewLogReader exposes newLogReader to the external test package, wrapping rc in
+// the on-the-fly STX/ETX marker-trimming reader.
+func NewLogReader(rc io.ReadCloser) io.ReadCloser {
+	return newLogReader(rc)
+}
 
 // ResolveHTTPClient builds the HTTP client [New] would construct from opts,
 // exposing the response-header-timeout wiring to the external test package

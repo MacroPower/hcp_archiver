@@ -139,13 +139,13 @@ func (c *Collector) archivePlan(ctx context.Context, project, ws string, run *tf
 		return err
 	}
 
-	// The log is downloaded whole from its signed URL rather than streamed
-	// through the SDK's chunked log reader, whose request-per-few-kilobytes
-	// pacing makes a large finished log take minutes (see
-	// [tfeclient.Client.DownloadPlanLog]).
-	err = c.bytes(ctx, st.RunFile(project, ws, run.ID, "plan.log"),
-		func(ctx context.Context) ([]byte, error) {
-			return c.env.Client().DownloadPlanLog(ctx, planID)
+	// The log streams whole from its signed URL rather than through the SDK's
+	// chunked log reader, whose request-per-few-kilobytes pacing makes a large
+	// finished log take minutes; its STX/ETX framing is trimmed on the fly (see
+	// [tfeclient.Client.OpenPlanLog]).
+	err = c.blob(ctx, st.RunFile(project, ws, run.ID, "plan.log"),
+		func(ctx context.Context) (io.ReadCloser, error) {
+			return c.env.Client().OpenPlanLog(ctx, planID)
 		})
 	if err != nil {
 		return err
@@ -175,10 +175,10 @@ func (c *Collector) archiveApply(ctx context.Context, project, ws string, run *t
 		return err
 	}
 
-	// Downloaded whole from its signed URL for the same reason as the plan log.
-	return c.bytes(ctx, st.RunFile(project, ws, run.ID, "apply.log"),
-		func(ctx context.Context) ([]byte, error) {
-			return c.env.Client().DownloadApplyLog(ctx, applyID)
+	// Streams whole from its signed URL for the same reason as the plan log.
+	return c.blob(ctx, st.RunFile(project, ws, run.ID, "apply.log"),
+		func(ctx context.Context) (io.ReadCloser, error) {
+			return c.env.Client().OpenApplyLog(ctx, applyID)
 		})
 }
 

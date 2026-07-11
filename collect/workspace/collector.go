@@ -265,9 +265,3 @@ func (c *Collector) blob(
 		return open(ctx)
 	}))
 }
-
-// bytes buffers a raw artifact fetched through fetch into an immutable blob at
-// relPath, running fetch directly (it already routes through the shared client).
-func (c *Collector) bytes(ctx context.Context, relPath string, fetch func(context.Context) ([]byte, error)) error {
-	return wrapArchive(relPath, c.env.Bytes(ctx, relPath, fetch))
-}

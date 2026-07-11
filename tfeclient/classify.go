@@ -15,9 +15,9 @@ var (
 	// ErrMissingToken is returned by [New] when no API token was supplied.
 	ErrMissingToken = errors.New("token is required")
 
-	// ErrMissingLogURL is returned by [Client.DownloadPlanLog] and
-	// [Client.DownloadApplyLog] when the read plan or apply carries no signed
-	// log URL to fetch.
+	// ErrMissingLogURL is returned by [Client.OpenPlanLog] and
+	// [Client.OpenApplyLog] when the read plan or apply carries no signed log
+	// URL to fetch.
 	ErrMissingLogURL = errors.New("log URL is missing")
 
 	// The errForbidden403 sentinel is joined with a raw [tfe.ClientRequest.DoRaw]

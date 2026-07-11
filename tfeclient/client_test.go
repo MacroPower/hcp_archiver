@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/hashicorp/go-tfe"
@@ -418,7 +419,7 @@ func newServerClientURL(t *testing.T, mux *http.ServeMux) (*tfeclient.Client, st
 	return c, srv.URL
 }
 
-func TestDownloadPlanLog(t *testing.T) {
+func TestOpenPlanLog(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
@@ -491,7 +492,7 @@ func TestDownloadPlanLog(t *testing.T) {
 
 			c := newServerClient(t, mux)
 
-			got, err := c.DownloadPlanLog(t.Context(), "plan-1")
+			r, err := c.OpenPlanLog(t.Context(), "plan-1")
 
 			if tc.err != nil {
 				require.ErrorIs(t, err, tc.err)
@@ -500,13 +501,18 @@ func TestDownloadPlanLog(t *testing.T) {
 			}
 
 			require.NoError(t, err)
+
+			got, err := io.ReadAll(r)
+			require.NoError(t, err)
+			require.NoError(t, r.Close())
+
 			assert.Equal(t, tc.want, string(got))
 			assert.Equal(t, int64(1), artifactHits.Load(), "the whole log downloads in one request")
 		})
 	}
 }
 
-func TestDownloadApplyLog(t *testing.T) {
+func TestOpenApplyLog(t *testing.T) {
 	t.Parallel()
 
 	mux := http.NewServeMux()
@@ -522,7 +528,7 @@ func TestDownloadApplyLog(t *testing.T) {
 	})
 	mux.HandleFunc("/artifact/apply-1", func(w http.ResponseWriter, r *http.Request) {
 		// Mirrors archivist's rejection of the JSON:API accept header; see
-		// TestDownloadPlanLog.
+		// TestOpenPlanLog.
 		if !strings.Contains(r.Header.Get("Accept"), "*/*") {
 			w.WriteHeader(http.StatusBadRequest)
 
@@ -537,10 +543,76 @@ func TestDownloadApplyLog(t *testing.T) {
 
 	c := newServerClient(t, mux)
 
-	got, err := c.DownloadApplyLog(t.Context(), "apply-1")
-
+	r, err := c.OpenApplyLog(t.Context(), "apply-1")
 	require.NoError(t, err)
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+
 	assert.Equal(t, "apply output", string(got))
+}
+
+func TestLogReader(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		in   string
+		want string
+	}{
+		"framed trim":              {in: "\x02plan output\x03", want: "plan output"},
+		"unframed passthrough":     {in: "plain output", want: "plain output"},
+		"etx without stx is kept":  {in: "tail\x03", want: "tail\x03"},
+		"interior etx unframed":    {in: "a\x03b", want: "a\x03b"},
+		"empty":                    {in: "", want: ""},
+		"framed empty":             {in: "\x02\x03", want: ""},
+		"stx only":                 {in: "\x02", want: ""},
+		"interior etx framed":      {in: "\x02a\x03b\x03", want: "a\x03b"},
+		"double trailing etx kept": {in: "\x02abc\x03\x03", want: "abc\x03"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// Whole read.
+			r := tfeclient.NewLogReader(io.NopCloser(strings.NewReader(tc.in)))
+
+			got, err := io.ReadAll(r)
+			require.NoError(t, err)
+			require.NoError(t, r.Close())
+			assert.Equal(t, tc.want, string(got))
+
+			// One byte at a time over a one-byte-at-a-time underlying reader, to
+			// exercise the hold-back across chunk boundaries in both directions.
+			chunked := tfeclient.NewLogReader(io.NopCloser(iotest.OneByteReader(strings.NewReader(tc.in))))
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, readByteAtATime(t, chunked))
+			require.NoError(t, chunked.Close())
+		})
+	}
+}
+
+// readByteAtATime drains r one byte per Read call, so a reader is exercised at
+// the smallest possible buffer size.
+func readByteAtATime(t *testing.T, r io.Reader) string {
+	t.Helper()
+
+	var out []byte
+
+	buf := make([]byte, 1)
+
+	for {
+		n, err := r.Read(buf)
+		out = append(out, buf[:n]...)
+
+		if errors.Is(err, io.EOF) {
+			return string(out)
+		}
+
+		require.NoError(t, err)
+	}
 }
 
 func TestOpenState(t *testing.T) {

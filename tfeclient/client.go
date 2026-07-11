@@ -1,8 +1,9 @@
 package tfeclient
 
 import (
-	"bytes"
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -455,6 +456,98 @@ func (c *Client) OpenPlanJSON(ctx context.Context, planID string) (io.ReadCloser
 	return c.openRaw(ctx, "download plan JSON", req)
 }
 
+// OpenPlanLog opens a plan's full log by its id for streaming to disk, returning
+// the live response body the caller must close.
+//
+// The plan is read first so its signed log URL is fresh, then the whole log is
+// opened in one request. The chunked [tfe.LogReader] behind the SDK's Logs
+// methods exists to tail a live run: it consumes only the first few kilobytes of
+// each response before issuing another request, which makes a large finished log
+// take minutes. An archived run is terminal, so its log is complete and one
+// streamed read suffices; the stream's STX/ETX framing is trimmed on the fly by
+// a [logReader]. Returns an error wrapping [ErrMissingLogURL] when the plan
+// carries no log URL.
+func (c *Client) OpenPlanLog(ctx context.Context, planID string) (io.ReadCloser, error) {
+	var logURL string
+
+	err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
+		p, e := tc.Plans.Read(ctx, planID)
+		if e != nil {
+			return fmt.Errorf("read plan: %w", e)
+		}
+
+		logURL = p.LogReadURL
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	r, err := c.openLog(ctx, logURL)
+	if err != nil {
+		return nil, fmt.Errorf("open plan %s log: %w", planID, err)
+	}
+
+	return r, nil
+}
+
+// OpenApplyLog opens an apply's full log by its id for streaming to disk, with
+// the same single-request semantics as [Client.OpenPlanLog]. Returns an error
+// wrapping [ErrMissingLogURL] when the apply carries no log URL.
+func (c *Client) OpenApplyLog(ctx context.Context, applyID string) (io.ReadCloser, error) {
+	var logURL string
+
+	err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
+		a, e := tc.Applies.Read(ctx, applyID)
+		if e != nil {
+			return fmt.Errorf("read apply: %w", e)
+		}
+
+		logURL = a.LogReadURL
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	r, err := c.openLog(ctx, logURL)
+	if err != nil {
+		return nil, fmt.Errorf("open apply %s log: %w", applyID, err)
+	}
+
+	return r, nil
+}
+
+// openLog opens the whole log at logURL for streaming through the shared client,
+// wrapping the body in a [logReader] that trims the STX/ETX framing on the fly.
+// A missing URL is [ErrMissingLogURL]; a nil body (a 304) passes through as a
+// nil reader for the archive path to record as a settled gap.
+func (c *Client) openLog(ctx context.Context, logURL string) (io.ReadCloser, error) {
+	if logURL == "" {
+		return nil, ErrMissingLogURL
+	}
+
+	req, err := c.tfe.NewRequest("GET", logURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("new log request: %w", err)
+	}
+
+	// The SDK stamps every GET with the JSON:API accept header, but the signed
+	// URL is served by archivist, which answers 400 Bad Request to any request
+	// that does not accept text/plain. Its own log reader sends no accept header
+	// at all; match that permissively.
+	req.Header.Set("Accept", "text/plain, */*")
+
+	body, err := c.openRaw(ctx, "get log", req)
+	if err != nil {
+		return nil, err
+	}
+
+	return newLogReader(body), nil
+}
+
 // openRaw sends the prepared GET through the shared client and returns the live
 // response body from [tfe.ClientRequest.DoRaw]. It suits large artifacts that
 // stream to disk: the gate slot [Client.Do] holds is released when this returns
@@ -491,123 +584,113 @@ func (c *Client) openRaw(ctx context.Context, action string, req *tfe.ClientRequ
 	return body, nil
 }
 
-// DownloadPlanLog downloads a plan's full log by its id.
+// logReader trims the STX/ETX control characters framing a completed log stream
+// as it flows, so a directly streamed log stays byte-identical to one archived
+// through the SDK's chunked [tfe.LogReader], which strips the framing while
+// chunking. A leading STX is dropped, and a trailing ETX is dropped only when
+// that leading STX was present, so a stream that never adopted the framing (a
+// bare interior or trailing ETX with no leading STX) passes through untouched.
 //
-// The plan is read first so its signed log URL is fresh, then the whole log
-// object is fetched in one request. The chunked [tfe.LogReader] behind the
-// SDK's Logs methods exists to tail a live run: it consumes only the first few
-// kilobytes of each response before issuing another request, which makes a
-// large finished log take minutes. An archived run is terminal, so its log is
-// complete and one read suffices. Returns an error wrapping [ErrMissingLogURL]
-// when the plan carries no log URL.
-func (c *Client) DownloadPlanLog(ctx context.Context, planID string) ([]byte, error) {
-	var logURL string
-
-	err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
-		p, e := tc.Plans.Read(ctx, planID)
-		if e != nil {
-			return fmt.Errorf("read plan: %w", e)
-		}
-
-		logURL = p.LogReadURL
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := c.downloadLog(ctx, logURL)
-	if err != nil {
-		return nil, fmt.Errorf("download plan %s log: %w", planID, err)
-	}
-
-	return data, nil
+// It peeks one byte past a candidate trailing ETX to tell a real end-of-stream
+// marker from an interior one, so nothing but the framing bytes is dropped,
+// without buffering the whole log. Create instances with [newLogReader].
+type logReader struct {
+	rc      io.ReadCloser
+	br      *bufio.Reader
+	started bool
+	framed  bool
 }
 
-// DownloadApplyLog downloads an apply's full log by its id, with the same
-// single-request semantics as [Client.DownloadPlanLog]. Returns an error
-// wrapping [ErrMissingLogURL] when the apply carries no log URL.
-func (c *Client) DownloadApplyLog(ctx context.Context, applyID string) ([]byte, error) {
-	var logURL string
-
-	err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
-		a, e := tc.Applies.Read(ctx, applyID)
-		if e != nil {
-			return fmt.Errorf("read apply: %w", e)
-		}
-
-		logURL = a.LogReadURL
-
+// newLogReader wraps rc in a [logReader]. A nil rc (a 304 with no body) yields a
+// nil reader, matching the streaming archive path's empty-artifact handling.
+func newLogReader(rc io.ReadCloser) io.ReadCloser {
+	if rc == nil {
 		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 
-	data, err := c.downloadLog(ctx, logURL)
-	if err != nil {
-		return nil, fmt.Errorf("download apply %s log: %w", applyID, err)
-	}
-
-	return data, nil
+	return &logReader{rc: rc, br: bufio.NewReader(rc)}
 }
 
-// downloadLog fetches the whole log object at logURL in one request through
-// the shared limiter, using the go-tfe request machinery so retries and error
-// classification match every other request.
-func (c *Client) downloadLog(ctx context.Context, logURL string) ([]byte, error) {
-	if logURL == "" {
-		return nil, ErrMissingLogURL
-	}
+// Read fills p with the next trimmed log bytes.
+func (l *logReader) Read(p []byte) (int, error) {
+	n := 0
 
-	var data []byte
-
-	err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
-		req, e := tc.NewRequest("GET", logURL, nil)
-		if e != nil {
-			return fmt.Errorf("new log request: %w", e)
+	for n < len(p) {
+		b, err := l.next()
+		if err != nil {
+			return n, err
 		}
 
-		// The SDK stamps every GET with the JSON:API accept header, but the
-		// signed URL is served by archivist, which answers 400 Bad Request to
-		// any request that does not accept text/plain. Its own log reader
-		// sends no accept header at all; match that permissively.
-		req.Header.Set("Accept", "text/plain, */*")
-
-		var buf bytes.Buffer
-
-		e = req.Do(ctx, &buf)
-		if e != nil {
-			return fmt.Errorf("get log: %w", e)
-		}
-
-		data = trimLogMarkers(buf.Bytes())
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
+		p[n] = b
+		n++
 	}
 
-	return data, nil
+	return n, nil
 }
 
-// trimLogMarkers strips the STX/ETX control characters framing a completed
-// log stream. [tfe.LogReader] removes them while chunking, so trimming keeps
-// a directly downloaded log byte-identical to one archived through it. The
-// ETX is only trimmed behind an STX, mirroring the reader, so a stream that
-// never adopted the framing passes through untouched.
-func trimLogMarkers(b []byte) []byte {
-	if len(b) == 0 || b[0] != 0x02 {
-		return b
+// next returns the next output byte, or [io.EOF] once the trimmed stream is
+// spent. It drops a leading STX on the first call, and drops an ETX only when it
+// is both framed and the final byte, peeking one byte ahead to tell a trailing
+// ETX from an interior one.
+func (l *logReader) next() (byte, error) {
+	if !l.started {
+		err := l.start()
+		if err != nil {
+			return 0, err
+		}
 	}
 
-	b = b[1:]
-
-	if n := len(b); n > 0 && b[n-1] == 0x03 {
-		b = b[:n-1]
+	b, err := l.readByte()
+	if err != nil {
+		return 0, err
 	}
 
-	return b
+	// A framed stream's trailing ETX is dropped; an interior ETX (more bytes
+	// still follow) is kept.
+	if l.framed && b == 0x03 {
+		_, peekErr := l.br.Peek(1)
+		if errors.Is(peekErr, io.EOF) {
+			return 0, io.EOF
+		}
+	}
+
+	return b, nil
+}
+
+// start consumes the first byte, recording whether the stream is STX-framed and
+// putting a non-STX first byte back for the normal read path.
+func (l *logReader) start() error {
+	l.started = true
+
+	b, err := l.readByte()
+	if err != nil {
+		return err
+	}
+
+	// A leading STX marks a framed stream and is dropped; any other first byte
+	// is real content, so put it back for the read below.
+	if b == 0x02 {
+		l.framed = true
+
+		return nil
+	}
+
+	err = l.br.UnreadByte()
+	if err != nil {
+		return err //nolint:wrapcheck // A transparent reader wrapper.
+	}
+
+	return nil
+}
+
+// readByte reads one raw byte from the underlying log body.
+func (l *logReader) readByte() (byte, error) {
+	b, err := l.br.ReadByte()
+
+	return b, err //nolint:wrapcheck // A transparent reader wrapper.
+}
+
+// Close closes the underlying log body.
+func (l *logReader) Close() error {
+	return l.rc.Close() //nolint:wrapcheck // A transparent reader wrapper.
 }
