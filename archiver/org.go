@@ -69,7 +69,7 @@ func listOrgNames(ctx context.Context, client *tfeclient.Client) ([]string, erro
 // child context, drives the collectors with the parent ctx so an interrupt
 // cancels the work, and then closes the run: it writes the run record, stops
 // the goroutines, flushes the ledger a final time, and prints the summary.
-func (a *Archiver) runOrg(ctx context.Context, orgName string) error {
+func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, error) {
 	st := store.New(filepath.Join(a.cfg.OutputDir, orgName))
 
 	ledger, err := manifest.Load(
@@ -77,7 +77,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) error {
 		manifest.WithRecheckAbsent(a.cfg.RecheckAbsent),
 	)
 	if err != nil {
-		return fmt.Errorf("load manifest: %w", err)
+		return manifest.Tally{}, fmt.Errorf("load manifest: %w", err)
 	}
 
 	env := collect.NewEnv(a.client, st, ledger)
@@ -139,7 +139,24 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) error {
 		}
 	}()
 
-	return a.collectOrg(ctx, env, reporter, orgName)
+	// Capture the final per-status counts before the deferred close runs; the
+	// collectors are done once collectOrg returns, so the tally is settled. Run
+	// uses it to tell an organization that captured nothing but failures from a
+	// clean one, since the collectors record per-object failures in the ledger
+	// and return non-nil only on cancellation.
+	collectErr := a.collectOrg(ctx, env, reporter, orgName)
+
+	return ledger.Tally(), collectErr
+}
+
+// orgWhollyFailed reports whether an organization's run captured nothing yet
+// recorded failures: no object settled done while at least one errored or was
+// forbidden. An empty organization (nothing recorded) is not a failure, and a
+// run that captured anything is a success even if some objects failed, so a
+// scheduled run reports failure only when the archive is empty and broken rather
+// than merely partial.
+func orgWhollyFailed(t manifest.Tally) bool {
+	return t.Done == 0 && (t.Errored > 0 || t.Forbidden > 0)
 }
 
 // flushLoop flushes the ledger on a fixed cadence until ctx is done, then

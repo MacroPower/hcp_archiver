@@ -2,6 +2,7 @@ package archiver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,13 @@ import (
 // defaultFlushInterval is the cadence at which each organization's ledger is
 // flushed durably to disk while its collectors run.
 const defaultFlushInterval = 10 * time.Second
+
+// ErrRunIncomplete reports that the run finished without archiving every
+// organization: at least one returned a non-cancellation error or recorded only
+// failures with nothing captured. The per-organization and per-object details
+// are logged as the run proceeds; this sentinel lets the command exit non-zero
+// so a scheduled run does not report success over an empty or broken archive.
+var ErrRunIncomplete = errors.New("archive run incomplete")
 
 // Archiver drives a single archive run across one or more organizations.
 //
@@ -135,9 +143,11 @@ func New(cfg *config.Config, opts ...Option) *Archiver {
 // archives each sequentially. The orgs run under a cancelable child of ctx
 // whose cancel the reporter's terminal UI holds, so an in-UI ctrl+c aborts the
 // whole run exactly as an external SIGINT does. A non-cancellation failure of
-// one organization is logged and does not abort the others; a cancellation
-// aborts the run and is returned wrapped so the command can map it to a graceful
-// exit. Run returns nil on clean completion.
+// one organization is logged and does not abort the others, but leaves the run
+// incomplete; a cancellation aborts the run and is returned wrapped so the
+// command can map it to a graceful exit. Run returns nil on clean completion and
+// [ErrRunIncomplete] when any organization returned a non-cancellation error or
+// captured nothing but failures.
 func (a *Archiver) Run(ctx context.Context) error {
 	err := a.cfg.Validate()
 	if err != nil {
@@ -206,6 +216,8 @@ func (a *Archiver) Run(ctx context.Context) error {
 		return fmt.Errorf("resolve organizations: %w", err)
 	}
 
+	incomplete := false
+
 	for _, orgName := range orgs {
 		if runCtx.Err() != nil {
 			return fmt.Errorf("archive run: %w", runCtx.Err())
@@ -215,7 +227,7 @@ func (a *Archiver) Run(ctx context.Context) error {
 			slog.String("org", orgName),
 		)
 
-		err = a.runOrg(runCtx, orgName)
+		tally, err := a.runOrg(runCtx, orgName)
 		if err != nil {
 			if runCtx.Err() != nil {
 				return fmt.Errorf("archive run: %w", runCtx.Err())
@@ -226,12 +238,32 @@ func (a *Archiver) Run(ctx context.Context) error {
 				slog.String("error", err.Error()),
 			)
 
+			incomplete = true
+
+			continue
+		}
+
+		if orgWhollyFailed(tally) {
+			a.logger.LogAttrs(runCtx, slog.LevelError, "org_archive_incomplete",
+				slog.String("org", orgName),
+				slog.Int("errored", tally.Errored),
+				slog.Int("forbidden", tally.Forbidden),
+			)
+
+			incomplete = true
+
 			continue
 		}
 
 		a.logger.LogAttrs(runCtx, slog.LevelInfo, "org_archive_finish",
 			slog.String("org", orgName),
 		)
+	}
+
+	// Every organization was tried; a non-cancellation failure of one does not
+	// abort the rest, but it must not be reported as a clean run either.
+	if incomplete {
+		return ErrRunIncomplete
 	}
 
 	return nil
