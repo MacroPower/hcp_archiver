@@ -122,8 +122,8 @@ func (c *Collector) collectWorkspaceSettings(ctx context.Context, project string
 }
 
 // collectReadme archives the workspace readme as raw markdown. A workspace with
-// no readme yields an empty reader, which records an empty file rather than a
-// gap.
+// no readme yields an empty (or nil) reader, which [collect.Env.Blob] settles as
+// a not-applicable gap, writing no readme.md file.
 func (c *Collector) collectReadme(ctx context.Context, project string, ws *tfe.Workspace) error {
 	st := c.env.Store()
 	wsID := ws.ID
