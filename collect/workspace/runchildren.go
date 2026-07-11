@@ -61,8 +61,8 @@ func (c *Collector) archiveConfigurationVersion(ctx context.Context, project, ws
 		return err
 	}
 
-	return c.bytes(ctx, st.ConfigVersionTarball(cvID), func(ctx context.Context) ([]byte, error) {
-		return c.env.Client().DownloadConfigurationVersion(ctx, cvID)
+	return c.blob(ctx, st.ConfigVersionTarball(cvID), func(ctx context.Context) (io.ReadCloser, error) {
+		return c.env.Client().OpenConfigurationVersion(ctx, cvID)
 	})
 }
 
@@ -123,8 +123,9 @@ func (c *Collector) archiveConfigVersionIngress(
 //
 // The plan is already hydrated on the run by the pager's include but renders as a
 // bare id ref on run.json, so its summary attributes (resource counts, change
-// flags) are archived directly. The structured plan.json (the full ReadJSONOutput
-// artifact) is kept alongside as before.
+// flags) are archived directly. The structured plan.json (the plans/{id}/json-output
+// artifact) is streamed alongside; a run that produced none answers an empty body
+// that settles a not-applicable gap.
 func (c *Collector) archivePlan(ctx context.Context, project, ws string, run *tfe.Run) error {
 	if run.Plan == nil {
 		return nil
@@ -150,9 +151,9 @@ func (c *Collector) archivePlan(ctx context.Context, project, ws string, run *tf
 		return err
 	}
 
-	return c.bytesFromDo(ctx, st.RunFile(project, ws, run.ID, "plan.json"),
-		func(ctx context.Context, tc *tfe.Client) ([]byte, error) {
-			return tc.Plans.ReadJSONOutput(ctx, planID)
+	return c.blob(ctx, st.RunFile(project, ws, run.ID, "plan.json"),
+		func(ctx context.Context) (io.ReadCloser, error) {
+			return c.env.Client().OpenPlanJSON(ctx, planID)
 		})
 }
 

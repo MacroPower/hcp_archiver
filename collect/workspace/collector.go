@@ -249,27 +249,20 @@ func (c *Collector) logBlob(
 	}))
 }
 
-// bytesFromDo buffers a raw artifact fetched through fetch into an immutable
-// blob at relPath.
-func (c *Collector) bytesFromDo(
+// blob streams a raw artifact opened through open into an immutable blob at
+// relPath, calling open directly: the [tfeclient.Client] Open methods already
+// route through the shared client and own their request gate, so wrapping open
+// in another [tfeclient.Client.Do] would re-acquire a slot while holding one and
+// deadlock at small pool sizes. The reader that open returns streams to disk
+// through [collect.Env.Blob] without buffering, and a nil reader settles a
+// not-applicable gap.
+func (c *Collector) blob(
 	ctx context.Context,
 	relPath string,
-	fetch func(context.Context, *tfe.Client) ([]byte, error),
+	open func(context.Context) (io.ReadCloser, error),
 ) error {
-	return wrapArchive(relPath, c.env.Bytes(ctx, relPath, func(ctx context.Context) ([]byte, error) {
-		var b []byte
-
-		err := c.env.Client().Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
-			bb, e := fetch(ctx, tc)
-			b = bb
-
-			return e
-		})
-		if err != nil {
-			return nil, fmt.Errorf("fetch %q: %w", relPath, err)
-		}
-
-		return b, nil
+	return wrapArchive(relPath, c.env.Blob(ctx, relPath, func(ctx context.Context) (io.Reader, error) {
+		return open(ctx)
 	}))
 }
 

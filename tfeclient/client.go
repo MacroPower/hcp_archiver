@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync/atomic"
 	"time"
 
@@ -405,42 +407,80 @@ func Paginate[T any](
 	return all, nil
 }
 
-// DownloadState downloads a state version blob from its signed download URL
-// (the raw or JSON-format URL carried on a [tfe.StateVersion]). The go-tfe
-// method buffers the whole blob, so this returns bytes.
-func (c *Client) DownloadState(ctx context.Context, downloadURL string) ([]byte, error) {
-	var data []byte
-
-	err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
-		var e error
-
-		data, e = tc.StateVersions.Download(ctx, downloadURL)
-		if e != nil {
-			return fmt.Errorf("download state version: %w", e)
-		}
-
-		return nil
-	})
+// OpenState opens a state version blob at its signed download URL for streaming
+// to disk, returning the live response body the caller must close. The URL is
+// the raw or JSON-format download URL carried on a [tfe.StateVersion]. It
+// replaces the SDK's buffering [tfe.StateVersions.Download], releasing the
+// request gate at the response headers rather than holding it for the whole
+// transfer, so peak memory stays bounded regardless of the blob's size.
+func (c *Client) OpenState(ctx context.Context, downloadURL string) (io.ReadCloser, error) {
+	req, err := c.tfe.NewRequest("GET", downloadURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("new state request: %w", err)
 	}
 
-	return data, nil
+	// Match the SDK's Download, whose signed URL is served as application/json.
+	req.Header.Set("Accept", "application/json")
+
+	return c.openRaw(ctx, "download state version", req)
 }
 
-// DownloadConfigurationVersion downloads a configuration version tarball
-// (tar.gz) by its id. The go-tfe method buffers the whole tarball, so this
-// returns bytes.
-func (c *Client) DownloadConfigurationVersion(ctx context.Context, cvID string) ([]byte, error) {
-	var data []byte
+// OpenConfigurationVersion opens a configuration version tarball (tar.gz) by its
+// id for streaming to disk, returning the live response body the caller must
+// close. It replaces the SDK's buffering [tfe.ConfigurationVersions.Download].
+func (c *Client) OpenConfigurationVersion(ctx context.Context, cvID string) (io.ReadCloser, error) {
+	u := fmt.Sprintf("configuration-versions/%s/download", url.PathEscape(cvID))
 
-	err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
-		var e error
+	req, err := c.tfe.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("new configuration version request: %w", err)
+	}
 
-		data, e = tc.ConfigurationVersions.Download(ctx, cvID)
+	return c.openRaw(ctx, "download configuration version", req)
+}
+
+// OpenPlanJSON opens a plan's structured JSON output (the plans/{id}/json-output
+// artifact) by its id for streaming to disk, returning the live response body
+// the caller must close. It replaces the SDK's buffering
+// [tfe.Plans.ReadJSONOutput]. A run that produced no JSON plan answers 204 No
+// Content, surfaced as an empty body the archive path records as a settled gap.
+func (c *Client) OpenPlanJSON(ctx context.Context, planID string) (io.ReadCloser, error) {
+	u := fmt.Sprintf("plans/%s/json-output", url.PathEscape(planID))
+
+	req, err := c.tfe.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("new plan JSON request: %w", err)
+	}
+
+	return c.openRaw(ctx, "download plan JSON", req)
+}
+
+// openRaw sends the prepared GET through the shared client and returns the live
+// response body from [tfe.ClientRequest.DoRaw]. It suits large artifacts that
+// stream to disk: the gate slot [Client.Do] holds is released when this returns
+// at the response headers, so the body transfers without occupying it.
+//
+// DoRaw skips the SDK's response-code check, surfacing a non-2xx only as a
+// generic "error HTTP response: N". The status is captured through a response
+// header hook and translated by [statusError] so [Classify] yields the same
+// [Kind] the SDK's checked request path yields (a 404 stays [KindTerminal], a
+// 403 [KindForbidden]). A 304 yields a nil body.
+func (c *Client) openRaw(ctx context.Context, action string, req *tfe.ClientRequest) (io.ReadCloser, error) {
+	var body io.ReadCloser
+
+	err := c.Do(ctx, func(ctx context.Context, _ *tfe.Client) error {
+		var status int
+
+		ctx = tfe.ContextWithResponseHeaderHook(ctx, func(s int, _ http.Header) {
+			status = s
+		})
+
+		rc, e := req.DoRaw(ctx)
 		if e != nil {
-			return fmt.Errorf("download configuration version: %w", e)
+			return fmt.Errorf("%s: %w", action, statusError(status, e))
 		}
+
+		body = rc
 
 		return nil
 	})
@@ -448,7 +488,7 @@ func (c *Client) DownloadConfigurationVersion(ctx context.Context, cvID string) 
 		return nil, err
 	}
 
-	return data, nil
+	return body, nil
 }
 
 // DownloadPlanLog downloads a plan's full log by its id.

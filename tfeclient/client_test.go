@@ -395,6 +395,16 @@ func TestDoGate(t *testing.T) {
 func newServerClient(t *testing.T, mux *http.ServeMux) *tfeclient.Client {
 	t.Helper()
 
+	c, _ := newServerClientURL(t, mux)
+
+	return c
+}
+
+// newServerClientURL is [newServerClient] that also returns the server's base
+// URL, for exercising the Open methods that fetch an absolute signed URL.
+func newServerClientURL(t *testing.T, mux *http.ServeMux) (*tfeclient.Client, string) {
+	t.Helper()
+
 	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -405,7 +415,7 @@ func newServerClient(t *testing.T, mux *http.ServeMux) *tfeclient.Client {
 	c, err := tfeclient.New(tfeclient.WithToken("test-token"), tfeclient.WithAddress(srv.URL))
 	require.NoError(t, err)
 
-	return c
+	return c, srv.URL
 }
 
 func TestDownloadPlanLog(t *testing.T) {
@@ -531,6 +541,141 @@ func TestDownloadApplyLog(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "apply output", string(got))
+}
+
+func TestOpenState(t *testing.T) {
+	t.Parallel()
+
+	// A raw payload with an embedded NUL proves the blob streams byte-for-byte,
+	// unparsed and untransformed, rather than round-tripping through a decoder.
+	const body = "raw state blob\x00\x01\x02 bytes"
+
+	var hits atomic.Int64
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/dl/state", func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+
+		assert.Equal(t, "application/json", r.Header.Get("Accept"))
+
+		_, werr := io.WriteString(w, body)
+		if werr != nil {
+			return
+		}
+	})
+
+	c, base := newServerClientURL(t, mux)
+
+	r, err := c.OpenState(t.Context(), base+"/dl/state")
+	require.NoError(t, err)
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+
+	assert.Equal(t, body, string(got))
+	assert.Equal(t, int64(1), hits.Load(), "the blob streams in one request")
+}
+
+func TestOpenConfigurationVersion(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "\x1f\x8b\x08 fake tar.gz \x00\x01\x02"
+
+	var hits atomic.Int64
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/configuration-versions/cv-1/download", func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+
+		_, werr := io.WriteString(w, tarball)
+		if werr != nil {
+			return
+		}
+	})
+
+	c := newServerClient(t, mux)
+
+	r, err := c.OpenConfigurationVersion(t.Context(), "cv-1")
+	require.NoError(t, err)
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+
+	assert.Equal(t, tarball, string(got))
+	assert.Equal(t, int64(1), hits.Load(), "the tarball streams in one request")
+}
+
+func TestOpenPlanJSON(t *testing.T) {
+	t.Parallel()
+
+	// A raw payload with an embedded NUL proves the artifact streams byte-for-byte
+	// rather than round-tripping through a JSON decoder.
+	const body = "structured plan\x00 output"
+
+	var hits atomic.Int64
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/plans/plan-1/json-output", func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+
+		_, werr := io.WriteString(w, body)
+		if werr != nil {
+			return
+		}
+	})
+
+	c := newServerClient(t, mux)
+
+	r, err := c.OpenPlanJSON(t.Context(), "plan-1")
+	require.NoError(t, err)
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+
+	assert.Equal(t, body, string(got))
+	assert.Equal(t, int64(1), hits.Load(), "the structured plan streams in one request")
+}
+
+func TestOpenClassifiesStatus(t *testing.T) {
+	t.Parallel()
+
+	// DoRaw discards the SDK's typed error, so each Open method translates the
+	// captured status back to the Kind the buffered path produced. 410 is left
+	// unmapped on purpose, since the buffered checkResponseCode did not map it.
+	tests := map[string]struct {
+		status int
+		want   tfeclient.Kind
+	}{
+		"404 is terminal":  {status: http.StatusNotFound, want: tfeclient.KindTerminal},
+		"403 is forbidden": {status: http.StatusForbidden, want: tfeclient.KindForbidden},
+		"401 is unknown":   {status: http.StatusUnauthorized, want: tfeclient.KindUnknown},
+		"410 is unknown":   {status: http.StatusGone, want: tfeclient.KindUnknown},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v2/configuration-versions/cv-1/download",
+				func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(tc.status)
+				})
+
+			c := newServerClient(t, mux)
+
+			r, err := c.OpenConfigurationVersion(t.Context(), "cv-1")
+			if r != nil {
+				require.NoError(t, r.Close())
+			}
+
+			require.Error(t, err)
+			assert.Equal(t, tc.want, tfeclient.Classify(err))
+		})
+	}
 }
 
 func TestRateLimitCounterCounts429s(t *testing.T) {

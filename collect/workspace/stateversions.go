@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/hashicorp/go-tfe"
 
@@ -88,8 +89,8 @@ func (c *Collector) archiveStateVersion(ctx context.Context, project, ws string,
 	} else {
 		downloadURL := sv.DownloadURL
 
-		err := c.bytes(ctx, rawPath, func(ctx context.Context) ([]byte, error) {
-			return c.env.Client().DownloadState(ctx, downloadURL)
+		err := c.blob(ctx, rawPath, func(ctx context.Context) (io.ReadCloser, error) {
+			return c.env.Client().OpenState(ctx, downloadURL)
 		})
 		if err != nil {
 			return err
@@ -105,8 +106,8 @@ func (c *Collector) archiveStateVersion(ctx context.Context, project, ws string,
 	} else {
 		jsonURL := sv.JSONDownloadURL
 
-		err := c.bytes(ctx, jsonPath, func(ctx context.Context) ([]byte, error) {
-			return c.env.Client().DownloadState(ctx, jsonURL)
+		err := c.blob(ctx, jsonPath, func(ctx context.Context) (io.ReadCloser, error) {
+			return c.env.Client().OpenState(ctx, jsonURL)
 		})
 		if err != nil {
 			return err

@@ -116,6 +116,131 @@ func TestArchiveConfigurationVersionRetryGate(t *testing.T) {
 	assert.Equal(t, manifest.StatusDone, f.status(cvPath), "the settled record is left untouched")
 }
 
+func TestArchiveConfigurationVersionTarball(t *testing.T) {
+	t.Parallel()
+
+	// The tarball is streamed from its download endpoint, not preSettled: this
+	// locks in byte-identity for the newly-streamed blob end to end.
+	const tarball = "\x1f\x8b\x08 fake tar.gz bytes \x00\x01\x02"
+
+	cv := &tfe.ConfigurationVersion{ID: "cv-1", Status: tfe.ConfigurationUploaded}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/configuration-versions/cv-1", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONAPI(t, w, marshalJSONAPI(t, cv))
+	})
+	mux.HandleFunc("/api/v2/configuration-versions/cv-1/download", func(w http.ResponseWriter, _ *http.Request) {
+		_, werr := io.WriteString(w, tarball)
+		if werr != nil {
+			return
+		}
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+
+	run := &tfe.Run{ID: "run-1", ConfigurationVersion: &tfe.ConfigurationVersion{ID: "cv-1"}}
+	require.NoError(t, f.collector.ArchiveConfigurationVersion(t.Context(), "proj", "ws", run))
+
+	tarballPath := st.ConfigVersionTarball("cv-1")
+	assert.Equal(t, manifest.StatusDone, f.status(tarballPath))
+
+	got, err := os.ReadFile(st.AbsPath(tarballPath))
+	require.NoError(t, err)
+	assert.Equal(t, tarball, string(got), "the tarball streams to disk byte-identically")
+}
+
+func TestArchiveConfigurationVersionTarballAbsent(t *testing.T) {
+	t.Parallel()
+
+	// An expired configuration version's tarball 404s on a normal lifecycle. The
+	// streaming DoRaw path discards the SDK's typed error, so this guards that the
+	// status translation still classifies the 404 terminal: the object must settle
+	// absent, never re-fetched and re-errored on every later run.
+	cv := &tfe.ConfigurationVersion{ID: "cv-1", Status: tfe.ConfigurationUploaded}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/configuration-versions/cv-1", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONAPI(t, w, marshalJSONAPI(t, cv))
+	})
+	mux.HandleFunc("/api/v2/configuration-versions/cv-1/download", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+
+	run := &tfe.Run{ID: "run-1", ConfigurationVersion: &tfe.ConfigurationVersion{ID: "cv-1"}}
+	require.NoError(t, f.collector.ArchiveConfigurationVersion(t.Context(), "proj", "ws", run))
+
+	tarballPath := st.ConfigVersionTarball("cv-1")
+	assert.Equal(t, manifest.StatusAbsentPermanently, f.status(tarballPath))
+
+	exists, err := st.Exists(tarballPath)
+	require.NoError(t, err)
+	assert.False(t, exists, "an absent tarball writes no file")
+}
+
+func TestArchivePlanJSON(t *testing.T) {
+	t.Parallel()
+
+	// The structured plan is streamed from json-output, not preSettled, locking in
+	// byte-identity for the newly-streamed blob end to end. The embedded NUL proves
+	// the stream is byte-exact, arbitrary bytes and all, rather than re-encoded.
+	const planBody = "structured plan output\x00\x01 bytes"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/plans/plan-1/json-output", func(w http.ResponseWriter, _ *http.Request) {
+		_, werr := io.WriteString(w, planBody)
+		if werr != nil {
+			return
+		}
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+
+	// Settle the log so the test isolates on the structured JSON stream.
+	f.preSettle(st.RunFile("proj", "ws", "run-1", "plan.log"))
+
+	run := &tfe.Run{ID: "run-1", Plan: &tfe.Plan{ID: "plan-1"}}
+	require.NoError(t, f.collector.ArchivePlan(t.Context(), "proj", "ws", run))
+
+	jsonPath := st.RunFile("proj", "ws", "run-1", "plan.json")
+	assert.Equal(t, manifest.StatusDone, f.status(jsonPath))
+
+	got, err := os.ReadFile(st.AbsPath(jsonPath))
+	require.NoError(t, err)
+	assert.Equal(t, planBody, string(got), "the structured plan streams to disk byte-identically")
+}
+
+func TestArchivePlanJSONAbsent(t *testing.T) {
+	t.Parallel()
+
+	// A plan whose structured output has expired 404s; the object must settle
+	// absent rather than re-fetch and re-error every run (the section-3 regression
+	// guard for the plan.json blob).
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/plans/plan-1/json-output", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+
+	f.preSettle(st.RunFile("proj", "ws", "run-1", "plan.log"))
+
+	run := &tfe.Run{ID: "run-1", Plan: &tfe.Plan{ID: "plan-1"}}
+	require.NoError(t, f.collector.ArchivePlan(t.Context(), "proj", "ws", run))
+
+	jsonPath := st.RunFile("proj", "ws", "run-1", "plan.json")
+	assert.Equal(t, manifest.StatusAbsentPermanently, f.status(jsonPath))
+
+	exists, err := st.Exists(jsonPath)
+	require.NoError(t, err)
+	assert.False(t, exists, "an absent structured plan writes no file")
+}
+
 func TestArchivePlanSummary(t *testing.T) {
 	t.Parallel()
 
