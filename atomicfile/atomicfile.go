@@ -308,6 +308,12 @@ func lastRecordBoundary(f *os.File) (int64, error) {
 		return 0, fmt.Errorf("stat append target: %w", err)
 	}
 
+	// A freshly created (empty) file has no record boundary and the scan below
+	// would not run, so skip the scratch allocation on that first-append path.
+	if info.Size() == 0 {
+		return 0, nil
+	}
+
 	const chunk = 4096
 
 	buf := make([]byte, chunk)
