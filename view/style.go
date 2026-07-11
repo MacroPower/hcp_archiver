@@ -59,11 +59,21 @@ func humanBytes(n int64) string {
 		return fmt.Sprintf("%d B", n)
 	}
 
-	div, exp := int64(unit), 0
-	for m := n / unit; m >= unit; m /= unit {
-		div *= unit
+	const prefixes = "KMGTPE"
+
+	value, exp := float64(n)/unit, 0 // exp indexes prefixes; 0 is KB (one divide).
+	for value >= unit && exp < len(prefixes)-1 {
+		value /= unit
 		exp++
 	}
 
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+	// Rounding to one decimal can lift a value just under the next unit up to a
+	// bare "1024.0"; promote it so the label stays compact (1.0 MB, not
+	// 1024.0 KB). The 0.05 margin is half the printed precision.
+	if value >= unit-0.05 && exp < len(prefixes)-1 {
+		value /= unit
+		exp++
+	}
+
+	return fmt.Sprintf("%.1f %cB", value, prefixes[exp])
 }
