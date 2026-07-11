@@ -203,6 +203,24 @@ func TestResponseHeaderTimeoutAllowsSlowBody(t *testing.T) {
 	assert.Equal(t, strings.Repeat("chunk", chunks), string(body))
 }
 
+func TestResolveHTTPClientTransportTuning(t *testing.T) {
+	t.Parallel()
+
+	// The built transport must keep the connection-churn tuning: a handshake
+	// bound generous enough to survive a saturated link, and a per-host idle pool
+	// wide enough that HTTP/1 chunked log reads reuse connections instead of
+	// redialing (and re-handshaking) per chunk.
+	tr := tfeclient.UnderlyingTransport(tfeclient.ResolveHTTPClient())
+	require.NotNil(t, tr)
+
+	assert.Equal(t, tfeclient.DefaultTLSHandshakeTimeout, tr.TLSHandshakeTimeout)
+	assert.Equal(t, tr.MaxIdleConns, tr.MaxIdleConnsPerHost,
+		"every pooled connection may idle per host")
+	assert.False(t, tr.ForceAttemptHTTP2,
+		"HTTP/2 stays disabled so the header and idle-read bounds keep working")
+	assert.Equal(t, tfeclient.DefaultResponseHeaderTimeout, tr.ResponseHeaderTimeout)
+}
+
 func TestPaginate(t *testing.T) {
 	t.Parallel()
 

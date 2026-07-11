@@ -29,6 +29,14 @@ const (
 // not the body, so a large streaming download is not capped.
 const DefaultResponseHeaderTimeout = 60 * time.Second
 
+// DefaultTLSHandshakeTimeout bounds a new connection's TLS handshake when [New]
+// builds its own HTTP client. Chunked log reads dial the artifact host over
+// HTTP/1, so under a saturated link handshake packets queue behind the bulk
+// transfers of concurrent workers; the bound sits above the transport's usual
+// 10 seconds to tolerate that congestion while still failing a dead dial
+// promptly.
+const DefaultTLSHandshakeTimeout = 20 * time.Second
+
 // Gate bounds how many requests may be in flight at once. Acquire blocks
 // until a slot is free or ctx is done and Release returns the slot, so a
 // resizable implementation can scale the client's effective parallelism while
@@ -270,6 +278,15 @@ func resolveHTTPClient(cfg *config) *http.Client {
 	tr := cleanhttp.DefaultPooledTransport()
 	tr.ForceAttemptHTTP2 = false
 	tr.ResponseHeaderTimeout = cfg.responseHeaderTimeout
+	tr.TLSHandshakeTimeout = DefaultTLSHandshakeTimeout
+
+	// The archive workload splits across two hosts (the API and the artifact
+	// store) with HTTP/2 disabled, so each concurrent worker holds its own HTTP/1
+	// connection per host. The cleanhttp per-host idle cap of GOMAXPROCS+1 closes
+	// most of those between chunked log reads, forcing a fresh dial and TLS
+	// handshake per chunk under load; letting every pooled connection idle per
+	// host keeps them reusable.
+	tr.MaxIdleConnsPerHost = tr.MaxIdleConns
 
 	return &http.Client{Transport: &idleTransport{
 		next:        tr,
