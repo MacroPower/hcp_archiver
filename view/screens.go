@@ -553,7 +553,10 @@ func newVariablesScreen(ws *Workspace) (screen, error) {
 
 	resources, err := DecodeResources(data)
 	if err != nil {
-		return nil, err
+		// A malformed-but-readable variables.json still shows its raw bytes,
+		// matching newOverviewScreen, rather than dead-ending the tab on a
+		// decode error the operator cannot see past.
+		return newViewerScreen("variables", string(data)), nil //nolint:nilerr // The raw document still displays.
 	}
 
 	rows := make([]item, 0, len(resources))
