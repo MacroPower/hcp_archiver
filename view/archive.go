@@ -160,21 +160,9 @@ func (o *Org) Workspace(project, name string) *Workspace {
 // subdirs returns the sorted immediate subdirectory names of an
 // archive-relative directory, tolerating one that does not exist.
 func (o *Org) subdirs(relPath string) ([]string, error) {
-	entries, err := os.ReadDir(o.AbsPath(relPath))
-
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, nil
-	case err != nil:
-		return nil, fmt.Errorf("read %q: %w", relPath, err)
-	}
-
-	var names []string
-
-	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
-		}
+	names, err := subdirNames(o.AbsPath(relPath))
+	if err != nil {
+		return nil, err
 	}
 
 	slices.Sort(names)
