@@ -38,6 +38,7 @@ func (a *Archiver) collectProjects(
 	wsc *workspace.Collector,
 ) (map[string]string, error) {
 	reporter.SetPhase(phaseProjects)
+	reporter.SetTotal(-1)
 
 	projects, err := tfeclient.Paginate(ctx, env.Client(),
 		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.Project, *tfe.Pagination, error) {
