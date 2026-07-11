@@ -15,10 +15,14 @@
 // page) and follows the short-lived signed-URL download flow for state blobs,
 // configuration tarballs, and plan/apply logs.
 //
-// Failures are classified as transient (rate limits, timeouts, server errors,
-// context cancellation) or terminal, meaning permanent absence such as a 404
-// or 410. Recording that distinction keeps a resume from mistaking a rate-limit
-// blip for a permanently-gone object. A handful of endpoints do not
+// Failures are classified so a resume can tell a temporary blip from a
+// permanent absence: transient (a network timeout, context cancellation or
+// deadline, or rate-limiter exhaustion), terminal (a permanent absence such as
+// a 404 or 410), or forbidden (an access denial). Rate-limited (429) and server
+// (5xx) responses are retried inside go-tfe; if one still surfaces it is not
+// recognized structurally and classifies as unknown, which callers also treat
+// as retryable. Recording that distinction keeps a resume from mistaking a blip
+// for a permanently-gone object. A handful of endpoints do not
 // enumerate at all and are reachable only when another object references their
 // id (plan exports, HYOK encrypted data keys, the OIDC configuration types, and
 // the experimental provider-set and registry-component types); the wrapper
