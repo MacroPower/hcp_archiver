@@ -56,8 +56,6 @@ func (k Kind) String() string {
 		return "terminal"
 	case KindForbidden:
 		return "forbidden"
-	case KindUnknown:
-		return "unknown"
 	default:
 		return "unknown"
 	}
