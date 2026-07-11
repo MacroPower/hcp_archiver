@@ -9,9 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
-	"strings"
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 	"go.jacobcolvin.com/hcp_archiver/serialize"
@@ -55,7 +53,7 @@ func (s *Store) Root() string {
 // clean archive-relative path is unchanged, so this is a boundary the write and
 // read methods enforce rather than trust their callers to respect.
 func (s *Store) AbsPath(relPath string) string {
-	clean := strings.TrimPrefix(path.Clean("/"+filepath.ToSlash(relPath)), "/")
+	clean := cleanJoin(filepath.ToSlash(relPath))
 
 	return filepath.Join(s.root, filepath.FromSlash(clean))
 }
