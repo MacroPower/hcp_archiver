@@ -846,12 +846,12 @@ type jsonLine struct {
 	PhaseCompleted    *int    `json:"phaseCompleted,omitempty"`
 	TaskTotal         *int    `json:"taskTotal,omitempty"`
 	TaskCompleted     *int    `json:"taskCompleted,omitempty"`
+	Workers           *int    `json:"workers,omitempty"`
+	MaxWorkers        *int    `json:"maxWorkers,omitempty"`
 	Phase             string  `json:"phase,omitempty"`
 	Task              string  `json:"task,omitempty"`
 	Target            string  `json:"target,omitempty"`
 	TasksActive       int     `json:"tasksActive,omitempty"`
-	Workers           int     `json:"workers,omitempty"`
-	MaxWorkers        int     `json:"maxWorkers,omitempty"`
 	RateLimited       int64   `json:"rateLimited,omitempty"`
 	Done              int     `json:"done"`
 	AbsentPermanently int     `json:"absentPermanently"`
@@ -893,8 +893,14 @@ func (r *Reporter) writeJSON(snap snapshot, summary bool) error {
 	}
 
 	if snap.hasWorkers() {
-		line.Workers = snap.workers
-		line.MaxWorkers = snap.maxWorkers
+		// Pointers, not bare ints, so a fully throttled live count of 0 is still
+		// emitted alongside its ceiling rather than dropped by omitempty -- the two
+		// are documented to appear together, and 0/N is the moment throttling is
+		// most worth reporting.
+		workers := snap.workers
+		maxWorkers := snap.maxWorkers
+		line.Workers = &workers
+		line.MaxWorkers = &maxWorkers
 	}
 
 	if snap.hasBar() {
