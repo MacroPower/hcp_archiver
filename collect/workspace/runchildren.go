@@ -255,13 +255,19 @@ func (c *Collector) archiveComments(ctx context.Context, project, ws string, run
 // so it is archived directly at users/<id>.json — a sibling shard outside this
 // run's subtree, and the only capture of who acted on a run. Two facts make a
 // plain settle-and-skip read unsafe here: that user write can fail invisibly to
-// the runs walk's retry gate (it scans only the run's own shard), and
-// run-events.json settles Done before the actors are archived, so a settled
-// re-walk would skip the very read that re-derives the actors (they live only in
-// the list include, not on the run). So the read is gated on the union of
-// run-events.json being unsettled and a run-scoped actors reference gate being
+// the runs walk's retry gate (it scans only the run's own shard), and the actors
+// live only in the list include, not on the run, so a settled re-walk that
+// skipped the read could never re-derive them. So the read is gated on the union
+// of run-events.json being unsettled and a run-scoped actors reference gate being
 // open, and runs via the non-self-gating doRead: it re-derives the actors even
 // after run-events.json is Done, and the gate clears once every actor is captured.
+//
+// The events file settles Done last, after the actor writes and the gate, so this
+// skip signal is never persisted ahead of the writes it stands in for. A crash
+// after the actors and gate but before it settles leaves it unsettled, forcing a
+// later run to re-read; settling it first would let a flush persist Done with the
+// gate not yet written, stranding an event actor behind an already-settled events
+// file on an otherwise settled run.
 func (c *Collector) archiveRunEvents(ctx context.Context, project, ws string, run *tfe.Run) error {
 	st := c.env.Store()
 	eventsPath := st.RunFile(project, ws, run.ID, "run-events.json")
@@ -290,13 +296,6 @@ func (c *Collector) archiveRunEvents(ctx context.Context, project, ws string, ru
 		return c.recordErrored(ctx, eventsPath, err)
 	}
 
-	// Write through the self-gating object so a pure re-read (run-events.json
-	// already Done, only the gate still open) does not rewrite or re-seal it.
-	err = c.object(ctx, eventsPath, events)
-	if err != nil {
-		return err
-	}
-
 	var actorPaths []string
 
 	for _, ev := range events {
@@ -316,7 +315,10 @@ func (c *Collector) archiveRunEvents(ctx context.Context, project, ws string, ru
 	// recurring once run-events.json is Done.
 	c.env.Reference(actorsGate, actorPaths...)
 
-	return nil
+	// Settle run-events.json Done last, after the actors and the gate, so the skip
+	// signal never lands ahead of them. The self-gating object still leaves an
+	// already-Done events file untouched on a pure re-read (only the gate open).
+	return c.object(ctx, eventsPath, events)
 }
 
 // archivePolicyChecks archives the run's Sentinel policy checks and a log per
