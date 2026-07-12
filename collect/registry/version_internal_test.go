@@ -41,6 +41,7 @@ func TestCompareVersions(t *testing.T) {
 		"numeric minor lower":          {a: "1.2.3", b: "1.10.0", want: -1},
 		"numeric major higher":         {a: "2.0.0", b: "1.9.9", want: 1},
 		"different depth, shorter":     {a: "1.2", b: "1.2.1", want: -1},
+		"missing segment is zero":      {a: "1.2", b: "1.2.0", want: 0},
 		"two prereleases compare text": {a: "1.2.0-rc2", b: "1.2.0-rc1", want: 1},
 		"release outranks prerelease":  {a: "1.2.0", b: "1.2.0-rc1", want: 1},
 		"prerelease sorts below":       {a: "2.0.0-beta", b: "2.0.0", want: -1},

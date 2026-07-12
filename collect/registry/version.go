@@ -197,12 +197,13 @@ func compareCore(a, b string) int {
 	return 0
 }
 
-// segmentAt returns the i-th segment of parts, or the empty string when i is out
-// of range, so two version strings of different depth stay comparable.
+// segmentAt returns the i-th segment of parts, or "0" when i is out of range, so
+// a version with fewer segments compares as if padded with explicit zeros (1.2
+// equals 1.2.0) rather than an empty segment sorting below a "0" it should equal.
 func segmentAt(parts []string, i int) string {
 	if i < len(parts) {
 		return parts[i]
 	}
 
-	return ""
+	return "0"
 }
