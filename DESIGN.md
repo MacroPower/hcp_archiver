@@ -32,12 +32,14 @@ cleanly). Runs once top-to-bottom; tar the result.
 
 These fall into three general classes, plus platform data.
 
-- **Metadata-only for every secret** (not just sensitive vars). Write-only
-  fields come back blank on read, so the archive records existence/metadata
-  only, with the value as `[REDACTED]`. This covers sensitive variable,
-  variable-set, and policy-set-parameter values, every `*Token` secret (team /
-  org / agent / user tokens), `OAuthClient.Secret`, `RunTask.HMACKey`, and
-  `NotificationConfiguration.Token`. `SSHKey` is a related but distinct case:
+- **Full fidelity, no local redaction.** Every payload is stored exactly as
+  the API returned it. Most secret fields are write-only upstream and come back
+  blank on read (sensitive variable, variable-set, and policy-set-parameter
+  values, and the team / org / agent / user token secrets), so the archive
+  records their existence and metadata with whatever value — usually empty —
+  the server sent; anything the API does return (for example a
+  `NotificationConfiguration.Token`) is kept verbatim, which is part of why
+  the archive is secret at rest. `SSHKey` is a related but distinct case:
   its read model exposes only `ID`/`Name` (the private key lives solely on the
   write-only create options), so key material is never returned at all; there
   is no field to blank.
@@ -87,26 +89,26 @@ archive/<org>/
   teams/<id>/
     team.json                       # def + OrganizationAccess matrix, members,
                                      #   SSO/SCIM linkage
-    notification-configs.json       # team-scoped alerting (redact Token)
+    notification-configs.json       # team-scoped alerting
   memberships.json                  # org roster: email, status, user + team refs
   users/<id>.json                   # hydrated user records; no user-list API, so
                                      #   sourced from run/event/team/membership refs
   oauth-clients/<id>/
-    oauth-client.json               # VCS connection def (redact Secret)
+    oauth-client.json               # VCS connection def
     tokens/<token-id>.json          # token metadata (uid, ssh-key flag; no secret)
   github-app-installations.json     # GitHub App VCS installs (metadata only;
                                      #   user/token-scoped, not org-scoped)
   variable-sets/<id>/
     variable-set.json               # name, global/priority, applied scopes
-    variables.json                  # sensitive values -> "[REDACTED]"
+    variables.json                  # sensitive values read back empty upstream
   policy-sets/<id>/
     policy-set.json                 # kind, scope, current/newest version refs
     current-version.json            # current version source/status/timestamps
     newest-version.json             # newest version source/status/timestamps
-    parameters.json                 # sensitive values -> "[REDACTED]"
+    parameters.json                 # sensitive values read back empty upstream
   policies/<id>.json                # metadata
   policies/<id>.<ext>               # Sentinel/OPA source (Policies.Download)
-  run-tasks.json                    # org run-task definitions (redact HMACKey)
+  run-tasks.json                    # org run-task definitions
   agent-pools/<id>.json             # pool config + allowed & excluded ws, allowed projects
   token-ttl-policies.json           # org max-TTL-per-token-type governance
   audit-trails/
@@ -131,15 +133,15 @@ archive/<org>/
     project.json                    # id, defaults (exec mode, agent pool,
                                      #   auto-destroy), tag bindings, team access
     effective-tag-bindings.json     # resolved bindings, including inherited
-    notification-configs.json       # project-scoped alerting (redact Token)
+    notification-configs.json       # project-scoped alerting
 
     workspaces/<ws-name>/
       workspace.json                # full settings + Project ref, GlobalRemoteState
-      variables.json                # sensitive values -> "[REDACTED]"
+      variables.json                # sensitive values read back empty upstream
       readme.md                     # workspace README (Workspaces.Readme)
       tags.json                     # tag + effective-tag bindings
       team-access.json              # workspace RBAC (which team, what access)
-      notification-configs.json     # alerting wiring (redact Token)
+      notification-configs.json     # alerting wiring
       run-triggers.json             # inbound cross-workspace trigger sources
       run-tasks.json                # per-workspace run-task bindings
       remote-state-consumers.json   # only when GlobalRemoteState=false
@@ -220,11 +222,10 @@ Notes:
   a `StateVersion` concern).
 - Any org-level object with a write-only secret stores metadata only
   (see Hard limits).
-- **Raw state blobs are sensitive; treat the archive as secret at rest.** The
+- **The archive is secret at rest.** Nothing is redacted locally: the
   `.tfstate.json` pulled from `hosted-state-download-url` embeds sensitive
-  variable / output / resource values in cleartext; the API redacts them only
-  through `StateVersionOutputs` (which we skip). The "metadata-only for every
-  secret" rule is about write-only _config_ fields, not state contents.
+  variable / output / resource values in cleartext, and serialized objects keep
+  whatever the API returned. Every file is written owner-only (0600).
 - **Notification configs are polymorphic** across workspace / project / team
   scope, so they are archived at all three levels: in each
   `projects/<name>/workspaces/<ws>/`, in `projects/<name>/`, and in `teams/<id>/`,
@@ -343,20 +344,11 @@ Notes:
   jsonapi _response_ structs tagged `jsonapi` (not `json`); kebab output matches
   the public API docs and survives a `go-tfe` field rename better than
   `encoding/json`'s Go-field-name fallback. Caveats the code must handle:
-  - **Redact by mutation**: there is no tag-driven omission, so sensitive
-    `Value` fields and every write-only secret (each `*Token`, `OAuthClient.Secret`,
-    `RunTask.HMACKey`, `NotificationConfiguration.Token`) are overwritten with the
-    `[REDACTED]` sentinel on the struct before marshaling, set to the marker, not
-    zeroed, so the archive records the secret's existence rather than an empty
-    value indistinguishable from a genuinely unset field.
-  - **Drop every ephemeral signed URL, by pattern not enumeration.** Match any
-    signed out-of-band URL field: both `*DownloadURL` _and_ `*UploadURL`
-    (`DownloadURL`, `UploadURL`, `JSONUploadURL`, `SanitizedStateUploadURL`) plus
-    the `LogReadURL` on hydrated `Plan`/`Apply` relations (tag `log-read-url`):
-    they expire within minutes, can embed tokens, and duplicate blobs already
-    archived. (The provider `Shasums*URL` values need no handling; they are
-    methods on `RegistryProviderVersion`, not struct fields, so neither marshaler
-    serializes them.)
+  - **Ephemeral signed URLs are stored as returned.** The `*DownloadURL`,
+    `*UploadURL`, and `LogReadURL` fields expire within minutes and merely
+    duplicate blobs the archive captures directly, but they are part of the
+    payload and full fidelity keeps them; they are dead links by the time
+    anyone reads the archive, not live credentials.
   - **Hydrated relations are inconsistent**: an included relation pointer
     marshals as the full nested object, and as `null` when not included, so the
     same field varies shape and is hugely redundant. Serialize relations as ids
@@ -609,7 +601,7 @@ Variables:
 - `Variables.ListAll(ctx, workspaceID string, *VariableListOptions) (*VariableList, error)`
   (hits `.../all-vars`, so it includes variable-set-inherited variables)
 - `Variable` fields: `Key, Value, Description, Category, HCL, Sensitive, VersionID`
-  (redact `Value` when `Sensitive`)
+  (a sensitive `Value` reads back empty from the API and is stored as returned)
 
 State versions:
 
@@ -669,8 +661,8 @@ results to loop, per the pagination pattern below):
   `TeamMembers.ListOrganizationMemberships`, `TeamAccess.List` (workspace RBAC,
   filter by workspace id), `TeamProjectAccess.List` (project RBAC, filter by
   project id).
-- **VCS**: `OAuthClients.List(org)` (`include=oauth_tokens,projects`; redact
-  `Secret`), `OAuthTokens.List(org)`, and `GHAInstallations.List` for GitHub App
+- **VCS**: `OAuthClients.List(org)` (`include=oauth_tokens,projects`),
+  `OAuthTokens.List(org)`, and `GHAInstallations.List` for GitHub App
   integrations (metadata only; **user/token-scoped, not org-scoped**, so
   completeness depends on the archiving identity, and each consuming object still
   keeps its own `VCSRepo` wiring).
@@ -686,8 +678,8 @@ results to loop, per the pagination pattern below):
   `TaskResults`, `PolicyEvaluations.List(taskStageID)` -> `PolicySetOutcomes.List`,
   and `TFPolicyEvaluationOutcomes` (set the `RunTFPolicyEvaluation` include).
 - **Run wiring**: `RunTriggers.List(workspaceID)` (inbound),
-  `RunTasks.List(org)` (defs; redact `HMACKey`) + `WorkspaceRunTasks.List(wsID)`,
-  `NotificationConfigurations.List(id)` (redact `Token`; the subscribable is
+  `RunTasks.List(org)` (defs) + `WorkspaceRunTasks.List(wsID)`,
+  `NotificationConfigurations.List(id)` (the subscribable is
   polymorphic, so list it per workspace **and** per project **and** per team),
   `AgentPools.List(org)` (+ allowed & excluded workspaces, allowed projects).
 - **Workspace extras**: `Workspaces.Readme(id)`, `Workspaces.ListTagBindings` /

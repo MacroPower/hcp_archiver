@@ -293,7 +293,7 @@ func newWorkspaceScreen(ws *Workspace) (screen, error) {
 		},
 		{
 			title: "Variables",
-			desc:  "workspace variables (sensitive values redacted)",
+			desc:  "workspace variables",
 			open: func() (screen, error) {
 				return newVariablesScreen(ws)
 			},
@@ -564,7 +564,7 @@ func newStateScreen(ws *Workspace, sv StateVersion) (screen, error) {
 }
 
 // newVariablesScreen lists a workspace's variables the way the HCP variables
-// tab does: key, value (sensitive ones archived redacted), and category.
+// tab does: key, value (stored as the API returned it), and category.
 func newVariablesScreen(ws *Workspace) (screen, error) {
 	data, err := ws.Open(ws.File("variables.json"))
 	if err != nil {

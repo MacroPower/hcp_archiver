@@ -35,9 +35,9 @@
 //
 // # Sensitivity
 //
-// The raw state blobs pulled from the hosted download URL embed sensitive
-// variable, output, and resource values in cleartext; the API only redacts them
-// through a separate outputs endpoint that returns a lossy subset, which the
-// archive does not substitute. The whole archive should therefore be treated as
-// secret at rest.
+// Everything is stored exactly as the API returned it: the raw state blobs
+// embed sensitive variable, output, and resource values in cleartext, and the
+// serialized objects keep whatever secret material the API chose to return.
+// The whole archive should therefore be treated as secret at rest; every file
+// is written owner-only (0600).
 package store

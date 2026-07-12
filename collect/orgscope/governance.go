@@ -11,8 +11,9 @@ import (
 // set applies to, so those relations serialize with their ids.
 const variableSetScopeInclude = string(tfe.VariableSetWorkspaces) + "," + string(tfe.VariableSetProjects)
 
-// collectVariableSets archives each variable set with its variables. Sensitive
-// values are redacted by the serializer.
+// collectVariableSets archives each variable set with its variables, stored
+// exactly as the API returns them (a sensitive value reads back empty from the
+// API; nothing is redacted locally).
 func (c *Collector) collectVariableSets(ctx context.Context) error {
 	return enumerate(ctx, c, "variable sets",
 		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.VariableSet, *tfe.Pagination, error) {
@@ -127,8 +128,8 @@ func (c *Collector) archivePolicySetVersions(ctx context.Context, set *tfe.Polic
 	return nil
 }
 
-// collectPolicySetParameters archives the parameters of one policy set.
-// Sensitive values are redacted by the serializer.
+// collectPolicySetParameters archives the parameters of one policy set,
+// stored exactly as the API returns them.
 func (c *Collector) collectPolicySetParameters(ctx context.Context, setID string) error {
 	relPath := c.env.Store().PolicySetFile(setID, "parameters.json")
 

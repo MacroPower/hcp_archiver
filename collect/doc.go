@@ -4,8 +4,8 @@
 //
 // It binds the API client, the serializer, the on-disk store, and the ledger
 // into one environment that archives a single object end to end: consult the
-// ledger to decide whether to fetch, retrieve through the client, serialize and
-// redact, write atomically to the object's path, and record the resulting
+// ledger to decide whether to fetch, retrieve through the client, serialize,
+// write atomically to the object's path, and record the resulting
 // status, content signature, and (for append-mostly collections) high-water
 // mark. Two behaviors that would otherwise be re-implemented per family live
 // here: the newest-first walk that halts as soon as it reaches an already-

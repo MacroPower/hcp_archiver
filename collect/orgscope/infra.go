@@ -7,8 +7,8 @@ import (
 	"github.com/hashicorp/go-tfe"
 )
 
-// collectRunTasks archives the organization run-task definitions. The HMAC key
-// is redacted by the serializer.
+// collectRunTasks archives the organization run-task definitions, stored
+// exactly as the API returns them.
 func (c *Collector) collectRunTasks(ctx context.Context) error {
 	return archiveList(ctx, c, c.env.Store().RunTasks(), "run tasks",
 		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.RunTask, *tfe.Pagination, error) {

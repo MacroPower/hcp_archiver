@@ -7,14 +7,14 @@
 // organization-access matrix, members, and SSO/SCIM linkage, plus their team-
 // scoped notification configurations; the organization roster, with each
 // membership's team reference; and VCS connections. Those connections are OAuth
-// clients (secret redacted, each with its access tokens) and GitHub App
+// clients (each with its access tokens) and GitHub App
 // installations; the installations are user- and token-scoped rather than
 // org-scoped, so their completeness depends on the archiving identity.
 //
 // It also captures the governance objects: policy sets with their current and
 // newest version and their parameters, the Sentinel or OPA policy source
 // alongside each policy's metadata, variable sets with their variables, and
-// organization run-task definitions (HMAC key redacted). The remaining org-level
+// organization run-task definitions. The remaining org-level
 // configuration rounds it out: agent pools with their allowed and excluded
 // workspaces and allowed projects, per-token-type max-TTL policies, and reserved
 // tag keys. When the corresponding scope toggle is on, it also captures

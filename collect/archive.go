@@ -50,7 +50,7 @@ func (e *Env) Mutable(ctx context.Context, relPath string, fetch func(context.Co
 // reader rather than serializing it.
 //
 // It suits large raw artifacts (state blobs, plan and apply logs) that should
-// not be buffered or redacted. Like [Env.Object] it skips a settled object and
+// not be buffered. Like [Env.Object] it skips a settled object and
 // records the outcome; error handling matches [Env.Object].
 //
 // Unlike the buffered fetches, whose HTTP exchanges ride the API client's

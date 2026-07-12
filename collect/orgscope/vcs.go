@@ -8,7 +8,7 @@ import (
 )
 
 // collectOAuthClients archives each VCS OAuth client with its tokens and
-// projects. The client secret is redacted by the serializer.
+// projects, stored exactly as the API returns them.
 func (c *Collector) collectOAuthClients(ctx context.Context) error {
 	return enumerate(ctx, c, "oauth clients",
 		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.OAuthClient, *tfe.Pagination, error) {
@@ -31,10 +31,9 @@ func (c *Collector) collectOAuthClients(ctx context.Context) error {
 
 // archiveOAuthClient archives one VCS OAuth client and its hydrated tokens.
 //
-// The client's secret is redacted by the serializer. The parent renders its
-// token relation as bare id refs, so each token is archived directly as its own
-// primary object; tokens carry only metadata (uid, created-at, has-ssh-key,
-// service-provider-user) and no secret.
+// The parent renders its token relation as bare id refs, so each token is
+// archived directly as its own primary object; tokens carry only metadata
+// (uid, created-at, has-ssh-key, service-provider-user) and no secret.
 func (c *Collector) archiveOAuthClient(ctx context.Context, client *tfe.OAuthClient) error {
 	st := c.env.Store()
 

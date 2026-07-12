@@ -11,29 +11,19 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/serialize"
 )
 
-// plainSecret is a non-jsonapi struct carrying a sensitive Value, so it takes
-// the encoding/json fallback rather than the jsonapi encoder and can exercise
-// redaction of a secret reached only through an unaddressable reflected value.
-type plainSecret struct {
-	Value     string
-	Sensitive bool
-}
-
-// ifaceHolder nests a value behind an interface field, where the concrete struct
-// the interface holds is not addressable.
-type ifaceHolder struct {
-	Inner any
-}
-
-func TestMarshal(t *testing.T) {
+// TestMarshalIsByteFaithful pins the package's fidelity contract: values the
+// API returned — sensitive variable values, token fields, signed URLs — are
+// stored exactly as received, never redacted or stripped. The archive is a
+// full-fidelity record, and its at-rest sensitivity is handled by file
+// permissions, not by rewriting payloads.
+func TestMarshalIsByteFaithful(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
-		input           any
-		wantContains    []string
-		wantNotContains []string
+		input        any
+		wantContains []string
 	}{
-		"sensitive variable redacts value and keeps kebab keys": {
+		"sensitive variable keeps its value and kebab keys": {
 			input: &tfe.Variable{
 				ID:        "var-1",
 				Key:       "db_password",
@@ -41,91 +31,44 @@ func TestMarshal(t *testing.T) {
 				VersionID: "vv-1",
 				Sensitive: true,
 			},
-			wantContains:    []string{serialize.Redacted, `"version-id"`, `"vars"`},
-			wantNotContains: []string{"hunter2"},
+			wantContains: []string{"hunter2", `"version-id"`, `"vars"`},
 		},
-		"non-sensitive variable keeps its value": {
-			input: &tfe.Variable{
-				ID:        "var-2",
-				Key:       "region",
-				Value:     "us-east-1",
-				Sensitive: false,
-			},
-			wantContains:    []string{"us-east-1"},
-			wantNotContains: []string{serialize.Redacted},
-		},
-		"sensitive variable-set variable redacts value": {
-			input: &tfe.VariableSetVariable{
-				ID:        "var-3",
-				Key:       "api_key",
-				Value:     "abc123",
-				Sensitive: true,
-			},
-			wantContains:    []string{serialize.Redacted},
-			wantNotContains: []string{"abc123"},
-		},
-		"sensitive policy-set parameter redacts value": {
-			input: &tfe.PolicySetParameter{
-				ID:        "var-4",
-				Key:       "token",
-				Value:     "topsecret",
-				Sensitive: true,
-			},
-			wantContains:    []string{serialize.Redacted},
-			wantNotContains: []string{"topsecret"},
-		},
-		"agent token secret is redacted": {
+		"agent token keeps its secret": {
 			input: &tfe.AgentToken{
 				ID:    "at-1",
 				Token: "aabbcc.atlasv1.deadbeef",
 			},
-			wantContains:    []string{serialize.Redacted},
-			wantNotContains: []string{"deadbeef"},
+			wantContains: []string{"aabbcc.atlasv1.deadbeef"},
 		},
-		"oauth client secret is redacted": {
+		"oauth client keeps its secret": {
 			input: &tfe.OAuthClient{
 				ID:     "oc-1",
 				Secret: "shhh",
 			},
-			wantContains:    []string{serialize.Redacted},
-			wantNotContains: []string{`"shhh"`},
+			wantContains: []string{`"shhh"`},
 		},
-		"run task hmac key is redacted": {
+		"run task keeps its hmac key": {
 			input: &tfe.RunTask{
 				ID:      "task-1",
 				Name:    "sentinel",
 				HMACKey: new("raw-hmac"),
 			},
-			wantContains:    []string{serialize.Redacted, `"hmac-key"`},
-			wantNotContains: []string{"raw-hmac"},
+			wantContains: []string{"raw-hmac", `"hmac-key"`},
 		},
-		"notification configuration token is redacted": {
+		"notification configuration keeps its token": {
 			input: &tfe.NotificationConfiguration{
 				ID:    "nc-1",
 				Token: "notif-token",
 			},
-			wantContains:    []string{serialize.Redacted},
-			wantNotContains: []string{"notif-token"},
+			wantContains: []string{"notif-token"},
 		},
-		"state version strips download and upload urls": {
+		"state version keeps its signed urls": {
 			input: &tfe.StateVersion{
-				ID:                      "sv-1",
-				DownloadURL:             "https://archivist.example/download?token=secret",
-				UploadURL:               "https://archivist.example/upload?token=secret",
-				JSONUploadURL:           "https://archivist.example/json?token=secret",
-				SanitizedStateUploadURL: new("https://archivist.example/sanitized?token=secret"),
+				ID:          "sv-1",
+				DownloadURL: "https://archivist.example/download?token=sig",
+				UploadURL:   "https://archivist.example/upload?token=sig",
 			},
-			wantNotContains: []string{"archivist.example", "token=secret"},
-		},
-		"sensitive value in a by-value array is redacted": {
-			input:           [1]plainSecret{{Value: "hunter2", Sensitive: true}},
-			wantContains:    []string{serialize.Redacted},
-			wantNotContains: []string{"hunter2"},
-		},
-		"sensitive value behind an interface field is redacted": {
-			input:           &ifaceHolder{Inner: plainSecret{Value: "hunter2", Sensitive: true}},
-			wantContains:    []string{serialize.Redacted},
-			wantNotContains: []string{"hunter2"},
+			wantContains: []string{"https://archivist.example/download?token=sig"},
 		},
 	}
 
@@ -142,10 +85,7 @@ func TestMarshal(t *testing.T) {
 				assert.Contains(t, out, want)
 			}
 
-			for _, notWant := range tc.wantNotContains {
-				assert.NotContains(t, out, notWant)
-			}
-
+			assert.NotContains(t, out, "REDACTED", "nothing is rewritten on the way to disk")
 			require.True(t, json.Valid(got), "output must be valid JSON")
 		})
 	}
@@ -180,97 +120,6 @@ func TestMarshalSubStructKeepsAttributes(t *testing.T) {
 	assert.Equal(t, "psv-1", doc.Data.ID)
 	assert.Equal(t, "tfe-api", doc.Data.Attributes["source"], "the attributes survive, not a bare id ref")
 	assert.Equal(t, "ready", doc.Data.Attributes["status"])
-}
-
-func TestMarshalRedactsNonStringValue(t *testing.T) {
-	t.Parallel()
-
-	// A sensitive Value whose kind is interface{} rather than a plain string must
-	// still be redacted: the redactor fails closed instead of emitting cleartext.
-	type sensitiveAnyValue struct {
-		Key       string `json:"key"`
-		Value     any    `json:"value"`
-		Sensitive bool   `json:"sensitive"`
-	}
-
-	got, err := serialize.Marshal(&sensitiveAnyValue{
-		Key:       "db_password",
-		Value:     "hunter2-SECRET",
-		Sensitive: true,
-	})
-	require.NoError(t, err)
-
-	out := string(got)
-	assert.NotContains(t, out, "hunter2-SECRET", "a non-string sensitive value must not leak cleartext")
-	assert.Contains(t, out, serialize.Redacted)
-	require.True(t, json.Valid(got), "output must be valid JSON")
-}
-
-func TestMarshalRedactsNestedSecret(t *testing.T) {
-	t.Parallel()
-
-	// A secret carried below the top-level struct must still be redacted: the
-	// safety pass descends into nested structs, pointers, and slice elements
-	// rather than stopping at the outermost struct.
-	type inner struct {
-		Token string `json:"token"`
-	}
-
-	type policy struct {
-		Secret string `json:"secret"`
-	}
-
-	type outer struct {
-		Name    string   `json:"name"`
-		Nested  inner    `json:"nested"`
-		Deep    *inner   `json:"deep"`
-		Members []policy `json:"members"`
-	}
-
-	got, err := serialize.Marshal(&outer{
-		Name:    "config",
-		Nested:  inner{Token: "nested-TOKEN-SECRET"},
-		Deep:    &inner{Token: "pointer-TOKEN-SECRET"},
-		Members: []policy{{Secret: "slice-SECRET"}},
-	})
-	require.NoError(t, err)
-
-	out := string(got)
-	assert.NotContains(t, out, "nested-TOKEN-SECRET", "a secret in a nested struct must not leak")
-	assert.NotContains(t, out, "pointer-TOKEN-SECRET", "a secret behind a pointer must not leak")
-	assert.NotContains(t, out, "slice-SECRET", "a secret in a slice element must not leak")
-	assert.Contains(t, out, serialize.Redacted)
-	require.True(t, json.Valid(got), "output must be valid JSON")
-}
-
-func TestMarshalRedactsSecretInMap(t *testing.T) {
-	t.Parallel()
-
-	// A secret reachable only through a Go map must still be redacted: the safety
-	// pass descends into map values, both a struct stored by value and a pointer
-	// to one, rather than stopping at the map.
-	type member struct {
-		Secret string `json:"secret"`
-	}
-
-	type org struct {
-		Name    string             `json:"name"`
-		Members map[string]member  `json:"members"`
-		Admins  map[string]*member `json:"admins"`
-	}
-
-	got, err := serialize.Marshal(&org{
-		Name:    "acme",
-		Members: map[string]member{"a": {Secret: "map-value-SECRET"}},
-		Admins:  map[string]*member{"b": {Secret: "map-pointer-SECRET"}},
-	})
-	require.NoError(t, err)
-
-	out := string(got)
-	assert.NotContains(t, out, "map-value-SECRET", "a secret in a map struct value must not leak")
-	assert.NotContains(t, out, "map-pointer-SECRET", "a secret behind a map pointer value must not leak")
-	assert.Contains(t, out, serialize.Redacted)
-	require.True(t, json.Valid(got), "output must be valid JSON")
 }
 
 func TestMarshalHydratedRelationAsIDRef(t *testing.T) {
@@ -333,6 +182,18 @@ func TestMarshalPlainTypeUsesEncodingJSON(t *testing.T) {
 	assert.Contains(t, out, "\n  ")
 }
 
+func TestMarshalByValueModel(t *testing.T) {
+	t.Parallel()
+
+	// A model passed by value still marshals through the jsonapi encoder, which
+	// requires a pointer; Marshal takes an addressable copy.
+	got, err := serialize.Marshal(tfe.Variable{ID: "var-1", Key: "a", Value: "one"})
+	require.NoError(t, err)
+
+	assert.Contains(t, string(got), `"one"`)
+	require.True(t, json.Valid(got))
+}
+
 func TestMarshalSliceOfModels(t *testing.T) {
 	t.Parallel()
 
@@ -346,8 +207,7 @@ func TestMarshalSliceOfModels(t *testing.T) {
 
 	out := string(got)
 
-	assert.Contains(t, out, serialize.Redacted)
-	assert.NotContains(t, out, `"one"`)
+	assert.Contains(t, out, `"one"`, "a sensitive value is stored as returned")
 	assert.Contains(t, out, "two")
 	require.True(t, json.Valid(got))
 }

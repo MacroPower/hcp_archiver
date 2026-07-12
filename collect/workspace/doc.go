@@ -15,8 +15,8 @@
 // access. For each workspace it captures the full
 // settings (including the project reference and the global-remote-state flag),
 // the variables (read through the all-vars endpoint so variable-set-inherited
-// variables are included, with a value redacted when the variable is
-// sensitive), the readme, the tag and effective-tag bindings, team access,
+// variables are included; a sensitive value reads back empty from the API and
+// is stored as returned), the readme, the tag and effective-tag bindings, team access,
 // notification configurations, inbound run triggers, per-workspace run-task
 // bindings, and, only when global remote state is disabled, the remote-state
 // consumers.
