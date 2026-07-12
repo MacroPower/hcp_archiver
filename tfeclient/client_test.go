@@ -143,7 +143,12 @@ func TestResponseHeaderTimeoutBoundsStalledConnection(t *testing.T) {
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { close(release) })
 
-	client := tfeclient.ResolveHTTPClient(tfeclient.WithResponseHeaderTimeout(50 * time.Millisecond))
+	// Server-error retry is disabled so the elapsed bound measures the header
+	// timeout alone rather than the retry backoff on top of it.
+	client := tfeclient.ResolveHTTPClient(
+		tfeclient.WithResponseHeaderTimeout(50*time.Millisecond),
+		tfeclient.WithServerErrorRetry(0, 0),
+	)
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
 	require.NoError(t, err)
@@ -851,4 +856,160 @@ func TestRateLimitCounterCounts429s(t *testing.T) {
 	}
 
 	assert.Equal(t, int64(2), counter.Load())
+}
+
+// doGet issues a context-bound GET through hc, closes the body, and returns
+// the status code, which is all the retry tests assert on.
+func doGet(t *testing.T, hc *http.Client, url string) int {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := hc.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	return resp.StatusCode
+}
+
+func TestServerErrorRetry(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a transient 5xx is retried and succeeds", func(t *testing.T) {
+		t.Parallel()
+
+		var hits atomic.Int64
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if hits.Add(1) <= 2 {
+				w.WriteHeader(http.StatusInternalServerError)
+
+				return
+			}
+
+			_, werr := io.WriteString(w, "ok")
+			if werr != nil {
+				return
+			}
+		}))
+		t.Cleanup(srv.Close)
+
+		hc := tfeclient.ResolveHTTPClient(tfeclient.WithServerErrorRetry(3, 0))
+
+		status := doGet(t, hc, srv.URL)
+
+		assert.Equal(t, http.StatusOK, status)
+		assert.Equal(t, int64(3), hits.Load(), "two failed attempts, then the success")
+	})
+
+	t.Run("a persistent 5xx returns after the bounded attempts", func(t *testing.T) {
+		t.Parallel()
+
+		var hits atomic.Int64
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.WriteHeader(http.StatusBadGateway)
+		}))
+		t.Cleanup(srv.Close)
+
+		hc := tfeclient.ResolveHTTPClient(tfeclient.WithServerErrorRetry(2, 0))
+
+		start := time.Now()
+		status := doGet(t, hc, srv.URL)
+
+		assert.Equal(t, http.StatusBadGateway, status, "the final attempt's response is returned as-is")
+		assert.Equal(t, int64(3), hits.Load(), "the first attempt plus the configured retries")
+		assert.Less(t, time.Since(start), 5*time.Second, "the stall is bounded")
+	})
+
+	t.Run("a request with a body is not retried", func(t *testing.T) {
+		t.Parallel()
+
+		var hits atomic.Int64
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		t.Cleanup(srv.Close)
+
+		hc := tfeclient.ResolveHTTPClient(tfeclient.WithServerErrorRetry(3, 0))
+
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+		require.NoError(t, err)
+
+		resp, err := hc.Do(req)
+		require.NoError(t, err)
+
+		t.Cleanup(func() { assert.NoError(t, resp.Body.Close()) })
+
+		assert.Equal(t, int64(1), hits.Load(), "a consumed body cannot be re-sent")
+	})
+
+	t.Run("a 429 passes through to the rate-limit handling", func(t *testing.T) {
+		t.Parallel()
+
+		var hits atomic.Int64
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		t.Cleanup(srv.Close)
+
+		hc := tfeclient.ResolveHTTPClient(tfeclient.WithServerErrorRetry(3, 0))
+
+		status := doGet(t, hc, srv.URL)
+
+		assert.Equal(t, http.StatusTooManyRequests, status)
+		assert.Equal(t, int64(1), hits.Load(),
+			"rate limiting is the go-tfe client's to handle, honoring the server's reset time")
+	})
+}
+
+func TestServerErrorStallIsBoundedEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	// The regression this pins: with go-tfe's own RetryServerErrors enabled, a
+	// persistently failing endpoint was retried 30 times under a linearly
+	// growing backoff -- over six minutes per request, none of it configurable.
+	// The bounded transport retry replaces it, so the whole go-tfe call must
+	// come back in seconds after exactly the configured attempts.
+	var hits atomic.Int64
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/v2/organization/audit-trail", func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, err := tfeclient.New(
+		tfeclient.WithToken("test-token"),
+		tfeclient.WithAddress(srv.URL),
+		tfeclient.WithServerErrorRetry(2, 0),
+	)
+	require.NoError(t, err)
+
+	start := time.Now()
+
+	err = c.Do(t.Context(), func(ctx context.Context, tc *tfe.Client) error {
+		_, e := tc.AuditTrails.List(ctx, &tfe.AuditTrailListOptions{})
+		if e != nil {
+			return fmt.Errorf("list audit trails: %w", e)
+		}
+
+		return nil
+	})
+
+	require.Error(t, err, "the failure still surfaces to the caller for recording")
+	assert.Equal(t, int64(3), hits.Load(), "the first attempt plus the configured retries, not go-tfe's 30")
+	assert.Less(t, time.Since(start), 10*time.Second)
 }

@@ -83,6 +83,8 @@ type config struct {
 	burst                 int
 	responseHeaderTimeout time.Duration
 	idleReadTimeout       time.Duration
+	serverErrorRetryDelay time.Duration
+	serverErrorRetries    int
 }
 
 // Option configures a [Client] during [New].
@@ -93,6 +95,7 @@ type config struct {
 //   - [WithRateLimit]
 //   - [WithResponseHeaderTimeout]
 //   - [WithIdleReadTimeout]
+//   - [WithServerErrorRetry]
 //   - [WithWireBytes]
 //   - [WithRateLimitCounter]
 //   - [WithGate]
@@ -166,6 +169,24 @@ func WithIdleReadTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithServerErrorRetry sets how the client retries a request that failed at
+// the transport or answered with a server error (5xx) when [New] builds its
+// own HTTP client: retries is the number of additional attempts after the
+// first, and delay is the wait before the first retry, doubling on each retry
+// after that (capped internally, so the worst-case stall stays in seconds).
+// Rate-limited (429) responses are not governed by this; the go-tfe client
+// retries those itself honoring the server's reset time. A non-positive
+// retries disables in-client retrying, leaving the failure to the caller's
+// recorded outcome and the next run; a non-positive delay retries
+// immediately. A caller-supplied [WithHTTPClient] takes precedence over it.
+// Returns an [Option].
+func WithServerErrorRetry(retries int, delay time.Duration) Option {
+	return func(c *config) {
+		c.serverErrorRetries = retries
+		c.serverErrorRetryDelay = delay
+	}
+}
+
 // WithWireBytes sets a shared counter that accumulates response-body bytes as
 // they are delivered to the reader when [New] builds its own HTTP client, so a
 // progress view can derive live throughput while a large transfer is still in
@@ -206,8 +227,9 @@ func WithGate(g Gate) Option {
 // its own HTTP client. Each attempt on the wire emits one [slog.LevelDebug]
 // line carrying the method, URL, elapsed time to headers, and the status (or
 // transport error) that attempt saw; the go-tfe client retries rate-limited
-// and server-error responses internally, so a retried request logs once per
-// attempt. Downloads log their full signed artifact URL, so treat the debug
+// responses and this client retries server errors ([WithServerErrorRetry]), so
+// a retried request logs once per attempt. Downloads log their full signed
+// artifact URL, so treat the debug
 // output as sensitively as the token itself. A nil logger disables the
 // logging, and a caller-supplied [WithHTTPClient] takes precedence over it.
 // Returns an [Option].
@@ -229,9 +251,8 @@ func WithHTTPClient(hc *http.Client) Option {
 
 // New creates a new [Client].
 //
-// It constructs exactly one go-tfe client (with server-error retry enabled)
-// and one shared [rate.Limiter]. It returns [ErrMissingToken] if no token was
-// supplied via [WithToken].
+// It constructs exactly one go-tfe client and one shared [rate.Limiter]. It
+// returns [ErrMissingToken] if no token was supplied via [WithToken].
 func New(opts ...Option) (*Client, error) {
 	cfg := newConfig(opts)
 
@@ -239,10 +260,17 @@ func New(opts ...Option) (*Client, error) {
 		return nil, fmt.Errorf("new client: %w", ErrMissingToken)
 	}
 
+	// Server-error retry is deliberately owned by this package's bounded
+	// [retryTransport] rather than go-tfe: with RetryServerErrors on, go-tfe
+	// retries a 5xx 30 times under a linearly growing backoff — over six
+	// minutes per request against a persistently failing endpoint, holding a
+	// worker slot the whole time — and none of it is configurable through
+	// [tfe.Config]. The 429 handling is unaffected: go-tfe retries rate-limited
+	// responses regardless of this flag, honoring the server's reset time.
 	tc, err := tfe.NewClient(&tfe.Config{
 		Address:           cfg.address,
 		Token:             cfg.token,
-		RetryServerErrors: true,
+		RetryServerErrors: false,
 		HTTPClient:        resolveHTTPClient(&cfg),
 	})
 	if err != nil {
@@ -264,6 +292,8 @@ func newConfig(opts []Option) config {
 		burst:                 DefaultBurst,
 		responseHeaderTimeout: DefaultResponseHeaderTimeout,
 		idleReadTimeout:       DefaultIdleReadTimeout,
+		serverErrorRetries:    DefaultServerErrorRetries,
+		serverErrorRetryDelay: DefaultServerErrorRetryDelay,
 	}
 
 	for _, opt := range opts {
@@ -312,13 +342,26 @@ func resolveHTTPClient(cfg *config) *http.Client {
 	// host keeps them reusable.
 	tr.MaxIdleConnsPerHost = tr.MaxIdleConns
 
-	return &http.Client{Transport: &idleTransport{
+	var rt http.RoundTripper = &idleTransport{
 		next:        tr,
 		logger:      cfg.logger,
 		idleTimeout: cfg.idleReadTimeout,
 		wireBytes:   cfg.wireBytes,
 		rateLimited: cfg.rateLimited,
-	}}
+	}
+
+	// The bounded server-error retry sits above the instrumented transport, so
+	// each retried attempt still logs and counts individually, and below the
+	// go-tfe client, whose own server-error retry stays disabled (see [New]).
+	if cfg.serverErrorRetries > 0 {
+		rt = &retryTransport{
+			next:    rt,
+			retries: cfg.serverErrorRetries,
+			delay:   cfg.serverErrorRetryDelay,
+		}
+	}
+
+	return &http.Client{Transport: rt}
 }
 
 // TFE returns the underlying go-tfe client so collectors can build closures

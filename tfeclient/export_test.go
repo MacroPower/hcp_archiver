@@ -21,12 +21,19 @@ func ResolveHTTPClient(opts ...Option) *http.Client {
 	return resolveHTTPClient(&cfg)
 }
 
-// UnderlyingTransport returns the [*http.Transport] beneath the idle-bounding
-// wrapper of a client built by [ResolveHTTPClient], so the external test
-// package can assert the transport tuning (handshake bound, idle pool sizing)
-// directly. It returns nil when the client does not carry the expected wrapper.
+// UnderlyingTransport returns the [*http.Transport] beneath the retry and
+// idle-bounding wrappers of a client built by [ResolveHTTPClient], so the
+// external test package can assert the transport tuning (handshake bound, idle
+// pool sizing) directly. It returns nil when the client does not carry the
+// expected wrappers.
 func UnderlyingTransport(hc *http.Client) *http.Transport {
-	it, ok := hc.Transport.(*idleTransport)
+	rt := hc.Transport
+
+	if rr, ok := rt.(*retryTransport); ok {
+		rt = rr.next
+	}
+
+	it, ok := rt.(*idleTransport)
 	if !ok {
 		return nil
 	}
