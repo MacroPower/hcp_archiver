@@ -149,33 +149,19 @@ HCP_TOKEN=$user_token hcp_archiver -c hcp_archiver.yaml -o ./archive
 Each pass keeps everything already captured and fills in only what its token can
 now reach.
 
-### Progress and logging
-
-Progress is written to stderr; `--progress` selects the form:
-
-- `auto` (default) — the human line on a TTY, silent when redirected.
-- `human` — force the human line even off a TTY.
-- `json` — one JSON object per line, for CI or a watcher.
-- `quiet` — no progress output.
-
-`--progress-interval` (default `5s`) sets the cadence. Run logs are separate
-from progress and have their own knobs, `--log-level` (`error|warn|info|debug`)
-and `--log-format` (`text|logfmt|json`), so a warning about a skipped collection
-stays legible next to `--progress=json`.
-
 ### Reading the run summary
 
 A run ends with a per-status summary line; the counts are the resume model made
 visible:
 
-- **done** — fetched and written.
-- **absent** — permanently gone (a 404/410), re-probed only with
-  `--recheck-absent`.
-- **forbidden** — the token may not read it (a 403); retried on the next run, so
+- **done**: fetched and written.
+- **absent**: gone (a 404, confirmed by an in-run re-probe), re-probed only
+  with `--retry-absent`.
+- **forbidden**: the token may not read it (a 403); retried on the next run, so
   a broader token can still capture it (see above). Counted apart from an error.
-- **errored** — a transient or unclassified failure, retried next run; a healthy
+- **errored**: a transient or unclassified failure, retried next run; a healthy
   archive ends with `errored=0`.
-- **skipped** / **n/a** — intentionally deferred or not applicable to this
+- **skipped** / **n/a**: intentionally deferred or not applicable to this
   archive; settled, and never mistaken for a gap.
 
 A non-zero `errored` is the count to investigate; `forbidden`, `absent`,
@@ -217,30 +203,33 @@ archive/<org>/
   # org-level objects (not scoped to a single project)
   teams/<id>/
     team.json                       definition + access matrix, members, SSO/SCIM
-    notification-configs.json       team-scoped alerting (Token redacted)
+    notification-configs.json       team-scoped alerting
   memberships.json                  org roster: email, status, user + team refs
-  oauth-clients/<id>.json           VCS connection + tokens (Secret redacted)
+  users/<id>.json                   users referenced by runs, events, teams
+  oauth-clients/<id>/               VCS connection + per-token metadata
   github-app-installations.json     GitHub App installs (metadata only)
-  variable-sets/<id>/               set metadata + variables (values redacted)
-  policy-sets/<id>/                 set metadata + parameters (values redacted)
+  variable-sets/<id>/               set metadata + variables
+  policy-sets/<id>/                 set metadata, versions, parameters
   policies/<id>.json                policy metadata
   policies/<id>.<ext>               Sentinel/OPA source
-  run-tasks.json                    org run-task definitions (HMACKey redacted)
+  run-tasks.json                    org run-task definitions
   agent-pools/<id>.json             pool config + allowed/excluded scopes
   token-ttl-policies.json           org token max-TTL governance
   audit-trails/                     audit config + windowed who-did-what pages
   reserved-tag-keys.json            org tag governance
-  hyok-configurations/<id>.json     HYOK encryption config (optional)
+  hyok-configurations/<id>/         HYOK + OIDC config, key versions (optional)
   registry/                         modules, no-code modules, providers, GPG keys
   config-versions/<cv-id>.tar.gz    deduped org-wide; runs reference by id
 
   # project-scoped objects nest beneath the owning project
   projects/<project-name>/
-    project.json                    defaults, tag bindings, team access
-    notification-configs.json       project-scoped alerting (Token redacted)
+    project.json                    defaults + tag bindings
+    team-access.json                project RBAC
+    effective-tag-bindings.json     resolved bindings, including inherited
+    notification-configs.json       project-scoped alerting
     workspaces/<ws-name>/
       workspace.json                full settings + project ref
-      variables.json                values redacted when sensitive
+      variables.json                sensitive values read back blank upstream
       readme.md, tags.json, team-access.json, notification-configs.json
       run-triggers.json, run-tasks.json, remote-state-consumers.json
       state-versions/               raw + JSON state blobs, per-version metadata
@@ -281,14 +270,16 @@ Layout rules worth knowing:
 Some data cannot be archived at full fidelity, or at all. The archive records
 what it can and marks the rest so gaps are never mistaken for missing objects.
 
-- **Secrets are metadata-only.** Write-only fields return blank on read, so
-  sensitive variable, variable-set, and policy-set-parameter values, every
-  token secret, OAuth client secrets, run-task HMAC keys, and notification
-  tokens are recorded as `[REDACTED]`. SSH private keys never come back at all.
+- **Write-only secrets read back blank.** Sensitive variable, variable-set,
+  and policy-set-parameter values and token secrets are write-only upstream:
+  the API returns them blank, and the archive stores exactly what was
+  returned. Nothing is redacted locally, so any secret the API does return (a
+  notification token, say) is stored verbatim. SSH private keys never come
+  back at all.
 - **Raw state is sensitive and stored in cleartext.** State blobs embed
   sensitive variable, output, and resource values; the API only redacts them
   through an endpoint that returns a lossy subset. **Treat the archive as
-  secret at rest.**
+  secret at rest.** Every file is written owner-only (0600).
 - **Retention- and version-gated artifacts are best-effort.** Plan and apply
   logs expire; structured plan JSON exists only for recent Terraform versions;
   many VCS-driven configuration versions have no downloadable tarball; audit
@@ -327,9 +318,9 @@ for a best-effort snapshot.
   among them), so it is disqualifying here. The two modules have distinct import
   paths, so v2 can be adopted additively later for anything v1 lacks.
 - Serialization marshals the go-tfe response structs through their vendored
-  jsonapi tags (kebab-case, matching the public API docs), redacts sensitive
-  values by mutation, drops ephemeral signed URLs, and flattens hydrated
-  relations to ids.
+  jsonapi tags (kebab-case, matching the public API docs) and flattens hydrated
+  relations to ids. It is otherwise byte-faithful: nothing is redacted or
+  stripped, and ephemeral signed URLs ride along as dead links.
 
 ## Development
 

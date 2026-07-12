@@ -36,7 +36,7 @@ These fall into three general classes, plus platform data.
   the API returned it. Most secret fields are write-only upstream and come back
   blank on read (sensitive variable, variable-set, and policy-set-parameter
   values, and the team / org / agent / user token secrets), so the archive
-  records their existence and metadata with whatever value — usually empty —
+  records their existence and metadata with whatever value (usually empty)
   the server sent; anything the API does return (for example a
   `NotificationConfiguration.Token`) is kept verbatim, which is part of why
   the archive is secret at rest. `SSHKey` is a related but distinct case:
@@ -113,25 +113,34 @@ archive/<org>/
   token-ttl-policies.json           # org max-TTL-per-token-type governance
   audit-trails/
     config.json                     # whether/how auditing is on (elevated token)
-    <page>.json                     # who-did-what-when (elevated token; windowed)
+    <since>-p<page>.json            # who-did-what-when (elevated token; pages
+                                     #   named by window stamp + page number)
   reserved-tag-keys.json            # org tag governance (optional)
   hyok-configurations/<id>/         # HYOK encryption config (optional)
     hyok-configuration.json         # KEK id, KMS options, status
     oidc-configuration.json         # concrete AWS/GCP/Azure/Vault OIDC config
     key-versions/<kv-id>.json       # per customer-key-version status
   registry/
-    modules/<ns>-<name>-<provider>/module.json    # + versions, last commits
-    no-code-modules/<id>.json                     # version pin + variable options
-                                                   #   (BETA API; via module include)
-    providers/<ns>-<name>/provider.json           # + versions, platforms, shasums
-    gpg-keys/<namespace>-<key-id>.json            # ascii-armor public signing keys
+    modules/<ns>/<name>/<provider>/               # nested dirs, not hyphen-joined:
+      module.json                                 #   all three segments can
+      commits.json                                #   themselves contain hyphens
+      version-<version>.json                      # per-version detail (registryDetail)
+    no-code-modules/<id>.json                     # version pin (BETA API; via
+                                                   #   module include)
+    no-code-module-variables/<id>.json            # per-version variable options
+    providers/<ns>/<name>/
+      provider.json
+      version-<version>.json                      # + platforms-<version>.json,
+      platforms-<version>.json                    #   shasums (registryDetail)
+    gpg-keys/<namespace>/<key-id>.json            # ascii-armor public signing keys
                                                    #   (namespaced; ListPrivate)
   config-versions/<cv-id>.tar.gz    # deduped org-wide; runs reference by id
 
   # --- project-scoped objects: everything a project owns nests beneath it ---
   projects/<project-name>/
     project.json                    # id, defaults (exec mode, agent pool,
-                                     #   auto-destroy), tag bindings, team access
+                                     #   auto-destroy), tag bindings
+    team-access.json                # project RBAC (TeamProjectAccess)
     effective-tag-bindings.json     # resolved bindings, including inherited
     notification-configs.json       # project-scoped alerting
 
@@ -173,15 +182,20 @@ archive/<org>/
     stacks/<name>/
       stack.json                    # name, VCS repo, project ref, latest config
       configurations/<id>/
-        configuration.json          # + JSON schema, diagnostics
+        configuration.json
+        json-schemas.json           # once the configuration is terminal
+        diagnostics.json
         deployment-groups/<gid>/
           group.json
           runs/<run-id>/
             run.json
-            steps/<step-id>/        # per-step artifacts (plan/apply desc) + diag
+            steps/<step-id>/        # step.json, plan-description.json,
+                                     #   apply-description.json, diagnostics.json
       deployments/<name>/
         deployment.json             # named-deployment metadata + latest-run ref
-      states/<generation>.json      # StackStates Description() = full stack state
+      states/<deployment>-<generation>.json  # StackStates Description() = full
+                                     #   stack state; bare <generation> when the
+                                     #   state names no deployment
 ```
 
 Notes:
@@ -243,28 +257,61 @@ Notes:
 - **Resumable via a real ledger, not file-existence** (required). A
   permanently-gone object (404/410) and a not-yet-fetched one both leave no
   file, so existence alone cannot drive resume. The ledger records
-  per-object status (`done` / `absent-permanently` / `skipped` / `errored` /
-  `not-applicable`, with counts, timestamps, and the failing error), and resume
-  consults it. `skipped` and `not-applicable` are settled like `done` (never
-  re-requested), so a deferred or intentionally-skipped object is not mistaken
-  for a gap.
+  per-object status (`done` / `absent-permanently` / `forbidden` / `skipped` /
+  `errored` / `not-applicable`, with counts, timestamps, and the failing
+  error), and resume consults it. `skipped` and `not-applicable` are settled
+  like `done` (never re-requested), so a deferred or intentionally-skipped
+  object is not mistaken for a gap. `forbidden` (a 403) is counted apart from
+  `errored` but retried the same way, so a later run under a differently
+  scoped token captures the union of what each token can see.
   Downloads write to a temp path and atomic-rename on success, so an
   interrupted run never leaves a truncated `.tfstate.json` / `.tar.gz` that
-  looks complete. The manifest is flushed durably (write-temp + atomic-rename)
-  at a bounded cadence and on shutdown, so a kill -9 loses at most the last
-  in-flight batch, never the ledger itself.
+  looks complete. The manifest is flushed durably (append-only log lines, with
+  atomic-renamed snapshots on compaction; see Sharded ledger) at a bounded
+  cadence and on shutdown, so a kill -9 loses at most the last in-flight batch,
+  never the ledger itself.
   - **Restart semantics**: a re-invocation against a non-empty output dir loads
     the existing manifest and, per object, _skips_ `done` and
-    `absent-permanently`, _retries_ `errored` and anything absent from the
-    ledger. `absent-permanently` is sticky (a 404/410 is not re-requested every
+    `absent-permanently`, _retries_ `errored`, `forbidden`, and anything absent
+    from the ledger. `absent-permanently` is sticky (a 404/410 is not re-requested every
     run); a `--recheck-absent` toggle forces re-probing when the operator
     suspects a since-restored object. Resume and a clean first run are the same
     code path: a first run just starts from an empty ledger.
   - **Interrupted vs. failed** are the same to resume: both leave objects in
     `errored`/absent, and both are picked up on the next invocation. Transient
     errors (429, 5xx, timeouts, context cancellation) are recorded distinctly
-    from terminal ones (404/410) so resume never mistakes a rate-limit blip for
-    a permanent absence.
+    from terminal ones (404) so resume never mistakes a rate-limit blip for an
+    absence.
+  - **A 404 is confirmed before it settles**: the API can answer 404 out of
+    eventual consistency for an object it listed moments earlier, and `absent`
+    is sticky, so one response is never trusted alone. The archive layer
+    re-probes once in-run after a short delay; only a repeated 404 records
+    `absent`. A genuinely gone object costs one extra request, once. The
+    confirmation lives entirely inside the run; see Cross-run state below for
+    why it is not spread across two runs.
+  - **Cross-run state is avoided**: an object's recorded outcome is a function
+    of its most recent attempt alone, never of how the current run relates to a
+    prior one. (An earlier design settled `absent` only when two _different_
+    runs observed the 404, pairing a persisted observation timestamp with the
+    current run's start time; the escalation depended on run boundaries, made
+    one run's outcome unreproducible from its own inputs, and surfaced
+    first-sight 404s as `errored` noise. The in-run confirm replaced it.)
+    The durable state that legitimately spans runs is exactly the state resume
+    exists to provide, and each piece is a plain last-known value, not a
+    relation between runs:
+    - the per-object entries themselves (status, content signature,
+      `fetchedAt`), which resume _is_ reading back; without them every run
+      starts from zero;
+    - the per-collection high-water marks (newest `CreatedAt` archived; the
+      audit trail's `Since` cursor), without which incremental re-run cannot know
+      where the last walk ended;
+    - the collection completed/settled flags that gate the seal phase, since
+      whether a collection's tail was ever fully walked is inherently a fact about a
+      past run;
+    - the run summary records (`lastRunAt`, `runCount`, per-status totals), which are
+      informational only; nothing consults them to decide a fetch.
+      Anything else that needs more than one observation to decide (today, only
+      the 404 confirm) must gather those observations within a single run.
 - **Re-runnable to capture updates since the last run** (required). Re-invoking
   a completed archive must fetch only what changed, not re-download everything.
   Two object classes, two strategies:
@@ -300,9 +347,10 @@ Notes:
     bar while the phase is determinate. Log output routes through a slog sink
     into the panel so log lines scroll above it rather than corrupting it, and
     ctrl+c/q cancels the whole run under raw mode;
-  - off a terminal (a pipe, a redirect, CI), the same signal as a periodic
-    logfmt line (phase, current target, counts, `completed=x/y` while
-    determinate, bytes, elapsed, a rough rate);
+  - off a terminal (a pipe, a redirect, CI), `--progress=human` carries the
+    same signal as a periodic plain line (phase, current target, counts,
+    `completed=x/y` while determinate, bytes, elapsed, a rough rate); the
+    default `auto` stays quiet off a TTY;
   - the same signal in a machine-readable form (`--progress=json`, one JSON
     object per line: phase, counts, current target, and `phaseTotal` /
     `phaseCompleted` while determinate) for wrapping in CI or a watcher,
@@ -327,11 +375,16 @@ Notes:
   time, any orgs/workspaces that errored) prints on completion and is also written
   to the manifest as the run record, which stays per-run.
 
-- **Concurrency**: worker pool over workspaces (default ~4); sequential within a
-  workspace. `go-tfe` retries per request on rate limits, but N workers each
-  paginating and downloading multiply the request rate; use a shared rate
-  limiter, not just per-request retry. Guard shared manifest/counter writes with
-  a mutex. (Config-version ids are globally unique, so the shared
+- **Concurrency**: a single AIMD-controlled gate over API requests, shared by
+  the whole run. Every request acquires a slot; the run starts at one worker,
+  doubles while a window passes without a 429, halves when the API rate-limits
+  it, and creeps back up additively after, capped at `maxConcurrency` (default
+  16). Workspace walks fan out on coordinator goroutines (capped at the same
+  ceiling) that hold no slot themselves, so parallelism follows the requests
+  rather than a fixed per-workspace assignment. `go-tfe`'s own unbounded 5xx
+  retry is replaced by a bounded doubling backoff at the transport, which also
+  counts observed 429s as the AIMD signal. Guard shared manifest/counter writes
+  with a mutex. (Config-version ids are globally unique, so the shared
   `config-versions/` dir is race-free.)
 - **Not point-in-time consistent**: a long archive of a live org sees new runs
   and state versions appear mid-run. Acceptable for a best-effort snapshot,
@@ -368,7 +421,7 @@ Notes:
 
 An org with thousands of workspaces, each with hundreds of runs and dozens of
 state versions, produces millions of leaf objects. The tree in Output layout is
-the logical namespace — every object's stable archive-relative path — and that
+the logical namespace (every object's stable archive-relative path), and that
 namespace is stored physically in two forms that keep it tractable: the ledger is
 partitioned into **per-workspace shards** rather than one document, and frozen
 history is **sealed into compressed, indexed bundles** rather than one file per
@@ -380,38 +433,42 @@ Two independent pressures shape the two forms, and neither answers the other. A
 single in-RAM `map[relpath]*Entry`, marshaled in full and atomic-rewritten on
 every flush (a 10s cadence) and on shutdown, is a multi-GB document
 re-serialized every ten seconds over a multi-GB resident map at millions of
-entries — a per-tick, per-run cost independent of on-disk size, which sharding
+entries: a per-tick, per-run cost independent of on-disk size, which sharding
 removes and bundling does not (a bundled run still carries its ~12 ledger
-entries). One file per object is millions of tiny leaves — inode pressure and
+entries). One file per object is millions of tiny leaves: inode pressure and
 O(files) traversal locally, and on a remote object store a per-object overhead
 (~8KB of name metadata, plus ~32KB of index on Glacier Deep Archive) that
 dominates the bill: at ~2.7M objects the per-object tax is ~37x the ~15GB
-compressed payload, so object count, not bytes, is the cost — which bundling
+compressed payload, so object count, not bytes, is the cost, which bundling
 removes and sharding does not.
 
 ### Sharded ledger
 
-The ledger lives as per-workspace shards co-located with the subtree they index
-(`.../workspaces/<ws>/.ledger/`), a small org-root shard for org-scoped objects,
-and per-`cvID`-prefix sub-shards for the config-version entries (numerous enough
-to reconstitute the monolith on their own). Each entry belongs to the shard named
-by its relpath prefix, so its key is byte-identical to the single-file form and
-every ledger operation — `ShouldFetch`, `Entry`, the frozen early-stop, the
-watermarks and completion flags — is unchanged; only the entry's physical
-location differs. Each shard carries the marks and flags whose keys share its
-prefix, and resident ledger memory is bounded to `concurrency x one shard`: a
-shard loads when its workspace's walk begins and is released when it ends.
+The ledger lives as per-workspace and per-stack shards co-located with the
+subtree they index (`.../workspaces/<ws>/.ledger/`, `.../stacks/<s>/.ledger/`),
+a small org-root shard for org-scoped objects, and one shared
+`config-versions/.ledger/` shard for the org-wide config-version entries. Each
+entry belongs to the shard named by its relpath prefix, so its key is
+byte-identical to the single-file form and every ledger operation
+(`ShouldFetch`, `Entry`, the frozen early-stop, the watermarks and completion
+flags) is unchanged; only the entry's physical location differs. Each shard
+carries the marks and flags whose keys share its prefix. Every shard under the
+org root loads when the run opens and stays resident for the run; what sharding
+buys is not residency but flush cost: an append-only write path in place of
+re-serializing one monolithic document on every flush tick.
 
 A shard is a compacted `snapshot.json` plus an append-only `log.ndjson`.
 Recording an entry appends one newline-terminated line, so no flush re-serializes
 the whole ledger; the terminating newline is the commit marker and a torn
 trailing line is dropped on read. Compaction folds a shard's log into its
-snapshot once the log has outgrown it, writing the merged snapshot before
-truncating the log, and an unchanged record appends no line, so a re-run's
+snapshot once the log passes a size floor (64MiB) and outgrows the snapshot,
+and unconditionally when the run finishes, writing the merged snapshot before
+truncating the log; an unchanged record appends no line, so a re-run's
 archive-then-stop boundary adds nothing. Each shard commits through the same
 temp-write-and-atomic-rename as every other file, so a shard that exists is
-whole. A shard with no file is re-derived from the on-disk tree rather than read
-as empty.
+whole. A shard with no file starts empty; the ledger, not file existence, is
+the record, so deleting a `.ledger/` directory forgets that subtree's history
+and the next run re-fetches it.
 
 ### Sealed cold storage
 
@@ -471,10 +528,10 @@ loose files canonical and simply re-runs.
 Bundles are `zip` (Zip64), not `.tar.gz`. A zip's central directory is a member
 index for random access after a restore, per-member framing isolates corruption
 to a single member, and mixed per-member methods let one container **STORE** raw
-state while **DEFLATE**-ing logs — with `grep -a` reading the stored members
+state while **DEFLATE**-ing logs, with `grep -a` reading the stored members
 directly and `unzip` readable decades out with no dependency on this tool. Gzip
-is a single non-seekable, non-appendable stream — one member needs the whole
-stream inflated from the front and one bad byte poisons the rest — so it is the
+is a single non-seekable, non-appendable stream: one member needs the whole
+stream inflated from the front and one bad byte poisons the rest, so it is the
 wrong container here. (Config-version tarballs stay `.tar.gz`; they arrive that
 way from the API and are stored opaque.)
 
@@ -572,9 +629,11 @@ generated from the Go type and embedded in the binary.
   `absent-permanently` objects on a re-run, and the `--log-*` knobs.
 - Config file (all keys optional, defaults applied per field): `address`
   (default `https://app.terraform.io`), `organizations` (all visible orgs if
-  empty), `concurrency`, and a `scope` block of toggles for the heavy or
-  optional surfaces (Stacks, HYOK, registry version/platform/binary detail,
-  audit trails), each off by default.
+  empty), `maxConcurrency` (the AIMD ceiling, default 16), a `runHistory`
+  block bounding each workspace's archived run history (`count` / `age`;
+  whichever admits more history wins; unlimited by default), and a `scope`
+  block of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
+  `registryDetail`, `auditTrail`), each off by default.
 
 ## Packaging
 
