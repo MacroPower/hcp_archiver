@@ -338,8 +338,15 @@ func newOverviewScreen(ws *Workspace) (screen, error) {
 	writeField("description", r.String("description"))
 	writeField("terraform version", r.String("terraform-version"))
 	writeField("execution mode", r.String("execution-mode"))
-	writeField("auto apply", fmt.Sprintf("%t", r.Bool("auto-apply")))
-	writeField("resource count", fmt.Sprintf("%d", r.Int("resource-count")))
+
+	if v, ok := r.BoolOK("auto-apply"); ok {
+		writeField("auto apply", fmt.Sprintf("%t", v))
+	}
+
+	if v, ok := r.IntOK("resource-count"); ok {
+		writeField("resource count", fmt.Sprintf("%d", v))
+	}
+
 	writeField("created at", r.String("created-at"))
 
 	if repo, ok := r.Attributes["vcs-repo"].(map[string]any); ok {

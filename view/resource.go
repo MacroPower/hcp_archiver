@@ -99,6 +99,24 @@ func (r *Resource) Int(key string) int64 {
 	return 0
 }
 
+// BoolOK returns the attribute named key as a bool and whether it was present as
+// a bool, so an absent or null field is distinguished from an explicit false
+// (which the string getters suppress but "%t" of a zero bool would render).
+func (r *Resource) BoolOK(key string) (bool, bool) {
+	b, ok := r.Attributes[key].(bool)
+
+	return b, ok
+}
+
+// IntOK returns the attribute named key as an int64 and whether it was present
+// as a JSON number, so an absent or null field is distinguished from an explicit
+// zero.
+func (r *Resource) IntOK(key string) (int64, bool) {
+	f, ok := r.Attributes[key].(float64)
+
+	return int64(f), ok
+}
+
 // Time returns the attribute named key parsed as an RFC 3339 timestamp, or the
 // zero time when it is absent or unparseable. The jsonapi encoder renders
 // iso8601-tagged times in this layout.
