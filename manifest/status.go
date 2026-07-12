@@ -2,10 +2,11 @@ package manifest
 
 // Status is the recorded outcome of archiving a single object.
 //
-// Seven states drive resume. [StatusDone], [StatusSkipped], and
-// [StatusNotApplicable] are settled and never re-requested; permanent absence
-// is settled but sticky; [StatusErrored], [StatusForbidden], [StatusPending],
-// and any object absent from the ledger are retried on the next run.
+// Eight states drive resume. [StatusDone], [StatusSkipped],
+// [StatusNotApplicable], and [StatusReferenceCleared] are settled and never
+// re-requested; permanent absence is settled but sticky; [StatusErrored],
+// [StatusForbidden], [StatusPending], and any object absent from the ledger are
+// retried on the next run.
 type Status string
 
 const (
@@ -38,6 +39,13 @@ const (
 	// run while the foreign write remains outstanding, yet it never inflates the
 	// error tally or the failure list. See [Ledger.MirrorReference].
 	StatusPending Status = "pending"
+	// StatusReferenceCleared marks a run-scoped reference gate whose cross-shard
+	// write has settled: the settled counterpart of [StatusPending]. Like it, the
+	// gate is a ledger-only proxy rather than a real object, so it is settled (the
+	// walk stops retrying its run) yet excluded from [Ledger.Tally]'s object
+	// counters, keeping a recovered reference out of the user-visible
+	// not-applicable and total counts. See [Ledger.MirrorReference].
+	StatusReferenceCleared Status = "reference-cleared"
 )
 
 // String returns the on-disk spelling of the status.
@@ -49,7 +57,8 @@ func (s Status) String() string {
 func (s Status) Valid() bool {
 	switch s {
 	case StatusDone, StatusAbsentPermanently, StatusSkipped,
-		StatusErrored, StatusForbidden, StatusNotApplicable, StatusPending:
+		StatusErrored, StatusForbidden, StatusNotApplicable, StatusPending,
+		StatusReferenceCleared:
 		return true
 	default:
 		return false
@@ -63,10 +72,12 @@ func (s Status) Valid() bool {
 // absence is settled but sticky, so a recheck can still force it to be
 // re-probed. Forbidden is not settled, so a re-run under a token with broader
 // access retries it. Pending is not settled, so a reference gate keeps its run
-// in the walk's retry set until the foreign write it mirrors settles.
+// in the walk's retry set until the foreign write it mirrors settles; once it
+// does, [StatusReferenceCleared] settles the gate and the retry stops.
 func (s Status) Settled() bool {
 	switch s {
-	case StatusDone, StatusAbsentPermanently, StatusSkipped, StatusNotApplicable:
+	case StatusDone, StatusAbsentPermanently, StatusSkipped, StatusNotApplicable,
+		StatusReferenceCleared:
 		return true
 	case StatusErrored, StatusForbidden, StatusPending:
 		return false

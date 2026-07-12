@@ -462,10 +462,12 @@ func (l *Ledger) RecordNotApplicable(relPath string) {
 // It is idempotent and creates no entry for a reference that never failed:
 //   - settled false records [StatusPending] unless the gate is already pending,
 //     so a re-walk does not re-dirty an open gate;
-//   - settled true clears an existing unsettled gate to [StatusNotApplicable] and
-//     does nothing when no gate exists or it is already settled, so a reference
-//     that always succeeded leaves no entry behind and a cleared gate is not
-//     re-dirtied on later re-walks.
+//   - settled true clears an existing unsettled gate to [StatusReferenceCleared]
+//     and does nothing when no gate exists or it is already settled, so a
+//     reference that always succeeded leaves no entry behind and a cleared gate
+//     is not re-dirtied on later re-walks. The cleared gate is settled but, like
+//     the pending one, stays out of [Ledger.Tally]'s object counts, so a
+//     recovered reference never inflates the not-applicable or total tally.
 func (l *Ledger) MirrorReference(key string, settled bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -484,9 +486,10 @@ func (l *Ledger) MirrorReference(key string, settled bool) {
 
 	if settled {
 		// Clear an open gate; leave an absent or already-settled one untouched so a
-		// successful reference never creates or re-dirties an entry.
+		// successful reference never creates or re-dirties an entry. The cleared
+		// gate settles the walk but is kept out of the object tally.
 		if e != nil && !e.Status.Settled() {
-			l.recordLocked(key, StatusNotApplicable, clearErr)
+			l.recordLocked(key, StatusReferenceCleared, clearErr)
 		}
 
 		return

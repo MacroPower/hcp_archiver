@@ -53,6 +53,7 @@ func TestStatus_ValidAndSettled(t *testing.T) {
 		"errored":   {status: manifest.StatusErrored, wantValid: true, wantSettled: false},
 		"forbidden": {status: manifest.StatusForbidden, wantValid: true, wantSettled: false},
 		"pending":   {status: manifest.StatusPending, wantValid: true, wantSettled: false},
+		"cleared":   {status: manifest.StatusReferenceCleared, wantValid: true, wantSettled: true},
 		"unknown":   {status: manifest.Status("nonsense"), wantValid: false, wantSettled: false},
 	}
 
@@ -965,9 +966,16 @@ func TestLedger_MirrorReferenceGate(t *testing.T) {
 
 	entry, ok = ledger.Entry(gate)
 	require.True(t, ok)
-	assert.Equal(t, manifest.StatusNotApplicable, entry.Status)
+	assert.Equal(t, manifest.StatusReferenceCleared, entry.Status)
 	assert.False(t, ledger.ReferencePending(gate))
 	assert.False(t, ledger.HasUnsettledUnder(runsPrefix), "a cleared gate settles the runs prefix")
+
+	// A cleared gate is a ledger-only proxy, not a real object, so it stays out
+	// of the tally's object counters just as the pending gate did: a recovered
+	// reference must not inflate the not-applicable or total counts.
+	clearedTally := ledger.Tally()
+	assert.Equal(t, 0, clearedTally.NotApplicable, "a cleared gate is not a not-applicable object")
+	assert.Equal(t, 0, clearedTally.Total(), "a cleared gate is not one of the counted statuses")
 
 	// A cleared gate is not re-dirtied by a later settled re-mirror.
 	cleared := entry.Attempts

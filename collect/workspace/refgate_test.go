@@ -75,7 +75,7 @@ func TestArchiveRunEventsReReadsActorsWhileGateOpen(t *testing.T) {
 	alice := f.attrs(t, st.User("user-1"), "users", "user-1")
 	assert.Equal(t, "alice", alice["username"])
 
-	assert.Equal(t, manifest.StatusNotApplicable, f.status(actorsGate),
+	assert.Equal(t, manifest.StatusReferenceCleared, f.status(actorsGate),
 		"the gate clears once the actor is captured")
 	assert.Equal(t, manifest.StatusDone, f.status(eventsPath),
 		"the settled events file is not regressed by the pure re-read")
@@ -147,7 +147,7 @@ func TestArchiveConfigurationVersionTarballStrandsAndRecovers(t *testing.T) {
 	require.NoError(t, f.collector.ArchiveConfigurationVersion(t.Context(), "proj", "ws", run))
 
 	assert.Equal(t, manifest.StatusDone, f.status(tarballPath), "the tarball is captured on recovery")
-	assert.Equal(t, manifest.StatusNotApplicable, f.status(gate), "the gate clears once the tarball settles")
+	assert.Equal(t, manifest.StatusReferenceCleared, f.status(gate), "the gate clears once the tarball settles")
 }
 
 func TestArchiveRunChildrenCreatedByStrandsAndRecovers(t *testing.T) {
@@ -183,7 +183,7 @@ func TestArchiveRunChildrenCreatedByStrandsAndRecovers(t *testing.T) {
 
 	alice := f.attrs(t, userPath, "users", "user-1")
 	assert.Equal(t, "alice", alice["username"])
-	assert.Equal(t, manifest.StatusNotApplicable, f.status(gate), "the gate clears once the user settles")
+	assert.Equal(t, manifest.StatusReferenceCleared, f.status(gate), "the gate clears once the user settles")
 	assert.False(t, f.ledger.HasUnsettledUnder(runsKey), "the run has no outstanding work once captured")
 }
 
@@ -236,7 +236,7 @@ func TestCollectRunsStrandsAndRecoversCreatedByAcrossWalk(t *testing.T) {
 	require.NoError(t, f.collector.CollectRuns(t.Context(), "proj", ws, nil))
 
 	assert.Equal(t, manifest.StatusDone, f.status(st.User("user-1")), "the older run's user is captured")
-	assert.Equal(t, manifest.StatusNotApplicable, f.status(olderGate), "its gate clears")
+	assert.Equal(t, manifest.StatusReferenceCleared, f.status(olderGate), "its gate clears")
 	assert.False(t, f.ledger.HasUnsettledUnder(runsKey), "no run has outstanding work")
 	assert.True(t, f.ledger.IsCollectionSettled(runsKey), "the collection settles once every gate clears")
 }
