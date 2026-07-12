@@ -25,12 +25,13 @@ const pageTimeLayout = "20060102T150405.000000000"
 // page never collides with or clobbers an earlier run's immutable page. Two
 // runs whose watermarks differ by any amount get distinct stamps, so the later
 // run never reuses the earlier run's page names. The zero cursor of a first run
-// formats to a fixed epoch stamp. The page number is zero-padded so the names
-// sort in page order.
+// formats to a fixed epoch stamp. The page number is zero-padded to nine digits
+// so the names sort in page order for any realistic page count; a four-digit pad
+// would let page 10000 sort before page 9999.
 func pageName(since time.Time, page int) string {
 	stamp := since.UTC().Format(pageTimeLayout) + "Z"
 
-	return fmt.Sprintf("%s-p%04d.json", stamp, page)
+	return fmt.Sprintf("%s-p%09d.json", stamp, page)
 }
 
 // eventsAfter returns the items whose timestamp is strictly newer than since,

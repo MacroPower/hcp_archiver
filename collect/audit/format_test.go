@@ -22,27 +22,27 @@ func TestPageName(t *testing.T) {
 		"zero cursor formats to the epoch stamp": {
 			since: time.Time{},
 			page:  1,
-			want:  "00010101T000000.000000000Z-p0001.json",
+			want:  "00010101T000000.000000000Z-p000000001.json",
 		},
 		"a cursor stamps in UTC without colons": {
 			since: time.Date(2026, time.July, 8, 13, 4, 5, 0, time.UTC),
 			page:  2,
-			want:  "20260708T130405.000000000Z-p0002.json",
+			want:  "20260708T130405.000000000Z-p000000002.json",
 		},
 		"a non-UTC cursor is normalized to UTC": {
 			since: time.Date(2026, time.July, 8, 9, 4, 5, 0, time.FixedZone("EST", -4*60*60)),
 			page:  3,
-			want:  "20260708T130405.000000000Z-p0003.json",
+			want:  "20260708T130405.000000000Z-p000000003.json",
 		},
 		"sub-second cursors keep their fractional precision": {
 			since: time.Date(2026, time.July, 8, 13, 4, 5, 987654321, time.UTC),
 			page:  1,
-			want:  "20260708T130405.987654321Z-p0001.json",
+			want:  "20260708T130405.987654321Z-p000000001.json",
 		},
 		"high page numbers keep sorting past four digits": {
 			since: time.Time{},
 			page:  12345,
-			want:  "00010101T000000.000000000Z-p12345.json",
+			want:  "00010101T000000.000000000Z-p000012345.json",
 		},
 	}
 
@@ -62,6 +62,8 @@ func TestPageNameOrdersByPage(t *testing.T) {
 
 	assert.Less(t, audit.PageName(since, 1), audit.PageName(since, 2))
 	assert.Less(t, audit.PageName(since, 2), audit.PageName(since, 10))
+	// The padding must hold lexical order across a digit-width boundary.
+	assert.Less(t, audit.PageName(since, 9999), audit.PageName(since, 10000))
 }
 
 func TestPageNameDistinguishesSameSecondCursors(t *testing.T) {
