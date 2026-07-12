@@ -34,12 +34,6 @@ func providerPlatformsFilename(version string) string {
 	return "platforms-" + version + ".json"
 }
 
-// noCodeVariablesPath derives the variable-options leaf beside a no-code
-// module's file, reusing the module's own path so the two sit together.
-func noCodeVariablesPath(base string) string {
-	return strings.TrimSuffix(base, ".json") + "-variables.json"
-}
-
 // isConcreteVersion reports whether v names a specific version rather than the
 // floating "latest" pin or an empty value, so it can address a per-version read.
 func isConcreteVersion(v string) bool {

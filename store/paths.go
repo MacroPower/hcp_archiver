@@ -163,6 +163,17 @@ func (s *Store) RegistryNoCodeModule(id string) string {
 	return cleanJoin("registry", "no-code-modules", seg(id)+".json")
 }
 
+// RegistryNoCodeModuleVariables returns the relative path of a no-code module's
+// variable-options sidecar, keyed on its id.
+//
+// It lives under a sibling directory of the module files, not beside them, so a
+// module whose id ends in "-variables" can never alias another module's sidecar:
+// [Store.RegistryNoCodeModule] only ever writes under "no-code-modules", never
+// "no-code-module-variables".
+func (s *Store) RegistryNoCodeModuleVariables(id string) string {
+	return cleanJoin("registry", "no-code-module-variables", seg(id)+".json")
+}
+
 // RegistryProviderFile returns the relative path of a leaf named file under a
 // registry provider's directory (e.g. provider.json).
 //

@@ -86,6 +86,10 @@ func TestStore_pathBuilders(t *testing.T) {
 			build: func(s *store.Store) string { return s.RegistryNoCodeModule("nocode-1") },
 			want:  "registry/no-code-modules/nocode-1.json",
 		},
+		"registry no-code module variables": {
+			build: func(s *store.Store) string { return s.RegistryNoCodeModuleVariables("nocode-1") },
+			want:  "registry/no-code-module-variables/nocode-1.json",
+		},
 		"registry provider file": {
 			build: func(s *store.Store) string { return s.RegistryProviderFile("ns", "aws", "provider.json") },
 			want:  "registry/providers/ns/aws/provider.json",

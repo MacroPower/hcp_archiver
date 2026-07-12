@@ -91,7 +91,7 @@ func (c *Collector) archiveNoCodeModule(
 		return nil
 	}
 
-	varsPath := noCodeVariablesPath(base)
+	varsPath := st.RegistryNoCodeModuleVariables(ncm.ID)
 
 	version := resolveNoCodeVersion(ncm.VersionPin, mod.VersionStatuses)
 	if version == "" {
