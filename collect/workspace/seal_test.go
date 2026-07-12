@@ -210,6 +210,37 @@ func TestSealWorkspace_SkipsUnsettledArtifacts(t *testing.T) {
 		"no bundle is written when nothing is frozen")
 }
 
+func TestSealWorkspace_IgnoresReferenceGates(t *testing.T) {
+	t.Parallel()
+
+	f := newSealFixture(t)
+	st := f.store
+	project, ws := "stg", "web"
+
+	// A frozen run whose actor write stranded: run-events.json is on disk and done,
+	// while a ledger-only pending reference gate has no on-disk file. Sealing must
+	// coalesce the events file and neither seal, materialize, nor disturb the gate.
+	gate := st.RunFile(project, ws, "run-1", "run-events-actors.ref")
+	f.writeDone(t, st.RunFile(project, ws, "run-1", "run-events.json"), []byte("[]"))
+	f.ledger.MirrorReference(gate, false)
+
+	f.markComplete(project, ws)
+
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	assert.False(t, f.exists(st.RunFile(project, ws, "run-1", "run-events.json")),
+		"the events file coalesces into its roll-up")
+	assert.True(t, f.exists(st.Join(st.RollupDir(project, ws), "run-events.ndjson")),
+		"the run-events roll-up is written")
+	assert.False(t, f.exists(gate), "a reference gate is never materialized on disk")
+
+	// The gate entry is inert to sealing: it stays pending, so a later run still
+	// retries the stranded actor.
+	entry, ok := f.ledger.Entry(gate)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusPending, entry.Status)
+}
+
 func TestSealWorkspace_GenerationsAppend(t *testing.T) {
 	t.Parallel()
 

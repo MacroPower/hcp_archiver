@@ -33,8 +33,23 @@ func (c *Collector) archiveRunChildren(ctx context.Context, project, ws string, 
 	}
 
 	// The run's created-by is hydrated by the pager but renders as a bare id ref;
-	// archive that user directly (the only capture of who queued the run).
-	return c.archiveUser(ctx, run.CreatedBy)
+	// archive that user directly (the only capture of who queued the run). It lands
+	// in the org-root users/ shard, outside this run's subtree, so a failed write
+	// is invisible to the runs walk's retry gate; mirror it into a run-scoped
+	// reference gate so the run is re-walked until the user is captured.
+	err := c.archiveUser(ctx, run.CreatedBy)
+	if err != nil {
+		return err
+	}
+
+	if run.CreatedBy == nil {
+		return nil
+	}
+
+	st := c.env.Store()
+	c.env.Reference(st.RunFile(project, ws, run.ID, "created-by.ref"), st.User(run.CreatedBy.ID))
+
+	return nil
 }
 
 // archiveConfigurationVersion archives the run's configuration-version record,
@@ -61,9 +76,22 @@ func (c *Collector) archiveConfigurationVersion(ctx context.Context, project, ws
 		return err
 	}
 
-	return c.blob(ctx, st.ConfigVersionTarball(cvID), func(ctx context.Context) (io.ReadCloser, error) {
+	tarballPath := st.ConfigVersionTarball(cvID)
+
+	err = c.blob(ctx, tarballPath, func(ctx context.Context) (io.ReadCloser, error) {
 		return c.env.Client().OpenConfigurationVersion(ctx, cvID)
 	})
+	if err != nil {
+		return err
+	}
+
+	// The tarball is deduped org-wide under config-versions/, outside this run's
+	// subtree, so a failed write is invisible to the runs walk's retry gate. Its
+	// own Blob re-attempts on any re-walk; the gate supplies only the visibility
+	// half, so mirror the tarball's settlement into a run-scoped reference gate.
+	c.env.Reference(st.RunFile(project, ws, run.ID, "config-version-tarball.ref"), tarballPath)
+
+	return nil
 }
 
 // archiveConfigVersionRecord reads the configuration version once, only while
@@ -224,16 +252,27 @@ func (c *Collector) archiveComments(ctx context.Context, project, ws string, run
 // hydrated actor.
 //
 // The actor is hydrated by the include but renders as a bare id ref on the event,
-// so it is archived directly at users/<id>.json. The events are captured from the
-// list read so their actors can be looped after; a settled re-walk skips the read
-// and leaves the slice empty, a harmless no-op since the actors were archived when
-// the events were first written.
+// so it is archived directly at users/<id>.json — a sibling shard outside this
+// run's subtree, and the only capture of who acted on a run. Two facts make a
+// plain settle-and-skip read unsafe here: that user write can fail invisibly to
+// the runs walk's retry gate (it scans only the run's own shard), and
+// run-events.json settles Done before the actors are archived, so a settled
+// re-walk would skip the very read that re-derives the actors (they live only in
+// the list include, not on the run). So the read is gated on the union of
+// run-events.json being unsettled and a run-scoped actors reference gate being
+// open, and runs via the non-self-gating doRead: it re-derives the actors even
+// after run-events.json is Done, and the gate clears once every actor is captured.
 func (c *Collector) archiveRunEvents(ctx context.Context, project, ws string, run *tfe.Run) error {
+	st := c.env.Store()
+	eventsPath := st.RunFile(project, ws, run.ID, "run-events.json")
+	actorsGate := st.RunFile(project, ws, run.ID, "run-events-actors.ref")
 	runID := run.ID
 
-	var events []*tfe.RunEvent
+	if !c.env.ShouldFetch(eventsPath) && !c.env.ReferencePending(actorsGate) {
+		return nil
+	}
 
-	err := objectOne(ctx, c, c.env.Store().RunFile(project, ws, run.ID, "run-events.json"),
+	events, err := doRead(ctx, c, eventsPath,
 		func(ctx context.Context, tc *tfe.Client) ([]*tfe.RunEvent, error) {
 			l, e := tc.RunEvents.List(ctx, runID, &tfe.RunEventListOptions{
 				Include: []tfe.RunEventIncludeOpt{tfe.RunEventActor, tfe.RunEventComment},
@@ -242,20 +281,40 @@ func (c *Collector) archiveRunEvents(ctx context.Context, project, ws string, ru
 				return nil, fmt.Errorf("list run events: %w", e)
 			}
 
-			events = l.Items
-
 			return l.Items, nil
 		})
 	if err != nil {
+		// Unlike the cross-shard actor writes, eventsPath is in the runs walk's own
+		// shard, so an errored entry is already visible to HasUnsettledUnder and needs
+		// no gate; recordErrored records it without regressing a settled events file.
+		return c.recordErrored(ctx, eventsPath, err)
+	}
+
+	// Write through the self-gating object so a pure re-read (run-events.json
+	// already Done, only the gate still open) does not rewrite or re-seal it.
+	err = c.object(ctx, eventsPath, events)
+	if err != nil {
 		return err
 	}
+
+	var actorPaths []string
 
 	for _, ev := range events {
 		uErr := c.archiveUser(ctx, ev.Actor)
 		if uErr != nil {
 			return uErr
 		}
+
+		if ev.Actor != nil {
+			actorPaths = append(actorPaths, st.User(ev.Actor.ID))
+		}
 	}
+
+	// Mirror the actor writes (the org-root users/ shard) into the run-scoped gate:
+	// a failed actor write keeps the gate open so a later run re-reads and captures
+	// it. Zero actors leaves no paths, so the gate clears and the read stops
+	// recurring once run-events.json is Done.
+	c.env.Reference(actorsGate, actorPaths...)
 
 	return nil
 }

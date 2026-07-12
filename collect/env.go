@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/manifest"
@@ -124,6 +125,27 @@ func (e *Env) Skip(relPath string) {
 // for a gap.
 func (e *Env) NotApplicable(relPath string) {
 	e.ledger.RecordNotApplicable(relPath)
+}
+
+// Reference maintains a run-scoped reference gate at gateKey that mirrors whether
+// the cross-shard writes at sharedPaths have settled, so a write that lands
+// outside the referencing run's own subtree (its created-by user, an event
+// actor, a config-version tarball) is still retried by the run walk when it
+// fails. The gate counts unsettled while any shared path is not yet settled,
+// using the same predicate ([Env.ShouldFetch]) the walk uses to decide retries,
+// and clears once every shared write is settled. See
+// [manifest.Ledger.MirrorReference].
+func (e *Env) Reference(gateKey string, sharedPaths ...string) {
+	settled := !slices.ContainsFunc(sharedPaths, e.ledger.ShouldFetch)
+	e.ledger.MirrorReference(gateKey, settled)
+}
+
+// ReferencePending reports whether the reference gate at gateKey exists and is
+// still unsettled. A split-read that re-derives a cross-shard write's source
+// consults it to force the read while the gate is open (the run-event actors,
+// whose hydrated objects live only in the list include).
+func (e *Env) ReferencePending(gateKey string) bool {
+	return e.ledger.ReferencePending(gateKey)
 }
 
 // HighWaterMark returns the recorded watermark for key, or the zero time when

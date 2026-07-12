@@ -447,6 +447,87 @@ func (l *Ledger) RecordNotApplicable(relPath string) {
 	})
 }
 
+// MirrorReference maintains a run-scoped reference gate at key, a ledger-only
+// proxy that mirrors whether a cross-shard write the run depends on has settled.
+//
+// A run's Archive closure writes a few objects into sibling shards outside its
+// own subtree: its created-by user and each event actor into users/<id>.json,
+// and a config-version tarball into config-versions/<id>.tar.gz. A local write of
+// one that fails records an errored entry in that foreign shard, invisible to the
+// run walk's retry gate ([Ledger.HasUnsettledUnder] scans only the run's own
+// shard), so nothing would ever retry it and the object stays uncaptured. A gate
+// under the run's own prefix makes that outstanding work visible to the walk
+// without moving the foreign write out of its org-global location.
+//
+// It is idempotent and creates no entry for a reference that never failed:
+//   - settled false records [StatusPending] unless the gate is already pending,
+//     so a re-walk does not re-dirty an open gate;
+//   - settled true clears an existing unsettled gate to [StatusNotApplicable] and
+//     does nothing when no gate exists or it is already settled, so a reference
+//     that always succeeded leaves no entry behind and a cleared gate is not
+//     re-dirtied on later re-walks.
+func (l *Ledger) MirrorReference(key string, settled bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var e *Entry
+
+	if sh, ok := l.lookupShard(key); ok {
+		e = sh.entries[key]
+	}
+
+	clearErr := func(_ time.Time, ent *Entry) {
+		ent.LastError = ""
+		ent.LastErrorAt = time.Time{}
+		ent.Transient = false
+	}
+
+	if settled {
+		// Clear an open gate; leave an absent or already-settled one untouched so a
+		// successful reference never creates or re-dirties an entry.
+		if e != nil && !e.Status.Settled() {
+			l.recordLocked(key, StatusNotApplicable, clearErr)
+		}
+
+		return
+	}
+
+	// Open the gate; leave an already-pending one untouched so a re-walk does not
+	// re-dirty it. A gate cleared on a prior run but whose foreign write has since
+	// failed again is re-opened here, so a transient cross-shard disagreement
+	// self-heals.
+	if e != nil && e.Status == StatusPending {
+		return
+	}
+
+	l.recordLocked(key, StatusPending, clearErr)
+}
+
+// ReferencePending reports whether a reference gate at key exists and is
+// unsettled.
+//
+// A split-read that both mirrors a cross-shard write and re-derives its source
+// (the run-event actors, hydrated only in the list include) consults it to force
+// the read while the gate is open. It differs from [Ledger.ShouldFetch], which
+// treats an absent path as "fetch": a gate's absence means no outstanding work,
+// so this returns false for a gate that was never created or has been cleared.
+func (l *Ledger) ReferencePending(key string) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	sh, ok := l.lookupShard(key)
+	if !ok {
+		return false
+	}
+
+	e, ok := sh.entries[key]
+	if !ok {
+		return false
+	}
+
+	return !e.Status.Settled()
+}
+
 // record applies status and mutate to the entry at relPath in its shard and
 // keeps both tallies in step: the per-run counts swap any status this entry
 // already contributed to the run, and the cumulative counts swap the entry's
@@ -455,6 +536,13 @@ func (l *Ledger) record(relPath string, status Status, mutate func(now time.Time
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	l.recordLocked(relPath, status, mutate)
+}
+
+// recordLocked is the body of [Ledger.record] with the write lock already held,
+// so a caller that must inspect the entry and record atomically (see
+// [Ledger.MirrorReference]) can do both under one lock acquisition.
+func (l *Ledger) recordLocked(relPath string, status Status, mutate func(now time.Time, e *Entry)) {
 	now := l.now()
 	sh := l.shardFor(relPath)
 

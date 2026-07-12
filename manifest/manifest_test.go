@@ -52,6 +52,7 @@ func TestStatus_ValidAndSettled(t *testing.T) {
 		"na":        {status: manifest.StatusNotApplicable, wantValid: true, wantSettled: true},
 		"errored":   {status: manifest.StatusErrored, wantValid: true, wantSettled: false},
 		"forbidden": {status: manifest.StatusForbidden, wantValid: true, wantSettled: false},
+		"pending":   {status: manifest.StatusPending, wantValid: true, wantSettled: false},
 		"unknown":   {status: manifest.Status("nonsense"), wantValid: false, wantSettled: false},
 	}
 
@@ -116,7 +117,7 @@ func TestLoad_UnknownStatus(t *testing.T) {
 	// key the tally never reads, so a resumed run would report a zero total; the
 	// load rejects it instead.
 	path := t.TempDir()
-	doc := `{"version":1,"entries":{"a":{"status":"pending","attempts":1}}}`
+	doc := `{"version":1,"entries":{"a":{"status":"nonsense","attempts":1}}}`
 	snapshot, _ := rootShardFiles(path)
 	require.NoError(t, os.MkdirAll(filepath.Dir(snapshot), 0o755))
 	require.NoError(t, os.WriteFile(snapshot, []byte(doc), 0o600))
@@ -907,4 +908,113 @@ func TestLedger_HasUnsettledUnderIgnoresSyntheticCursor(t *testing.T) {
 
 	assert.False(t, ledger.HasUnsettledUnder("stacks/stk-123/configurations"),
 		"a synthetic id cursor is not a prefix of any entry")
+}
+
+func TestLedger_MirrorReferenceGate(t *testing.T) {
+	t.Parallel()
+
+	const (
+		runsPrefix = "projects/p/workspaces/w/runs"
+		gate       = runsPrefix + "/r1/created-by.ref"
+	)
+
+	ledger, err := manifest.Load(t.TempDir())
+	require.NoError(t, err)
+
+	ledger.StartRun()
+
+	// A reference that never failed creates no entry: mirroring a settled write
+	// against an absent gate is a no-op, so the happy path leaves no *.ref bloat.
+	ledger.MirrorReference(gate, true)
+
+	_, ok := ledger.Entry(gate)
+	assert.False(t, ok, "a settled reference against an absent gate creates no entry")
+	assert.False(t, ledger.ReferencePending(gate))
+	assert.False(t, ledger.HasUnsettledUnder(runsPrefix))
+
+	// An unsettled foreign write opens the gate as pending: unsettled, but not a
+	// failure. HasUnsettledUnder now sees outstanding work under the runs prefix
+	// even though the write itself lives in a sibling shard.
+	ledger.MirrorReference(gate, false)
+
+	entry, ok := ledger.Entry(gate)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusPending, entry.Status)
+	assert.True(t, ledger.ReferencePending(gate))
+	assert.True(t, ledger.HasUnsettledUnder(runsPrefix),
+		"a pending gate makes its run unsettled under the runs prefix")
+
+	// A pending gate never inflates the error tally, the total, or the failure
+	// list: it is absent from Tally's six counters and from Failures.
+	tally := ledger.Tally()
+	assert.Equal(t, 0, tally.Errored, "pending is not an error")
+	assert.Equal(t, 0, tally.Total(), "pending is not one of the counted statuses")
+	assert.Empty(t, ledger.Failures(), "a pending gate is not a failure")
+
+	// Re-mirroring the same unsettled write is idempotent: an already-pending gate
+	// is not re-dirtied, so a re-walk does not climb its attempt count.
+	ledger.MirrorReference(gate, false)
+
+	entry, ok = ledger.Entry(gate)
+	require.True(t, ok)
+	assert.Equal(t, 1, entry.Attempts, "an already-pending gate is not re-recorded")
+
+	// The foreign write settling clears the gate to not-applicable, a settled state
+	// that stops the retry.
+	ledger.MirrorReference(gate, true)
+
+	entry, ok = ledger.Entry(gate)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusNotApplicable, entry.Status)
+	assert.False(t, ledger.ReferencePending(gate))
+	assert.False(t, ledger.HasUnsettledUnder(runsPrefix), "a cleared gate settles the runs prefix")
+
+	// A cleared gate is not re-dirtied by a later settled re-mirror.
+	cleared := entry.Attempts
+
+	ledger.MirrorReference(gate, true)
+
+	entry, _ = ledger.Entry(gate)
+	assert.Equal(t, cleared, entry.Attempts, "a cleared gate is not re-dirtied on later re-walks")
+}
+
+func TestLedger_ReferencePendingAbsentIsFalse(t *testing.T) {
+	t.Parallel()
+
+	ledger, err := manifest.Load(t.TempDir())
+	require.NoError(t, err)
+
+	// Unlike ShouldFetch, an absent gate is not pending: its absence means no
+	// outstanding work, so the actor re-read is not forced when no gate was written.
+	assert.False(t, ledger.ReferencePending("projects/p/workspaces/w/runs/r1/x.ref"))
+	assert.True(t, ledger.ShouldFetch("projects/p/workspaces/w/runs/r1/x.ref"),
+		"the two predicates differ on an absent path")
+}
+
+func TestLedger_PendingGateSurvivesReload(t *testing.T) {
+	t.Parallel()
+
+	path := t.TempDir()
+
+	const (
+		runsPrefix = "projects/p/workspaces/w/runs"
+		gate       = runsPrefix + "/r1/run-events-actors.ref"
+	)
+
+	ledger, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	ledger.StartRun()
+	ledger.MirrorReference(gate, false)
+	require.NoError(t, ledger.Flush())
+
+	// A snapshot carrying a pending gate loads cleanly (Valid accepts it) and the
+	// gate still forces its run unsettled on resume.
+	reloaded, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	entry, ok := reloaded.Entry(gate)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusPending, entry.Status)
+	assert.True(t, reloaded.HasUnsettledUnder(runsPrefix), "a pending gate re-widens the walk on resume")
 }

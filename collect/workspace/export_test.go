@@ -42,6 +42,11 @@ func (c *Collector) ArchiveRunEvents(ctx context.Context, project, ws string, ru
 	return c.archiveRunEvents(ctx, project, ws, run)
 }
 
+// ArchiveRunChildren exposes archiveRunChildren to the external test package.
+func (c *Collector) ArchiveRunChildren(ctx context.Context, project, ws string, run *tfe.Run) error {
+	return c.archiveRunChildren(ctx, project, ws, run)
+}
+
 // ArchiveStateVersion exposes archiveStateVersion to the external test package.
 func (c *Collector) ArchiveStateVersion(
 	ctx context.Context,
