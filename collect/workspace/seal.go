@@ -370,16 +370,25 @@ func isStateBlob(name string) bool {
 // nextGeneration returns the generation number for a new bundle named by prefix,
 // one past the highest already present, so a bundle is written once and never
 // rewritten.
+//
+// It lists the directory literally rather than globbing: the bundles path is
+// rooted at the operator-chosen archive root, so a glob metacharacter in that
+// root ('*', '?', or a '[' character class) would make [filepath.Glob] match
+// nothing, restart numbering at 1, and overwrite the prior generation's sealed
+// bundles. [os.ReadDir] treats the whole path as a literal, and parseGeneration
+// ignores any name that is not a bundle leaf.
 func nextGeneration(bundlesDir, prefix string) (int, error) {
-	matches, err := filepath.Glob(filepath.Join(bundlesDir, prefix+".gen*.zip"))
+	names, err := listNames(bundlesDir, func(e fs.DirEntry) bool {
+		return !e.IsDir()
+	})
 	if err != nil {
-		return 0, fmt.Errorf("glob %s bundles: %w", prefix, err)
+		return 0, fmt.Errorf("list %s bundles: %w", prefix, err)
 	}
 
 	highest := 0
 
-	for _, match := range matches {
-		gen := parseGeneration(filepath.Base(match), prefix)
+	for _, name := range names {
+		gen := parseGeneration(name, prefix)
 		if gen > highest {
 			highest = gen
 		}
