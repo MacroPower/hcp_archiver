@@ -19,10 +19,12 @@ import (
 // or permanently absent) returns without fetching, so an immutable artifact is
 // never re-downloaded on a re-run. Otherwise it runs fetch, serializes and
 // writes the result atomically, and records the object done with its content
-// signature. A terminal fetch error (a 404) records the object as permanently
-// absent; any other error, a 410 among them, records it as errored so a re-run
-// retries it. Only a cancellation of ctx propagates; every other outcome is
-// recorded and returns nil so one bad object never aborts the run.
+// signature. A terminal fetch error (a 404) records an absence observation,
+// which settles to permanently absent only once a later run observes it again
+// (see [manifest.Ledger.RecordAbsentObservation]); any other error, a 410 among
+// them, records the object as errored so a re-run retries it. Only a
+// cancellation of ctx propagates; every other outcome is recorded and returns
+// nil so one bad object never aborts the run.
 func (e *Env) Object(ctx context.Context, relPath string, fetch func(context.Context) (any, error)) error {
 	if !e.ledger.ShouldFetch(relPath) {
 		return nil
@@ -298,11 +300,13 @@ func (e *Env) recordDone(relPath string, res store.WriteResult) {
 // transient-versus-terminal classification is turned into a recorded outcome.
 //
 // A cancellation of the passed context propagates so the run can wind down; a
-// terminal error records permanent absence (sticky); an access denial records a
-// forbidden object (retryable, so a later run under a broader token captures
-// it); anything else records an errored object, transient when the client
-// classifies it so, so a re-run retries it and never mistakes a rate-limit blip
-// for a gone object.
+// terminal error records an absence observation, which settles to permanent
+// (sticky) absence only once a later run observes it again, so an
+// eventual-consistency 404 on a just-listed object is never converted into a
+// permanent gap from one response; an access denial records a forbidden object
+// (retryable, so a later run under a broader token captures it); anything else
+// records an errored object, transient when the client classifies it so, so a
+// re-run retries it and never mistakes a rate-limit blip for a gone object.
 func (e *Env) fail(ctx context.Context, relPath string, cause error) error {
 	canceled := e.canceled(ctx, relPath)
 	if canceled != nil {
@@ -310,7 +314,7 @@ func (e *Env) fail(ctx context.Context, relPath string, cause error) error {
 	}
 
 	if tfeclient.IsTerminal(cause) {
-		e.ledger.RecordAbsent(relPath)
+		e.ledger.RecordAbsentObservation(relPath, cause)
 
 		return nil
 	}

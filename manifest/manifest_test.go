@@ -1057,3 +1057,88 @@ func TestLedger_DroppedSurfaces(t *testing.T) {
 	assert.Zero(t, ledger.Tally().SurfacesDropped)
 	assert.Empty(t, ledger.DroppedSurfaces())
 }
+
+func TestLedger_AbsentObservationSecondStrike(t *testing.T) {
+	t.Parallel()
+
+	const relPath = "projects/p/workspaces/w/runs/r1/run.json"
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+
+	ledger, err := manifest.Load(t.TempDir(), manifest.WithClock(func() time.Time { return now }))
+	require.NoError(t, err)
+
+	ledger.StartRun()
+
+	// The first observation is not believed: it records errored (retryable) so
+	// the next run re-probes, rather than converting one possibly
+	// eventually-consistent 404 into a sticky permanent absence.
+	ledger.RecordAbsentObservation(relPath, errors.New("resource not found"))
+
+	entry, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, entry.Status)
+	assert.True(t, ledger.ShouldFetch(relPath), "a first observation stays retryable")
+
+	// A repeat within the same run can sit in the same consistency window, so it
+	// re-stamps without escalating.
+	now = now.Add(time.Minute)
+
+	ledger.RecordAbsentObservation(relPath, errors.New("resource not found"))
+
+	entry, ok = ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, entry.Status)
+
+	// A later run observing the absence again settles it.
+	now = now.Add(time.Hour)
+
+	ledger.StartRun()
+	ledger.RecordAbsentObservation(relPath, errors.New("resource not found"))
+
+	entry, ok = ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusAbsentPermanently, entry.Status)
+	assert.False(t, ledger.ShouldFetch(relPath), "the confirmed absence is settled")
+}
+
+func TestLedger_AbsentObservationResetByOtherOutcomes(t *testing.T) {
+	t.Parallel()
+
+	const relPath = "projects/p/workspaces/w/runs/r1/run.json"
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+
+	ledger, err := manifest.Load(t.TempDir(), manifest.WithClock(func() time.Time { return now }))
+	require.NoError(t, err)
+
+	ledger.StartRun()
+	ledger.RecordAbsentObservation(relPath, errors.New("resource not found"))
+
+	// A successful fetch clears the observation: the object exists, so an old
+	// stamp must not pair with a much later 404.
+	ledger.RecordDone(relPath, manifest.Signature{Size: 1})
+
+	now = now.Add(time.Hour)
+
+	ledger.StartRun()
+	ledger.RecordAbsentObservation(relPath, errors.New("resource not found"))
+
+	entry, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, entry.Status,
+		"the count restarted, so this is a first observation again")
+
+	// An intervening non-absence failure also restarts the count, so only
+	// consecutive absence observations settle.
+	ledger.RecordErrored(relPath, errors.New("500"), true)
+
+	now = now.Add(time.Hour)
+
+	ledger.StartRun()
+	ledger.RecordAbsentObservation(relPath, errors.New("resource not found"))
+
+	entry, ok = ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, entry.Status)
+}

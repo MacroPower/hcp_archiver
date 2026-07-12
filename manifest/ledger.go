@@ -386,13 +386,66 @@ func (l *Ledger) RecordDone(relPath string, sig Signature) {
 	})
 }
 
-// RecordAbsent records relPath as permanently gone (a 404).
+// RecordAbsent records relPath as permanently gone (a 404), settling it
+// immediately. Collectors should prefer [Ledger.RecordAbsentObservation],
+// which requires a second run to confirm before settling.
 func (l *Ledger) RecordAbsent(relPath string) {
 	l.record(relPath, StatusAbsentPermanently, func(now time.Time, e *Entry) {
 		e.FetchedAt = now
 		e.LastError = ""
 		e.LastErrorAt = time.Time{}
 		e.Transient = false
+	})
+}
+
+// RecordAbsentObservation records one observation of relPath answering as
+// permanently gone (a 404).
+//
+// A single observation is not believed: permanent absence is settled and
+// sticky, so recording it from one response converts an eventual-consistency
+// blip — an object listed a moment ago whose read briefly 404s — into a
+// permanent, silent gap. The first observation records the object
+// [StatusErrored] (retryable, so the next run re-probes it) and stamps the
+// entry; only an observation in a later run, when the stamp predates the
+// current run's start ([Ledger.StartRun]), settles [StatusAbsentPermanently].
+// Repeated observations within one run re-stamp without escalating, since a
+// re-walk seconds later can sit in the same consistency window. Any other
+// recorded outcome clears the stamp, so the two observations are always
+// consecutive: a fetch that succeeds, or fails another way, restarts the
+// count.
+func (l *Ledger) RecordAbsentObservation(relPath string, cause error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var prior time.Time
+
+	if sh, ok := l.lookupShard(relPath); ok {
+		if e := sh.entries[relPath]; e != nil {
+			prior = e.AbsentSeenAt
+		}
+	}
+
+	if !prior.IsZero() && prior.Before(l.runStartedAt) {
+		l.recordLocked(relPath, StatusAbsentPermanently, func(now time.Time, e *Entry) {
+			e.FetchedAt = now
+			e.LastError = ""
+			e.LastErrorAt = time.Time{}
+			e.Transient = false
+		})
+
+		return
+	}
+
+	msg := ""
+	if cause != nil {
+		msg = cause.Error()
+	}
+
+	l.recordLocked(relPath, StatusErrored, func(now time.Time, e *Entry) {
+		e.LastError = msg
+		e.LastErrorAt = now
+		e.Transient = false
+		e.AbsentSeenAt = now
 	})
 }
 
@@ -569,6 +622,11 @@ func (l *Ledger) recordLocked(relPath string, status Status, mutate func(now tim
 
 	e.Status = status
 	e.Attempts++
+
+	// Every recorded outcome resets the absence observation; the mutate of
+	// [Ledger.RecordAbsentObservation] re-stamps it, so only consecutive
+	// absence observations accumulate toward settling absent.
+	e.AbsentSeenAt = time.Time{}
 
 	mutate(now, e)
 
