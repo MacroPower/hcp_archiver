@@ -297,6 +297,31 @@ func TestPaginate(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []int{7}, got)
 	})
+
+	t.Run("non-advancing next page is an error, not a truncated listing", func(t *testing.T) {
+		t.Parallel()
+
+		var calls int
+
+		fetch := func(
+			_ context.Context,
+			_ *tfe.Client,
+			opts tfe.ListOptions,
+		) ([]int, *tfe.Pagination, error) {
+			calls++
+
+			return []int{calls}, &tfe.Pagination{
+				CurrentPage: opts.PageNumber,
+				NextPage:    opts.PageNumber, // claims more pages but never advances
+			}, nil
+		}
+
+		got, err := tfeclient.Paginate(t.Context(), c, fetch)
+
+		require.ErrorIs(t, err, tfeclient.ErrPaginationStalled)
+		assert.Nil(t, got, "a stalled pagination must not surface a partial listing as complete")
+		assert.Equal(t, 1, calls, "the stall is detected on the first non-advancing page")
+	})
 }
 
 // recordingGate records the order of gate and fn events so tests can assert

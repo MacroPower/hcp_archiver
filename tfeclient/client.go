@@ -355,6 +355,12 @@ func (c *Client) Do(ctx context.Context, fn func(context.Context, *tfe.Client) e
 	return fn(ctx, c.tfe)
 }
 
+// ErrPaginationStalled reports a pagination whose NextPage did not advance past
+// the current page while still claiming further pages exist: a misbehaving
+// server or a cycle. The pages past the stall were never fetched, so the
+// listing is incomplete and must not be treated as a complete enumeration.
+var ErrPaginationStalled = errors.New("pagination stalled")
+
 // Paginate walks a paginated list endpoint through [Client.Do], accumulating
 // every page's items into one slice.
 //
@@ -362,6 +368,12 @@ func (c *Client) Do(ctx context.Context, fn func(context.Context, *tfe.Client) e
 // the [tfe.ListOptions] to apply, and stops when the returned
 // [*tfe.Pagination] reports no next page. Each page fetch passes through the
 // shared limiter.
+//
+// A pagination that stalls — a NextPage that claims more pages but does not
+// advance — returns [ErrPaginationStalled] rather than the partial listing:
+// the callers of a complete enumeration settle absences and mark surfaces
+// complete from it, so a silently truncated list would convert the unreached
+// tail into recorded absences.
 func Paginate[T any](
 	ctx context.Context,
 	c *Client,
@@ -395,11 +407,12 @@ func Paginate[T any](
 		}
 
 		// The server drives pagination through NextPage, and a well-formed response
-		// always advances it. A NextPage that does not move past the current page (a
-		// misbehaving server, a cycle) would otherwise loop forever, re-fetching the
-		// same page and growing all without bound; stop with what was gathered.
+		// always advances it. A NextPage that does not move past the current page
+		// would otherwise loop forever, re-fetching the same page and growing all
+		// without bound; surface the stall rather than return a truncated listing
+		// the caller would mistake for a complete one.
 		if pg.NextPage <= page {
-			break
+			return nil, fmt.Errorf("%w: page %d reports next page %d", ErrPaginationStalled, page, pg.NextPage)
 		}
 
 		page = pg.NextPage
