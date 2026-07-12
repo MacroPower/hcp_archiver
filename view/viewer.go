@@ -8,8 +8,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// viewerScreen scrolls one archived document: JSON metadata, a log, or a state
-// blob.
+// viewerScreen scrolls one archived plain-text document: a log or the mixed
+// text-and-JSON overview. JSON documents go through [yamlViewerScreen]
+// instead, which adds syntax highlighting.
 //
 // Create instances with [newViewerScreen].
 type viewerScreen struct {
@@ -33,7 +34,7 @@ func newViewerScreen(name, content string) *viewerScreen {
 func (s *viewerScreen) update(msg tea.Msg) tea.Cmd {
 	if key, ok := msg.(tea.KeyPressMsg); ok {
 		switch key.String() {
-		case "esc", "backspace":
+		case keyEsc, keyBackspace:
 			return pop()
 		case "q":
 			return tea.Quit

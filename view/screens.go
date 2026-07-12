@@ -66,7 +66,7 @@ func (s *listScreen) update(msg tea.Msg) tea.Cmd {
 
 			return nil
 
-		case "esc", "backspace":
+		case keyEsc, keyBackspace:
 			if s.list.FilterState() == list.Unfiltered {
 				return pop()
 			}
@@ -320,7 +320,7 @@ func newOverviewScreen(ws *Workspace) (screen, error) {
 
 	resources, err := DecodeResources(data)
 	if err != nil || len(resources) != 1 {
-		return newViewerScreen("overview", string(data)), nil //nolint:nilerr // The raw document still displays.
+		return newYAMLViewerScreen("overview", string(data)), nil //nolint:nilerr // The raw document still displays.
 	}
 
 	r := &resources[0]
@@ -576,7 +576,7 @@ func newVariablesScreen(ws *Workspace) (screen, error) {
 		// A malformed-but-readable variables.json still shows its raw bytes,
 		// matching newOverviewScreen, rather than dead-ending the tab on a
 		// decode error the operator cannot see past.
-		return newViewerScreen("variables", string(data)), nil //nolint:nilerr // The raw document still displays.
+		return newYAMLViewerScreen("variables", string(data)), nil //nolint:nilerr // The raw document still displays.
 	}
 
 	rows := make([]item, 0, len(resources))
@@ -624,7 +624,7 @@ func newResourceViewer(r Resource) (screen, error) {
 		name = r.ID
 	}
 
-	return newViewerScreen(name, string(data)), nil
+	return newYAMLViewerScreen(name, string(data)), nil
 }
 
 // newFilesScreen browses the loose archive tree at an archive-relative
@@ -712,6 +712,12 @@ func newFileViewer(org *Org, relPath string, ws *Workspace) (screen, error) {
 
 	if err != nil {
 		return nil, err
+	}
+
+	// JSON documents (metadata sidecars, structured plans, state blobs) go
+	// through the highlighting viewport; logs and other plain text scroll raw.
+	if path.Ext(relPath) == ".json" {
+		return newYAMLViewerScreen(path.Base(relPath), string(data)), nil
 	}
 
 	return newViewerScreen(path.Base(relPath), string(data)), nil

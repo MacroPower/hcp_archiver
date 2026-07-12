@@ -18,6 +18,12 @@ var ErrBrowser = errors.New("run archive browser")
 // the breadcrumb line and the status line under it.
 const chromeLines = 2
 
+// Back keys: esc and backspace both pop a screen.
+const (
+	keyEsc       = "esc"
+	keyBackspace = "backspace"
+)
+
 // Browse opens the archive at dir and drives the interactive browser on the
 // given terminal streams until the user quits or ctx is canceled.
 //
