@@ -155,6 +155,8 @@ func TestLedger_RoundTrip(t *testing.T) {
 	require.NoError(t, ledger.Flush())
 
 	// Reload and confirm the durable state survives.
+	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
+
 	reloaded, err := manifest.Load(path, manifest.WithClock(fixedClock(now)))
 	require.NoError(t, err)
 
@@ -357,6 +359,8 @@ func TestLedger_CumulativeAcrossRuns(t *testing.T) {
 
 	// Second run resumes: the cumulative counts carry the prior settled work
 	// before this run records anything, and the run is marked resumed.
+	require.NoError(t, first.Close(), "release the lock as a finished process would")
+
 	second, err := manifest.Load(path)
 	require.NoError(t, err)
 
@@ -397,6 +401,8 @@ func TestLedger_CumulativeReRecordIsIdempotent(t *testing.T) {
 
 	// A resumed run that re-reads the same mutable object (RecordDone again)
 	// must keep the cumulative count at one, not two.
+	require.NoError(t, first.Close(), "release the lock as a finished process would")
+
 	second, err := manifest.Load(path)
 	require.NoError(t, err)
 
@@ -543,6 +549,8 @@ func TestLedger_AppendOnlyFlushLeavesLog(t *testing.T) {
 	require.NoError(t, statErr, "the append-only log holds the flushed records")
 
 	// The records survive a reload driven by replaying the log alone.
+	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
+
 	reloaded, err := manifest.Load(path)
 	require.NoError(t, err)
 
@@ -582,6 +590,8 @@ func TestLedger_FlushFailureKeepsStateForRetry(t *testing.T) {
 	require.NoError(t, os.Chmod(path, 0o755))
 	require.NoError(t, ledger.Flush())
 
+	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
+
 	reloaded, err := manifest.Load(path)
 	require.NoError(t, err)
 
@@ -615,6 +625,8 @@ func TestLedger_CompactionOnFinishClearsLog(t *testing.T) {
 	_, statErr = os.Stat(logFile)
 	assert.True(t, os.IsNotExist(statErr), "the log is removed after compaction")
 
+	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
+
 	reloaded, err := manifest.Load(path)
 	require.NoError(t, err)
 
@@ -640,6 +652,8 @@ func TestLedger_SnapshotPlusLogMerge(t *testing.T) {
 
 	// Second run appends object b to the log without compacting, so the durable
 	// state is the snapshot (a) plus the log (b).
+	require.NoError(t, first.Close(), "release the lock as a finished process would")
+
 	second, err := manifest.Load(path)
 	require.NoError(t, err)
 
@@ -654,6 +668,8 @@ func TestLedger_SnapshotPlusLogMerge(t *testing.T) {
 	require.NoError(t, statErr, "the second run's delta is in the log")
 
 	// A reload merges both sources.
+	require.NoError(t, second.Close(), "release the lock as a finished process would")
+
 	reloaded, err := manifest.Load(path)
 	require.NoError(t, err)
 
@@ -731,6 +747,8 @@ func TestLedger_ShardsPerWorkspace(t *testing.T) {
 
 	// A reload discovers every shard by globbing the known depths and rebuilds the
 	// full state.
+	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
+
 	reloaded, err := manifest.Load(root)
 	require.NoError(t, err)
 
@@ -762,6 +780,8 @@ func TestLedger_FlushTouchesOnlyChangedShards(t *testing.T) {
 
 	// A resumed run that records only into ws1 leaves ws2's shard untouched: only
 	// the shard that changed grows a log.
+	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
+
 	resumed, err := manifest.Load(root)
 	require.NoError(t, err)
 
@@ -797,12 +817,16 @@ func TestLedger_SettledSurvivesLogRoundTrip(t *testing.T) {
 
 	// The true value is durable on its own before the flip, so the final false is
 	// a genuine true->false transition rather than a value that was never set.
+	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
+
 	afterTrue, err := manifest.Load(path)
 	require.NoError(t, err)
 	assert.True(t, afterTrue.IsCollectionSettled("runs"), "settled=true persists through the log")
 
 	ledger.SetCollectionSettled("runs", false)
 	require.NoError(t, ledger.Flush())
+
+	require.NoError(t, afterTrue.Close(), "release the lock as a finished process would")
 
 	reloaded, err := manifest.Load(path)
 	require.NoError(t, err)
@@ -832,6 +856,8 @@ func TestLedger_SettledSurvivesCompaction(t *testing.T) {
 
 	_, statErr = os.Stat(logFile)
 	assert.True(t, os.IsNotExist(statErr), "the log is removed after compaction")
+
+	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
 
 	reloaded, err := manifest.Load(path)
 	require.NoError(t, err)
@@ -1018,6 +1044,8 @@ func TestLedger_PendingGateSurvivesReload(t *testing.T) {
 
 	// A snapshot carrying a pending gate loads cleanly (Valid accepts it) and the
 	// gate still forces its run unsettled on resume.
+	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
+
 	reloaded, err := manifest.Load(path)
 	require.NoError(t, err)
 
@@ -1141,4 +1169,31 @@ func TestLedger_AbsentObservationResetByOtherOutcomes(t *testing.T) {
 	entry, ok = ledger.Entry(relPath)
 	require.True(t, ok)
 	assert.Equal(t, manifest.StatusErrored, entry.Status)
+}
+
+func TestLedger_LockExcludesConcurrentOpen(t *testing.T) {
+	t.Parallel()
+
+	path := t.TempDir()
+
+	first, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	// A second open while the first is live must fail fast: the WAL, compaction,
+	// and tallies all assume one writer, so a scheduled run starting while the
+	// previous still runs cannot be allowed to interleave.
+	_, err = manifest.Load(path)
+	require.ErrorIs(t, err, manifest.ErrLedgerLocked)
+
+	// Releasing the lock is what a process death does implicitly (the kernel
+	// drops an flock when its descriptors close), so a crashed holder never
+	// blocks a later run and no stale-lock recovery exists.
+	require.NoError(t, first.Close())
+
+	second, err := manifest.Load(path)
+	require.NoError(t, err)
+	require.NoError(t, second.Close())
+
+	// Close is idempotent, so a belt-and-braces double close is harmless.
+	require.NoError(t, second.Close())
 }

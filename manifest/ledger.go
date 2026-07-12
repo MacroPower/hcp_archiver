@@ -47,7 +47,10 @@ type document struct {
 // It guards its in-memory state with a single mutex, so record methods called
 // from many workspace workers are race-free and the live tally never drifts from
 // the recorded entries. A second mutex serializes flushes so a shard's log takes
-// one writer at a time. Create instances with [Load].
+// one writer at a time. Across processes, an exclusive flock taken by [Load]
+// and released by [Ledger.Close] (or automatically by the kernel when the
+// process dies) enforces the single writer the on-disk format assumes. Create
+// instances with [Load].
 //
 // # Sharded storage
 //
@@ -69,6 +72,7 @@ type Ledger struct {
 	counts           map[Status]int
 	cumulative       map[Status]int
 	dropped          map[string]string
+	lockFile         *os.File
 	runStartedAt     time.Time
 	root             string
 	target           string
@@ -111,9 +115,17 @@ func WithRecheckAbsent(recheck bool) Option {
 
 // Load reads the sharded manifest under root, or starts empty when none exists.
 //
-// It discovers and loads every shard beneath root. Resume and a clean first run
-// are one code path: a first run simply finds no shards. A shard whose snapshot
-// or log cannot be parsed returns [ErrCorruptManifest].
+// It first takes an exclusive cross-process lock under the org-root ledger
+// directory, so a second archiver on the same root — a scheduled run starting
+// while the previous one still runs — fails fast with [ErrLedgerLocked] rather
+// than interleaving log appends and racing compaction; every crash-consistency
+// guarantee in this package assumes a single writer. The lock is an flock, so
+// a crashed process releases it automatically (see [Ledger.Close]); a caller
+// that finishes cleanly releases it with [Ledger.Close].
+//
+// It then discovers and loads every shard beneath root. Resume and a clean
+// first run are one code path: a first run simply finds no shards. A shard
+// whose snapshot or log cannot be parsed returns [ErrCorruptManifest].
 func Load(root string, opts ...Option) (*Ledger, error) {
 	l := &Ledger{
 		now:              time.Now,
@@ -129,11 +141,22 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 		opt(l)
 	}
 
+	// The lock is taken before any shard is read, so the state loaded below can
+	// never be a snapshot another process is concurrently compacting.
+	lock, err := acquireLock(l.shardDir(""))
+	if err != nil {
+		return nil, err
+	}
+
+	l.lockFile = lock
+
 	l.rootShard = newShard(l.shardDir(""))
 	l.shards[""] = l.rootShard
 
 	dirs, err := discoverShards(root)
 	if err != nil {
+		_ = l.Close() //nolint:errcheck // The load error takes precedence.
+
 		return nil, err
 	}
 
@@ -146,6 +169,8 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 
 		err = sh.load()
 		if err != nil {
+			_ = l.Close() //nolint:errcheck // The load error takes precedence.
+
 			return nil, err
 		}
 	}
@@ -157,10 +182,14 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 	for _, sh := range l.shards {
 		for relPath, e := range sh.entries {
 			if e == nil {
+				_ = l.Close() //nolint:errcheck // The load error takes precedence.
+
 				return nil, fmt.Errorf("%w: entry %q is null", ErrCorruptManifest, relPath)
 			}
 
 			if !e.Status.Valid() {
+				_ = l.Close() //nolint:errcheck // The load error takes precedence.
+
 				return nil, fmt.Errorf("%w: entry %q has unknown status %q",
 					ErrCorruptManifest, relPath, e.Status)
 			}
@@ -170,6 +199,37 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 	}
 
 	return l, nil
+}
+
+// Close releases the ledger's cross-process lock, so another process (or a
+// later [Load] in this one) can open the root. It does not flush; callers
+// flush before closing. It is idempotent, and safe on a ledger whose lock was
+// already released.
+//
+// Closing is only needed on a clean finish. A process that crashes while
+// holding the lock never calls Close, and needs to have made no promise to:
+// the lock is an flock, which the kernel releases the moment the process's
+// file descriptors close, so a killed or panicked run leaves no stale lock and
+// no recovery step. The lock file itself is left on disk; its presence carries
+// no meaning.
+func (l *Ledger) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.lockFile == nil {
+		return nil
+	}
+
+	f := l.lockFile
+	l.lockFile = nil
+
+	// Closing the descriptor releases the flock; no explicit unlock is needed.
+	err := f.Close()
+	if err != nil {
+		return fmt.Errorf("release ledger lock: %w", err)
+	}
+
+	return nil
 }
 
 // shardDir returns the absolute .ledger directory for a shard key, co-located

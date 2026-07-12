@@ -141,6 +141,17 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 				slog.String("error", serr.Error()),
 			)
 		}
+
+		// Release the org's cross-process ledger lock last, after the final
+		// flush above, so no other process can open the root while this run's
+		// unflushed state is still in memory.
+		cerr := ledger.Close()
+		if cerr != nil {
+			a.logger.LogAttrs(ctx, slog.LevelWarn, "manifest_close_error",
+				slog.String("org", orgName),
+				slog.String("error", cerr.Error()),
+			)
+		}
 	}()
 
 	// Capture the final per-status counts before the deferred close runs; the
