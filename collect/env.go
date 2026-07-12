@@ -189,6 +189,9 @@ func (e *Env) ShouldFetch(relPath string) bool {
 // Each domain package implements it over the [Env] it is constructed with; the
 // orchestrator runs the collectors and needs only this contract, not their
 // per-family method shapes.
+//
+// See [go.jacobcolvin.com/hcp_archiver/collect/orgscope.Collector] for an
+// implementation.
 type Collector interface {
 	// Collect archives this collector's object family, returning only on a
 	// context cancellation; a single missing or failed object is recorded and
