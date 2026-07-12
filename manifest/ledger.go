@@ -875,11 +875,10 @@ func (l *Ledger) FinishRun() RunRecord {
 	totals := make(map[Status]int, len(l.counts))
 
 	// Exclude the reference-gate proxy statuses, mirroring [Ledger.Tally]'s
-	// object-only selection: StatusPending and StatusReferenceCleared count a
-	// ledger-only gate, not an archived object, so a run's persisted Totals must
-	// not report them as work done.
+	// object-only selection: a gate counts a ledger-only proxy, not an archived
+	// object, so a run's persisted Totals must not report it as work done.
 	for s, n := range l.counts {
-		if n != 0 && s != StatusPending && s != StatusReferenceCleared {
+		if n != 0 && !s.IsGate() {
 			totals[s] = n
 		}
 	}
@@ -947,15 +946,15 @@ func (l *Ledger) Flush() error {
 	l.mu.Lock()
 
 	type pending struct {
-		sh   *shard
-		recs []walRecord
+		sh *shard
+		d  drainedState
 	}
 
 	var work []pending
 
 	for _, sh := range l.shards {
 		if sh.hasDirty() {
-			work = append(work, pending{sh: sh, recs: sh.drainDirty()})
+			work = append(work, pending{sh: sh, d: sh.drainDirty()})
 		}
 	}
 
@@ -965,7 +964,7 @@ func (l *Ledger) Flush() error {
 	l.mu.Unlock()
 
 	for i, w := range work {
-		n, err := appendLog(w.sh.logPath(), w.recs)
+		n, err := appendLog(w.sh.logPath(), w.d.recs)
 		if err != nil {
 			// The drained records never reached the log; put them and every
 			// not-yet-appended shard's records back so a retry re-appends them
@@ -975,7 +974,7 @@ func (l *Ledger) Flush() error {
 			l.mu.Lock()
 
 			for _, rem := range work[i:] {
-				rem.sh.restoreDirty(rem.recs)
+				rem.sh.restoreDirty(rem.d)
 			}
 
 			if compactAll {

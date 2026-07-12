@@ -65,6 +65,17 @@ func (s Status) Valid() bool {
 	}
 }
 
+// IsGate reports whether the status marks a run-scoped reference-gate proxy
+// ([StatusPending] or [StatusReferenceCleared]) rather than an archived object.
+//
+// Gate entries drive the walk's retry machinery but represent no file, so
+// every surface that counts or reports objects excludes them through this one
+// predicate; a gate status added later joins here once and every counting
+// surface follows.
+func (s Status) IsGate() bool {
+	return s == StatusPending || s == StatusReferenceCleared
+}
+
 // Settled reports whether a normal re-run leaves the object alone.
 //
 // Every status except [StatusErrored], [StatusForbidden], and [StatusPending]

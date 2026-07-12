@@ -207,16 +207,48 @@ func (s *shard) hasDirty() bool {
 		s.runDirty
 }
 
+// drainedState is one drain's output: the log records to append and the dirty
+// sets they were built from, taken whole.
+//
+// Carrying the sets themselves (rather than re-deriving them from the records'
+// kinds) makes restore a plain union with no per-kind dispatch: a record kind
+// added later cannot be silently dropped on the restore path, because there is
+// no second list of kinds to keep in step with the drain.
+type drainedState struct {
+	entries    map[string]struct{}
+	watermarks map[string]struct{}
+	completed  map[string]struct{}
+	settled    map[string]struct{}
+	recs       []walRecord
+	run        bool
+}
+
 // drainDirty builds the log records for everything changed since the last flush
-// and clears the dirty sets, so their state is carried by the returned records.
+// and hands the dirty sets to the returned [drainedState], leaving the shard's
+// sets empty, so a failed append can restore exactly what was drained (see
+// [shard.restoreDirty]).
 //
 // It runs under the owning ledger's write lock; the entry it emits is a copy, so
 // a concurrent record does not race the marshal that follows outside the lock.
-func (s *shard) drainDirty() []walRecord {
-	recs := make([]walRecord, 0,
-		len(s.dirtyEntries)+len(s.dirtyWatermarks)+len(s.dirtyCompleted)+len(s.dirtySettled)+1)
+func (s *shard) drainDirty() drainedState {
+	d := drainedState{
+		entries:    s.dirtyEntries,
+		watermarks: s.dirtyWatermarks,
+		completed:  s.dirtyCompleted,
+		settled:    s.dirtySettled,
+		run:        s.runDirty,
+	}
 
-	for relPath := range s.dirtyEntries {
+	s.dirtyEntries = make(map[string]struct{})
+	s.dirtyWatermarks = make(map[string]struct{})
+	s.dirtyCompleted = make(map[string]struct{})
+	s.dirtySettled = make(map[string]struct{})
+	s.runDirty = false
+
+	d.recs = make([]walRecord, 0,
+		len(d.entries)+len(d.watermarks)+len(d.completed)+len(d.settled)+1)
+
+	for relPath := range d.entries {
 		e := s.entries[relPath]
 		if e == nil {
 			continue
@@ -228,22 +260,22 @@ func (s *shard) drainDirty() []walRecord {
 			cp.Signature = &sig
 		}
 
-		recs = append(recs, walRecord{Kind: walEntry, Path: relPath, Entry: &cp})
+		d.recs = append(d.recs, walRecord{Kind: walEntry, Path: relPath, Entry: &cp})
 	}
 
-	for key := range s.dirtyWatermarks {
-		recs = append(recs, walRecord{Kind: walWatermark, Key: key, At: s.watermarks[key]})
+	for key := range d.watermarks {
+		d.recs = append(d.recs, walRecord{Kind: walWatermark, Key: key, At: s.watermarks[key]})
 	}
 
-	for key := range s.dirtyCompleted {
-		recs = append(recs, walRecord{Kind: walCompleted, Key: key})
+	for key := range d.completed {
+		d.recs = append(d.recs, walRecord{Kind: walCompleted, Key: key})
 	}
 
-	for key := range s.dirtySettled {
-		recs = append(recs, walRecord{Kind: walSettled, Key: key, Settled: s.settled[key]})
+	for key := range d.settled {
+		d.recs = append(d.recs, walRecord{Kind: walSettled, Key: key, Settled: s.settled[key]})
 	}
 
-	if s.runDirty {
+	if d.run {
 		rec := walRecord{Kind: walRun, LastRunAt: s.lastRunAt, RunCount: s.runCount}
 
 		if s.lastRun != nil {
@@ -252,38 +284,35 @@ func (s *shard) drainDirty() []walRecord {
 			rec.LastRun = &lr
 		}
 
-		recs = append(recs, rec)
+		d.recs = append(d.recs, rec)
 	}
 
-	clear(s.dirtyEntries)
-	clear(s.dirtyWatermarks)
-	clear(s.dirtyCompleted)
-	clear(s.dirtySettled)
-
-	s.runDirty = false
-
-	return recs
+	return d
 }
 
-// restoreDirty re-marks the state carried by recs as dirty, undoing a
-// [shard.drainDirty] whose records never reached the log. It runs under the
-// owning ledger's write lock, so a failed flush can put the shard back and a
-// retry re-appends the same delta rather than dropping it.
-func (s *shard) restoreDirty(recs []walRecord) {
-	for i := range recs {
-		switch recs[i].Kind {
-		case walEntry:
-			s.dirtyEntries[recs[i].Path] = struct{}{}
-		case walWatermark:
-			s.dirtyWatermarks[recs[i].Key] = struct{}{}
-		case walCompleted:
-			s.dirtyCompleted[recs[i].Key] = struct{}{}
-		case walSettled:
-			s.dirtySettled[recs[i].Key] = struct{}{}
-		case walRun:
-			s.runDirty = true
-		}
+// restoreDirty unions a drain's dirty sets back into the shard, undoing a
+// [shard.drainDirty] whose records never reached the log. The union direction
+// matters: a key re-dirtied by a worker during the failed flush stays dirty,
+// and the drained keys rejoin it, so a retry re-appends the whole delta rather
+// than dropping it. It runs under the owning ledger's write lock.
+func (s *shard) restoreDirty(d drainedState) {
+	for k := range d.entries {
+		s.dirtyEntries[k] = struct{}{}
 	}
+
+	for k := range d.watermarks {
+		s.dirtyWatermarks[k] = struct{}{}
+	}
+
+	for k := range d.completed {
+		s.dirtyCompleted[k] = struct{}{}
+	}
+
+	for k := range d.settled {
+		s.dirtySettled[k] = struct{}{}
+	}
+
+	s.runDirty = s.runDirty || d.run
 }
 
 // document builds the shard's full snapshot document. It runs under the owning
