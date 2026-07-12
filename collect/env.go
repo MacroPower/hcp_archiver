@@ -127,6 +127,20 @@ func (e *Env) NotApplicable(relPath string) {
 	e.ledger.RecordNotApplicable(relPath)
 }
 
+// MarkSurfaceDropped records that the enumeration of surface failed this run
+// for a non-cancellation reason, marking the run incomplete.
+//
+// Every collector that tolerates a listing failure — logging it and moving on
+// so one unreachable surface does not abort the rest of the organization —
+// must record the drop through this at the point it swallows the error. A
+// per-object failure is already visible as an errored ledger entry, but a
+// listing that never completed records no entries for the objects it never
+// named, so this is the only channel that keeps a dropped surface out of a
+// clean exit. See [manifest.Ledger.MarkSurfaceDropped].
+func (e *Env) MarkSurfaceDropped(surface string, cause error) {
+	e.ledger.MarkSurfaceDropped(surface, cause)
+}
+
 // Reference maintains a run-scoped reference gate at gateKey that mirrors whether
 // the cross-shard writes at sharedPaths have settled, so a write that lands
 // outside the referencing run's own subtree (its created-by user, an event

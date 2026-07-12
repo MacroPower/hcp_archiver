@@ -68,6 +68,7 @@ type Ledger struct {
 	rootShard        *shard
 	counts           map[Status]int
 	cumulative       map[Status]int
+	dropped          map[string]string
 	runStartedAt     time.Time
 	root             string
 	target           string
@@ -119,6 +120,7 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 		shards:           make(map[string]*shard),
 		counts:           make(map[Status]int),
 		cumulative:       make(map[Status]int),
+		dropped:          make(map[string]string),
 		root:             root,
 		compactThreshold: defaultCompactThreshold,
 	}
@@ -706,6 +708,47 @@ func (l *Ledger) HasUnsettledUnder(prefix string) bool {
 	return false
 }
 
+// MarkSurfaceDropped records that the enumeration of surface failed this run
+// for a non-cancellation reason, so the run cannot know that surface's extent
+// and must not report a complete archive.
+//
+// It is the one channel every collector routes a dropped listing through: a
+// per-object failure is visible as an errored entry, but a listing that never
+// completed records no entries at all, so without this record the gap would be
+// invisible to the run's completeness signal. The record is run-scoped (reset
+// by [Ledger.StartRun], never persisted): a re-run retries the enumeration
+// from scratch, so the drop describes this run, not the archive.
+func (l *Ledger) MarkSurfaceDropped(surface string, cause error) {
+	msg := ""
+	if cause != nil {
+		msg = cause.Error()
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.dropped[surface] = msg
+}
+
+// DroppedSurfaces returns every surface recorded dropped this run, sorted by
+// surface, so the run's close can name what was missed rather than only count
+// it. See [Ledger.MarkSurfaceDropped].
+func (l *Ledger) DroppedSurfaces() []DroppedSurface {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	out := make([]DroppedSurface, 0, len(l.dropped))
+	for surface, msg := range l.dropped {
+		out = append(out, DroppedSurface{Surface: surface, Error: msg})
+	}
+
+	slices.SortFunc(out, func(a, b DroppedSurface) int {
+		return strings.Compare(a.Surface, b.Surface)
+	})
+
+	return out
+}
+
 // AddBytes adds n to the run's downloaded-bytes counter.
 func (l *Ledger) AddBytes(n int64) {
 	l.mu.Lock()
@@ -749,6 +792,7 @@ func (l *Ledger) Tally() Tally {
 		Errored:           l.cumulative[StatusErrored],
 		Forbidden:         l.cumulative[StatusForbidden],
 		NotApplicable:     l.cumulative[StatusNotApplicable],
+		SurfacesDropped:   len(l.dropped),
 		Retried:           l.retried,
 		BytesDownloaded:   l.bytes,
 		Resumed:           l.resumed,
@@ -808,6 +852,7 @@ func (l *Ledger) StartRun() {
 	l.runStartedAt = now
 	l.resumed = l.totalEntries() > 0
 	l.counts = make(map[Status]int)
+	l.dropped = make(map[string]string)
 	l.bytes = 0
 	l.retried = 0
 	l.target = ""

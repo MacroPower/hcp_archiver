@@ -44,6 +44,48 @@ func TestLogFailures(t *testing.T) {
 	assert.Contains(t, out, longErr, "the full error text survives, untruncated")
 }
 
+func TestOrgIncomplete(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		tally manifest.Tally
+		want  bool
+	}{
+		"empty org is complete": {
+			tally: manifest.Tally{},
+			want:  false,
+		},
+		"clean run is complete": {
+			tally: manifest.Tally{Done: 10},
+			want:  false,
+		},
+		"partial per-object failures stay complete": {
+			tally: manifest.Tally{Done: 10, Errored: 2, Forbidden: 1},
+			want:  false,
+		},
+		"wholly failed org is incomplete": {
+			tally: manifest.Tally{Errored: 3},
+			want:  true,
+		},
+		"forbidden-only org is incomplete": {
+			tally: manifest.Tally{Forbidden: 1},
+			want:  true,
+		},
+		"a dropped surface is incomplete even with work done": {
+			tally: manifest.Tally{Done: 100, SurfacesDropped: 1},
+			want:  true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, archiver.OrgIncomplete(tc.tally))
+		})
+	}
+}
+
 func TestNew(t *testing.T) {
 	t.Parallel()
 

@@ -2,7 +2,6 @@ package archiver
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 
@@ -14,16 +13,6 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/progress"
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
-
-// errSurfaceIncomplete marks an organization whose project or workspace
-// enumeration failed for a non-cancellation reason. The failure is best-effort
-// for the independent surfaces (the registry, stacks, and audit collectors
-// still run and a re-run retries the enumeration), but the archive is
-// incomplete: the whole workspace or project surface was dropped, which the
-// org's own object tally can never reveal once other surfaces recorded work.
-// [Archiver.collectOrg] propagates it to [Archiver.Run] so a scheduled run
-// exits non-zero rather than reporting success over the missing surface.
-var errSurfaceIncomplete = errors.New("organization surface incomplete")
 
 // defaultProjectName labels a workspace whose project cannot be resolved, so it
 // still lands under a project directory (a workspace with no explicit project
@@ -68,15 +57,17 @@ func (a *Archiver) collectProjects(
 		// Best-effort: a non-cancellation list failure is logged and does not
 		// abort the organization, so the independent registry, stacks, and
 		// audit surfaces still run. A re-run retries the projects. The dropped
-		// surface leaves the archive incomplete, so signal it (with an empty
+		// surface leaves the archive incomplete, so record it (with an empty
 		// name map so workspaces still resolve to their default project) rather
 		// than let the run report success over the missing projects.
+		env.MarkSurfaceDropped(phaseProjects, err)
+
 		a.logger.LogAttrs(ctx, slog.LevelError, "project_list_error",
 			slog.String("org", orgName),
 			slog.String("error", err.Error()),
 		)
 
-		return map[string]string{}, errSurfaceIncomplete
+		return map[string]string{}, nil
 	}
 
 	reporter.SetTotal(len(projects))
@@ -147,14 +138,16 @@ func (a *Archiver) collectWorkspaces(
 		// Best-effort: a non-cancellation list failure is logged and does not
 		// abort the organization, so the remaining collectors still run. A
 		// re-run retries the workspaces. The dropped surface leaves the archive
-		// incomplete, so signal it rather than let the run report success over
+		// incomplete, so record it rather than let the run report success over
 		// an organization whose entire workspace surface was silently missed.
+		env.MarkSurfaceDropped(phaseWorkspaces, err)
+
 		a.logger.LogAttrs(ctx, slog.LevelError, "workspace_list_error",
 			slog.String("org", orgName),
 			slog.String("error", err.Error()),
 		)
 
-		return errSurfaceIncomplete
+		return nil
 	}
 
 	// Weight each workspace by 1 (its settings) + its probed run and
@@ -221,6 +214,10 @@ func (a *Archiver) collectWorkspaces(
 				// list error) for one workspace is logged and does not cancel
 				// the pool, so it never aborts the rest of the organization. A
 				// re-run re-walks the workspace and picks up what it missed.
+				// The abandoned walk is a dropped surface: the listings it never
+				// finished record no entries, so nothing else marks the gap.
+				env.MarkSurfaceDropped(project+"/"+ws.Name, err)
+
 				a.logger.LogAttrs(gctx, slog.LevelError, "workspace_archive_error",
 					slog.String("org", orgName),
 					slog.String("workspace", ws.Name),

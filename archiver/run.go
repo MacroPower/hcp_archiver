@@ -2,7 +2,6 @@ package archiver
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -19,14 +18,13 @@ import (
 //
 // Each collector is best-effort: a single missing or failed object is recorded
 // and the walk continues, so a collector returns non-nil only on a cancellation
-// of ctx, which stops the whole organization. It threads reporter through so
-// each step names its phase and, where a cheap pre-count exists (projects,
-// workspaces), drives a determinate bar. Optional surfaces run only when their
-// configuration toggle is set.
-//
-// A dropped project or workspace surface ([errSurfaceIncomplete]) is not a
-// cancellation and does not stop the organization: the remaining collectors
-// still run, but it is remembered and returned so the run is marked incomplete.
+// of ctx, which stops the whole organization. A listing a collector had to drop
+// is recorded in the ledger as a dropped surface ([collect.Env.MarkSurfaceDropped])
+// rather than returned, so the remaining collectors still run and the run's
+// close derives incompleteness from the tally in one place. It threads reporter
+// through so each step names its phase and, where a cheap pre-count exists
+// (projects, workspaces), drives a determinate bar. Optional surfaces run only
+// when their configuration toggle is set.
 func (a *Archiver) collectOrg(
 	ctx context.Context,
 	env *collect.Env,
@@ -41,24 +39,14 @@ func (a *Archiver) collectOrg(
 	wsc := workspace.New(env, orgName,
 		workspace.WithRunHistoryLimit(a.cfg.RunHistoryCount, a.runHistoryOldest()))
 
-	var incomplete error
-
 	projectNames, err := a.collectProjects(ctx, env, reporter, orgName, wsc)
 	if err != nil {
-		if !errors.Is(err, errSurfaceIncomplete) {
-			return err
-		}
-
-		incomplete = err
+		return err
 	}
 
 	err = a.collectWorkspaces(ctx, env, reporter, orgName, wsc, projectNames)
 	if err != nil {
-		if !errors.Is(err, errSurfaceIncomplete) {
-			return err
-		}
-
-		incomplete = err
+		return err
 	}
 
 	err = a.runCollector(ctx, reporter, registry.New(env, orgName, registry.WithDetail(a.cfg.RegistryDetail)))
@@ -80,7 +68,7 @@ func (a *Archiver) collectOrg(
 		}
 	}
 
-	return incomplete
+	return nil
 }
 
 // runHistoryOldest resolves the configured run-history age bound into the

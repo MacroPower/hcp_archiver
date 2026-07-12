@@ -27,6 +27,13 @@ type Tally struct {
 	Forbidden int `json:"forbidden"`
 	// NotApplicable counts objects currently recorded as [StatusNotApplicable].
 	NotApplicable int `json:"notApplicable"`
+	// SurfacesDropped counts the enumeration surfaces dropped this run: listings
+	// that failed for a non-cancellation reason, leaving that surface's extent
+	// unknown (see [Ledger.MarkSurfaceDropped]). It is per-run, since a re-run
+	// retries every enumeration from scratch. A non-zero count marks the run
+	// incomplete regardless of the per-object counts, because a dropped listing
+	// records no per-object entries for the objects it never named.
+	SurfacesDropped int `json:"surfacesDropped,omitempty"`
 	// Retried counts this run's in-run retries of transient fetch failures. It
 	// tallies retry attempts rather than objects, so one object retried twice
 	// counts twice, and stays per-run like BytesDownloaded: a retried fetch that
@@ -42,6 +49,17 @@ type Tally struct {
 // Total returns the number of objects currently recorded across every status.
 func (t Tally) Total() int {
 	return t.Done + t.AbsentPermanently + t.Skipped + t.Errored + t.Forbidden + t.NotApplicable
+}
+
+// DroppedSurface is one enumeration surface dropped this run, with the text of
+// the listing failure, so the run's close can name what was missed rather than
+// only count it. Instances are produced by [Ledger.DroppedSurfaces].
+type DroppedSurface struct {
+	// Surface names the dropped listing (an archive-relative prefix or a
+	// collector-scoped label such as "registry/modules").
+	Surface string
+	// Error is the text of the listing failure.
+	Error string
 }
 
 // Failure is one object still recorded errored or forbidden, with the text of

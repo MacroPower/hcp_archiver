@@ -132,6 +132,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 		}
 
 		a.logFailures(ctx, orgName, ledger)
+		a.logDroppedSurfaces(ctx, orgName, ledger)
 
 		serr := reporter.Summary()
 		if serr != nil {
@@ -152,14 +153,24 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 	return ledger.Tally(), collectErr
 }
 
-// orgWhollyFailed reports whether an organization's run captured nothing yet
-// recorded failures: no object settled done while at least one errored or was
-// forbidden. An empty organization (nothing recorded) is not a failure, and a
-// run that captured anything is a success even if some objects failed, so a
-// scheduled run reports failure only when the archive is empty and broken rather
-// than merely partial.
-func orgWhollyFailed(t manifest.Tally) bool {
-	return t.Done == 0 && (t.Errored > 0 || t.Forbidden > 0)
+// orgIncomplete is the one predicate deciding whether an organization's run
+// leaves the whole run incomplete, so a scheduled run exits non-zero rather
+// than reporting success over a gap. Two conditions mark it:
+//
+//   - a dropped surface: some listing failed for a non-cancellation reason,
+//     so an unknown number of objects were never even named. Every collector
+//     records its drops through [collect.Env.MarkSurfaceDropped], which is what
+//     makes this check cover all of them rather than whichever ones remembered
+//     to plumb an error back.
+//   - a wholly-failed org: no object settled done while at least one errored or
+//     was forbidden. An empty organization (nothing recorded) is not a failure,
+//     and a run whose listings completed is merely partial if some objects
+//     failed — those failures are visible as errored entries, logged at close,
+//     and retried next run.
+func orgIncomplete(t manifest.Tally) bool {
+	whollyFailed := t.Done == 0 && (t.Errored > 0 || t.Forbidden > 0)
+
+	return t.SurfacesDropped > 0 || whollyFailed
 }
 
 // flushLoop flushes the ledger on a fixed cadence until ctx is done, then
@@ -199,6 +210,21 @@ func (a *Archiver) logFailures(ctx context.Context, orgName string, ledger *mani
 			slog.String("status", string(f.Status)),
 			slog.String("path", f.RelPath),
 			slog.String("error", f.Error),
+		)
+	}
+}
+
+// logDroppedSurfaces writes one error log per enumeration surface dropped this
+// run when the organization's run closes, naming each listing whose failure
+// left the archive's extent unknown. The drops are recorded silently as the
+// collectors proceed, so this is where they surface alongside the per-object
+// failures.
+func (a *Archiver) logDroppedSurfaces(ctx context.Context, orgName string, ledger *manifest.Ledger) {
+	for _, d := range ledger.DroppedSurfaces() {
+		a.logger.LogAttrs(ctx, slog.LevelError, "surface_dropped",
+			slog.String("org", orgName),
+			slog.String("surface", d.Surface),
+			slog.String("error", d.Error),
 		)
 	}
 }

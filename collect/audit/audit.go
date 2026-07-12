@@ -159,8 +159,12 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 		// still claims exist. Halt without advancing the watermark, exactly like
 		// the fetch- and write-error paths, so the next run retries from the same
 		// cursor rather than stepping past the unreached pages' events under a
-		// watermark it would never revisit.
+		// watermark it would never revisit. The unreached pages are a dropped
+		// surface: nothing records them, so the run must not report complete.
 		if p.NextPage <= page {
+			c.env.MarkSurfaceDropped(key,
+				fmt.Errorf("audit trail pagination stalled: page %d reports next page %d", page, p.NextPage))
+
 			return nil
 		}
 
@@ -177,9 +181,11 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 // archiveTrailPage records one audit-trail page -- its fresh events, or the list
 // error -- and reports whether the walk must halt without advancing the
 // watermark. A fetch error the walk cannot page past, and a write that did not
-// settle, both halt so the next run retries the page from the same cursor. It is
-// called only for a page carrying fresh events or a list error; a clean page of
-// only already-archived events is skipped by the caller.
+// settle, both halt so the next run retries the page from the same cursor; a
+// halt also records the trail as a dropped surface, since the pages past it were
+// never reached and nothing else marks the gap. It is called only for a page
+// carrying fresh events or a list error; a clean page of only already-archived
+// events is skipped by the caller.
 func (c *Collector) archiveTrailPage(
 	ctx context.Context,
 	since time.Time,
@@ -211,6 +217,8 @@ func (c *Collector) archiveTrailPage(
 
 		// The page fetch is recorded by Object; the walk cannot paginate past an
 		// unreadable page, so halt without advancing the watermark.
+		c.env.MarkSurfaceDropped(c.env.Store().AuditTrailDir(), listErr)
+
 		return true, nil
 	}
 
@@ -219,6 +227,9 @@ func (c *Collector) archiveTrailPage(
 	// the next run retries the page from the same cursor instead of stepping past
 	// its events under a name it would never revisit.
 	if entry, ok := c.env.Entry(relPath); ok && !entry.Status.Settled() {
+		c.env.MarkSurfaceDropped(c.env.Store().AuditTrailDir(),
+			fmt.Errorf("audit trail page %q did not settle: %s", relPath, entry.LastError))
+
 		return true, nil
 	}
 

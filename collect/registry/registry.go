@@ -82,13 +82,17 @@ func (c *Collector) Collect(ctx context.Context) error {
 // a cancellation of ctx propagates so the run can wind down, while any other
 // enumeration failure is logged and swallowed so an unreachable or disabled
 // registry family does not abort the archive (a re-run retries, having recorded
-// nothing settled). It is logged, not silent, so an operator sees that a family
-// was omitted this run, matching the org-scoped and stacks collectors.
+// nothing settled). The drop is recorded through [collect.Env.MarkSurfaceDropped]
+// so the run still reports incomplete over the missing family, and logged so an
+// operator sees which family was omitted, matching the org-scoped and stacks
+// collectors.
 func (c *Collector) listFailed(ctx context.Context, family string, cause error) error {
 	ctxErr := ctx.Err()
 	if ctxErr != nil {
 		return fmt.Errorf("list registry %s: %w", family, ctxErr)
 	}
+
+	c.env.MarkSurfaceDropped("registry/"+family, cause)
 
 	slog.WarnContext(ctx, msgListSkipped,
 		slog.String("family", family),

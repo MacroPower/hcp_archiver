@@ -86,7 +86,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 		},
 	)
 	if err != nil {
-		return c.tolerate(ctx, err)
+		return c.tolerate(ctx, name, err)
 	}
 
 	for _, stack := range stacks {
@@ -116,17 +116,19 @@ func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 		return wrap(err)
 	}
 
-	err = c.tolerate(ctx, c.collectConfigurations(ctx, project, stack))
+	stackSurface := c.env.Store().StackDir(project, stack.Name)
+
+	err = c.tolerate(ctx, stackSurface+"/configurations", c.collectConfigurations(ctx, project, stack))
 	if err != nil {
 		return err
 	}
 
-	err = c.tolerate(ctx, c.collectDeployments(ctx, project, stack))
+	err = c.tolerate(ctx, stackSurface+"/deployments", c.collectDeployments(ctx, project, stack))
 	if err != nil {
 		return err
 	}
 
-	return c.tolerate(ctx, c.collectStates(ctx, project, stack))
+	return c.tolerate(ctx, stackSurface+"/states", c.collectStates(ctx, project, stack))
 }
 
 // projectName resolves the display name of a stack's project, caching each
@@ -174,9 +176,11 @@ func (c *Collector) projectName(ctx context.Context, stack *tfe.Stack) string {
 }
 
 // tolerate turns a list-level failure into either a propagated cancellation or a
-// logged, swallowed error so the collector keeps going on a transient blip. A
-// nil error passes through unchanged.
-func (c *Collector) tolerate(ctx context.Context, err error) error {
+// logged, swallowed error so the collector keeps going on a transient blip. The
+// drop is recorded under surface through [collect.Env.MarkSurfaceDropped] so the
+// run still reports incomplete over the skipped collection. A nil error passes
+// through unchanged.
+func (c *Collector) tolerate(ctx context.Context, surface string, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -185,8 +189,11 @@ func (c *Collector) tolerate(ctx context.Context, err error) error {
 		return err
 	}
 
+	c.env.MarkSurfaceDropped(surface, err)
+
 	c.log.WarnContext(ctx, "skipping stacks object after failure",
 		slog.String("org", c.org),
+		slog.String("surface", surface),
 		slog.Any("cause", err),
 	)
 

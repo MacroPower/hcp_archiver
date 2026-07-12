@@ -1026,3 +1026,34 @@ func TestLedger_PendingGateSurvivesReload(t *testing.T) {
 	assert.Equal(t, manifest.StatusPending, entry.Status)
 	assert.True(t, reloaded.HasUnsettledUnder(runsPrefix), "a pending gate re-widens the walk on resume")
 }
+
+func TestLedger_DroppedSurfaces(t *testing.T) {
+	t.Parallel()
+
+	ledger, err := manifest.Load(t.TempDir())
+	require.NoError(t, err)
+
+	ledger.StartRun()
+
+	assert.Zero(t, ledger.Tally().SurfacesDropped, "a fresh run starts with no dropped surfaces")
+
+	ledger.MarkSurfaceDropped("registry/modules", errors.New("list modules: boom"))
+	ledger.MarkSurfaceDropped("workspaces", errors.New("list workspaces: boom"))
+	ledger.MarkSurfaceDropped("registry/modules", errors.New("list modules: boom again"))
+
+	tally := ledger.Tally()
+	assert.Equal(t, 2, tally.SurfacesDropped, "re-dropping the same surface counts once")
+
+	dropped := ledger.DroppedSurfaces()
+	require.Len(t, dropped, 2)
+	assert.Equal(t, "registry/modules", dropped[0].Surface, "sorted by surface")
+	assert.Equal(t, "list modules: boom again", dropped[0].Error, "the latest cause wins")
+	assert.Equal(t, "workspaces", dropped[1].Surface)
+
+	// The record is run-scoped: a new run retries every enumeration from
+	// scratch, so the next run starts clean rather than inheriting a drop it
+	// might not repeat.
+	ledger.StartRun()
+	assert.Zero(t, ledger.Tally().SurfacesDropped)
+	assert.Empty(t, ledger.DroppedSurfaces())
+}

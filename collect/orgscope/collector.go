@@ -132,8 +132,9 @@ func (c *Collector) collectNotApplicable(_ context.Context) error {
 // a successful empty read, whose items are nil) and false when the read is
 // skipped, so a caller that writes a whole-collection file can tell an empty
 // roster from an unavailable one. A cancellation of ctx propagates so the run
-// can wind down, while any other read error is logged and skipped so one
-// unavailable collection never aborts the collector.
+// can wind down, while any other read error is recorded as a dropped surface
+// ([collect.Env.MarkSurfaceDropped]), logged, and skipped, so one unavailable
+// collection never aborts the collector yet still marks the run incomplete.
 func paginate[T any](
 	ctx context.Context,
 	c *Collector,
@@ -145,6 +146,8 @@ func paginate[T any](
 		if ctx.Err() != nil {
 			return nil, false, fmt.Errorf("list %s: %w", collection, ctx.Err())
 		}
+
+		c.env.MarkSurfaceDropped(name+"/"+collection, err)
 
 		slog.WarnContext(ctx, msgListSkipped,
 			slog.String("collection", collection),

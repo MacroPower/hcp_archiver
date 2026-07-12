@@ -260,11 +260,12 @@ func (a *Archiver) Run(ctx context.Context) error {
 			continue
 		}
 
-		if orgWhollyFailed(tally) {
+		if orgIncomplete(tally) {
 			a.logger.LogAttrs(runCtx, slog.LevelError, "org_archive_incomplete",
 				slog.String("org", orgName),
 				slog.Int("errored", tally.Errored),
 				slog.Int("forbidden", tally.Forbidden),
+				slog.Int("surfaces_dropped", tally.SurfacesDropped),
 			)
 
 			incomplete = true

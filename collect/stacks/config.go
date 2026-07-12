@@ -109,7 +109,9 @@ func (c *Collector) archiveConfiguration(
 		return wrap(err)
 	}
 
-	return c.tolerate(ctx, c.collectGroups(ctx, project, stackName, cfg.ID))
+	return c.tolerate(ctx,
+		c.env.Store().StackConfigurationFile(project, stackName, cfg.ID, "deployment-groups"),
+		c.collectGroups(ctx, project, stackName, cfg.ID))
 }
 
 // configDiagnostics reads a configuration's diagnostics as an id-serializable
@@ -154,7 +156,9 @@ func (c *Collector) collectGroups(ctx context.Context, project, stackName, confi
 	}
 
 	for _, group := range groups {
-		err = c.tolerate(ctx, c.archiveGroup(ctx, project, stackName, configID, group))
+		err = c.tolerate(ctx,
+			c.env.Store().StackDeploymentGroupDir(project, stackName, configID, group.ID),
+			c.archiveGroup(ctx, project, stackName, configID, group))
 		if err != nil {
 			return err
 		}
@@ -179,7 +183,9 @@ func (c *Collector) archiveGroup(
 		return wrap(err)
 	}
 
-	return c.tolerate(ctx, c.collectRuns(ctx, project, stackName, configID, group.ID))
+	return c.tolerate(ctx,
+		runArchivePrefix(c.env.Store(), project, stackName, configID, group.ID),
+		c.collectRuns(ctx, project, stackName, configID, group.ID))
 }
 
 // collectRuns walks a deployment group's runs newest-first, archiving each run
@@ -246,7 +252,9 @@ func (c *Collector) archiveRun(
 		return nil
 	}
 
-	return c.tolerate(ctx, c.collectSteps(ctx, project, stackName, configID, groupID, run.ID))
+	return c.tolerate(ctx,
+		c.env.Store().StackRunFile(project, stackName, configID, groupID, run.ID, "steps"),
+		c.collectSteps(ctx, project, stackName, configID, groupID, run.ID))
 }
 
 // collectSteps archives every step of a deployment run. A per-step failure is
@@ -269,7 +277,9 @@ func (c *Collector) collectSteps(ctx context.Context, project, stackName, config
 	}
 
 	for _, step := range steps {
-		err = c.tolerate(ctx, c.archiveStep(ctx, project, stackName, configID, groupID, runID, step))
+		err = c.tolerate(ctx,
+			c.env.Store().StackStepFile(project, stackName, configID, groupID, runID, step.ID, ""),
+			c.archiveStep(ctx, project, stackName, configID, groupID, runID, step))
 		if err != nil {
 			return err
 		}

@@ -8,6 +8,8 @@ var (
 	ProjectNameFor = projectNameFor
 	// LogFailures exposes (*Archiver).logFailures for tests.
 	LogFailures = (*Archiver).logFailures
+	// OrgIncomplete exposes orgIncomplete for tests.
+	OrgIncomplete = orgIncomplete
 )
 
 // DefaultProjectName exposes defaultProjectName for tests.
