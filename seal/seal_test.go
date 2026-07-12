@@ -212,6 +212,26 @@ func TestSeal_RejectsMemberNameEscapingArchive(t *testing.T) {
 	}
 }
 
+func TestSeal_RejectsDuplicateMemberNames(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	a := writeSource(t, dir, "a", []byte("first"))
+	b := writeSource(t, dir, "b", []byte("second"))
+
+	_, sealErr := seal.Seal(filepath.Join(dir, "bundle.zip"), []seal.Member{
+		{Name: "runs/r/x.log", Source: a, Compress: true},
+		{Name: "runs/r/x.log", Source: b, Compress: true},
+	})
+	require.ErrorIs(t, sealErr, seal.ErrDuplicateMember)
+
+	rollupErr := seal.Rollup(filepath.Join(dir, "rollup.ndjson"), []seal.Member{
+		{Name: "runs/r/x.json", Source: a},
+		{Name: "runs/r/x.json", Source: b},
+	})
+	require.ErrorIs(t, rollupErr, seal.ErrDuplicateMember)
+}
+
 func TestSeal_SidecarRecordsEveryMember(t *testing.T) {
 	t.Parallel()
 

@@ -81,15 +81,25 @@ var (
 	// would no longer reproduce the source or match its recorded digest. Such a
 	// source is refused rather than silently mangled.
 	ErrContentNotUTF8 = errors.New("roll-up content must be valid UTF-8")
+
+	// ErrDuplicateMember rejects two [Member]s sharing a name within one bundle. A
+	// duplicate would write two zip entries under one path, and read-back
+	// verification keys on the name, so it would compare one member's digest
+	// against the other's bytes; [Seal] and [Rollup] refuse it before writing.
+	ErrDuplicateMember = errors.New("member names must be unique within a bundle")
 )
 
 // checkMemberNames verifies every member names a clean path that stays within
-// the archive tree, so an extract cannot escape its destination directory. Names
-// are slash-separated bundle paths: an empty name, a leading slash (absolute), a
-// backslash anywhere (a Windows separator a '/'-only split would step over), or
-// any empty, ".", or ".." segment is rejected, which covers "//", a trailing
-// slash, and every traversal form without depending on the host separator.
+// the archive tree and is unique within the bundle, so an extract cannot escape
+// its destination directory and read-back verification maps each name to one
+// member. Names are slash-separated bundle paths: an empty name, a leading slash
+// (absolute), a backslash anywhere (a Windows separator a '/'-only split would
+// step over), or any empty, ".", or ".." segment is rejected, which covers "//",
+// a trailing slash, and every traversal form without depending on the host
+// separator; a name repeated across members is rejected too.
 func checkMemberNames(members []Member) error {
+	seen := make(map[string]struct{}, len(members))
+
 	for i := range members {
 		name := members[i].Name
 		if name == "" || strings.HasPrefix(name, "/") || strings.ContainsRune(name, '\\') {
@@ -101,6 +111,12 @@ func checkMemberNames(members []Member) error {
 				return fmt.Errorf("%w: %q", ErrMemberName, name)
 			}
 		}
+
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("%w: %q", ErrDuplicateMember, name)
+		}
+
+		seen[name] = struct{}{}
 	}
 
 	return nil
