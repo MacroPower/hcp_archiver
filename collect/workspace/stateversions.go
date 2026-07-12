@@ -135,14 +135,34 @@ func (c *Collector) archiveStateVersion(ctx context.Context, project, ws string,
 // stateVersionTerminal reports whether a state version has settled so it needs
 // no further refresh.
 //
-// Only a pending version is still non-terminal: its raw and JSON download URLs
-// are transiently empty until it finalizes, so treating it as terminal would
-// settle those blobs as not-applicable and permanently lose irreplaceable state
-// once they populate. Marking it non-terminal keeps the collection re-walking
-// (through the walk's settled machinery) until it finalizes. A finalized or
-// discarded version is terminal.
+// A pending version is non-terminal: its raw and JSON download URLs are
+// transiently empty until it finalizes, so treating it as terminal would settle
+// those blobs as not-applicable and permanently lose irreplaceable state once
+// they populate. Marking it non-terminal keeps the collection re-walking
+// (through the walk's settled machinery) until it finalizes.
+//
+// The polarity is an explicit allowlist: only a status positively known to be
+// final is terminal, and an unrecognized status — one HashiCorp adds after this
+// list was written — falls through to non-terminal. Mistaking a live status for
+// terminal settles a transiently-empty blob as a permanent absence, silent and
+// irreversible; mistaking a final status for live only costs re-walks until the
+// list is updated. Every terminality predicate in the collectors keeps this
+// polarity (see runTerminal and the stacks classifiers).
 func stateVersionTerminal(status tfe.StateVersionStatus) bool {
-	return status != tfe.StateVersionPending
+	switch status {
+	case tfe.StateVersionFinalized, tfe.StateVersionDiscarded:
+		return true
+	case "":
+		// A server that predates the status attribute omits it. Such a server has
+		// no pending state: versions exist only once uploaded, so an empty status
+		// is a finalized version, and treating it as live would re-walk every
+		// collection forever without ever settling its metadata.
+		return true
+	case tfe.StateVersionPending:
+		return false
+	default:
+		return false
+	}
 }
 
 // hasNextPage reports whether pagination points at a further page, tolerating a

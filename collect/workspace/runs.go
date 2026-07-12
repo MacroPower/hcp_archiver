@@ -91,6 +91,12 @@ func (c *Collector) archiveRun(ctx context.Context, project, ws string, run *tfe
 // runTerminal reports whether a run has settled into a final state and so needs
 // no further refresh. The remaining statuses are in-flight or paused stages that
 // may still advance.
+//
+// The polarity is an explicit allowlist: an unrecognized status falls through to
+// non-terminal, the safe direction — a live run mistaken for terminal would
+// freeze premature absences for children it has yet to produce, while a
+// terminal run mistaken for live only re-fetches its summary until the list is
+// updated. See stateVersionTerminal for the same invariant.
 func runTerminal(status tfe.RunStatus) bool {
 	switch status {
 	case tfe.RunApplied,
@@ -100,6 +106,9 @@ func runTerminal(status tfe.RunStatus) bool {
 		tfe.RunCanceled:
 		return true
 	case tfe.RunStatus("force_canceled"):
+		// The HCP Terraform API documents force_canceled as a final run state,
+		// but go-tfe (v1.109.0) defines no constant for it, so the wire value is
+		// spelled here directly.
 		return true
 	default:
 		return false

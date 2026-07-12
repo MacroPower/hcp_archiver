@@ -26,10 +26,16 @@ func TestStateVersionTerminal(t *testing.T) {
 		status tfe.StateVersionStatus
 		want   bool
 	}{
-		"pending is not terminal":  {status: tfe.StateVersionPending, want: false},
-		"finalized is terminal":    {status: tfe.StateVersionFinalized, want: true},
-		"discarded is terminal":    {status: tfe.StateVersionDiscarded, want: true},
+		"pending is not terminal": {status: tfe.StateVersionPending, want: false},
+		"finalized is terminal":   {status: tfe.StateVersionFinalized, want: true},
+		"discarded is terminal":   {status: tfe.StateVersionDiscarded, want: true},
+		// A pre-status server omits the attribute; its versions exist only once
+		// uploaded, so an empty status is a finalized version.
 		"empty status is terminal": {status: tfe.StateVersionStatus(""), want: true},
+		// The allowlist polarity: a status added to the SDK after this list was
+		// written must default to live, so a transiently-empty download URL is
+		// re-walked rather than settled as a permanent absence.
+		"unknown status is not terminal": {status: tfe.StateVersionStatus("surprise"), want: false},
 	}
 
 	for name, tc := range tests {

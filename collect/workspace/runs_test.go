@@ -34,6 +34,7 @@ func TestRunTerminal(t *testing.T) {
 		"planned and saved is not terminal":  {status: tfe.RunPlannedAndSaved, want: false},
 		"confirmed is not terminal":          {status: tfe.RunConfirmed, want: false},
 		"empty status is not terminal":       {status: tfe.RunStatus(""), want: false},
+		"unknown status is not terminal":     {status: tfe.RunStatus("surprise"), want: false},
 	}
 
 	for name, tc := range tests {
