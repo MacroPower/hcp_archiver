@@ -29,41 +29,65 @@ func TestIsConcreteVersion(t *testing.T) {
 	}
 }
 
-func TestCompareVersions(t *testing.T) {
+func TestLatestModuleVersion(t *testing.T) {
 	t.Parallel()
 
+	versions := func(vs ...string) []tfe.RegistryModuleVersionStatuses {
+		out := make([]tfe.RegistryModuleVersionStatuses, len(vs))
+		for i, v := range vs {
+			out[i] = tfe.RegistryModuleVersionStatuses{Version: v}
+		}
+
+		return out
+	}
+
 	tests := map[string]struct {
-		a    string
-		b    string
-		want int // sign only
+		statuses []tfe.RegistryModuleVersionStatuses
+		want     string
 	}{
-		"equal":                        {a: "1.2.3", b: "1.2.3", want: 0},
-		"numeric minor lower":          {a: "1.2.3", b: "1.10.0", want: -1},
-		"numeric major higher":         {a: "2.0.0", b: "1.9.9", want: 1},
-		"different depth, shorter":     {a: "1.2", b: "1.2.1", want: -1},
-		"missing segment is zero":      {a: "1.2", b: "1.2.0", want: 0},
-		"two prereleases compare text": {a: "1.2.0-rc2", b: "1.2.0-rc1", want: 1},
-		"release outranks prerelease":  {a: "1.2.0", b: "1.2.0-rc1", want: 1},
-		"prerelease sorts below":       {a: "2.0.0-beta", b: "2.0.0", want: -1},
-		"numbered prerelease numeric":  {a: "1.0.0-rc.10", b: "1.0.0-rc.2", want: 1},
-		"numeric id below alphanum":    {a: "1.0.0-1", b: "1.0.0-alpha", want: -1},
-		"more identifiers outrank":     {a: "1.0.0-rc.1", b: "1.0.0-rc.1.1", want: -1},
+		"numeric segments compare numerically, not lexically": {
+			statuses: versions("1.9.9", "1.10.0", "1.2.3"),
+			want:     "1.10.0",
+		},
+		"a shorter core pads with zeros": {
+			statuses: versions("1.2", "1.2.1"),
+			want:     "1.2.1",
+		},
+		"a stable release outranks a newer prerelease": {
+			statuses: versions("2.0.0-rc1", "1.9.0"),
+			want:     "1.9.0",
+		},
+		"the newest prerelease wins when no stable exists": {
+			statuses: versions("1.0.0-rc.2", "1.0.0-rc.10"),
+			want:     "1.0.0-rc.10",
+		},
+		"a numeric prerelease identifier ranks below alphanumeric": {
+			statuses: versions("1.0.0-1", "1.0.0-alpha"),
+			want:     "1.0.0-alpha",
+		},
+		"floating and empty pins are ignored": {
+			statuses: versions("latest", "", "0.1.0"),
+			want:     "0.1.0",
+		},
+		"nothing concrete resolves to empty": {
+			statuses: versions("latest", ""),
+			want:     "",
+		},
+		"an unparsable version never outranks a real release": {
+			statuses: versions("not-a-version-at-all!", "0.0.1"),
+			want:     "0.0.1",
+		},
+		"an unparsable version is the last resort": {
+			statuses: versions("not-a-version-at-all!"),
+			want:     "not-a-version-at-all!",
+		},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			got := compareVersions(tc.a, tc.b)
-
-			switch {
-			case tc.want < 0:
-				assert.Negative(t, got)
-			case tc.want > 0:
-				assert.Positive(t, got)
-			default:
-				assert.Zero(t, got)
-			}
+			assert.Equal(t, tc.want, latestModuleVersion(tc.statuses))
 		})
 	}
 }

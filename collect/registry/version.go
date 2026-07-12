@@ -1,10 +1,9 @@
 package registry
 
 import (
-	"strconv"
-	"strings"
-
 	"github.com/hashicorp/go-tfe"
+
+	goversion "github.com/hashicorp/go-version"
 )
 
 // Registry leaf filenames written under a module or provider directory.
@@ -57,147 +56,50 @@ func resolveNoCodeVersion(pin string, statuses []tfe.RegistryModuleVersionStatus
 // the empty string when none is concrete. The registry serves a "latest" pin as
 // the newest stable, so a prerelease must not shadow it when resolving the
 // version whose no-code variable options to archive.
+//
+// Precedence comes from [github.com/hashicorp/go-version], the library behind
+// HashiCorp's own registries, rather than a hand-rolled comparator, so the
+// ordering here cannot drift from the ordering the data source itself applies.
+// A version the parser rejects is kept only as a last resort when nothing
+// parses, so one malformed status never outranks a real release yet a registry
+// serving only surprising strings still resolves to something archivable.
 func latestModuleVersion(statuses []tfe.RegistryModuleVersionStatuses) string {
-	bestStable := ""
-	bestAny := ""
+	var bestStable, bestAny *goversion.Version
+
+	bestStableRaw, bestAnyRaw, fallback := "", "", ""
 
 	for _, s := range statuses {
 		if !isConcreteVersion(s.Version) {
 			continue
 		}
 
-		if bestAny == "" || compareVersions(s.Version, bestAny) > 0 {
-			bestAny = s.Version
-		}
-
-		if _, pre := splitPrerelease(s.Version); pre == "" {
-			if bestStable == "" || compareVersions(s.Version, bestStable) > 0 {
-				bestStable = s.Version
-			}
-		}
-	}
-
-	if bestStable != "" {
-		return bestStable
-	}
-
-	return bestAny
-}
-
-// compareVersions orders two dotted version strings by SemVer-style precedence.
-// It compares the numeric release core segment by segment (numerically when both
-// segments parse as integers, lexically otherwise); when the cores are equal, a
-// version carrying no pre-release outranks one that does, and two pre-releases
-// compare by SemVer identifier precedence (see [comparePrerelease]). It returns a
-// negative number when a sorts before b, zero when they are equal, and a positive
-// number when a sorts after b.
-func compareVersions(a, b string) int {
-	aCore, aPre := splitPrerelease(a)
-	bCore, bPre := splitPrerelease(b)
-
-	if c := compareCore(aCore, bCore); c != 0 {
-		return c
-	}
-
-	switch {
-	case aPre == "" && bPre == "":
-		return 0
-	case aPre == "":
-		// A final release outranks its own pre-releases (1.2.0 > 1.2.0-rc1).
-		return 1
-	case bPre == "":
-		return -1
-	default:
-		return comparePrerelease(aPre, bPre)
-	}
-}
-
-// comparePrerelease orders two non-empty pre-release remainders by SemVer
-// identifier precedence: it compares dot-separated identifiers left to right,
-// numerically when both parse as integers, lexically when both are alphanumeric,
-// and ranks a numeric identifier below an alphanumeric one; when every shared
-// identifier ties, the remainder carrying more identifiers outranks the shorter
-// (1.0.0-rc.2 < 1.0.0-rc.10 < 1.0.0-rc.10.1).
-func comparePrerelease(a, b string) int {
-	as := strings.Split(a, ".")
-	bs := strings.Split(b, ".")
-	n := min(len(as), len(bs))
-
-	for i := range n {
-		if c := comparePrereleaseID(as[i], bs[i]); c != 0 {
-			return c
-		}
-	}
-
-	return len(as) - len(bs)
-}
-
-// comparePrereleaseID orders two pre-release identifiers: both numeric compare
-// numerically, both alphanumeric compare lexically, and a numeric identifier
-// ranks below an alphanumeric one.
-func comparePrereleaseID(a, b string) int {
-	an, aErr := strconv.Atoi(a)
-	bn, bErr := strconv.Atoi(b)
-
-	switch {
-	case aErr == nil && bErr == nil:
-		return an - bn
-	case aErr == nil:
-		// A numeric identifier has lower precedence than an alphanumeric one.
-		return -1
-	case bErr == nil:
-		return 1
-	default:
-		return strings.Compare(a, b)
-	}
-}
-
-// splitPrerelease separates a version's numeric release core from its
-// pre-release remainder at the first "-", returning the whole string as the core
-// when it carries no pre-release.
-func splitPrerelease(v string) (string, string) {
-	core, prerelease, _ := strings.Cut(v, "-")
-
-	return core, prerelease
-}
-
-// compareCore orders two dotted release cores segment by segment, comparing each
-// segment numerically when both parse as integers and lexically otherwise.
-func compareCore(a, b string) int {
-	as := strings.Split(a, ".")
-	bs := strings.Split(b, ".")
-	n := max(len(as), len(bs))
-
-	for i := range n {
-		x := segmentAt(as, i)
-		y := segmentAt(bs, i)
-
-		xn, xErr := strconv.Atoi(x)
-		yn, yErr := strconv.Atoi(y)
-
-		if xErr == nil && yErr == nil {
-			if xn != yn {
-				return xn - yn
+		v, err := goversion.NewVersion(s.Version)
+		if err != nil {
+			if fallback == "" {
+				fallback = s.Version
 			}
 
 			continue
 		}
 
-		if c := strings.Compare(x, y); c != 0 {
-			return c
+		if bestAny == nil || v.GreaterThan(bestAny) {
+			bestAny, bestAnyRaw = v, s.Version
+		}
+
+		if v.Prerelease() == "" && (bestStable == nil || v.GreaterThan(bestStable)) {
+			bestStable, bestStableRaw = v, s.Version
 		}
 	}
 
-	return 0
-}
-
-// segmentAt returns the i-th segment of parts, or "0" when i is out of range, so
-// a version with fewer segments compares as if padded with explicit zeros (1.2
-// equals 1.2.0) rather than an empty segment sorting below a "0" it should equal.
-func segmentAt(parts []string, i int) string {
-	if i < len(parts) {
-		return parts[i]
+	// The raw string as served is returned, not the parsed form's rendering: it
+	// keys the per-version API read, which must address the version by the exact
+	// spelling the registry listed.
+	switch {
+	case bestStable != nil:
+		return bestStableRaw
+	case bestAny != nil:
+		return bestAnyRaw
+	default:
+		return fallback
 	}
-
-	return "0"
 }
