@@ -2,6 +2,7 @@ package archiver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -22,6 +23,10 @@ import (
 // each step names its phase and, where a cheap pre-count exists (projects,
 // workspaces), drives a determinate bar. Optional surfaces run only when their
 // configuration toggle is set.
+//
+// A dropped project or workspace surface ([errSurfaceIncomplete]) is not a
+// cancellation and does not stop the organization: the remaining collectors
+// still run, but it is remembered and returned so the run is marked incomplete.
 func (a *Archiver) collectOrg(
 	ctx context.Context,
 	env *collect.Env,
@@ -36,14 +41,24 @@ func (a *Archiver) collectOrg(
 	wsc := workspace.New(env, orgName,
 		workspace.WithRunHistoryLimit(a.cfg.RunHistoryCount, a.runHistoryOldest()))
 
+	var incomplete error
+
 	projectNames, err := a.collectProjects(ctx, env, reporter, orgName, wsc)
 	if err != nil {
-		return err
+		if !errors.Is(err, errSurfaceIncomplete) {
+			return err
+		}
+
+		incomplete = err
 	}
 
 	err = a.collectWorkspaces(ctx, env, reporter, orgName, wsc, projectNames)
 	if err != nil {
-		return err
+		if !errors.Is(err, errSurfaceIncomplete) {
+			return err
+		}
+
+		incomplete = err
 	}
 
 	err = a.runCollector(ctx, reporter, registry.New(env, orgName, registry.WithDetail(a.cfg.RegistryDetail)))
@@ -65,7 +80,7 @@ func (a *Archiver) collectOrg(
 		}
 	}
 
-	return nil
+	return incomplete
 }
 
 // runHistoryOldest resolves the configured run-history age bound into the
