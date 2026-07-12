@@ -740,7 +740,7 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 		fmt.Fprintf(
 			&b,
 			" absent=%d skipped=%d n/a=%d total=%d",
-			t.AbsentPermanently,
+			t.Absent,
 			t.Skipped,
 			t.NotApplicable,
 			t.Total(),
@@ -806,7 +806,7 @@ func (r *Reporter) summaryBlock(snap snapshot) string {
 
 	meta := fmt.Sprintf(
 		"absent %d · skipped %d · n/a %d · total %d · %s · %s",
-		t.AbsentPermanently,
+		t.Absent,
 		t.Skipped,
 		t.NotApplicable,
 		t.Total(),
@@ -842,30 +842,30 @@ func (r *Reporter) summaryBlock(snap snapshot) string {
 // a pool; RateLimited is the cumulative count of rate-limited (429) responses,
 // present once any were observed.
 type jsonLine struct {
-	PhaseTotal        *int    `json:"phaseTotal,omitempty"`
-	PhaseCompleted    *int    `json:"phaseCompleted,omitempty"`
-	TaskTotal         *int    `json:"taskTotal,omitempty"`
-	TaskCompleted     *int    `json:"taskCompleted,omitempty"`
-	Workers           *int    `json:"workers,omitempty"`
-	MaxWorkers        *int    `json:"maxWorkers,omitempty"`
-	Phase             string  `json:"phase,omitempty"`
-	Task              string  `json:"task,omitempty"`
-	Target            string  `json:"target,omitempty"`
-	TasksActive       int     `json:"tasksActive,omitempty"`
-	RateLimited       int64   `json:"rateLimited,omitempty"`
-	Done              int     `json:"done"`
-	AbsentPermanently int     `json:"absentPermanently"`
-	Skipped           int     `json:"skipped"`
-	Errored           int     `json:"errored"`
-	Forbidden         int     `json:"forbidden"`
-	NotApplicable     int     `json:"notApplicable"`
-	Retried           int64   `json:"retried"`
-	Total             int     `json:"total"`
-	BytesDownloaded   int64   `json:"bytesDownloaded"`
-	ElapsedSeconds    float64 `json:"elapsedSeconds"`
-	BytesPerSecond    float64 `json:"bytesPerSecond"`
-	Summary           bool    `json:"summary,omitempty"`
-	Resumed           bool    `json:"resumed,omitempty"`
+	PhaseTotal      *int    `json:"phaseTotal,omitempty"`
+	PhaseCompleted  *int    `json:"phaseCompleted,omitempty"`
+	TaskTotal       *int    `json:"taskTotal,omitempty"`
+	TaskCompleted   *int    `json:"taskCompleted,omitempty"`
+	Workers         *int    `json:"workers,omitempty"`
+	MaxWorkers      *int    `json:"maxWorkers,omitempty"`
+	Phase           string  `json:"phase,omitempty"`
+	Task            string  `json:"task,omitempty"`
+	Target          string  `json:"target,omitempty"`
+	TasksActive     int     `json:"tasksActive,omitempty"`
+	RateLimited     int64   `json:"rateLimited,omitempty"`
+	Done            int     `json:"done"`
+	Absent          int     `json:"absent"`
+	Skipped         int     `json:"skipped"`
+	Errored         int     `json:"errored"`
+	Forbidden       int     `json:"forbidden"`
+	NotApplicable   int     `json:"notApplicable"`
+	Retried         int64   `json:"retried"`
+	Total           int     `json:"total"`
+	BytesDownloaded int64   `json:"bytesDownloaded"`
+	ElapsedSeconds  float64 `json:"elapsedSeconds"`
+	BytesPerSecond  float64 `json:"bytesPerSecond"`
+	Summary         bool    `json:"summary,omitempty"`
+	Resumed         bool    `json:"resumed,omitempty"`
 }
 
 // writeJSON encodes one snapshot as a compact JSON object followed by a
@@ -874,22 +874,22 @@ func (r *Reporter) writeJSON(snap snapshot, summary bool) error {
 	t := snap.tally
 
 	line := jsonLine{
-		Phase:             snap.phase,
-		Target:            t.Target,
-		Done:              t.Done,
-		AbsentPermanently: t.AbsentPermanently,
-		Skipped:           t.Skipped,
-		Errored:           t.Errored,
-		Forbidden:         t.Forbidden,
-		NotApplicable:     t.NotApplicable,
-		Retried:           t.Retried,
-		Total:             t.Total(),
-		BytesDownloaded:   t.BytesDownloaded,
-		ElapsedSeconds:    snap.elapsed.Seconds(),
-		BytesPerSecond:    snap.rate,
-		RateLimited:       snap.rateLimited,
-		Summary:           summary,
-		Resumed:           t.Resumed,
+		Phase:           snap.phase,
+		Target:          t.Target,
+		Done:            t.Done,
+		Absent:          t.Absent,
+		Skipped:         t.Skipped,
+		Errored:         t.Errored,
+		Forbidden:       t.Forbidden,
+		NotApplicable:   t.NotApplicable,
+		Retried:         t.Retried,
+		Total:           t.Total(),
+		BytesDownloaded: t.BytesDownloaded,
+		ElapsedSeconds:  snap.elapsed.Seconds(),
+		BytesPerSecond:  snap.rate,
+		RateLimited:     snap.rateLimited,
+		Summary:         summary,
+		Resumed:         t.Resumed,
 	}
 
 	if snap.hasWorkers() {

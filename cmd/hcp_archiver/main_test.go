@@ -70,13 +70,13 @@ func TestConfigFromArgs(t *testing.T) {
 				"--output", "/tmp/a",
 				"--progress", "json",
 				"--progress-interval", "10s",
-				"--recheck-absent",
+				"--retry-absent",
 			},
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
 				assert.Equal(t, config.ProgressModeJSON, cfg.ProgressMode)
 				assert.Equal(t, 10*time.Second, cfg.ProgressInterval)
-				assert.True(t, cfg.RecheckAbsent)
+				assert.True(t, cfg.RetryAbsent)
 			},
 		},
 		"config file via flag drives archive settings": {

@@ -4,7 +4,7 @@ package manifest
 //
 // Eight states drive resume. [StatusDone], [StatusSkipped],
 // [StatusNotApplicable], and [StatusReferenceCleared] are settled and never
-// re-requested; permanent absence is settled but sticky; [StatusErrored],
+// re-requested; [StatusAbsent] is settled but sticky; [StatusErrored],
 // [StatusForbidden], [StatusPending], and any object absent from the ledger are
 // retried on the next run.
 type Status string
@@ -12,10 +12,10 @@ type Status string
 const (
 	// StatusDone marks an object that was fetched and written successfully.
 	StatusDone Status = "done"
-	// StatusAbsentPermanently marks an object gone for good (a 404 or 410); it
-	// is settled and sticky, so a re-run does not re-probe it unless recheck is
-	// enabled.
-	StatusAbsentPermanently Status = "absent-permanently"
+	// StatusAbsent marks an object the API answered as gone (a 404); it is
+	// settled and sticky, so a re-run does not re-probe it unless retry-absent
+	// is enabled (see [WithRetryAbsent]).
+	StatusAbsent Status = "absent"
 	// StatusSkipped marks an object intentionally deferred; it is settled so a
 	// re-run does not mistake it for a gap.
 	StatusSkipped Status = "skipped"
@@ -56,7 +56,7 @@ func (s Status) String() string {
 // Valid reports whether the status is one of the recognized values.
 func (s Status) Valid() bool {
 	switch s {
-	case StatusDone, StatusAbsentPermanently, StatusSkipped,
+	case StatusDone, StatusAbsent, StatusSkipped,
 		StatusErrored, StatusForbidden, StatusNotApplicable, StatusPending,
 		StatusReferenceCleared:
 		return true
@@ -79,15 +79,15 @@ func (s Status) IsGate() bool {
 // Settled reports whether a normal re-run leaves the object alone.
 //
 // Every status except [StatusErrored], [StatusForbidden], and [StatusPending]
-// is settled; an object absent from the ledger is never settled. Permanent
-// absence is settled but sticky, so a recheck can still force it to be
-// re-probed. Forbidden is not settled, so a re-run under a token with broader
-// access retries it. Pending is not settled, so a reference gate keeps its run
-// in the walk's retry set until the foreign write it mirrors settles; once it
-// does, [StatusReferenceCleared] settles the gate and the retry stops.
+// is settled; an object absent from the ledger is never settled. Absence is
+// settled but sticky, so retry-absent can still force it to be re-probed.
+// Forbidden is not settled, so a re-run under a token with broader access
+// retries it. Pending is not settled, so a reference gate keeps its run in the
+// walk's retry set until the foreign write it mirrors settles; once it does,
+// [StatusReferenceCleared] settles the gate and the retry stops.
 func (s Status) Settled() bool {
 	switch s {
-	case StatusDone, StatusAbsentPermanently, StatusSkipped, StatusNotApplicable,
+	case StatusDone, StatusAbsent, StatusSkipped, StatusNotApplicable,
 		StatusReferenceCleared:
 		return true
 	case StatusErrored, StatusForbidden, StatusPending:

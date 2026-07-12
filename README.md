@@ -154,14 +154,14 @@ now reach.
 A run ends with a per-status summary line; the counts are the resume model made
 visible:
 
-- **done**: fetched and written.
-- **absent**: gone (a 404, confirmed by an in-run re-probe), re-probed only
+- **done** — fetched and written.
+- **absent** — gone (a 404, confirmed by an in-run re-probe), re-probed only
   with `--retry-absent`.
-- **forbidden**: the token may not read it (a 403); retried on the next run, so
+- **forbidden** — the token may not read it (a 403); retried on the next run, so
   a broader token can still capture it (see above). Counted apart from an error.
-- **errored**: a transient or unclassified failure, retried next run; a healthy
+- **errored** — a transient or unclassified failure, retried next run; a healthy
   archive ends with `errored=0`.
-- **skipped** / **n/a**: intentionally deferred or not applicable to this
+- **skipped** / **n/a** — intentionally deferred or not applicable to this
   archive; settled, and never mistaken for a gap.
 
 A non-zero `errored` is the count to investigate; `forbidden`, `absent`,
@@ -179,8 +179,8 @@ Settings are grouped by how much they vary; see
   `--output` / `-o` is the archive root (required; resume and incremental
   re-run are implied when it already holds an archive); `--progress` selects the
   progress format (`auto|human|json|quiet`, default `auto`: human on a TTY,
-  quiet off one) with a `--progress-interval` knob; and `--recheck-absent`
-  re-probes objects previously recorded as permanently gone.
+  quiet off one) with a `--progress-interval` knob; and `--retry-absent`
+  re-probes objects previously recorded as absent.
 - **Configuration file** (every key optional, defaulted per field): `address`
   (the API endpoint, default `https://app.terraform.io`), `organizations` (a
   list; empty or omitted archives every organization the token can see in turn),

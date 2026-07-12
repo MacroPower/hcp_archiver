@@ -16,9 +16,8 @@ type Tally struct {
 	Target string `json:"target,omitempty"`
 	// Done counts objects currently recorded as [StatusDone].
 	Done int `json:"done"`
-	// AbsentPermanently counts objects currently recorded as
-	// [StatusAbsentPermanently].
-	AbsentPermanently int `json:"absentPermanently"`
+	// Absent counts objects currently recorded as [StatusAbsent].
+	Absent int `json:"absent"`
 	// Skipped counts objects currently recorded as [StatusSkipped].
 	Skipped int `json:"skipped"`
 	// Errored counts objects currently recorded as [StatusErrored].
@@ -48,7 +47,7 @@ type Tally struct {
 
 // Total returns the number of objects currently recorded across every status.
 func (t Tally) Total() int {
-	return t.Done + t.AbsentPermanently + t.Skipped + t.Errored + t.Forbidden + t.NotApplicable
+	return t.Done + t.Absent + t.Skipped + t.Errored + t.Forbidden + t.NotApplicable
 }
 
 // DroppedSurface is one enumeration surface dropped this run, with the text of

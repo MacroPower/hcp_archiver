@@ -27,7 +27,7 @@ func TestNew_Defaults(t *testing.T) {
 	assert.Equal(t, config.DefaultProgressInterval, cfg.ProgressInterval)
 	assert.Zero(t, cfg.RunHistoryCount)
 	assert.Zero(t, cfg.RunHistoryAge)
-	assert.False(t, cfg.RecheckAbsent)
+	assert.False(t, cfg.RetryAbsent)
 	assert.False(t, cfg.Stacks)
 	assert.False(t, cfg.HYOK)
 	assert.False(t, cfg.RegistryDetail)
@@ -60,7 +60,7 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 		config.WithProgressInterval(10*time.Second),
 		config.WithRunHistoryCount(500),
 		config.WithRunHistoryAge(90*24*time.Hour),
-		config.WithRecheckAbsent(true),
+		config.WithRetryAbsent(true),
 		config.WithStacks(true),
 		config.WithHYOK(true),
 		config.WithRegistryDetail(true),
@@ -75,7 +75,7 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 	assert.Equal(t, 10*time.Second, cfg.ProgressInterval)
 	assert.Equal(t, 500, cfg.RunHistoryCount)
 	assert.Equal(t, 90*24*time.Hour, cfg.RunHistoryAge)
-	assert.True(t, cfg.RecheckAbsent)
+	assert.True(t, cfg.RetryAbsent)
 	assert.True(t, cfg.Stacks)
 	assert.True(t, cfg.HYOK)
 	assert.True(t, cfg.RegistryDetail)

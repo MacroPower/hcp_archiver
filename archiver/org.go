@@ -77,7 +77,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 
 	ledger, err := manifest.Load(
 		st.Root(),
-		manifest.WithRecheckAbsent(a.cfg.RecheckAbsent),
+		manifest.WithRetryAbsent(a.cfg.RetryAbsent),
 	)
 	if err != nil {
 		return manifest.Tally{}, fmt.Errorf("load manifest: %w", err)

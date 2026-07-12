@@ -275,14 +275,14 @@ func TestReporter_JSONLine(t *testing.T) {
 
 	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 	src := fakeSource{tally: manifest.Tally{
-		Target:            "org/acme",
-		Done:              10,
-		AbsentPermanently: 1,
-		Skipped:           2,
-		Errored:           3,
-		Forbidden:         5,
-		NotApplicable:     4,
-		BytesDownloaded:   1024,
+		Target:          "org/acme",
+		Done:            10,
+		Absent:          1,
+		Skipped:         2,
+		Errored:         3,
+		Forbidden:       5,
+		NotApplicable:   4,
+		BytesDownloaded: 1024,
 	}}
 
 	buf := &bytes.Buffer{}
@@ -343,14 +343,14 @@ func TestReporter_Summary(t *testing.T) {
 
 	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 	src := fakeSource{tally: manifest.Tally{
-		Done:              100,
-		AbsentPermanently: 3,
-		Skipped:           2,
-		Errored:           4,
-		Forbidden:         6,
-		NotApplicable:     1,
-		Retried:           5,
-		BytesDownloaded:   5 * 1024 * 1024,
+		Done:            100,
+		Absent:          3,
+		Skipped:         2,
+		Errored:         4,
+		Forbidden:       6,
+		NotApplicable:   1,
+		Retried:         5,
+		BytesDownloaded: 5 * 1024 * 1024,
 	}}
 
 	t.Run("human", func(t *testing.T) {

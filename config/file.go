@@ -42,9 +42,9 @@ var (
 // It holds the settings that are stable across runs: the API address, the
 // organizations to archive, the worker concurrency ceiling, and the opt-in
 // scope toggles. Per-run and secret settings (the output directory, the progress
-// mode, the recheck toggle, and the API token) are supplied by flags and the
-// environment instead, so a configuration file never carries a machine-specific
-// path or a credential.
+// mode, the retry-absent toggle, and the API token) are supplied by flags and
+// the environment instead, so a configuration file never carries a
+// machine-specific path or a credential.
 //
 // Every field is optional; an absent field takes the package default. Create
 // instances with [LoadFile], or [DefaultFile] for the defaults alone.

@@ -40,7 +40,10 @@ func newEnv(t *testing.T, opts ...collect.Option) (*collect.Env, *store.Store, *
 	ledger, err := manifest.Load(st.Root(), manifest.WithClock(fixedClock()))
 	require.NoError(t, err)
 
-	env := collect.NewEnv(nil, st, ledger, opts...)
+	// A zero confirm delay keeps the 404-confirming re-probe from sleeping in
+	// tests; a caller's own options still override it.
+	env := collect.NewEnv(nil, st, ledger,
+		append([]collect.Option{collect.WithAbsentConfirm(0)}, opts...)...)
 
 	return env, st, ledger
 }
@@ -85,7 +88,7 @@ func TestEnvObject(t *testing.T) {
 			wantStatus: manifest.StatusDone,
 			wantSig:    true,
 		},
-		"records a retryable absence observation on a terminal error": {
+		"records a settled absence on a terminal error": {
 			fetch: func(called *bool) func(context.Context) (any, error) {
 				return func(_ context.Context) (any, error) {
 					*called = true
@@ -94,10 +97,9 @@ func TestEnvObject(t *testing.T) {
 				}
 			},
 			wantFetch: true,
-			// One 404 is an observation, not a settled absence: it records errored
-			// so a later run re-probes and only a second run's observation settles
-			// permanent absence (see TestEnvObjectAbsenceSettlesOnSecondRun).
-			wantStatus: manifest.StatusErrored,
+			// The 404 is confirmed by an in-run re-probe (see
+			// TestEnvObjectAbsenceConfirmedInRun) and then settles absent.
+			wantStatus: manifest.StatusAbsent,
 		},
 		"records errored on a transient error": {
 			fetch: func(called *bool) func(context.Context) (any, error) {
@@ -399,7 +401,7 @@ func TestEnvBlobRetry(t *testing.T) {
 			wantAttempts: 1,
 			wantStatus:   manifest.StatusErrored,
 		},
-		"a terminal error is not retried": {
+		"a terminal error is confirmed once, never retried further": {
 			retries: 2,
 			fetch: func(attempts *int) func(context.Context) (io.Reader, error) {
 				return func(_ context.Context) (io.Reader, error) {
@@ -408,10 +410,10 @@ func TestEnvBlobRetry(t *testing.T) {
 					return nil, tfe.ErrResourceNotFound
 				}
 			},
-			wantAttempts: 1,
-			// The first 404 records a retryable absence observation; permanent
-			// absence settles only when a later run observes it again.
-			wantStatus: manifest.StatusErrored,
+			// The confirming re-probe is the only second attempt: a repeated 404
+			// settles absent without consuming the transient retry budget.
+			wantAttempts: 2,
+			wantStatus:   manifest.StatusAbsent,
 		},
 	}
 
@@ -1127,18 +1129,12 @@ func TestWalkArchivesPageItemsConcurrently(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestEnvObjectAbsenceSettlesOnSecondRun(t *testing.T) {
+func TestEnvObjectAbsenceConfirmedInRun(t *testing.T) {
 	t.Parallel()
 
 	const relPath = "projects/example/project.json"
 
-	now := time.Date(2026, time.July, 8, 12, 0, 0, 0, time.UTC)
-	st := store.New(t.TempDir())
-
-	ledger, err := manifest.Load(st.Root(), manifest.WithClock(func() time.Time { return now }))
-	require.NoError(t, err)
-
-	env := collect.NewEnv(nil, st, ledger)
+	env, _, ledger := newEnv(t)
 
 	fetches := 0
 	fetch := func(_ context.Context) (any, error) {
@@ -1147,26 +1143,45 @@ func TestEnvObjectAbsenceSettlesOnSecondRun(t *testing.T) {
 		return nil, tfe.ErrResourceNotFound
 	}
 
-	// First run: the 404 records a retryable observation, not a settled absence.
+	// A first 404 is confirmed by one in-run re-probe; the repeated 404 settles
+	// the object absent.
 	ledger.StartRun()
 	require.NoError(t, env.Object(t.Context(), relPath, fetch))
 
 	entry, ok := ledger.Entry(relPath)
 	require.True(t, ok)
-	assert.Equal(t, manifest.StatusErrored, entry.Status)
+	assert.Equal(t, manifest.StatusAbsent, entry.Status)
+	assert.Equal(t, 2, fetches, "the confirming re-probe is the only second attempt")
 
-	// Second run: the errored entry is re-probed; a repeated 404 confirms the
-	// absence and settles it.
-	now = now.Add(time.Hour)
+	// Settled: no further probes, this run or the next.
+	require.NoError(t, env.Object(t.Context(), relPath, fetch))
+	assert.Equal(t, 2, fetches, "a settled absence is never re-probed")
+}
+
+func TestEnvObjectAbsenceBlipRecovers(t *testing.T) {
+	t.Parallel()
+
+	const relPath = "projects/example/project.json"
+
+	env, _, ledger := newEnv(t)
+
+	// A 404 answered out of eventual consistency succeeds on the confirming
+	// re-probe, so the blip lands on the success path instead of settling a gap.
+	fetches := 0
+	fetch := func(_ context.Context) (any, error) {
+		fetches++
+		if fetches == 1 {
+			return nil, tfe.ErrResourceNotFound
+		}
+
+		return cannedProject(), nil
+	}
 
 	ledger.StartRun()
 	require.NoError(t, env.Object(t.Context(), relPath, fetch))
 
-	entry, ok = ledger.Entry(relPath)
+	entry, ok := ledger.Entry(relPath)
 	require.True(t, ok)
-	assert.Equal(t, manifest.StatusAbsentPermanently, entry.Status)
-
-	// Settled: no further probes.
-	require.NoError(t, env.Object(t.Context(), relPath, fetch))
-	assert.Equal(t, 2, fetches, "the confirmed absence is never re-probed")
+	assert.Equal(t, manifest.StatusDone, entry.Status)
+	assert.Equal(t, int64(1), ledger.Tally().Retried, "the confirming re-probe tallies as a retry")
 }

@@ -81,7 +81,7 @@ type Ledger struct {
 	compactThreshold int64
 	mu               sync.RWMutex
 	flushMu          sync.Mutex
-	recheckAbsent    bool
+	retryAbsent      bool
 	resumed          bool
 	compactNext      bool
 }
@@ -90,7 +90,7 @@ type Ledger struct {
 //
 // The available options are:
 //   - [WithClock]
-//   - [WithRecheckAbsent]
+//   - [WithRetryAbsent]
 type Option func(*Ledger)
 
 // WithClock injects the clock used for every recorded timestamp, defaulting to
@@ -104,12 +104,12 @@ func WithClock(now func() time.Time) Option {
 	}
 }
 
-// WithRecheckAbsent toggles re-probing of [StatusAbsentPermanently] objects, so
-// [Ledger.ShouldFetch] returns true for an object an operator suspects has been
-// restored. It returns an [Option].
-func WithRecheckAbsent(recheck bool) Option {
+// WithRetryAbsent toggles re-probing of [StatusAbsent] objects, so
+// [Ledger.ShouldFetch] returns true for an object an operator suspects
+// answered 404 spuriously or has since been restored. It returns an [Option].
+func WithRetryAbsent(retry bool) Option {
 	return func(l *Ledger) {
-		l.recheckAbsent = recheck
+		l.retryAbsent = retry
 	}
 }
 
@@ -386,8 +386,8 @@ func (l *Ledger) totalEntries() int {
 // relPath.
 //
 // An object absent from the ledger and one recorded as [StatusErrored] are
-// fetched; settled statuses are not. Permanent absence is fetched only when
-// recheck is enabled (see [WithRecheckAbsent]).
+// fetched; settled statuses are not. A recorded absence is fetched only when
+// retry-absent is enabled (see [WithRetryAbsent]).
 func (l *Ledger) ShouldFetch(relPath string) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -402,8 +402,8 @@ func (l *Ledger) ShouldFetch(relPath string) bool {
 		return true
 	}
 
-	if e.Status == StatusAbsentPermanently {
-		return l.recheckAbsent
+	if e.Status == StatusAbsent {
+		return l.retryAbsent
 	}
 
 	return !e.Status.Settled()
@@ -446,66 +446,23 @@ func (l *Ledger) RecordDone(relPath string, sig Signature) {
 	})
 }
 
-// RecordAbsent records relPath as permanently gone (a 404), settling it
-// immediately. Collectors should prefer [Ledger.RecordAbsentObservation],
-// which requires a second run to confirm before settling.
-func (l *Ledger) RecordAbsent(relPath string) {
-	l.record(relPath, StatusAbsentPermanently, func(now time.Time, e *Entry) {
-		e.FetchedAt = now
-		e.LastError = ""
-		e.LastErrorAt = time.Time{}
-		e.Transient = false
-	})
-}
-
-// RecordAbsentObservation records one observation of relPath answering as
-// permanently gone (a 404).
-//
-// A single observation is not believed: permanent absence is settled and
-// sticky, so recording it from one response converts an eventual-consistency
-// blip — an object listed a moment ago whose read briefly 404s — into a
-// permanent, silent gap. The first observation records the object
-// [StatusErrored] (retryable, so the next run re-probes it) and stamps the
-// entry; only an observation in a later run, when the stamp predates the
-// current run's start ([Ledger.StartRun]), settles [StatusAbsentPermanently].
-// Repeated observations within one run re-stamp without escalating, since a
-// re-walk seconds later can sit in the same consistency window. Any other
-// recorded outcome clears the stamp, so the two observations are always
-// consecutive: a fetch that succeeds, or fails another way, restarts the
-// count.
-func (l *Ledger) RecordAbsentObservation(relPath string, cause error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	var prior time.Time
-
-	if sh, ok := l.lookupShard(relPath); ok {
-		if e := sh.entries[relPath]; e != nil {
-			prior = e.AbsentSeenAt
-		}
-	}
-
-	if !prior.IsZero() && prior.Before(l.runStartedAt) {
-		l.recordLocked(relPath, StatusAbsentPermanently, func(now time.Time, e *Entry) {
-			e.FetchedAt = now
-			e.LastError = ""
-			e.LastErrorAt = time.Time{}
-			e.Transient = false
-		})
-
-		return
-	}
-
+// RecordAbsent records relPath as gone (a 404), settling it immediately: a
+// re-run leaves it alone unless retry-absent is enabled (see
+// [WithRetryAbsent]). It keeps the cause text so the entry documents why the
+// gap exists; the caller is expected to have confirmed the absence in-run
+// before believing it, so a brief consistency blip is not settled as a gap
+// from one response.
+func (l *Ledger) RecordAbsent(relPath string, cause error) {
 	msg := ""
 	if cause != nil {
 		msg = cause.Error()
 	}
 
-	l.recordLocked(relPath, StatusErrored, func(now time.Time, e *Entry) {
+	l.record(relPath, StatusAbsent, func(now time.Time, e *Entry) {
+		e.FetchedAt = now
 		e.LastError = msg
 		e.LastErrorAt = now
 		e.Transient = false
-		e.AbsentSeenAt = now
 	})
 }
 
@@ -682,11 +639,6 @@ func (l *Ledger) recordLocked(relPath string, status Status, mutate func(now tim
 
 	e.Status = status
 	e.Attempts++
-
-	// Every recorded outcome resets the absence observation; the mutate of
-	// [Ledger.RecordAbsentObservation] re-stamps it, so only consecutive
-	// absence observations accumulate toward settling absent.
-	e.AbsentSeenAt = time.Time{}
 
 	mutate(now, e)
 
@@ -875,9 +827,9 @@ func (l *Ledger) AddBytes(n int64) {
 	l.bytes += n
 }
 
-// AddRetry counts one in-run retry of a transient fetch failure, so progress
-// can show how much of the run is re-work absorbed by retrying rather than
-// surfacing as errored objects.
+// AddRetry counts one in-run re-fetch — a retry of a transient failure or the
+// re-probe confirming a 404 — so progress can show how much of the run is
+// re-work absorbed by retrying rather than surfacing as errored objects.
 func (l *Ledger) AddRetry() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -903,17 +855,17 @@ func (l *Ledger) Tally() Tally {
 	defer l.mu.RUnlock()
 
 	return Tally{
-		Target:            l.target,
-		Done:              l.cumulative[StatusDone],
-		AbsentPermanently: l.cumulative[StatusAbsentPermanently],
-		Skipped:           l.cumulative[StatusSkipped],
-		Errored:           l.cumulative[StatusErrored],
-		Forbidden:         l.cumulative[StatusForbidden],
-		NotApplicable:     l.cumulative[StatusNotApplicable],
-		SurfacesDropped:   len(l.dropped),
-		Retried:           l.retried,
-		BytesDownloaded:   l.bytes,
-		Resumed:           l.resumed,
+		Target:          l.target,
+		Done:            l.cumulative[StatusDone],
+		Absent:          l.cumulative[StatusAbsent],
+		Skipped:         l.cumulative[StatusSkipped],
+		Errored:         l.cumulative[StatusErrored],
+		Forbidden:       l.cumulative[StatusForbidden],
+		NotApplicable:   l.cumulative[StatusNotApplicable],
+		SurfacesDropped: len(l.dropped),
+		Retried:         l.retried,
+		BytesDownloaded: l.bytes,
+		Resumed:         l.resumed,
 	}
 }
 

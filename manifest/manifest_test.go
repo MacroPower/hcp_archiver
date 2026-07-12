@@ -33,7 +33,7 @@ func TestStatus_String(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t, "done", manifest.StatusDone.String())
-	assert.Equal(t, "absent-permanently", manifest.StatusAbsentPermanently.String())
+	assert.Equal(t, "absent", manifest.StatusAbsent.String())
 	assert.Equal(t, "forbidden", manifest.StatusForbidden.String())
 	assert.Equal(t, "not-applicable", manifest.StatusNotApplicable.String())
 }
@@ -47,7 +47,7 @@ func TestStatus_ValidAndSettled(t *testing.T) {
 		wantSettled bool
 	}{
 		"done":      {status: manifest.StatusDone, wantValid: true, wantSettled: true},
-		"absent":    {status: manifest.StatusAbsentPermanently, wantValid: true, wantSettled: true},
+		"absent":    {status: manifest.StatusAbsent, wantValid: true, wantSettled: true},
 		"skipped":   {status: manifest.StatusSkipped, wantValid: true, wantSettled: true},
 		"na":        {status: manifest.StatusNotApplicable, wantValid: true, wantSettled: true},
 		"errored":   {status: manifest.StatusErrored, wantValid: true, wantSettled: false},
@@ -140,7 +140,7 @@ func TestLedger_RoundTrip(t *testing.T) {
 
 	sig := manifest.SignatureOf([]byte("state blob"))
 	ledger.RecordDone("ws/state.json", sig)
-	ledger.RecordAbsent("ws/expired.tar.gz")
+	ledger.RecordAbsent("ws/expired.tar.gz", errors.New("resource not found"))
 	ledger.RecordErrored("ws/run.log", errors.New("boom"), true)
 	ledger.RecordForbidden("github-app-installations.json", errors.New("forbidden: team tokens not supported"))
 	ledger.RecordSkipped("ws/deferred.json")
@@ -197,39 +197,39 @@ func TestLedger_ShouldFetch(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
-		record        func(l *manifest.Ledger, path string)
-		wantNoRecheck bool
-		wantRecheck   bool
+		record          func(l *manifest.Ledger, path string)
+		wantPlain       bool
+		wantRetryAbsent bool
 	}{
 		"done is settled": {
-			record:        func(l *manifest.Ledger, p string) { l.RecordDone(p, manifest.Signature{Size: 1}) },
-			wantNoRecheck: false,
-			wantRecheck:   false,
+			record:          func(l *manifest.Ledger, p string) { l.RecordDone(p, manifest.Signature{Size: 1}) },
+			wantPlain:       false,
+			wantRetryAbsent: false,
 		},
 		"skipped is settled": {
-			record:        func(l *manifest.Ledger, p string) { l.RecordSkipped(p) },
-			wantNoRecheck: false,
-			wantRecheck:   false,
+			record:          func(l *manifest.Ledger, p string) { l.RecordSkipped(p) },
+			wantPlain:       false,
+			wantRetryAbsent: false,
 		},
 		"not-applicable is settled": {
-			record:        func(l *manifest.Ledger, p string) { l.RecordNotApplicable(p) },
-			wantNoRecheck: false,
-			wantRecheck:   false,
+			record:          func(l *manifest.Ledger, p string) { l.RecordNotApplicable(p) },
+			wantPlain:       false,
+			wantRetryAbsent: false,
 		},
 		"errored is retried": {
-			record:        func(l *manifest.Ledger, p string) { l.RecordErrored(p, errors.New("x"), false) },
-			wantNoRecheck: true,
-			wantRecheck:   true,
+			record:          func(l *manifest.Ledger, p string) { l.RecordErrored(p, errors.New("x"), false) },
+			wantPlain:       true,
+			wantRetryAbsent: true,
 		},
 		"forbidden is retried": {
-			record:        func(l *manifest.Ledger, p string) { l.RecordForbidden(p, errors.New("forbidden")) },
-			wantNoRecheck: true,
-			wantRecheck:   true,
+			record:          func(l *manifest.Ledger, p string) { l.RecordForbidden(p, errors.New("forbidden")) },
+			wantPlain:       true,
+			wantRetryAbsent: true,
 		},
-		"absent is sticky but recheckable": {
-			record:        func(l *manifest.Ledger, p string) { l.RecordAbsent(p) },
-			wantNoRecheck: false,
-			wantRecheck:   true,
+		"absent is sticky but retryable": {
+			record:          func(l *manifest.Ledger, p string) { l.RecordAbsent(p, errors.New("resource not found")) },
+			wantPlain:       false,
+			wantRetryAbsent: true,
 		},
 	}
 
@@ -240,15 +240,15 @@ func TestLedger_ShouldFetch(t *testing.T) {
 			plain, err := manifest.Load(t.TempDir())
 			require.NoError(t, err)
 			tc.record(plain, "obj")
-			assert.Equal(t, tc.wantNoRecheck, plain.ShouldFetch("obj"))
+			assert.Equal(t, tc.wantPlain, plain.ShouldFetch("obj"))
 
-			recheck, err := manifest.Load(
+			retry, err := manifest.Load(
 				t.TempDir(),
-				manifest.WithRecheckAbsent(true),
+				manifest.WithRetryAbsent(true),
 			)
 			require.NoError(t, err)
-			tc.record(recheck, "obj")
-			assert.Equal(t, tc.wantRecheck, recheck.ShouldFetch("obj"))
+			tc.record(retry, "obj")
+			assert.Equal(t, tc.wantRetryAbsent, retry.ShouldFetch("obj"))
 		})
 	}
 }
@@ -292,7 +292,7 @@ func TestLedger_TallyMatchesRecords(t *testing.T) {
 	ledger.RecordDone("b", manifest.Signature{Size: 1})
 	ledger.RecordErrored("c", errors.New("x"), false)
 	ledger.RecordSkipped("d")
-	ledger.RecordAbsent("e")
+	ledger.RecordAbsent("e", errors.New("resource not found"))
 	ledger.RecordNotApplicable("f")
 	ledger.RecordForbidden("g", errors.New("forbidden"))
 	ledger.AddBytes(42)
@@ -304,7 +304,7 @@ func TestLedger_TallyMatchesRecords(t *testing.T) {
 	assert.Equal(t, 1, tally.Errored)
 	assert.Equal(t, 1, tally.Forbidden)
 	assert.Equal(t, 1, tally.Skipped)
-	assert.Equal(t, 1, tally.AbsentPermanently)
+	assert.Equal(t, 1, tally.Absent)
 	assert.Equal(t, 1, tally.NotApplicable)
 	assert.Equal(t, int64(42), tally.BytesDownloaded)
 	assert.Equal(t, int64(2), tally.Retried)
@@ -1086,89 +1086,28 @@ func TestLedger_DroppedSurfaces(t *testing.T) {
 	assert.Empty(t, ledger.DroppedSurfaces())
 }
 
-func TestLedger_AbsentObservationSecondStrike(t *testing.T) {
+func TestLedger_RecordAbsentSettlesWithCause(t *testing.T) {
 	t.Parallel()
 
 	const relPath = "projects/p/workspaces/w/runs/r1/run.json"
 
-	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
-
-	ledger, err := manifest.Load(t.TempDir(), manifest.WithClock(func() time.Time { return now }))
+	ledger, err := manifest.Load(t.TempDir())
 	require.NoError(t, err)
 
 	ledger.StartRun()
+	ledger.RecordAbsent(relPath, errors.New("resource not found"))
 
-	// The first observation is not believed: it records errored (retryable) so
-	// the next run re-probes, rather than converting one possibly
-	// eventually-consistent 404 into a sticky permanent absence.
-	ledger.RecordAbsentObservation(relPath, errors.New("resource not found"))
-
+	// The absence settles immediately and keeps its cause, so the manifest
+	// documents why the gap exists.
 	entry, ok := ledger.Entry(relPath)
 	require.True(t, ok)
-	assert.Equal(t, manifest.StatusErrored, entry.Status)
-	assert.True(t, ledger.ShouldFetch(relPath), "a first observation stays retryable")
+	assert.Equal(t, manifest.StatusAbsent, entry.Status)
+	assert.Equal(t, "resource not found", entry.LastError)
+	assert.False(t, ledger.ShouldFetch(relPath), "a recorded absence is settled")
 
-	// A repeat within the same run can sit in the same consistency window, so it
-	// re-stamps without escalating.
-	now = now.Add(time.Minute)
-
-	ledger.RecordAbsentObservation(relPath, errors.New("resource not found"))
-
-	entry, ok = ledger.Entry(relPath)
-	require.True(t, ok)
-	assert.Equal(t, manifest.StatusErrored, entry.Status)
-
-	// A later run observing the absence again settles it.
-	now = now.Add(time.Hour)
-
-	ledger.StartRun()
-	ledger.RecordAbsentObservation(relPath, errors.New("resource not found"))
-
-	entry, ok = ledger.Entry(relPath)
-	require.True(t, ok)
-	assert.Equal(t, manifest.StatusAbsentPermanently, entry.Status)
-	assert.False(t, ledger.ShouldFetch(relPath), "the confirmed absence is settled")
-}
-
-func TestLedger_AbsentObservationResetByOtherOutcomes(t *testing.T) {
-	t.Parallel()
-
-	const relPath = "projects/p/workspaces/w/runs/r1/run.json"
-
-	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
-
-	ledger, err := manifest.Load(t.TempDir(), manifest.WithClock(func() time.Time { return now }))
-	require.NoError(t, err)
-
-	ledger.StartRun()
-	ledger.RecordAbsentObservation(relPath, errors.New("resource not found"))
-
-	// A successful fetch clears the observation: the object exists, so an old
-	// stamp must not pair with a much later 404.
-	ledger.RecordDone(relPath, manifest.Signature{Size: 1})
-
-	now = now.Add(time.Hour)
-
-	ledger.StartRun()
-	ledger.RecordAbsentObservation(relPath, errors.New("resource not found"))
-
-	entry, ok := ledger.Entry(relPath)
-	require.True(t, ok)
-	assert.Equal(t, manifest.StatusErrored, entry.Status,
-		"the count restarted, so this is a first observation again")
-
-	// An intervening non-absence failure also restarts the count, so only
-	// consecutive absence observations settle.
-	ledger.RecordErrored(relPath, errors.New("500"), true)
-
-	now = now.Add(time.Hour)
-
-	ledger.StartRun()
-	ledger.RecordAbsentObservation(relPath, errors.New("resource not found"))
-
-	entry, ok = ledger.Entry(relPath)
-	require.True(t, ok)
-	assert.Equal(t, manifest.StatusErrored, entry.Status)
+	// A recorded absence never surfaces as a failure: it is a settled gap, not
+	// an error awaiting a retry.
+	assert.Empty(t, ledger.Failures())
 }
 
 func TestLedger_LockExcludesConcurrentOpen(t *testing.T) {

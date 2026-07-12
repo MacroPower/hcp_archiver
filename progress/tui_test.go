@@ -272,14 +272,14 @@ func TestRenderSummary(t *testing.T) {
 
 	panel := progress.PanelSnapshot{
 		Tally: manifest.Tally{
-			Done:              100,
-			AbsentPermanently: 3,
-			Skipped:           2,
-			Errored:           4,
-			Forbidden:         6,
-			NotApplicable:     1,
-			Retried:           5,
-			BytesDownloaded:   5 * 1024 * 1024,
+			Done:            100,
+			Absent:          3,
+			Skipped:         2,
+			Errored:         4,
+			Forbidden:       6,
+			NotApplicable:   1,
+			Retried:         5,
+			BytesDownloaded: 5 * 1024 * 1024,
 		},
 		Elapsed: 200 * time.Second,
 	}

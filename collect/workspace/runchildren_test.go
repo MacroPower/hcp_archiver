@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/hashicorp/go-tfe"
 	"github.com/stretchr/testify/assert"
@@ -155,10 +154,10 @@ func TestArchiveConfigurationVersionTarballAbsent(t *testing.T) {
 	t.Parallel()
 
 	// An expired configuration version's tarball 404s on a normal lifecycle. The
-	// streaming DoRaw path discards the SDK's typed error, so this guards that the
-	// status translation still classifies the 404 terminal: the first run records
-	// a retryable absence observation and the next run's repeat confirms it, so
-	// the object settles absent rather than re-fetching and re-erroring forever.
+	// streaming DoRaw path discards the SDK's typed error, so this guards that
+	// the status translation still classifies the 404 terminal: the in-run
+	// re-probe confirms it and the object settles absent rather than
+	// re-fetching and re-erroring forever.
 	cv := &tfe.ConfigurationVersion{ID: "cv-1", Status: tfe.ConfigurationUploaded}
 
 	mux := http.NewServeMux()
@@ -176,15 +175,8 @@ func TestArchiveConfigurationVersionTarballAbsent(t *testing.T) {
 	require.NoError(t, f.collector.ArchiveConfigurationVersion(t.Context(), "proj", "ws", run))
 
 	tarballPath := st.ConfigVersionTarball("cv-1")
-	assert.Equal(t, manifest.StatusErrored, f.status(tarballPath),
-		"one 404 is an observation, not a settled absence")
-
-	// A later run re-probes; the repeated 404 confirms the absence.
-	time.Sleep(time.Millisecond)
-	f.ledger.StartRun()
-
-	require.NoError(t, f.collector.ArchiveConfigurationVersion(t.Context(), "proj", "ws", run))
-	assert.Equal(t, manifest.StatusAbsentPermanently, f.status(tarballPath))
+	assert.Equal(t, manifest.StatusAbsent, f.status(tarballPath),
+		"the confirmed 404 settles absent in one run")
 
 	exists, err := st.Exists(tarballPath)
 	require.NoError(t, err)
@@ -227,10 +219,10 @@ func TestArchivePlanJSON(t *testing.T) {
 func TestArchivePlanJSONAbsent(t *testing.T) {
 	t.Parallel()
 
-	// A plan whose structured output has expired 404s; the first run records a
-	// retryable absence observation and the next run's repeat confirms it, so the
-	// object settles absent rather than re-fetching and re-erroring forever (the
-	// section-3 regression guard for the plan.json blob).
+	// A plan whose structured output has expired 404s; the in-run re-probe
+	// confirms it, so the object settles absent rather than re-fetching and
+	// re-erroring forever (the section-3 regression guard for the plan.json
+	// blob).
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v2/plans/plan-1/json-output", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -245,15 +237,8 @@ func TestArchivePlanJSONAbsent(t *testing.T) {
 	require.NoError(t, f.collector.ArchivePlan(t.Context(), "proj", "ws", run))
 
 	jsonPath := st.RunFile("proj", "ws", "run-1", "plan.json")
-	assert.Equal(t, manifest.StatusErrored, f.status(jsonPath),
-		"one 404 is an observation, not a settled absence")
-
-	// A later run re-probes; the repeated 404 confirms the absence.
-	time.Sleep(time.Millisecond)
-	f.ledger.StartRun()
-
-	require.NoError(t, f.collector.ArchivePlan(t.Context(), "proj", "ws", run))
-	assert.Equal(t, manifest.StatusAbsentPermanently, f.status(jsonPath))
+	assert.Equal(t, manifest.StatusAbsent, f.status(jsonPath),
+		"the confirmed 404 settles absent in one run")
 
 	exists, err := st.Exists(jsonPath)
 	require.NoError(t, err)

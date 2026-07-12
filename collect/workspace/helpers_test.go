@@ -50,8 +50,12 @@ func newWSFixture(t *testing.T, mux *http.ServeMux, opts ...workspace.Option) ws
 
 	ledger.StartRun()
 
+	// A zero confirm delay keeps the 404-confirming re-probe from sleeping in
+	// tests.
+	env := collect.NewEnv(client, st, ledger, collect.WithAbsentConfirm(0))
+
 	return wsFixture{
-		collector: workspace.New(collect.NewEnv(client, st, ledger), testOrg, opts...),
+		collector: workspace.New(env, testOrg, opts...),
 		store:     st,
 		ledger:    ledger,
 	}

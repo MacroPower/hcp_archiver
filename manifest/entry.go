@@ -14,12 +14,6 @@ type Entry struct {
 	FetchedAt time.Time `json:"fetchedAt,omitzero"`
 	// LastErrorAt is when the last failure was recorded.
 	LastErrorAt time.Time `json:"lastErrorAt,omitzero"`
-	// AbsentSeenAt is when the object was last observed as permanently gone (a
-	// 404) without yet settling absent. [Ledger.RecordAbsentObservation] stamps
-	// it on a first observation and settles [StatusAbsentPermanently] only once
-	// a prior run also observed the absence; any other recorded outcome clears
-	// it, so a stale observation from long ago never pairs with a fresh one.
-	AbsentSeenAt time.Time `json:"absentSeenAt,omitzero"`
 	// Signature is the content fingerprint recorded on a successful fetch.
 	Signature *Signature `json:"signature,omitempty"`
 	// Status is the current recorded outcome.

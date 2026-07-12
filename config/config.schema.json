@@ -86,6 +86,6 @@
     }
   },
   "title": "File",
-  "description": "File is the on-disk YAML configuration describing what to archive and how.\n\nIt holds the settings that are stable across runs: the API address, the\norganizations to archive, the worker concurrency ceiling, and the opt-in\nscope toggles. Per-run and secret settings (the output directory, the progress\nmode, the recheck toggle, and the API token) are supplied by flags and the\nenvironment instead, so a configuration file never carries a machine-specific\npath or a credential.\n\nEvery field is optional; an absent field takes the package default. Create\ninstances with [LoadFile], or [DefaultFile] for the defaults alone.",
+  "description": "File is the on-disk YAML configuration describing what to archive and how.\n\nIt holds the settings that are stable across runs: the API address, the\norganizations to archive, the worker concurrency ceiling, and the opt-in\nscope toggles. Per-run and secret settings (the output directory, the progress\nmode, the retry-absent toggle, and the API token) are supplied by flags and\nthe environment instead, so a configuration file never carries a\nmachine-specific path or a credential.\n\nEvery field is optional; an absent field takes the package default. Create\ninstances with [LoadFile], or [DefaultFile] for the defaults alone.",
   "additionalProperties": false
 }

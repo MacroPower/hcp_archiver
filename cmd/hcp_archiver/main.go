@@ -33,7 +33,7 @@ const (
 	flagOutput           = "output"
 	flagProgress         = "progress"
 	flagProgressInterval = "progress-interval"
-	flagRecheckAbsent    = "recheck-absent"
+	flagRetryAbsent      = "retry-absent"
 )
 
 // ErrLogHandler indicates an error occurred while creating a log handler.
@@ -61,7 +61,7 @@ type archiveFlags struct {
 	output           string
 	progress         string
 	progressInterval time.Duration
-	recheckAbsent    bool
+	retryAbsent      bool
 }
 
 // registerArchiveFlags binds the archive flags onto cmd and returns the
@@ -78,8 +78,8 @@ func registerArchiveFlags(cmd *cobra.Command) *archiveFlags {
 		"progress output mode (auto|human|json|quiet)")
 	fs.DurationVar(&af.progressInterval, flagProgressInterval, config.DefaultProgressInterval,
 		"progress reporting cadence")
-	fs.BoolVar(&af.recheckAbsent, flagRecheckAbsent, false,
-		"re-probe objects previously recorded as permanently gone")
+	fs.BoolVar(&af.retryAbsent, flagRetryAbsent, false,
+		"re-probe objects previously recorded as absent")
 
 	return af
 }
@@ -112,7 +112,7 @@ func (af *archiveFlags) config() (*config.Config, error) {
 		config.WithOutputDir(af.output),
 		config.WithProgressMode(mode),
 		config.WithProgressInterval(af.progressInterval),
-		config.WithRecheckAbsent(af.recheckAbsent),
+		config.WithRetryAbsent(af.retryAbsent),
 	)
 }
 

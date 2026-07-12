@@ -21,6 +21,11 @@ const (
 	// DefaultBlobRetryDelay is the default wait before [Env.Blob]'s first
 	// retry; each subsequent retry doubles it.
 	DefaultBlobRetryDelay = 2 * time.Second
+
+	// DefaultAbsentConfirmDelay is the default wait before the confirming
+	// re-probe of a fetch that answered 404, so a brief consistency blip is
+	// not settled as an absence from one response.
+	DefaultAbsentConfirmDelay = 2 * time.Second
 )
 
 // Env is the shared environment every domain collector composes to archive an
@@ -38,18 +43,20 @@ const (
 // each concurrency-safe, so the orchestrator can share one Env across the
 // workspace workers it runs in parallel. Create instances with [NewEnv].
 type Env struct {
-	client         *tfeclient.Client
-	store          *store.Store
-	ledger         *manifest.Ledger
-	idOwners       map[string]map[string]string
-	idMu           sync.Mutex
-	blobRetries    int
-	blobRetryDelay time.Duration
+	client             *tfeclient.Client
+	store              *store.Store
+	ledger             *manifest.Ledger
+	idOwners           map[string]map[string]string
+	idMu               sync.Mutex
+	blobRetries        int
+	blobRetryDelay     time.Duration
+	absentConfirmDelay time.Duration
 }
 
 // Option configures an [Env] passed to [NewEnv].
 //
 // Options of this type:
+//   - [WithAbsentConfirm]
 //   - [WithBlobRetry]
 //   - [WithTarget]
 type Option func(*Env)
@@ -64,6 +71,17 @@ func WithBlobRetry(retries int, delay time.Duration) Option {
 	return func(e *Env) {
 		e.blobRetries = retries
 		e.blobRetryDelay = delay
+	}
+}
+
+// WithAbsentConfirm sets the wait before the single confirming re-probe of a
+// fetch whose error classifies terminal (a 404). A first 404 is never believed
+// alone: every archive primitive re-fetches once after delay, and only a
+// second 404 records the object absent (see [manifest.Ledger.RecordAbsent]).
+// A non-positive delay re-probes immediately. It returns an [Option].
+func WithAbsentConfirm(delay time.Duration) Option {
+	return func(e *Env) {
+		e.absentConfirmDelay = delay
 	}
 }
 
@@ -82,12 +100,13 @@ func WithTarget(target string) Option {
 // and ledger, then hands it to every collector it runs against the org.
 func NewEnv(client *tfeclient.Client, st *store.Store, ledger *manifest.Ledger, opts ...Option) *Env {
 	e := &Env{
-		client:         client,
-		store:          st,
-		ledger:         ledger,
-		idOwners:       make(map[string]map[string]string),
-		blobRetries:    DefaultBlobRetries,
-		blobRetryDelay: DefaultBlobRetryDelay,
+		client:             client,
+		store:              st,
+		ledger:             ledger,
+		idOwners:           make(map[string]map[string]string),
+		blobRetries:        DefaultBlobRetries,
+		blobRetryDelay:     DefaultBlobRetryDelay,
+		absentConfirmDelay: DefaultAbsentConfirmDelay,
 	}
 
 	for _, opt := range opts {

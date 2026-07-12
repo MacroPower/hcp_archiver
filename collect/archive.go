@@ -15,16 +15,16 @@ import (
 
 // Object archives a single immutable object at relPath.
 //
-// It consults the ledger first: a settled object (done, skipped, not-applicable,
-// or permanently absent) returns without fetching, so an immutable artifact is
-// never re-downloaded on a re-run. Otherwise it runs fetch, serializes and
-// writes the result atomically, and records the object done with its content
-// signature. A terminal fetch error (a 404) records an absence observation,
-// which settles to permanently absent only once a later run observes it again
-// (see [manifest.Ledger.RecordAbsentObservation]); any other error, a 410 among
-// them, records the object as errored so a re-run retries it. Only a
-// cancellation of ctx propagates; every other outcome is recorded and returns
-// nil so one bad object never aborts the run.
+// It consults the ledger first: a settled object (done, skipped,
+// not-applicable, or absent) returns without fetching, so an immutable
+// artifact is never re-downloaded on a re-run. Otherwise it runs fetch,
+// serializes and writes the result atomically, and records the object done
+// with its content signature. A terminal fetch error (a 404) is confirmed by
+// one in-run re-probe (see [WithAbsentConfirm]) and then records the object
+// absent, a settled state re-probed only under retry-absent; any other error,
+// a 410 among them, records the object as errored so a re-run retries it.
+// Only a cancellation of ctx propagates; every other outcome is recorded and
+// returns nil so one bad object never aborts the run.
 func (e *Env) Object(ctx context.Context, relPath string, fetch func(context.Context) (any, error)) error {
 	if !e.ledger.ShouldFetch(relPath) {
 		return nil
@@ -73,10 +73,14 @@ func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Conte
 		return nil
 	}
 
+	confirmed := func(ctx context.Context) (io.Reader, error) {
+		return fetchConfirmed(ctx, e, fetch)
+	}
+
 	var cause error
 
 	for attempt := 0; ; attempt++ {
-		settled, err := e.streamBlob(ctx, relPath, fetch)
+		settled, err := e.streamBlob(ctx, relPath, confirmed)
 		if settled {
 			return err
 		}
@@ -244,7 +248,7 @@ func (e *Env) Bytes(ctx context.Context, relPath string, fetch func(context.Cont
 		return nil
 	}
 
-	data, err := fetch(ctx)
+	data, err := fetchConfirmed(ctx, e, fetch)
 	if err != nil {
 		return e.fail(ctx, relPath, err)
 	}
@@ -265,10 +269,38 @@ func (e *Env) Bytes(ctx context.Context, relPath string, fetch func(context.Cont
 	return nil
 }
 
+// fetchConfirmed runs fetch, and when its error classifies terminal (a 404)
+// re-probes once after a short delay (see [WithAbsentConfirm]) before
+// believing it.
+//
+// Absence settles sticky, so a single 404 is never trusted: a read moments
+// after the object was listed can answer 404 out of eventual consistency and
+// succeed seconds later. The confirming probe turns that blip back onto the
+// success path, while a genuinely gone object costs one extra request, once,
+// before it settles absent. A cancellation ending the wait returns the
+// original cause; the caller's cancellation check then propagates the
+// wind-down instead of recording an outcome, leaving the object for the next
+// run.
+func fetchConfirmed[T any](ctx context.Context, e *Env, fetch func(context.Context) (T, error)) (T, error) {
+	v, err := fetch(ctx)
+	if err == nil || !tfeclient.IsTerminal(err) {
+		return v, err
+	}
+
+	werr := sleep(ctx, e.absentConfirmDelay)
+	if werr != nil {
+		return v, err
+	}
+
+	e.ledger.AddRetry()
+
+	return fetch(ctx)
+}
+
 // archiveJSON runs fetch, serializes and writes the value, and records the
 // object, the shared body of [Env.Object] and [Env.Mutable].
 func (e *Env) archiveJSON(ctx context.Context, relPath string, fetch func(context.Context) (any, error)) error {
-	v, err := fetch(ctx)
+	v, err := fetchConfirmed(ctx, e, fetch)
 	if err != nil {
 		return e.fail(ctx, relPath, err)
 	}
@@ -300,10 +332,10 @@ func (e *Env) recordDone(relPath string, res store.WriteResult) {
 // transient-versus-terminal classification is turned into a recorded outcome.
 //
 // A cancellation of the passed context propagates so the run can wind down; a
-// terminal error records an absence observation, which settles to permanent
-// (sticky) absence only once a later run observes it again, so an
-// eventual-consistency 404 on a just-listed object is never converted into a
-// permanent gap from one response; an access denial records a forbidden object
+// terminal error records the object absent, settled and sticky, trusting that
+// the fetch already re-probed once in-run (see fetchConfirmed) so an
+// eventual-consistency 404 on a just-listed object is not converted into a
+// gap from one response; an access denial records a forbidden object
 // (retryable, so a later run under a broader token captures it); anything else
 // records an errored object, transient when the client classifies it so, so a
 // re-run retries it and never mistakes a rate-limit blip for a gone object.
@@ -314,7 +346,7 @@ func (e *Env) fail(ctx context.Context, relPath string, cause error) error {
 	}
 
 	if tfeclient.IsTerminal(cause) {
-		e.ledger.RecordAbsentObservation(relPath, cause)
+		e.ledger.RecordAbsent(relPath, cause)
 
 		return nil
 	}

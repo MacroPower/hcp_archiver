@@ -86,9 +86,8 @@ type Config struct {
 	// newest count runs; zero leaves the count unbounded. When RunHistoryAge is
 	// also set, whichever bound admits more history wins.
 	RunHistoryCount int
-	// RecheckAbsent forces re-probing of objects previously recorded as
-	// permanently gone.
-	RecheckAbsent bool
+	// RetryAbsent forces re-probing of objects previously recorded as absent.
+	RetryAbsent bool
 	// Stacks enables archiving of Stacks.
 	Stacks bool
 	// HYOK enables archiving of hold-your-own-key configurations.
@@ -112,7 +111,7 @@ type Config struct {
 //   - [WithMaxConcurrency]
 //   - [WithRunHistoryCount]
 //   - [WithRunHistoryAge]
-//   - [WithRecheckAbsent]
+//   - [WithRetryAbsent]
 //   - [WithStacks]
 //   - [WithHYOK]
 //   - [WithRegistryDetail]
@@ -193,11 +192,11 @@ func WithRunHistoryAge(age time.Duration) Option {
 	}
 }
 
-// WithRecheckAbsent toggles re-probing of permanently-absent objects. It
-// returns an [Option].
-func WithRecheckAbsent(recheck bool) Option {
+// WithRetryAbsent toggles re-probing of objects previously recorded as
+// absent. It returns an [Option].
+func WithRetryAbsent(retry bool) Option {
 	return func(c *Config) {
-		c.RecheckAbsent = recheck
+		c.RetryAbsent = retry
 	}
 }
 

@@ -22,8 +22,8 @@
 // ledger already on disk, pointing a run at a directory that already holds an
 // archive is what makes it a resume rather than a fresh start. A progress mode
 // (auto, human, json, or quiet) with a reporting interval selects live output,
-// and an absent-recheck toggle forces re-probing of objects previously recorded
-// as permanently gone.
+// and a retry-absent toggle forces re-probing of objects previously recorded
+// as absent.
 //
 // [Config] is the resolved result. It holds plain values and performs no I/O
 // beyond reading the environment, so it stays a leaf: the command layer merges

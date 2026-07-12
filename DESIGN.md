@@ -36,7 +36,7 @@ These fall into three general classes, plus platform data.
   the API returned it. Most secret fields are write-only upstream and come back
   blank on read (sensitive variable, variable-set, and policy-set-parameter
   values, and the team / org / agent / user token secrets), so the archive
-  records their existence and metadata with whatever value (usually empty)
+  records their existence and metadata with whatever value — usually empty —
   the server sent; anything the API does return (for example a
   `NotificationConfiguration.Token`) is kept verbatim, which is part of why
   the archive is secret at rest. `SSHKey` is a related but distinct case:
@@ -257,7 +257,7 @@ Notes:
 - **Resumable via a real ledger, not file-existence** (required). A
   permanently-gone object (404/410) and a not-yet-fetched one both leave no
   file, so existence alone cannot drive resume. The ledger records
-  per-object status (`done` / `absent-permanently` / `forbidden` / `skipped` /
+  per-object status (`done` / `absent` / `forbidden` / `skipped` /
   `errored` / `not-applicable`, with counts, timestamps, and the failing
   error), and resume consults it. `skipped` and `not-applicable` are settled
   like `done` (never re-requested), so a deferred or intentionally-skipped
@@ -271,12 +271,12 @@ Notes:
   cadence and on shutdown, so a kill -9 loses at most the last in-flight batch,
   never the ledger itself.
   - **Restart semantics**: a re-invocation against a non-empty output dir loads
-    the existing manifest and, per object, _skips_ `done` and
-    `absent-permanently`, _retries_ `errored`, `forbidden`, and anything absent
-    from the ledger. `absent-permanently` is sticky (a 404/410 is not re-requested every
-    run); a `--recheck-absent` toggle forces re-probing when the operator
-    suspects a since-restored object. Resume and a clean first run are the same
-    code path: a first run just starts from an empty ledger.
+    the existing manifest and, per object, _skips_ `done` and `absent`,
+    _retries_ `errored`, `forbidden`, and anything absent from the ledger.
+    `absent` is sticky (a 404 is not re-requested every run); a
+    `--retry-absent` toggle forces re-probing when the operator suspects a
+    spurious 404 or a since-restored object. Resume and a clean first run are
+    the same code path: a first run just starts from an empty ledger.
   - **Interrupted vs. failed** are the same to resume: both leave objects in
     `errored`/absent, and both are picked up on the next invocation. Transient
     errors (429, 5xx, timeouts, context cancellation) are recorded distinctly
@@ -287,7 +287,7 @@ Notes:
     is sticky, so one response is never trusted alone. The archive layer
     re-probes once in-run after a short delay; only a repeated 404 records
     `absent`. A genuinely gone object costs one extra request, once. The
-    confirmation lives entirely inside the run; see Cross-run state below for
+    confirmation lives entirely inside the run — see Cross-run state below for
     why it is not spread across two runs.
   - **Cross-run state is avoided**: an object's recorded outcome is a function
     of its most recent attempt alone, never of how the current run relates to a
@@ -300,15 +300,15 @@ Notes:
     exists to provide, and each piece is a plain last-known value, not a
     relation between runs:
     - the per-object entries themselves (status, content signature,
-      `fetchedAt`), which resume _is_ reading back; without them every run
+      `fetchedAt`) — resume _is_ reading these back; without them every run
       starts from zero;
     - the per-collection high-water marks (newest `CreatedAt` archived; the
-      audit trail's `Since` cursor), without which incremental re-run cannot know
-      where the last walk ended;
-    - the collection completed/settled flags that gate the seal phase, since
-      whether a collection's tail was ever fully walked is inherently a fact about a
+      audit trail's `Since` cursor) — incremental re-run cannot know where the
+      last walk ended without them;
+    - the collection completed/settled flags that gate the seal phase — whether
+      a collection's tail was ever fully walked is inherently a fact about a
       past run;
-    - the run summary records (`lastRunAt`, `runCount`, per-status totals), which are
+    - the run summary records (`lastRunAt`, `runCount`, per-status totals) —
       informational only; nothing consults them to decide a fetch.
       Anything else that needs more than one observation to decide (today, only
       the 404 confirm) must gather those observations within a single run.
@@ -421,7 +421,7 @@ Notes:
 
 An org with thousands of workspaces, each with hundreds of runs and dozens of
 state versions, produces millions of leaf objects. The tree in Output layout is
-the logical namespace (every object's stable archive-relative path), and that
+the logical namespace — every object's stable archive-relative path — and that
 namespace is stored physically in two forms that keep it tractable: the ledger is
 partitioned into **per-workspace shards** rather than one document, and frozen
 history is **sealed into compressed, indexed bundles** rather than one file per
@@ -433,13 +433,13 @@ Two independent pressures shape the two forms, and neither answers the other. A
 single in-RAM `map[relpath]*Entry`, marshaled in full and atomic-rewritten on
 every flush (a 10s cadence) and on shutdown, is a multi-GB document
 re-serialized every ten seconds over a multi-GB resident map at millions of
-entries: a per-tick, per-run cost independent of on-disk size, which sharding
+entries — a per-tick, per-run cost independent of on-disk size, which sharding
 removes and bundling does not (a bundled run still carries its ~12 ledger
-entries). One file per object is millions of tiny leaves: inode pressure and
+entries). One file per object is millions of tiny leaves — inode pressure and
 O(files) traversal locally, and on a remote object store a per-object overhead
 (~8KB of name metadata, plus ~32KB of index on Glacier Deep Archive) that
 dominates the bill: at ~2.7M objects the per-object tax is ~37x the ~15GB
-compressed payload, so object count, not bytes, is the cost, which bundling
+compressed payload, so object count, not bytes, is the cost — which bundling
 removes and sharding does not.
 
 ### Sharded ledger
@@ -449,12 +449,12 @@ subtree they index (`.../workspaces/<ws>/.ledger/`, `.../stacks/<s>/.ledger/`),
 a small org-root shard for org-scoped objects, and one shared
 `config-versions/.ledger/` shard for the org-wide config-version entries. Each
 entry belongs to the shard named by its relpath prefix, so its key is
-byte-identical to the single-file form and every ledger operation
-(`ShouldFetch`, `Entry`, the frozen early-stop, the watermarks and completion
-flags) is unchanged; only the entry's physical location differs. Each shard
+byte-identical to the single-file form and every ledger operation —
+`ShouldFetch`, `Entry`, the frozen early-stop, the watermarks and completion
+flags — is unchanged; only the entry's physical location differs. Each shard
 carries the marks and flags whose keys share its prefix. Every shard under the
 org root loads when the run opens and stays resident for the run; what sharding
-buys is not residency but flush cost: an append-only write path in place of
+buys is not residency but flush cost — an append-only write path in place of
 re-serializing one monolithic document on every flush tick.
 
 A shard is a compacted `snapshot.json` plus an append-only `log.ndjson`.
@@ -466,7 +466,7 @@ and unconditionally when the run finishes, writing the merged snapshot before
 truncating the log; an unchanged record appends no line, so a re-run's
 archive-then-stop boundary adds nothing. Each shard commits through the same
 temp-write-and-atomic-rename as every other file, so a shard that exists is
-whole. A shard with no file starts empty; the ledger, not file existence, is
+whole. A shard with no file starts empty — the ledger, not file existence, is
 the record, so deleting a `.ledger/` directory forgets that subtree's history
 and the next run re-fetches it.
 
@@ -528,10 +528,10 @@ loose files canonical and simply re-runs.
 Bundles are `zip` (Zip64), not `.tar.gz`. A zip's central directory is a member
 index for random access after a restore, per-member framing isolates corruption
 to a single member, and mixed per-member methods let one container **STORE** raw
-state while **DEFLATE**-ing logs, with `grep -a` reading the stored members
+state while **DEFLATE**-ing logs — with `grep -a` reading the stored members
 directly and `unzip` readable decades out with no dependency on this tool. Gzip
-is a single non-seekable, non-appendable stream: one member needs the whole
-stream inflated from the front and one bad byte poisons the rest, so it is the
+is a single non-seekable, non-appendable stream — one member needs the whole
+stream inflated from the front and one bad byte poisons the rest — so it is the
 wrong container here. (Config-version tarballs stay `.tar.gz`; they arrive that
 way from the API and are stored opaque.)
 
@@ -625,8 +625,8 @@ generated from the Go type and embedded in the binary.
 - Flags: `--config` / `-c` (config path), `--output` / `-o` (archive root;
   resume/re-run is implied when it already holds an archive),
   `--progress=auto|human|json|quiet` (default `auto`: human on a TTY, quiet off
-  one) with a progress-interval knob, `--recheck-absent` to re-probe
-  `absent-permanently` objects on a re-run, and the `--log-*` knobs.
+  one) with a progress-interval knob, `--retry-absent` to re-probe
+  `absent` objects on a re-run, and the `--log-*` knobs.
 - Config file (all keys optional, defaults applied per field): `address`
   (default `https://app.terraform.io`), `organizations` (all visible orgs if
   empty), `maxConcurrency` (the AIMD ceiling, default 16), a `runHistory`
