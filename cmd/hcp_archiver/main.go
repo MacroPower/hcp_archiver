@@ -228,10 +228,11 @@ func newViewCmd() *cobra.Command {
 // signalContext returns a context canceled on the first SIGINT or SIGTERM and
 // arms a force-quit on the second: the first signal begins graceful shutdown,
 // and a second, arriving while that shutdown is still underway, terminates the
-// process immediately with code 130 so a hung shutdown can still be aborted by
-// the operator. The returned stop releases the handler and, called on normal
-// completion, disarms the force-quit. It replaces a bare
-// [signal.NotifyContext], whose second signal is merely buffered and ignored.
+// process immediately with the conventional 128+signal code (130 for SIGINT,
+// 143 for SIGTERM) so a hung shutdown can still be aborted by the operator. The
+// returned stop releases the handler and, called on normal completion, disarms
+// the force-quit. It replaces a bare [signal.NotifyContext], whose second signal
+// is merely buffered and ignored.
 func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
 
@@ -254,8 +255,15 @@ func signalContext(parent context.Context) (context.Context, context.CancelFunc)
 
 		select {
 		case <-done:
-		case <-sig:
-			//nolint:mnd // 130 is the conventional 128+SIGINT exit for ctrl+c.
+		case s := <-sig:
+			// 128+signal is the conventional exit code for a signal-terminated
+			// process: 130 for SIGINT (ctrl+c), 143 for SIGTERM.
+			if sysSig, ok := s.(syscall.Signal); ok {
+				//nolint:mnd // 128+signal is the conventional signal-terminated exit code.
+				os.Exit(128 + int(sysSig))
+			}
+
+			//nolint:mnd // Fall back to the conventional SIGINT code when unknown.
 			os.Exit(130)
 		}
 	}()
