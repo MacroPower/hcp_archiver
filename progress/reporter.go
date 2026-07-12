@@ -440,8 +440,13 @@ type snapshot struct {
 
 // hasWorkers reports whether the reporter was built over a worker source, so
 // the views render the adaptive worker readout only when one exists.
+//
+// It keys off maxWorkers, the ceiling set only when a source was supplied
+// (WithWorkers ignores a nil source or non-positive ceiling), not the live slot
+// count, so a source that transiently reports zero slots does not drop the
+// readout at exactly the moment throttling is most interesting.
 func (s snapshot) hasWorkers() bool {
-	return s.workers > 0
+	return s.maxWorkers > 0
 }
 
 // hasBar reports whether the phase is determinate, so the view renders a bar and
