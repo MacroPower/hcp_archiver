@@ -36,7 +36,7 @@ var ErrMarshal = fmt.Errorf("serialize")
 func Marshal(v any) ([]byte, error) {
 	v = addressable(v)
 
-	sanitize(reflect.ValueOf(v), map[uintptr]bool{})
+	sanitize(reflect.ValueOf(v), map[uintptr]map[reflect.Type]bool{})
 
 	if isJSONAPIModel(v) {
 		return marshalJSONAPI(v)
@@ -128,10 +128,33 @@ func deref(t reflect.Type) reflect.Type {
 	return t
 }
 
+// markVisited records rv's (address, type) as visited and reports whether it was
+// already seen. Keying on both address and type, not the address alone, keeps a
+// pointer to a struct distinct from a pointer to that struct's first field --
+// which share an address -- so the second, distinct object is not skipped with
+// its secrets left unredacted.
+func markVisited(seen map[uintptr]map[reflect.Type]bool, rv reflect.Value) bool {
+	ptr := rv.Pointer()
+	typ := rv.Type()
+
+	if seen[ptr][typ] {
+		return true
+	}
+
+	if seen[ptr] == nil {
+		seen[ptr] = make(map[reflect.Type]bool)
+	}
+
+	seen[ptr][typ] = true
+
+	return false
+}
+
 // sanitize walks rv, following pointers and into slice, array, and interface
 // elements, and applies the safety pass to every struct it reaches. The seen set
-// records visited pointers so a cycle in a hydrated model graph terminates.
-func sanitize(rv reflect.Value, seen map[uintptr]bool) {
+// records visited (pointer, type) pairs so a cycle in a hydrated model graph
+// terminates.
+func sanitize(rv reflect.Value, seen map[uintptr]map[reflect.Type]bool) {
 	if !rv.IsValid() {
 		return
 	}
@@ -142,12 +165,9 @@ func sanitize(rv reflect.Value, seen map[uintptr]bool) {
 			return
 		}
 
-		ptr := rv.Pointer()
-		if seen[ptr] {
+		if markVisited(seen, rv) {
 			return
 		}
-
-		seen[ptr] = true
 
 		sanitize(rv.Elem(), seen)
 
@@ -191,12 +211,9 @@ func sanitize(rv reflect.Value, seen map[uintptr]bool) {
 			return
 		}
 
-		ptr := rv.Pointer()
-		if seen[ptr] {
+		if markVisited(seen, rv) {
 			return
 		}
-
-		seen[ptr] = true
 
 		for _, k := range rv.MapKeys() {
 			mv := rv.MapIndex(k)
@@ -236,7 +253,7 @@ func mayContainSecret(t reflect.Type) bool {
 // URLs on a single struct value, recognizing the go-tfe field names rather than
 // enumerating concrete types. Every other field is walked recursively so a
 // secret carried in a nested struct, pointer, or slice is redacted too.
-func sanitizeStruct(rv reflect.Value, seen map[uintptr]bool) {
+func sanitizeStruct(rv reflect.Value, seen map[uintptr]map[reflect.Type]bool) {
 	rt := rv.Type()
 	sensitive := hasSensitiveValue(rv)
 
