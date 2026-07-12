@@ -196,7 +196,9 @@ func (w *Workspace) indexRollups(idx map[string]sealedRef) error {
 
 // indexRollupFile scans one roll-up, recording each line's path and offset. A
 // torn trailing line without its newline commit marker is ignored, matching the
-// writer's crash semantics.
+// writer's crash semantics, and a corrupt mid-file line is skipped rather than
+// failing the whole index, so one damaged sealed file does not hide the
+// workspace's intact loose runs and state versions.
 func indexRollupFile(file string, idx map[string]sealedRef) error {
 	//nolint:gosec // The path is composed from the archive root being browsed.
 	f, err := os.Open(file)
@@ -218,9 +220,14 @@ func indexRollupFile(file string, idx map[string]sealedRef) error {
 		if readErr == nil {
 			var rec rollupLine
 
+			// A single corrupt line (bit rot, a partial restore) must not dead-end
+			// the workspace: skip it and keep indexing. The offset still advances so
+			// later lines index at their true byte offset.
 			err = json.Unmarshal(line, &rec)
 			if err != nil {
-				return fmt.Errorf("parse roll-up %q at offset %d: %w", file, offset, err)
+				offset += int64(len(line))
+
+				continue
 			}
 
 			idx[rec.Path] = sealedRef{rollup: file, offset: offset}
@@ -282,9 +289,11 @@ func indexSidecarFile(file, bundlesDir string, idx map[string]sealedRef) error {
 
 		var rec sidecarLine
 
+		// Skip a corrupt line rather than dead-ending the workspace screen,
+		// matching indexRollupFile and the loose-file browser's per-file resilience.
 		err = json.Unmarshal(line, &rec)
 		if err != nil {
-			return fmt.Errorf("parse sidecar %q: %w", file, err)
+			continue
 		}
 
 		idx[rec.Name] = sealedRef{bundle: filepath.Join(bundlesDir, rec.Bundle)}
