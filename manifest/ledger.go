@@ -116,8 +116,8 @@ func WithRetryAbsent(retry bool) Option {
 // Load reads the sharded manifest under root, or starts empty when none exists.
 //
 // It first takes an exclusive cross-process lock under the org-root ledger
-// directory, so a second archiver on the same root — a scheduled run starting
-// while the previous one still runs — fails fast with [ErrLedgerLocked] rather
+// directory, so a second archiver on the same root (a scheduled run starting
+// while the previous one still runs) fails fast with [ErrLedgerLocked] rather
 // than interleaving log appends and racing compaction; every crash-consistency
 // guarantee in this package assumes a single writer. The lock is an flock, so
 // a crashed process releases it automatically (see [Ledger.Close]); a caller
@@ -827,8 +827,8 @@ func (l *Ledger) AddBytes(n int64) {
 	l.bytes += n
 }
 
-// AddRetry counts one in-run re-fetch — a retry of a transient failure or the
-// re-probe confirming a 404 — so progress can show how much of the run is
+// AddRetry counts one in-run re-fetch (a retry of a transient failure or the
+// re-probe confirming a 404) so progress can show how much of the run is
 // re-work absorbed by retrying rather than surfacing as errored objects.
 func (l *Ledger) AddRetry() {
 	l.mu.Lock()

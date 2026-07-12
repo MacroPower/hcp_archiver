@@ -12,8 +12,8 @@
 // org-scoped, so their completeness depends on the archiving identity.
 //
 // It also captures the governance objects: policy sets with their current and
-// newest version and their parameters, the Sentinel or OPA policy source
-// alongside each policy's metadata, variable sets with their variables, and
+// newest version and their parameters, each policy's raw source alongside its
+// metadata, variable sets with their variables, and
 // organization run-task definitions. The remaining org-level
 // configuration rounds it out: agent pools with their allowed and excluded
 // workspaces and allowed projects, per-token-type max-TTL policies, and reserved

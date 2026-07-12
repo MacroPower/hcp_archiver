@@ -9,14 +9,14 @@ import (
 )
 
 // lockFileName is the flock target inside the org-root ledger directory. The
-// file's presence on disk carries no meaning — only the kernel lock on it
-// does — so a file left behind by a crashed process is inert.
+// file's presence on disk carries no meaning; only the kernel lock on it
+// does, so a file left behind by a crashed process is inert.
 const lockFileName = "lock"
 
 // ErrLedgerLocked reports that another live process holds the ledger's
 // exclusive lock. The manifest's write-ahead log, compaction, and in-memory
-// tallies all assume a single writer, so a second archiver on the same root —
-// typically a scheduled run starting while the previous one still runs — must
+// tallies all assume a single writer, so a second archiver on the same root
+// (typically a scheduled run starting while the previous one still runs) must
 // fail fast rather than silently interleave.
 var ErrLedgerLocked = errors.New("ledger is locked by another process")
 

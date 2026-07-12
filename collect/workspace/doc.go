@@ -48,11 +48,11 @@
 // the cost estimate, kept as its own attributes (the monthly cost deltas and
 // matched and unmatched resource counts) plus its human-readable log; the run
 // comments; the actor-attributed run events, whose actors are archived as their
-// own user records; the policy checks with their logs; the task stages resolved
-// into task results and policy evaluations down to policy-set outcomes; and the
-// native Terraform policy evaluations with their set outcomes. Comments come from
-// their own list endpoint because the run's comment relation is not sideloadable
-// through an include.
+// own user records; the policy checks with their logs; the task stages as
+// listed, whose task-result and policy-evaluation relations stay bare id refs;
+// and the native Terraform policy evaluations with their set outcomes. Comments
+// come from their own list endpoint because the run's comment relation is not
+// sideloadable through an include.
 //
 // A run's created-by and each run event's actor are hydrated users, and go-tfe
 // exposes no user listing, so these sub-objects are the only capture of who

@@ -147,7 +147,7 @@ type idleBody struct {
 func (b *idleBody) Read(p []byte) (int, error) {
 	// Reads are serial (io.Copy drives one at a time), so a single timer is
 	// armed once and reset per read rather than allocated and dropped on the
-	// timer heap every call — tens of thousands of times for a large blob.
+	// timer heap every call, tens of thousands of times for a large blob.
 	if b.timer == nil {
 		b.timer = time.AfterFunc(b.timeout, func() {
 			b.fired.Store(true)

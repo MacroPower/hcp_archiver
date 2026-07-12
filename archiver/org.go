@@ -176,7 +176,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 //   - a wholly-failed org: no object settled done while at least one errored or
 //     was forbidden. An empty organization (nothing recorded) is not a failure,
 //     and a run whose listings completed is merely partial if some objects
-//     failed — those failures are visible as errored entries, logged at close,
+//     failed. Those failures are visible as errored entries, logged at close,
 //     and retried next run.
 func orgIncomplete(t manifest.Tally) bool {
 	whollyFailed := t.Done == 0 && (t.Errored > 0 || t.Forbidden > 0)

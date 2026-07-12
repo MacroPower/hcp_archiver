@@ -640,7 +640,7 @@ func TestWalkReachesErroredChildBelowBoundary(t *testing.T) {
 	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
 
 	// Both runs are terminal and their summaries archived done, and the
-	// collection is marked complete and settled — yet an older run's child log
+	// collection is marked complete and settled, yet an older run's child log
 	// errored in a prior run and was never retried. The start gate's
 	// HasUnsettledUnder check must force a full re-walk so the errored child is
 	// reached.

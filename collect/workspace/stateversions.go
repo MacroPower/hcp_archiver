@@ -142,8 +142,8 @@ func (c *Collector) archiveStateVersion(ctx context.Context, project, ws string,
 // (through the walk's settled machinery) until it finalizes.
 //
 // The polarity is an explicit allowlist: only a status positively known to be
-// final is terminal, and an unrecognized status — one HashiCorp adds after this
-// list was written — falls through to non-terminal. Mistaking a live status for
+// final is terminal, and an unrecognized status (one HashiCorp adds after this
+// list was written) falls through to non-terminal. Mistaking a live status for
 // terminal settles a transiently-empty blob as a permanent absence, silent and
 // irreversible; mistaking a final status for live only costs re-walks until the
 // list is updated. Every terminality predicate in the collectors keeps this

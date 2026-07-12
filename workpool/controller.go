@@ -117,8 +117,8 @@ func (c *Controller) Run(ctx context.Context) {
 }
 
 // step samples the window and applies one scaling decision: halve on any
-// rate-limit hits, and grow on a clean window — doubling while the run has
-// never been throttled, one worker at a time after.
+// rate-limit hits, and grow on a clean window, doubling while the run has
+// never been throttled, then one worker at a time after.
 func (c *Controller) step() {
 	total := c.sample()
 	hits := total - c.lastSeen

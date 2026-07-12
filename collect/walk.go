@@ -79,11 +79,11 @@ type WalkOption func(*walkConfig)
 // collection's entries live, for use by the walk's errored-child gate when that
 // prefix differs from the cursor key.
 //
-// A collection whose cursor key is itself a path prefix of its entries — a
-// workspace's runs (projects/.../runs) or state versions — needs no override:
+// A collection whose cursor key is itself a path prefix of its entries, such as
+// a workspace's runs (projects/.../runs) or state versions, needs no override:
 // the walk gates on the key directly. A collection cursored by a synthetic id
-// whose entries live elsewhere — a stack's configurations or a deployment
-// group's runs, keyed on an id but archived under projects/.../stacks/... —
+// whose entries live elsewhere, such as a stack's configurations or a deployment
+// group's runs (keyed on an id but archived under projects/.../stacks/...),
 // passes the real prefix here so [manifest.Ledger.HasUnsettledUnder] scans the
 // shard that actually holds the entries and can find an errored or forbidden
 // child left below a done boundary. An empty prefix keeps the default (the cursor
@@ -106,8 +106,8 @@ func WithArchivePrefix(prefix string) WalkOption {
 //
 // A limit-stopped walk has fully walked its in-bounds slice, so it records
 // collection completion (which lets the seal phase bundle that cold slice) but
-// withholds settlement. Withholding settlement keeps the early stop disabled —
-// the stop needs both — so a later walk with a wider (or no) limit still pages
+// withholds settlement. Withholding settlement keeps the early stop disabled
+// (the stop needs both), so a later walk with a wider (or no) limit still pages
 // down to its own boundary rather than mistaking the excluded tail for settled
 // history. A zero count and a zero oldest leave the walk unbounded, the
 // default. It returns a [WalkOption].

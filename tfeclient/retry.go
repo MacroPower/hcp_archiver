@@ -35,8 +35,8 @@ const (
 //
 // It exists because the retry go-tfe ships is unbounded in practice: with
 // RetryServerErrors enabled, a 5xx is retried 30 times under a linearly
-// growing jitter backoff — over six minutes for a persistently failing
-// endpoint — none of it configurable through [tfe.Config]. That stall holds a
+// growing jitter backoff (over six minutes for a persistently failing
+// endpoint), none of it configurable through [tfe.Config]. That stall holds a
 // worker slot the whole time, multiplies under the collect layer's own blob
 // retries, and is invisible to the pool controller, which reacts only to rate
 // limiting. The client therefore disables go-tfe's server-error retry and owns

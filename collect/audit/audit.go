@@ -154,8 +154,8 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 			break
 		}
 
-		// A NextPage that does not advance past the current page — a misbehaving
-		// server or a cycle — means the walk cannot reach the pages the server
+		// A NextPage that does not advance past the current page (a misbehaving
+		// server or a cycle) means the walk cannot reach the pages the server
 		// still claims exist. Halt without advancing the watermark, exactly like
 		// the fetch- and write-error paths, so the next run retries from the same
 		// cursor rather than stepping past the unreached pages' events under a

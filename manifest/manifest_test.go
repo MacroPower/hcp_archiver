@@ -929,7 +929,7 @@ func TestLedger_HasUnsettledUnderIgnoresSyntheticCursor(t *testing.T) {
 	ledger.StartRun()
 
 	// A stack walk's cursor key is an id, not a path prefix of the entries it
-	// routes past, so it matches nothing and reports settled — the documented
+	// routes past, so it matches nothing and reports settled: the documented
 	// scoping that keeps stacks at today's behavior.
 	ledger.RecordErrored("projects/p/stacks/s/configurations/c/config.json", errors.New("boom"), true)
 

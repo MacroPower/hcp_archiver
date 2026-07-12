@@ -18,8 +18,10 @@
 // Failures are classified so a resume can tell a temporary blip from a
 // permanent absence: transient (a network timeout, context cancellation or
 // deadline, or rate-limiter exhaustion), terminal (a permanent absence such as
-// a 404 or 410), or forbidden (an access denial). Rate-limited (429) and server
-// (5xx) responses are retried inside go-tfe; if one still surfaces it is not
+// a 404), or forbidden (an access denial). Rate-limited (429) responses are
+// retried inside go-tfe, honoring the server's reset time; server (5xx) and
+// transport failures are retried by this client's own bounded transport, since
+// go-tfe's server-error retry is disabled. If one still surfaces it is not
 // recognized structurally and classifies as unknown, which callers also treat
 // as retryable. Recording that distinction keeps a resume from mistaking a blip
 // for a permanently-gone object. A handful of endpoints do not

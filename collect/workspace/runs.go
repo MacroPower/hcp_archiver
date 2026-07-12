@@ -93,7 +93,7 @@ func (c *Collector) archiveRun(ctx context.Context, project, ws string, run *tfe
 // may still advance.
 //
 // The polarity is an explicit allowlist: an unrecognized status falls through to
-// non-terminal, the safe direction — a live run mistaken for terminal would
+// non-terminal, the safe direction, because a live run mistaken for terminal would
 // freeze premature absences for children it has yet to produce, while a
 // terminal run mistaken for live only re-fetches its summary until the list is
 // updated. See stateVersionTerminal for the same invariant.

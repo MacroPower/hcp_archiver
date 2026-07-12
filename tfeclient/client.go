@@ -262,9 +262,9 @@ func New(opts ...Option) (*Client, error) {
 
 	// Server-error retry is deliberately owned by this package's bounded
 	// [retryTransport] rather than go-tfe: with RetryServerErrors on, go-tfe
-	// retries a 5xx 30 times under a linearly growing backoff — over six
+	// retries a 5xx 30 times under a linearly growing backoff (over six
 	// minutes per request against a persistently failing endpoint, holding a
-	// worker slot the whole time — and none of it is configurable through
+	// worker slot the whole time), and none of it is configurable through
 	// [tfe.Config]. The 429 handling is unaffected: go-tfe retries rate-limited
 	// responses regardless of this flag, honoring the server's reset time.
 	tc, err := tfe.NewClient(&tfe.Config{
@@ -412,8 +412,8 @@ var ErrPaginationStalled = errors.New("pagination stalled")
 // [*tfe.Pagination] reports no next page. Each page fetch passes through the
 // shared limiter.
 //
-// A pagination that stalls — a NextPage that claims more pages but does not
-// advance — returns [ErrPaginationStalled] rather than the partial listing:
+// A pagination that stalls (a NextPage that claims more pages but does not
+// advance) returns [ErrPaginationStalled] rather than the partial listing:
 // the callers of a complete enumeration settle absences and mark surfaces
 // complete from it, so a silently truncated list would convert the unreached
 // tail into recorded absences.

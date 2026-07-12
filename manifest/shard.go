@@ -47,8 +47,8 @@ func shardKey(key string) string {
 	}
 }
 
-// shard is one slice of the ledger — a workspace, a stack, the org-wide
-// configuration versions, or the org root — persisted as a compacted snapshot
+// shard is one slice of the ledger (a workspace, a stack, the org-wide
+// configuration versions, or the org root) persisted as a compacted snapshot
 // plus an append-only log in a co-located [ledgerDirName] directory.
 //
 // It holds the entries, watermarks, and completion flags whose keys route to it

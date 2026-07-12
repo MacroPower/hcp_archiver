@@ -153,8 +153,8 @@ func (e *Env) NotApplicable(relPath string) {
 // MarkSurfaceDropped records that the enumeration of surface failed this run
 // for a non-cancellation reason, marking the run incomplete.
 //
-// Every collector that tolerates a listing failure — logging it and moving on
-// so one unreachable surface does not abort the rest of the organization —
+// Every collector that tolerates a listing failure (logging it and moving on
+// so one unreachable surface does not abort the rest of the organization)
 // must record the drop through this at the point it swallows the error. A
 // per-object failure is already visible as an errored ledger entry, but a
 // listing that never completed records no entries for the objects it never

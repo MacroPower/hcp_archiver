@@ -93,8 +93,8 @@ func (a *Archiver) collectProjects(
 // Enumeration hydrates each workspace's project relation so its project name
 // resolves from names. The goroutine per workspace is only a coordinator: it
 // holds no worker slot itself, and every request it causes takes one from the
-// client's gate, so slots flow across workspace boundaries — many small
-// workspaces at once, or many workers inside one large workspace — and the
+// client's gate, so slots flow across workspace boundaries (many small
+// workspaces at once, or many workers inside one large workspace) and the
 // pool's live size, not this fan-out, bounds the real parallelism. The
 // fan-out is capped at the pool's ceiling so the in-flight task list stays
 // meaningful. A workspace goroutine returns non-nil only on a cancellation,

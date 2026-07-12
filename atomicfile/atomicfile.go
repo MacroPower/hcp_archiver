@@ -108,7 +108,7 @@ func WriteReader(name string, r io.Reader, opts ...Option) error {
 // file is removed and name is left exactly as it was, whether pre-existing or
 // absent. Once the rename succeeds name holds the new content; a parent-directory
 // sync failure reported after that point still returns an error, but the new
-// content is in place — only its durability across a crash is unconfirmed, not
+// content is in place; only its durability across a crash is unconfirmed, not
 // its presence.
 func Write(name string, fn func(io.Writer) error, opts ...Option) error {
 	cfg := config{
@@ -348,8 +348,8 @@ func mkdirAllSynced(dir string, mode fs.FileMode) error {
 //
 // It fast-paths an already-existing directory with a single Stat and no fsync,
 // the hot path taken by every write after the first into a directory. Otherwise
-// it scans upward from dir collecting the levels that do not yet exist — exactly
-// the ones [os.MkdirAll] creates — creates them in one MkdirAll call (keeping its
+// it scans upward from dir collecting the levels that do not yet exist (exactly
+// the ones [os.MkdirAll] creates), creates them in one MkdirAll call (keeping its
 // race, mode, and ENOTDIR handling), then chmods and flushes each scanned level.
 // The chmod lands mode exactly: MkdirAll masks it by the process umask, so
 // without it a permissive [WithDirMode] would be silently narrowed, unlike the

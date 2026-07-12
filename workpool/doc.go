@@ -12,7 +12,7 @@
 // called. It watches a cumulative counter of rate-limited responses and
 // scales the pool the way TCP finds a path's capacity: doubling on clean
 // sampling windows until rate limiting is first observed (slow start), then
-// additive-increase, multiplicative-decrease — any rate limiting in a window
+// additive-increase, multiplicative-decrease: any rate limiting in a window
 // halves the pool, and a clean window grows it by one, within configured
 // bounds. The archiver starts the pool at one worker and points the counter
 // at its API client's 429 observations, so every run finds its own

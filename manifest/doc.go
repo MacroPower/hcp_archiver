@@ -47,16 +47,19 @@
 //
 // # Durability and the shared tally
 //
-// The ledger persists as a compacted snapshot (the manifest file) plus an
-// append-only log beside it. A flush at a bounded cadence and on shutdown
-// appends only the records changed since the last flush, so its cost is the
-// recent delta rather than the whole ledger, and folds the log back into the
-// snapshot once the log outgrows it or a run finishes. A load reads the snapshot
-// and replays the log on top, and a torn trailing write is dropped at the newline
-// commit marker, so a hard kill loses at most the last unflushed batch, never the
-// ledger itself. The ledger also guards the single mutex-protected tally that
-// both the run summary and the live progress reporter read, so the reported
-// counts and the ledger's own tally can never drift apart (the on-disk copy
-// trails only by the last unflushed batch). Deferred objects are recorded as
+// The ledger is partitioned into per-workspace, per-stack, per-config-version,
+// and org-root shards, each persisted as a compacted snapshot (snapshot.json)
+// plus an append-only log (log.ndjson) in a co-located .ledger directory. A
+// flush at a bounded cadence and on shutdown appends only the records changed
+// since the last flush to the shards that changed, so its cost is the recent
+// delta across the touched shards rather than the whole ledger, and folds a
+// shard's log back into its snapshot once that log outgrows it or a run finishes.
+// A load discovers every shard beneath the root and, per shard, reads the
+// snapshot and replays the log on top; a torn trailing write is dropped at the
+// newline commit marker, so a hard kill loses at most the last unflushed batch,
+// never the ledger itself. The ledger also guards the single mutex-protected
+// tally that both the run summary and the live progress reporter read, so the
+// reported counts and the ledger's own tally can never drift apart (the on-disk
+// copy trails only by the last unflushed batch). Deferred objects are recorded as
 // not-applicable so they are never mistaken for gaps.
 package manifest

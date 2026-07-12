@@ -20,7 +20,7 @@ const identityFileName = ".identity.json"
 // different object than the one being archived into it: the object that
 // originally claimed the name was deleted and a new one now carries it.
 // Archiving the new object in place would overwrite the deleted object's
-// final metadata — the very history the archive exists to keep — so the
+// final metadata, the very history the archive exists to keep, so the
 // caller must skip the object and leave the operator to move the old
 // directory aside.
 var ErrIdentityMismatch = errors.New("directory identity mismatch")
@@ -56,7 +56,7 @@ type Identity struct {
 // An unclaimed directory is claimed; a directory already owned by id passes
 // (clearing a stale rename breadcrumb if the object was renamed back). A
 // directory owned by a different id fails with [ErrIdentityMismatch], and any
-// failure — mismatch, or an identity file that cannot be read or written —
+// failure (a mismatch, or an identity file that cannot be read or written)
 // records dir as a dropped surface, so the caller must skip archiving the
 // object and the run reports incomplete until the operator intervenes.
 //

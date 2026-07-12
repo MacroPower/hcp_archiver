@@ -12,7 +12,7 @@ import (
 )
 
 // TestMarshalIsByteFaithful pins the package's fidelity contract: values the
-// API returned — sensitive variable values, token fields, signed URLs — are
+// API returned (sensitive variable values, token fields, signed URLs) are
 // stored exactly as received, never redacted or stripped. The archive is a
 // full-fidelity record, and its at-rest sensitivity is handled by file
 // permissions, not by rewriting payloads.

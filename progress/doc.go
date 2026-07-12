@@ -3,10 +3,11 @@
 // forward motion rather than sit silent until it finishes.
 //
 // The human mode splits on the terminal. On an interactive terminal it drives a
-// Bubble Tea panel pinned to the bottom of the screen: a spinner and the current
-// phase and target on the first line, colored per-status counts with bytes,
-// rate, and elapsed time on the second, and, when the phase is determinate, a
-// progress bar with an estimated time remaining. The panel's rate averages a
+// Bubble Tea panel pinned to the bottom of the screen: a spinner, the current
+// phase, the progress bar (a marquee until the phase is determinate) with its
+// percent and, once an estimate exists, a remaining time, and the target on the
+// first line; the colored per-status counts on a second line; and bytes, rate,
+// and elapsed time on a closing third line. The panel's rate averages a
 // short trailing window, so it reflects current throughput and visibly drops on
 // a stall. A reporter built over a [WorkerSource] also shows the adaptive
 // worker pool beside the rate (its live size against the ceiling it may scale

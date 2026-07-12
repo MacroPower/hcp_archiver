@@ -252,7 +252,7 @@ func (c *Collector) archiveComments(ctx context.Context, project, ws string, run
 // hydrated actor.
 //
 // The actor is hydrated by the include but renders as a bare id ref on the event,
-// so it is archived directly at users/<id>.json — a sibling shard outside this
+// so it is archived directly at users/<id>.json, a sibling shard outside this
 // run's subtree, and the only capture of who acted on a run. Two facts make a
 // plain settle-and-skip read unsafe here: that user write can fail invisibly to
 // the runs walk's retry gate (it scans only the run's own shard), and the actors
@@ -365,8 +365,8 @@ func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string,
 	return nil
 }
 
-// archiveTaskStages archives the run's task stages resolved into task results
-// and policy evaluations.
+// archiveTaskStages archives the run's task stages as listed; their task-result
+// and policy-evaluation relations stay bare id refs.
 func (c *Collector) archiveTaskStages(ctx context.Context, project, ws string, run *tfe.Run) error {
 	runID := run.ID
 

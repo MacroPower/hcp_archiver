@@ -110,9 +110,9 @@ func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Conte
 }
 
 // streamBlob runs one fetch-and-stream attempt for [Env.Blob]. Settled is true
-// when the attempt reached a final outcome — recorded done, a recorded
+// when the attempt reached a final outcome (recorded done, a recorded
 // not-applicable gap, a recorded local write failure, or a cancellation
-// propagating as err — and false when the fetch or a mid-stream read failed,
+// propagating as err), and false when the fetch or a mid-stream read failed,
 // returning that cause for the caller to classify and perhaps retry.
 func (e *Env) streamBlob(
 	ctx context.Context,
@@ -136,8 +136,8 @@ func (e *Env) streamBlob(
 	}
 
 	// Some clients hand back an [io.ReadCloser] over a live response body (stack
-	// state descriptions, step artifacts); close it once streamed — and before a
-	// retry opens a fresh one — so the connection and file descriptor are not
+	// state descriptions, step artifacts); close it once streamed, and before a
+	// retry opens a fresh one, so the connection and file descriptor are not
 	// leaked.
 	if rc, ok := r.(io.Closer); ok {
 		defer rc.Close() //nolint:errcheck // Best-effort close of an already-consumed body.

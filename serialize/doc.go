@@ -3,9 +3,9 @@
 // The output is byte-faithful to what the API returned: nothing is redacted,
 // stripped, or rewritten, so the archive is a full-fidelity record of the
 // organization. The corollary is that the archive holds whatever secret
-// material the API chooses to return — a notification configuration's token,
+// material the API chooses to return (a notification configuration's token,
 // signed artifact URLs, and the cleartext values raw state blobs already
-// embed — and must be treated as sensitive at rest, which is why the store
+// embed), and must be treated as sensitive at rest, which is why the store
 // writes every file owner-only (0600).
 //
 // # Two marshalers
