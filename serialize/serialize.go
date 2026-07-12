@@ -17,9 +17,29 @@ const Redacted = "[REDACTED]"
 
 const indent = "  "
 
-// ErrMarshal wraps any lower-level marshaling problem so callers can classify
-// a serialization fault with [errors.Is].
-var ErrMarshal = fmt.Errorf("serialize")
+var (
+	// ErrMarshal wraps any lower-level marshaling problem so callers can classify
+	// a serialization fault with [errors.Is].
+	ErrMarshal = fmt.Errorf("serialize")
+
+	// The redactedFieldNames set holds the field names the safety pass
+	// overwrites with [Redacted] wherever they appear: the go-tfe fields that
+	// carry raw secret material. It is the single list both [sanitizeStruct]
+	// and the SDK guard test read, and the guard test scans the go-tfe source
+	// for secret-shaped fields missing from it, so a field HashiCorp adds or
+	// renames fails a test rather than shipping in cleartext.
+	redactedFieldNames = map[string]bool{
+		"Token":             true, // organization, team, user, agent, SCIM, and notification tokens
+		"Secret":            true,
+		"HMACKey":           true, // run-task signing keys
+		"AccessToken":       true, // run-task request callbacks
+		"Password":          true, // admin SMTP settings
+		"PrivateKey":        true, // admin SAML settings
+		"AuthToken":         true, // admin Twilio settings
+		"GCPCredentials":    true, // admin cost-estimation settings
+		"AzureClientSecret": true, // admin cost-estimation settings
+	}
+)
 
 // Marshal runs the safety pass over v and renders it as indented JSON suitable
 // for storage in the archive.
@@ -266,7 +286,7 @@ func sanitizeStruct(rv reflect.Value, seen map[uintptr]map[reflect.Type]bool) {
 		name := rt.Field(i).Name
 
 		switch {
-		case name == "Token", name == "Secret", name == "HMACKey":
+		case redactedFieldNames[name]:
 			setString(fv, Redacted)
 		case name == "Value" && sensitive:
 			redactValue(fv)
