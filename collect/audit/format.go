@@ -33,6 +33,26 @@ func pageName(since time.Time, page int) string {
 	return fmt.Sprintf("%s-p%04d.json", stamp, page)
 }
 
+// eventsAfter returns the items whose timestamp is strictly newer than since,
+// preserving the API's order.
+//
+// The API floors the Since cursor to whole-second precision on the wire (jsonapi
+// renders a [time.Time] as RFC3339), so a walk resuming from a sub-second
+// watermark re-lists the events already archived in the watermark's second.
+// Dropping them keeps a page from duplicating a prior run's trailing second
+// under a fresh page name.
+func eventsAfter(items []*tfe.AuditTrail, since time.Time) []*tfe.AuditTrail {
+	fresh := make([]*tfe.AuditTrail, 0, len(items))
+
+	for _, it := range items {
+		if it != nil && it.Timestamp.After(since) {
+			fresh = append(fresh, it)
+		}
+	}
+
+	return fresh
+}
+
 // newestTimestamp returns the latest [tfe.AuditTrail.Timestamp] among items, or
 // the zero time when items is empty. It feeds the watermark the walk advances
 // to, independent of the order the API returns entries in.

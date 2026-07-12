@@ -121,41 +121,28 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 			break
 		}
 
-		relPath := st.AuditTrailFile(pageName(since, page))
+		// Keep only events strictly newer than the watermark, dropping the
+		// already-archived events the whole-second wire cursor re-lists when a walk
+		// resumes from a sub-second watermark.
+		var fresh []*tfe.AuditTrail
 
-		err := c.env.Object(ctx, relPath, func(context.Context) (any, error) {
-			if listErr != nil {
-				return nil, listErr
-			}
-
-			return list.Items, nil
-		})
-		if err != nil {
-			return fmt.Errorf("archive audit trail page: %w", err)
+		if listErr == nil {
+			fresh = eventsAfter(list.Items, since)
 		}
 
-		if listErr != nil {
-			// A cancellation must propagate even when Object short-circuited on an
-			// already-settled page and so never observed it, or the walk returns nil
-			// on a real cancellation and the run logs a canceled org as a clean
-			// finish.
-			ctxErr := ctx.Err()
-			if ctxErr != nil {
-				return fmt.Errorf("archive audit trail page: %w", ctxErr)
+		// Write the page unless it lists cleanly but carries only already-archived
+		// events; skipping such a page avoids duplicating them under a fresh name.
+		// The trail's page order is unspecified, so a later page may still carry new
+		// events -- only the wholly empty page handled above ends the walk.
+		if listErr != nil || len(fresh) > 0 {
+			halt, err := c.archiveTrailPage(ctx, since, page, fresh, listErr)
+			if err != nil {
+				return err
 			}
 
-			// The page fetch is recorded by Object; the walk cannot paginate past
-			// an unreadable page, so stop without advancing the watermark.
-			return nil //nolint:nilerr // The page error is recorded, not fatal.
-		}
-
-		// A page whose write failed is recorded errored rather than settled, and
-		// its file name is keyed on the unadvanced Since cursor. Halt without
-		// advancing, exactly like the fetch-error path, so the next run retries the
-		// page from the same cursor instead of stepping past its events under a
-		// name it would never revisit.
-		if entry, ok := c.env.Entry(relPath); ok && !entry.Status.Settled() {
-			return nil
+			if halt {
+				return nil
+			}
 		}
 
 		if t := newestTimestamp(list.Items); t.After(newest) {
@@ -185,6 +172,57 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// archiveTrailPage records one audit-trail page -- its fresh events, or the list
+// error -- and reports whether the walk must halt without advancing the
+// watermark. A fetch error the walk cannot page past, and a write that did not
+// settle, both halt so the next run retries the page from the same cursor. It is
+// called only for a page carrying fresh events or a list error; a clean page of
+// only already-archived events is skipped by the caller.
+func (c *Collector) archiveTrailPage(
+	ctx context.Context,
+	since time.Time,
+	page int,
+	fresh []*tfe.AuditTrail,
+	listErr error,
+) (bool, error) {
+	relPath := c.env.Store().AuditTrailFile(pageName(since, page))
+
+	err := c.env.Object(ctx, relPath, func(context.Context) (any, error) {
+		if listErr != nil {
+			return nil, listErr
+		}
+
+		return fresh, nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("archive audit trail page: %w", err)
+	}
+
+	if listErr != nil {
+		// A cancellation must propagate even when Object short-circuited on an
+		// already-settled page and so never observed it, or the walk returns nil on
+		// a real cancellation and the run logs a canceled org as a clean finish.
+		ctxErr := ctx.Err()
+		if ctxErr != nil {
+			return false, fmt.Errorf("archive audit trail page: %w", ctxErr)
+		}
+
+		// The page fetch is recorded by Object; the walk cannot paginate past an
+		// unreadable page, so halt without advancing the watermark.
+		return true, nil
+	}
+
+	// A page whose write failed is recorded errored rather than settled, and its
+	// file name is keyed on the unadvanced Since cursor. Halt without advancing so
+	// the next run retries the page from the same cursor instead of stepping past
+	// its events under a name it would never revisit.
+	if entry, ok := c.env.Entry(relPath); ok && !entry.Status.Settled() {
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // listPage reads one page of audit trails created after since, routed through
