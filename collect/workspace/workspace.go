@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/hashicorp/go-tfe"
@@ -40,7 +41,29 @@ func (c *Collector) CollectWorkspace(
 	ws *tfe.Workspace,
 	progress func(n int),
 ) error {
-	err := c.collectWorkspaceSettings(ctx, projectName, ws)
+	// Bind the name-keyed directory to this workspace's id before the first
+	// write: a reused name must not overwrite the deleted workspace's final
+	// archive, and a renamed workspace leaves a breadcrumb in its old
+	// directory. A failed claim skips the workspace; ClaimDir has recorded the
+	// dropped surface, so the run still reports incomplete.
+	renamedFrom, err := c.env.ClaimDir(c.env.Store().WorkspaceDir(projectName, ws.Name), ws.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "workspace directory not claimed; skipping",
+			slog.String("workspace", ws.Name),
+			slog.Any("error", err),
+		)
+
+		return nil
+	}
+
+	if renamedFrom != "" {
+		slog.WarnContext(ctx, "workspace was renamed; its prior archive is kept",
+			slog.String("workspace", ws.Name),
+			slog.String("previous_name", renamedFrom),
+		)
+	}
+
+	err = c.collectWorkspaceSettings(ctx, projectName, ws)
 	if err != nil {
 		return err
 	}

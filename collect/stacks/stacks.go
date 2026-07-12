@@ -107,9 +107,29 @@ func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 
 	c.env.SetTarget(project + "/" + stack.Name)
 
+	// Bind the name-keyed directory to this stack's id before the first write;
+	// a failed claim skips the stack with its surface dropped (recorded by
+	// ClaimDir), so a reused name never overwrites the deleted stack's archive.
+	renamedFrom, err := c.env.ClaimDir(c.env.Store().StackDir(project, stack.Name), stack.ID)
+	if err != nil {
+		c.log.ErrorContext(ctx, "stack directory not claimed; skipping",
+			slog.String("stack", stack.Name),
+			slog.Any("error", err),
+		)
+
+		return nil
+	}
+
+	if renamedFrom != "" {
+		c.log.WarnContext(ctx, "stack was renamed; its prior archive is kept",
+			slog.String("stack", stack.Name),
+			slog.String("previous_name", renamedFrom),
+		)
+	}
+
 	stackFile := c.env.Store().StackFile(project, stack.Name, "stack.json")
 
-	err := c.env.Mutable(ctx, stackFile, func(_ context.Context) (any, error) {
+	err = c.env.Mutable(ctx, stackFile, func(_ context.Context) (any, error) {
 		return stack, nil
 	})
 	if err != nil {

@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"slices"
+	"sync"
 	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/manifest"
@@ -40,6 +41,8 @@ type Env struct {
 	client         *tfeclient.Client
 	store          *store.Store
 	ledger         *manifest.Ledger
+	idOwners       map[string]map[string]string
+	idMu           sync.Mutex
 	blobRetries    int
 	blobRetryDelay time.Duration
 }
@@ -82,6 +85,7 @@ func NewEnv(client *tfeclient.Client, st *store.Store, ledger *manifest.Ledger, 
 		client:         client,
 		store:          st,
 		ledger:         ledger,
+		idOwners:       make(map[string]map[string]string),
 		blobRetries:    DefaultBlobRetries,
 		blobRetryDelay: DefaultBlobRetryDelay,
 	}

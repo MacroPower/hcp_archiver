@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/hashicorp/go-tfe"
 )
@@ -12,7 +13,11 @@ import (
 // project before the project's workspaces are archived.
 //
 // It returns only on a context cancellation; a single missing or failed object
-// is recorded in the ledger and does not abort the collector.
+// is recorded in the ledger and does not abort the collector. A project whose
+// name-keyed directory is owned by a different project (a reused name) is
+// skipped with its surface dropped, so the deleted project's metadata is never
+// overwritten; the workspaces nested beneath it stay individually protected by
+// their own directory claims.
 func (c *Collector) CollectProject(ctx context.Context, p *tfe.Project) error {
 	st := c.env.Store()
 	name := p.Name
@@ -21,7 +26,24 @@ func (c *Collector) CollectProject(ctx context.Context, p *tfe.Project) error {
 
 	projectID := p.ID
 
-	err := c.archiveProject(ctx, name, projectID)
+	renamedFrom, err := c.env.ClaimDir(st.ProjectDir(name), projectID)
+	if err != nil {
+		slog.ErrorContext(ctx, "project directory not claimed; skipping",
+			slog.String("project", name),
+			slog.Any("error", err),
+		)
+
+		return nil
+	}
+
+	if renamedFrom != "" {
+		slog.WarnContext(ctx, "project was renamed; its prior archive is kept",
+			slog.String("project", name),
+			slog.String("previous_name", renamedFrom),
+		)
+	}
+
+	err = c.archiveProject(ctx, name, projectID)
 	if err != nil {
 		return err
 	}

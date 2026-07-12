@@ -197,6 +197,12 @@ func (s *Store) ConfigVersionTarball(cvID string) string {
 	return cleanJoin("config-versions", seg(cvID)+".tar.gz")
 }
 
+// ProjectDir returns the directory that holds a project's archived objects and
+// its nested workspaces and stacks, keyed on the project name.
+func (s *Store) ProjectDir(project string) string {
+	return cleanJoin("projects", seg(project))
+}
+
 // ProjectFile returns the relative path of a leaf named name under a project's
 // directory (e.g. project.json, notification-configs.json).
 func (s *Store) ProjectFile(project, name string) string {
