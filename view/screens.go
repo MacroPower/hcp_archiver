@@ -432,6 +432,19 @@ func newRunScreen(ws *Workspace, run Run) (screen, error) {
 			desc = "policy check log"
 		}
 
+		// A binary artifact has no useful text rendering, so list it without an
+		// open func rather than dumping raw bytes into the viewer, matching fileRow.
+		if _, bin := binaryExts[path.Ext(name)]; bin {
+			note := "binary (not viewable)"
+			if desc != "" {
+				note = desc + " · " + note
+			}
+
+			rows = append(rows, item{title: name, desc: note})
+
+			continue
+		}
+
 		rows = append(rows, item{
 			title: name,
 			desc:  desc,
