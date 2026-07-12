@@ -582,7 +582,11 @@ func newVariablesScreen(ws *Workspace) (screen, error) {
 	rows := make([]item, 0, len(resources))
 
 	for _, r := range resources {
-		parts := []string{r.String("category")}
+		var parts []string
+
+		if c := r.String("category"); c != "" {
+			parts = append(parts, c)
+		}
 
 		if r.Bool("sensitive") {
 			parts = append(parts, "sensitive")
