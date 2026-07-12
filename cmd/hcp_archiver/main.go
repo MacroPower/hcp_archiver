@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -231,8 +232,9 @@ func newViewCmd() *cobra.Command {
 // process immediately with the conventional 128+signal code (130 for SIGINT,
 // 143 for SIGTERM) so a hung shutdown can still be aborted by the operator. The
 // returned stop releases the handler and, called on normal completion, disarms
-// the force-quit. It replaces a bare [signal.NotifyContext], whose second signal
-// is merely buffered and ignored.
+// the force-quit; like any [context.CancelFunc] it is safe to call more than
+// once and from multiple goroutines. It replaces a bare [signal.NotifyContext],
+// whose second signal is merely buffered and ignored.
 func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
 
@@ -268,9 +270,14 @@ func signalContext(parent context.Context) (context.Context, context.CancelFunc)
 		}
 	}()
 
+	// The close is not idempotent, so guard it with a Once: the returned func is a
+	// context.CancelFunc, whose contract makes a second or concurrent call a no-op
+	// rather than a "close of closed channel" panic.
+	var stopOnce sync.Once
+
 	return ctx, func() {
 		cancel()
-		close(done)
+		stopOnce.Do(func() { close(done) })
 	}
 }
 
