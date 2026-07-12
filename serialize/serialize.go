@@ -352,17 +352,17 @@ func setString(fv reflect.Value, s string) {
 	}
 }
 
-// clearString zeroes a string or *string field so an omitempty tag drops the
-// ephemeral URL it held.
+// clearString zeroes an ephemeral-URL field so an omitempty tag drops the
+// signed URL it held. A plain string is emptied; every other kind is zeroed,
+// failing closed like [setString] so a *string, a URL behind an interface, or a
+// go-tfe retype to a non-string kind cannot smuggle a live signed URL into the
+// archive.
 func clearString(fv reflect.Value) {
-	switch fv.Kind() {
-	case reflect.String:
+	if fv.Kind() == reflect.String {
 		fv.SetString("")
-	case reflect.Pointer:
-		if fv.Type().Elem().Kind() == reflect.String {
-			fv.Set(reflect.Zero(fv.Type()))
-		}
 
-	default:
+		return
 	}
+
+	fv.Set(reflect.Zero(fv.Type()))
 }
