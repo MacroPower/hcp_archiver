@@ -152,8 +152,12 @@ func (e *Env) markRenamed(parent, oldBase, newBase string) error {
 	relPath := e.store.Join(parent, oldBase, identityFileName)
 
 	old, err := e.readIdentity(relPath)
-	if err != nil || old == nil {
+	if err != nil {
 		return fmt.Errorf("read renamed identity %q: %w", relPath, err)
+	}
+
+	if old == nil {
+		return fmt.Errorf("read renamed identity %q: %w", relPath, fs.ErrNotExist)
 	}
 
 	old.RenamedTo = newBase
