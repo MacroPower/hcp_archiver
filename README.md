@@ -29,7 +29,7 @@ bundles, so grepping those means unzipping the one bundle a sidecar points at.
 ## Install
 
 ```bash
-go install go.jacobcolvin.com/hcp_archiver@latest
+go install go.jacobcolvin.com/hcp_archiver/cmd/hcp_archiver@latest
 ```
 
 ## Usage
