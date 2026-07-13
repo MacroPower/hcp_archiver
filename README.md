@@ -29,8 +29,7 @@ bundles, so grepping those means unzipping the one bundle a sidecar points at.
 ## Install
 
 ```bash
-task build          # cross-compile snapshot binaries to ./dist via Dagger
-go install ./cmd/hcp_archiver
+go install go.jacobcolvin.com/hcp_archiver@latest
 ```
 
 ## Usage
