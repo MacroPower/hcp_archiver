@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/go-tfe"
+	"golang.org/x/sync/errgroup"
 
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
@@ -33,14 +34,19 @@ func (c *Collector) collectProviders(ctx context.Context) error {
 		return c.listFailed(ctx, "providers", err)
 	}
 
+	// The providers archive concurrently, each under its own namespace/name
+	// paths; under detail each fans into per-version reads of its own, so the
+	// client's gate, not this loop, bounds the real parallelism. An archive
+	// returns non-nil only on a cancellation, which cancels the group.
+	g, gctx := errgroup.WithContext(ctx)
+
 	for _, prov := range providers {
-		archiveErr := c.archiveProvider(ctx, prov)
-		if archiveErr != nil {
-			return archiveErr
-		}
+		g.Go(func() error {
+			return c.archiveProvider(gctx, prov)
+		})
 	}
 
-	return nil
+	return g.Wait() //nolint:wrapcheck // Archive errors already carry their context.
 }
 
 // archiveProvider writes a provider's mutable metadata and, when detail is
@@ -91,14 +97,18 @@ func (c *Collector) archiveProviderDetail(ctx context.Context, prov *tfe.Registr
 		return c.listFailed(ctx, "provider-versions", err)
 	}
 
+	// Each version is a frozen write plus one platform list at its own paths,
+	// and a provider accumulates them for as long as it publishes, so they
+	// fetch concurrently; the settled versions skip inside Object.
+	g, gctx := errgroup.WithContext(ctx)
+
 	for _, ver := range versions {
-		versionErr := c.archiveProviderVersion(ctx, prov, pid, ver)
-		if versionErr != nil {
-			return versionErr
-		}
+		g.Go(func() error {
+			return c.archiveProviderVersion(gctx, prov, pid, ver)
+		})
 	}
 
-	return nil
+	return g.Wait() //nolint:wrapcheck // Archive errors already carry their context.
 }
 
 // archiveProviderVersion writes a provider version's frozen metadata and its

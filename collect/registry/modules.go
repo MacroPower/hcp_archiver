@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/go-tfe"
+	"golang.org/x/sync/errgroup"
 
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
@@ -32,14 +33,19 @@ func (c *Collector) collectModules(ctx context.Context) error {
 		return c.listFailed(ctx, "modules", err)
 	}
 
+	// The modules archive concurrently, each under its own namespace/name/
+	// provider paths; under detail each fans into per-version reads of its own,
+	// so the client's gate, not this loop, bounds the real parallelism. An
+	// archive returns non-nil only on a cancellation, which cancels the group.
+	g, gctx := errgroup.WithContext(ctx)
+
 	for _, mod := range modules {
-		archiveErr := c.archiveModule(ctx, mod)
-		if archiveErr != nil {
-			return archiveErr
-		}
+		g.Go(func() error {
+			return c.archiveModule(gctx, mod)
+		})
 	}
 
-	return nil
+	return g.Wait() //nolint:wrapcheck // Archive errors already carry their context.
 }
 
 // archiveModule writes a module's mutable metadata, its hydrated no-code
@@ -152,6 +158,11 @@ func (c *Collector) archiveModuleDetail(ctx context.Context, mod *tfe.RegistryMo
 		return err
 	}
 
+	// Each version is one frozen read at its own path, and a module accumulates
+	// them for as long as it publishes, so they fetch concurrently; the settled
+	// versions skip inside Object.
+	g, gctx := errgroup.WithContext(ctx)
+
 	for _, vs := range mod.VersionStatuses {
 		// A non-concrete or empty version cannot address a per-version read and
 		// would only record a permanent error; skip it, matching how the no-code
@@ -160,13 +171,12 @@ func (c *Collector) archiveModuleDetail(ctx context.Context, mod *tfe.RegistryMo
 			continue
 		}
 
-		versionErr := c.archiveModuleVersion(ctx, mod, id, vs.Version)
-		if versionErr != nil {
-			return versionErr
-		}
+		g.Go(func() error {
+			return c.archiveModuleVersion(gctx, mod, id, vs.Version)
+		})
 	}
 
-	return nil
+	return g.Wait() //nolint:wrapcheck // Archive errors already carry their context.
 }
 
 // archiveModuleVersion writes the frozen metadata of a single module version.

@@ -10,7 +10,9 @@ import (
 
 // CollectProject archives one project: its record, its project-scoped
 // notification configurations, and its team access. It is called once per
-// project before the project's workspaces are archived.
+// project before the project's workspaces are archived. Projects archive
+// concurrently, so it does not touch the progress target; the phase bar tracks
+// them instead.
 //
 // It returns only on a context cancellation; a single missing or failed object
 // is recorded in the ledger and does not abort the collector. A project whose
@@ -21,9 +23,6 @@ import (
 func (c *Collector) CollectProject(ctx context.Context, p *tfe.Project) error {
 	st := c.env.Store()
 	name := p.Name
-
-	c.env.SetTarget(name)
-
 	projectID := p.ID
 
 	renamedFrom, err := c.env.ClaimDir(st.ProjectDir(name), projectID)

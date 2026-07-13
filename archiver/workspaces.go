@@ -29,7 +29,11 @@ const (
 // from project id to project name for resolving each workspace's project.
 //
 // Enumeration paginates through the shared limiter; each project is archived by
-// the workspace collector's project method.
+// the workspace collector's project method, fanned across the run's shared
+// worker pool exactly like the workspaces after it: each goroutine is only a
+// coordinator, every request it causes takes a slot from the client's gate, and
+// the fan-out is capped at the pool's ceiling. A project goroutine returns
+// non-nil only on a cancellation, which cancels the group.
 func (a *Archiver) collectProjects(
 	ctx context.Context,
 	env *collect.Env,
@@ -72,16 +76,36 @@ func (a *Archiver) collectProjects(
 
 	reporter.SetTotal(len(projects))
 
+	// The name map is fully built before the fan-out, so the goroutines below
+	// and the workspace phase after them read it without a lock.
 	names := make(map[string]string, len(projects))
 	for _, p := range projects {
 		names[p.ID] = p.Name
+	}
 
-		err = wsc.CollectProject(ctx, p)
-		if err != nil {
-			return nil, fmt.Errorf("collect project %q: %w", p.Name, err)
-		}
+	// Projects archive concurrently, so no single name is the target; the
+	// phase bar tracks them instead.
+	env.SetTarget("")
 
-		reporter.Advance(1)
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(a.cfg.MaxConcurrency)
+
+	for _, p := range projects {
+		g.Go(func() error {
+			perr := wsc.CollectProject(gctx, p)
+			if perr != nil {
+				return fmt.Errorf("collect project %q: %w", p.Name, perr)
+			}
+
+			reporter.Advance(1)
+
+			return nil
+		})
+	}
+
+	err = g.Wait()
+	if err != nil {
+		return nil, fmt.Errorf("collect projects: %w", err)
 	}
 
 	return names, nil

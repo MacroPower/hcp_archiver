@@ -17,8 +17,10 @@ const msgListSkipped = "registry list read did not complete; skipping collection
 //
 // Module and provider metadata is always captured as mutable, re-read on every
 // run. The deeper version, platform, and binary detail multiplies request
-// volume, so it is gathered only when the collector is built [WithDetail]. It
-// satisfies [collect.Collector]. Create instances with [New].
+// volume, so it is gathered only when the collector is built [WithDetail].
+// Within each family the items and their per-version detail archive
+// concurrently, with the client's request gate bounding the run's real
+// parallelism. It satisfies [collect.Collector]. Create instances with [New].
 type Collector struct {
 	env    *collect.Env
 	org    string

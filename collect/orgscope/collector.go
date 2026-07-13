@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/hashicorp/go-tfe"
+	"golang.org/x/sync/errgroup"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
@@ -31,12 +33,15 @@ type Collector struct {
 	env *collect.Env
 
 	// Set of user ids already archived this Collect, so the many teams and roster
-	// entries that reference the same users skip a duplicate re-serialization. It
-	// needs no lock because a Collector runs its org scope on a single goroutine.
+	// entries that reference the same users skip a duplicate re-serialization.
+	// Guarded by seenMu: enumerate archives items concurrently, and two teams
+	// listing the same member would otherwise race to claim one users/<id>.json.
 	seenUsers map[string]struct{}
 
-	org  string
-	hyok bool
+	org string
+
+	seenMu sync.Mutex
+	hyok   bool
 }
 
 // Option configures a [Collector] passed to [New].
@@ -162,11 +167,18 @@ func paginate[T any](
 }
 
 // enumerate lists an org-scoped collection and archives each item through
-// archive.
+// archive, fanning the items across goroutines.
 //
 // The list read is best-effort: a read that does not complete is logged and the
 // collection skipped (see [paginate]), so nothing is archived this run and a
-// re-run retries. Only a cancellation of ctx surfaced by archive propagates.
+// re-run retries. The listed items then archive concurrently, mirroring
+// [collect.Walk]'s per-page fan-out: each goroutine is only a coordinator, and
+// every request it causes takes a slot from the client's gate, so the pool's
+// live size, not this fan-out, bounds the real parallelism. Items write under
+// distinct per-id paths, and the user sub-objects shared across teams dedupe
+// through the seen-set, so concurrent archives never contend on one ledger
+// entry. An archive returns non-nil only on a cancellation of ctx, which
+// cancels the group and propagates.
 func enumerate[T any](
 	ctx context.Context,
 	c *Collector,
@@ -181,14 +193,15 @@ func enumerate[T any](
 		return err
 	}
 
+	g, gctx := errgroup.WithContext(ctx)
+
 	for _, item := range items {
-		aerr := archive(ctx, item)
-		if aerr != nil {
-			return aerr
-		}
+		g.Go(func() error {
+			return archive(gctx, item)
+		})
 	}
 
-	return nil
+	return g.Wait() //nolint:wrapcheck // Archive closures already return contextual errors.
 }
 
 // mutableValue archives a single already-listed object at relPath as mutable
@@ -211,19 +224,32 @@ func (c *Collector) mutableValue(ctx context.Context, relPath string, value any)
 // team or membership is the only path to capturing who is on a team or in the
 // org; every other reference is a permanently-opaque id. Teams and the roster
 // reference the same users in bulk, so a seen-set skips the duplicate
-// re-serialization. A nil user is a no-op.
+// re-serialization; the id is claimed under the lock and only the claimant
+// writes, so the concurrent team archives never race on one user's file. A nil
+// user is a no-op.
 func (c *Collector) archiveUser(ctx context.Context, u *tfe.User) error {
 	if u == nil {
 		return nil
 	}
 
-	if _, ok := c.seenUsers[u.ID]; ok {
+	if !c.claimUser(u.ID) {
 		return nil
 	}
 
-	c.seenUsers[u.ID] = struct{}{}
-
 	return c.mutableValue(ctx, c.env.Store().User(u.ID), u)
+}
+
+// claimUser marks the user id seen and reports whether this caller made the
+// claim, so exactly one of the concurrent team archives referencing the same
+// user goes on to write it.
+func (c *Collector) claimUser(id string) bool {
+	c.seenMu.Lock()
+	defer c.seenMu.Unlock()
+
+	_, seen := c.seenUsers[id]
+	c.seenUsers[id] = struct{}{}
+
+	return !seen
 }
 
 // archiveList archives a whole paginated collection as one mutable file at

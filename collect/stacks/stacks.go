@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	tfe "github.com/hashicorp/go-tfe"
 
@@ -23,12 +26,20 @@ const name = "stacks"
 // groups; it also captures each stack's named deployments and its per-generation
 // states. It archives only through the [collect.Env] it is built with, so the
 // per-object ledger, serialization, and rate limiting are shared with every
-// other collector. Create instances with [New].
+// other collector. Stacks archive concurrently, and each stack's collections
+// share its wall-clock; the client's request gate bounds the run's real
+// parallelism. Create instances with [New].
 type Collector struct {
-	env      *collect.Env
-	log      *slog.Logger
+	env *collect.Env
+	log *slog.Logger
+
+	// Cache of resolved project display names by id. Guarded by projectsMu:
+	// stacks archive concurrently, and many stacks share a project.
 	projects map[string]string
-	org      string
+
+	org string
+
+	projectsMu sync.Mutex
 }
 
 // Option configures a [Collector] passed to [New].
@@ -89,14 +100,23 @@ func (c *Collector) Collect(ctx context.Context) error {
 		return c.tolerate(ctx, name, err)
 	}
 
+	// The stacks archive concurrently, mirroring the workspace fan-out: each
+	// goroutine is only a coordinator, every request it causes takes a slot from
+	// the client's gate, so the pool's live size bounds the real parallelism.
+	// No single stack is the target then, so clear it for the whole phase. A
+	// stack goroutine returns non-nil only on a cancellation, which cancels the
+	// group.
+	c.env.SetTarget("")
+
+	g, gctx := errgroup.WithContext(ctx)
+
 	for _, stack := range stacks {
-		err = c.collectStack(ctx, stack)
-		if err != nil {
-			return err
-		}
+		g.Go(func() error {
+			return c.collectStack(gctx, stack)
+		})
 	}
 
-	return nil
+	return g.Wait() //nolint:wrapcheck // Stack errors already carry their context.
 }
 
 // collectStack archives one stack: its metadata, configurations, named
@@ -104,8 +124,6 @@ func (c *Collector) Collect(ctx context.Context) error {
 // failure within one collection is logged and skipped.
 func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 	project := c.projectName(ctx, stack)
-
-	c.env.SetTarget(project + "/" + stack.Name)
 
 	// Bind the name-keyed directory to this stack's id before the first write;
 	// a failed claim skips the stack with its surface dropped (recorded by
@@ -138,17 +156,25 @@ func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 
 	stackSurface := c.env.Store().StackDir(project, stack.Name)
 
-	err = c.tolerate(ctx, stackSurface+"/configurations", c.collectConfigurations(ctx, project, stack))
-	if err != nil {
-		return err
-	}
+	// The three collections are independent and write disjoint paths, so they
+	// share the stack's wall-clock, mirroring the workspace collector's run and
+	// state-version walks. Each is wrapped in tolerate, so only a cancellation
+	// cancels the group.
+	g, gctx := errgroup.WithContext(ctx)
 
-	err = c.tolerate(ctx, stackSurface+"/deployments", c.collectDeployments(ctx, project, stack))
-	if err != nil {
-		return err
-	}
+	g.Go(func() error {
+		return c.tolerate(gctx, stackSurface+"/configurations", c.collectConfigurations(gctx, project, stack))
+	})
 
-	return c.tolerate(ctx, stackSurface+"/states", c.collectStates(ctx, project, stack))
+	g.Go(func() error {
+		return c.tolerate(gctx, stackSurface+"/deployments", c.collectDeployments(gctx, project, stack))
+	})
+
+	g.Go(func() error {
+		return c.tolerate(gctx, stackSurface+"/states", c.collectStates(gctx, project, stack))
+	})
+
+	return g.Wait() //nolint:wrapcheck // Collection errors already carry their context.
 }
 
 // projectName resolves the display name of a stack's project, caching each
@@ -160,14 +186,16 @@ func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 // single blip on one stack from freezing the whole project's stacks under the
 // id, and lets a later stack or a re-run under a broader token still resolve
 // the real name. Only a project that genuinely reads back without a name caches
-// the id, since that answer is stable.
+// the id, since that answer is stable. Concurrent stacks that miss the cache on
+// the same project may each read it; both cache the same stable answer, so the
+// duplicate read is harmless.
 func (c *Collector) projectName(ctx context.Context, stack *tfe.Stack) string {
 	if stack.Project == nil || stack.Project.ID == "" {
 		return "unknown-project"
 	}
 
 	id := stack.Project.ID
-	if cached, ok := c.projects[id]; ok {
+	if cached, ok := c.cachedProjectName(id); ok {
 		return cached
 	}
 
@@ -185,14 +213,33 @@ func (c *Collector) projectName(ctx context.Context, stack *tfe.Stack) string {
 	}
 
 	if project == nil || project.Name == "" {
-		c.projects[id] = id
+		c.cacheProjectName(id, id)
 
 		return id
 	}
 
-	c.projects[id] = project.Name
+	c.cacheProjectName(id, project.Name)
 
 	return project.Name
+}
+
+// cachedProjectName reads the resolved display name for a project id, reporting
+// whether one is cached.
+func (c *Collector) cachedProjectName(id string) (string, bool) {
+	c.projectsMu.Lock()
+	defer c.projectsMu.Unlock()
+
+	name, ok := c.projects[id]
+
+	return name, ok
+}
+
+// cacheProjectName records the resolved display name for a project id.
+func (c *Collector) cacheProjectName(id, name string) {
+	c.projectsMu.Lock()
+	defer c.projectsMu.Unlock()
+
+	c.projects[id] = name
 }
 
 // tolerate turns a list-level failure into either a propagated cancellation or a

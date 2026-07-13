@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 
+	"golang.org/x/sync/errgroup"
+
 	tfe "github.com/hashicorp/go-tfe"
 
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
@@ -60,6 +62,11 @@ func (c *Collector) collectStates(ctx context.Context, project string, stack *tf
 		return wrap(err)
 	}
 
+	// A stack accumulates generations for as long as it lives, and each is one
+	// streamed download, so they fetch concurrently; the settled generations
+	// skip inside Blob, and the gate bounds the real parallelism.
+	g, gctx := errgroup.WithContext(ctx)
+
 	for _, state := range states {
 		stateFile := c.env.Store().StackStateFile(
 			project,
@@ -68,15 +75,14 @@ func (c *Collector) collectStates(ctx context.Context, project string, stack *tf
 			generationName(state.Generation),
 		)
 
-		err = c.env.Blob(ctx, stateFile, func(ctx context.Context) (io.Reader, error) {
-			return c.stateDescription(ctx, state.ID)
+		g.Go(func() error {
+			return wrap(c.env.Blob(gctx, stateFile, func(ctx context.Context) (io.Reader, error) {
+				return c.stateDescription(ctx, state.ID)
+			}))
 		})
-		if err != nil {
-			return wrap(err)
-		}
 	}
 
-	return nil
+	return g.Wait() //nolint:wrapcheck // Blob errors are wrapped in the goroutines.
 }
 
 // stateDescription opens the full description of a stack state for streaming to
