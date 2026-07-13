@@ -18,6 +18,28 @@
       "title": "Organizations",
       "description": "Organizations limits the run to the named organizations. An empty list\narchives every organization the token can see."
     },
+    "projects": {
+      "type": [
+        "null",
+        "array"
+      ],
+      "items": {
+        "type": "string"
+      },
+      "title": "Projects",
+      "description": "Projects limits the run to the named projects within each archived\norganization. An empty list archives every project."
+    },
+    "workspaces": {
+      "type": [
+        "null",
+        "array"
+      ],
+      "items": {
+        "type": "string"
+      },
+      "title": "Workspaces",
+      "description": "Workspaces limits the run to the named workspaces within each archived\norganization. An empty list archives every workspace."
+    },
     "runHistory": {
       "$ref": "#/$defs/FileRunHistory",
       "title": "Run History",
@@ -79,6 +101,6 @@
     }
   },
   "title": "File",
-  "description": "File is the on-disk YAML configuration describing what to archive and how.\n\nIt holds the settings that are stable across runs: the API address, the\norganizations to archive, and the opt-in scope toggles. Per-run and secret\nsettings (the output directory, the progress mode, the retry-absent toggle,\nand the API token) are supplied by flags and the environment instead, so a\nconfiguration file never carries a machine-specific path or a credential.\n\nEvery field is optional; an absent field takes the package default. Create\ninstances with [LoadFile], or [DefaultFile] for the defaults alone.",
+  "description": "File is the on-disk YAML configuration describing what to archive and how.\n\nIt holds the settings that are stable across runs: the API address, the\norganization, project, and workspace filters, and the opt-in scope toggles.\nPer-run and secret\nsettings (the output directory, the progress mode, the retry-absent toggle,\nand the API token) are supplied by flags and the environment instead, so a\nconfiguration file never carries a machine-specific path or a credential.\n\nEvery field is optional; an absent field takes the package default. Create\ninstances with [LoadFile], or [DefaultFile] for the defaults alone.",
   "additionalProperties": false
 }

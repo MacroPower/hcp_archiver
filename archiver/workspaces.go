@@ -25,8 +25,10 @@ const (
 	phaseWorkspaces = "workspaces"
 )
 
-// collectProjects archives every project in the organization and returns a map
-// from project id to project name for resolving each workspace's project.
+// collectProjects archives every project in the organization that the
+// configured project filter admits and returns a map from project id to
+// project name, spanning every listed project regardless of the filter, for
+// resolving each workspace's project.
 //
 // Enumeration paginates through the shared governor; each project is archived
 // by the workspace collector's project method, fanned across the run's shared
@@ -74,14 +76,26 @@ func (a *Archiver) collectProjects(
 		return map[string]string{}, nil
 	}
 
-	reporter.SetTotal(len(projects))
-
 	// The name map is fully built before the fan-out, so the goroutines below
-	// and the workspace phase after them read it without a lock.
+	// and the workspace phase after them read it without a lock. It spans every
+	// listed project, not just the filtered ones, so a workspace still resolves
+	// its project name for the workspace phase's own filtering even when its
+	// project is excluded here.
 	names := make(map[string]string, len(projects))
 	for _, p := range projects {
 		names[p.ID] = p.Name
 	}
+
+	for _, name := range unmatchedFilter(a.cfg.Projects, projects, func(p *tfe.Project) string { return p.Name }) {
+		a.logger.LogAttrs(ctx, slog.LevelWarn, "project_filter_unmatched",
+			slog.String("org", orgName),
+			slog.String("project", name),
+		)
+	}
+
+	projects = filterProjects(a.cfg.Projects, projects)
+
+	reporter.SetTotal(len(projects))
 
 	// Projects archive concurrently, so no single name is the target; the
 	// phase bar tracks them instead.
@@ -111,8 +125,9 @@ func (a *Archiver) collectProjects(
 	return names, nil
 }
 
-// collectWorkspaces archives every workspace in the organization, fanning them
-// across the run's shared request gate.
+// collectWorkspaces archives every workspace in the organization that the
+// configured project and workspace filters admit, fanning them across the
+// run's shared request gate.
 //
 // Enumeration hydrates each workspace's project relation so its project name
 // resolves from names. The goroutine per workspace is only a coordinator: it
@@ -172,6 +187,17 @@ func (a *Archiver) collectWorkspaces(
 
 		return nil
 	}
+
+	for _, name := range unmatchedFilter(a.cfg.Workspaces, workspaces, func(ws *tfe.Workspace) string { return ws.Name }) {
+		a.logger.LogAttrs(ctx, slog.LevelWarn, "workspace_filter_unmatched",
+			slog.String("org", orgName),
+			slog.String("workspace", name),
+		)
+	}
+
+	// Filter before the counting pass below, so an excluded workspace costs no
+	// probe requests and adds no weight to the phase bar.
+	workspaces = filterWorkspaces(a.cfg.Projects, a.cfg.Workspaces, names, workspaces)
 
 	// Weight each workspace by 1 (its settings) + its probed run and
 	// state-version counts so the bar tracks real work (per-workspace effort

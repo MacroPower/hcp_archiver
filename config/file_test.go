@@ -20,6 +20,8 @@ func TestDefaultFile(t *testing.T) {
 
 	assert.Equal(t, config.DefaultAddress, file.Address)
 	assert.Empty(t, file.Organizations)
+	assert.Empty(t, file.Projects)
+	assert.Empty(t, file.Workspaces)
 	assert.Equal(t, config.FileRunHistory{}, file.RunHistory)
 	assert.Equal(t, config.FileScope{}, file.Scope)
 }
@@ -74,12 +76,16 @@ func TestLoadFile(t *testing.T) {
 			yaml: "# yaml-language-server: $schema=./config.schema.json\n" +
 				"address: https://tfe.example.com\n" +
 				"organizations:\n  - one\n  - two\n" +
+				"projects:\n  - networking\n" +
+				"workspaces:\n  - vpc\n  - dns\n" +
 				"runHistory:\n  count: 250\n  age: 2160h\n" +
 				"scope:\n  stacks: true\n  hyok: true\n  registryDetail: true\n  auditTrail: true\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, "https://tfe.example.com", file.Address)
 				assert.Equal(t, []string{"one", "two"}, file.Organizations)
+				assert.Equal(t, []string{"networking"}, file.Projects)
+				assert.Equal(t, []string{"vpc", "dns"}, file.Workspaces)
 				assert.Equal(t, 250, file.RunHistory.Count)
 				assert.Equal(t, 2160*time.Hour, file.RunHistory.Age)
 				assert.True(t, file.Scope.Stacks)
@@ -129,6 +135,18 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 		},
 		"duplicate organization": {
 			yaml: "organizations:\n  - acme\n  - acme\n",
+		},
+		"empty project name": {
+			yaml: "projects:\n  - \"\"\n",
+		},
+		"duplicate project": {
+			yaml: "projects:\n  - networking\n  - networking\n",
+		},
+		"empty workspace name": {
+			yaml: "workspaces:\n  - \"\"\n",
+		},
+		"duplicate workspace": {
+			yaml: "workspaces:\n  - vpc\n  - vpc\n",
 		},
 		"negative run history count": {
 			yaml: "runHistory:\n  count: -1\n",

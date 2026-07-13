@@ -60,6 +60,13 @@ address: https://app.terraform.io
 organizations:
   - my-org
 
+# Projects and workspaces to archive within each organization; omit or leave
+# either empty for everything. With both set, a workspace must satisfy both.
+projects:
+  - my-project
+workspaces:
+  - my-workspace
+
 # Bound on each workspace's archived run history, unlimited by default: count
 # keeps the newest N runs, age keeps runs created within the window (a Go
 # duration). With both set, whichever admits more history wins.
@@ -178,6 +185,9 @@ Settings are grouped by how much they vary; see
 - **Configuration file** (every key optional, defaulted per field): `address`
   (the API endpoint, default `https://app.terraform.io`), `organizations` (a
   list; empty or omitted archives every organization the token can see in turn),
+  `projects` and `workspaces` (lists filtering what is archived within each
+  organization; empty or omitted archives everything, and with both set a
+  workspace must satisfy both),
   a `runHistory` block bounding each workspace's archived run history
   (`count` keeps the newest N runs, `age` keeps runs created within a
   Go-duration window; with both set,

@@ -639,7 +639,9 @@ generated from the Go type and embedded in the binary.
   `absent` objects on a re-run, and the `--log-*` knobs.
 - Config file (all keys optional, defaults applied per field): `address`
   (default `https://app.terraform.io`), `organizations` (all visible orgs if
-  empty), a `runHistory` block bounding each workspace's archived run history
+  empty), `projects` and `workspaces` (filters within each org; everything if
+  empty, and with both set a workspace must satisfy both), a `runHistory`
+  block bounding each workspace's archived run history
   (`count` / `age`; whichever admits more history wins; unlimited by
   default), and a `scope`
   block of toggles for the heavy or optional surfaces (`stacks`, `hyok`,

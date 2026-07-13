@@ -63,6 +63,12 @@ type Config struct {
 	// Organizations limits the run to the named organizations; an empty list
 	// means every organization the token can see.
 	Organizations []string
+	// Projects limits the run to the named projects within each archived
+	// organization; an empty list means every project.
+	Projects []string
+	// Workspaces limits the run to the named workspaces within each archived
+	// organization; an empty list means every workspace.
+	Workspaces []string
 	// ProgressInterval is the cadence at which progress is reported.
 	ProgressInterval time.Duration
 	// RunHistoryAge bounds each workspace's archived run history to runs
@@ -93,6 +99,8 @@ type Config struct {
 //   - [WithToken]
 //   - [WithAddress]
 //   - [WithOrganizations]
+//   - [WithProjects]
+//   - [WithWorkspaces]
 //   - [WithOutputDir]
 //   - [WithProgressMode]
 //   - [WithProgressInterval]
@@ -129,6 +137,23 @@ func WithAddress(address string) Option {
 func WithOrganizations(orgs []string) Option {
 	return func(c *Config) {
 		c.Organizations = orgs
+	}
+}
+
+// WithProjects limits the run to the named projects within each archived
+// organization. An empty list archives every project. It returns an [Option].
+func WithProjects(projects []string) Option {
+	return func(c *Config) {
+		c.Projects = projects
+	}
+}
+
+// WithWorkspaces limits the run to the named workspaces within each archived
+// organization. An empty list archives every workspace. It returns an
+// [Option].
+func WithWorkspaces(workspaces []string) Option {
+	return func(c *Config) {
+		c.Workspaces = workspaces
 	}
 }
 

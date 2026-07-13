@@ -40,7 +40,8 @@ var (
 // File is the on-disk YAML configuration describing what to archive and how.
 //
 // It holds the settings that are stable across runs: the API address, the
-// organizations to archive, and the opt-in scope toggles. Per-run and secret
+// organization, project, and workspace filters, and the opt-in scope toggles.
+// Per-run and secret
 // settings (the output directory, the progress mode, the retry-absent toggle,
 // and the API token) are supplied by flags and the environment instead, so a
 // configuration file never carries a machine-specific path or a credential.
@@ -53,6 +54,12 @@ type File struct {
 	// Organizations limits the run to the named organizations. An empty list
 	// archives every organization the token can see.
 	Organizations []string `json:"organizations,omitempty" jsonschema:"title=Organizations"`
+	// Projects limits the run to the named projects within each archived
+	// organization. An empty list archives every project.
+	Projects []string `json:"projects,omitempty" jsonschema:"title=Projects"`
+	// Workspaces limits the run to the named workspaces within each archived
+	// organization. An empty list archives every workspace.
+	Workspaces []string `json:"workspaces,omitempty" jsonschema:"title=Workspaces"`
 	// RunHistory bounds how much of each workspace's run history is archived;
 	// unset archives every run.
 	RunHistory FileRunHistory `json:"runHistory,omitzero" jsonschema:"title=Run History"`
@@ -171,25 +178,48 @@ func (f File) ValidateSchema(data any) error {
 
 // Validate reports whether the [File] is internally consistent after decoding.
 // It implements [niceyaml.Validator] so [LoadFile] runs it automatically, and
-// rejects an empty or duplicated organization name with an error pointing at
-// the offending entry.
+// rejects an empty or duplicated name in the organization, project, or
+// workspace filter with an error pointing at the offending entry.
 func (f File) Validate() error {
-	seen := make(map[string]struct{}, len(f.Organizations))
+	filters := []struct {
+		field string
+		noun  string
+		names []string
+	}{
+		{field: "organizations", noun: "organization", names: f.Organizations},
+		{field: "projects", noun: "project", names: f.Projects},
+		{field: "workspaces", noun: "workspace", names: f.Workspaces},
+	}
 
-	for i, org := range f.Organizations {
-		if org == "" {
-			return niceyaml.NewError("organization name must not be empty",
-				niceyaml.WithPath(paths.Root().Child("organizations").Index(i).Value()),
+	for _, filter := range filters {
+		err := validateNames(filter.field, filter.noun, filter.names)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateNames rejects an empty or duplicated name in the filter list under
+// field with an error pointing at the offending entry, naming it by noun.
+func validateNames(field, noun string, names []string) error {
+	seen := make(map[string]struct{}, len(names))
+
+	for i, name := range names {
+		if name == "" {
+			return niceyaml.NewError(fmt.Sprintf("%s name must not be empty", noun),
+				niceyaml.WithPath(paths.Root().Child(field).Index(i).Value()),
 			)
 		}
 
-		if _, dup := seen[org]; dup {
-			return niceyaml.NewError(fmt.Sprintf("duplicate organization %q", org),
-				niceyaml.WithPath(paths.Root().Child("organizations").Index(i).Value()),
+		if _, dup := seen[name]; dup {
+			return niceyaml.NewError(fmt.Sprintf("duplicate %s %q", noun, name),
+				niceyaml.WithPath(paths.Root().Child(field).Index(i).Value()),
 			)
 		}
 
-		seen[org] = struct{}{}
+		seen[name] = struct{}{}
 	}
 
 	return nil

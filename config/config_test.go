@@ -22,6 +22,8 @@ func TestNew_Defaults(t *testing.T) {
 	assert.Equal(t, "tok", cfg.Token)
 	assert.Equal(t, config.DefaultAddress, cfg.Address)
 	assert.Empty(t, cfg.Organizations)
+	assert.Empty(t, cfg.Projects)
+	assert.Empty(t, cfg.Workspaces)
 	assert.Equal(t, config.ProgressModeAuto, cfg.ProgressMode)
 	assert.Equal(t, config.DefaultProgressInterval, cfg.ProgressInterval)
 	assert.Zero(t, cfg.RunHistoryCount)
@@ -54,6 +56,8 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 		config.WithOutputDir("/tmp/archive"),
 		config.WithAddress("https://tfe.example.com"),
 		config.WithOrganizations([]string{"acme"}),
+		config.WithProjects([]string{"networking"}),
+		config.WithWorkspaces([]string{"vpc"}),
 		config.WithProgressMode(config.ProgressModeJSON),
 		config.WithProgressInterval(10*time.Second),
 		config.WithRunHistoryCount(500),
@@ -68,6 +72,8 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 
 	assert.Equal(t, "https://tfe.example.com", cfg.Address)
 	assert.Equal(t, []string{"acme"}, cfg.Organizations)
+	assert.Equal(t, []string{"networking"}, cfg.Projects)
+	assert.Equal(t, []string{"vpc"}, cfg.Workspaces)
 	assert.Equal(t, config.ProgressModeJSON, cfg.ProgressMode)
 	assert.Equal(t, 10*time.Second, cfg.ProgressInterval)
 	assert.Equal(t, 500, cfg.RunHistoryCount)

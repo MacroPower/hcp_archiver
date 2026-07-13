@@ -10,6 +10,13 @@ var (
 	LogFailures = (*Archiver).logFailures
 	// OrgIncomplete exposes orgIncomplete for tests.
 	OrgIncomplete = orgIncomplete
+	// FilterProjects exposes filterProjects for tests.
+	FilterProjects = filterProjects
+	// FilterWorkspaces exposes filterWorkspaces for tests.
+	FilterWorkspaces = filterWorkspaces
+	// UnmatchedFilter exposes unmatchedFilter, instantiated for plain names, for
+	// tests.
+	UnmatchedFilter = unmatchedFilter[string]
 )
 
 // DefaultProjectName exposes defaultProjectName for tests.
