@@ -19,6 +19,7 @@ func TestDefaultFile(t *testing.T) {
 	file := config.DefaultFile()
 
 	assert.Equal(t, config.DefaultAddress, file.Address)
+	assert.Zero(t, file.RateLimit)
 	assert.Empty(t, file.Organizations)
 	assert.Empty(t, file.Projects)
 	assert.Empty(t, file.Workspaces)
@@ -75,6 +76,7 @@ func TestLoadFile(t *testing.T) {
 		"full document overrides every default": {
 			yaml: "# yaml-language-server: $schema=./config.schema.json\n" +
 				"address: https://tfe.example.com\n" +
+				"rateLimit: 12.5\n" +
 				"organizations:\n  - one\n  - two\n" +
 				"projects:\n  - networking\n" +
 				"workspaces:\n  - vpc\n  - dns\n" +
@@ -83,6 +85,7 @@ func TestLoadFile(t *testing.T) {
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, "https://tfe.example.com", file.Address)
+				assert.InEpsilon(t, 12.5, file.RateLimit, 1e-9)
 				assert.Equal(t, []string{"one", "two"}, file.Organizations)
 				assert.Equal(t, []string{"networking"}, file.Projects)
 				assert.Equal(t, []string{"vpc", "dns"}, file.Workspaces)
@@ -150,6 +153,12 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 		},
 		"negative run history count": {
 			yaml: "runHistory:\n  count: -1\n",
+		},
+		"zero rate limit": {
+			yaml: "rateLimit: 0\n",
+		},
+		"negative rate limit": {
+			yaml: "rateLimit: -1\n",
 		},
 		"run history age must be a duration string": {
 			yaml: "runHistory:\n  age: 90\n",

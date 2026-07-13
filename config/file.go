@@ -63,6 +63,12 @@ type File struct {
 	// RunHistory bounds how much of each workspace's run history is archived;
 	// unset archives every run.
 	RunHistory FileRunHistory `json:"runHistory,omitzero" jsonschema:"title=Run History"`
+	// RateLimit is the ceiling on how fast requests launch, in requests per
+	// second; omitted, the client's default of 30 (HCP Terraform's documented
+	// limit) applies. The client adapts downward from the server's rate-limit
+	// feedback on its own, so set this only for an organization whose granted
+	// limit sits well below the default and the run should not probe past it.
+	RateLimit float64 `json:"rateLimit,omitempty" jsonschema:"title=Rate Limit,exclusiveMinimum=0,default=30"`
 	// Scope selects the heavy or optional surfaces to archive, each off by
 	// default.
 	Scope FileScope `json:"scope,omitzero" jsonschema:"title=Scope"`

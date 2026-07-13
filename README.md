@@ -56,6 +56,12 @@ the file or set `HCP_ARCHIVER_CONFIG`; with neither, the built-in defaults apply
 # HCP Terraform API address (the default).
 address: https://app.terraform.io
 
+# Ceiling on how fast requests launch, in requests per second. The default of
+# 30 is HCP Terraform's documented limit. Lower it for an organization whose
+# granted limit sits well below that; the client still adapts downward from
+# the server's rate-limit feedback on its own.
+rateLimit: 30
+
 # Organizations to archive; omit or leave empty for every visible org.
 organizations:
   - my-org
@@ -183,7 +189,9 @@ Settings are grouped by how much they vary; see
   quiet off one) with a `--progress-interval` knob; and `--retry-absent`
   re-probes objects previously recorded as absent.
 - **Configuration file** (every key optional, defaulted per field): `address`
-  (the API endpoint, default `https://app.terraform.io`), `organizations` (a
+  (the API endpoint, default `https://app.terraform.io`), `rateLimit` (the
+  request-launch ceiling in requests per second, default 30, HCP Terraform's
+  documented limit; lower it for an organization granted less), `organizations` (a
   list; empty or omitted archives every organization the token can see in turn),
   `projects` and `workspaces` (lists filtering what is archived within each
   organization; empty or omitted archives everything, and with both set a

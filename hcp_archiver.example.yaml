@@ -8,6 +8,12 @@
 # HCP Terraform API address.
 address: https://app.terraform.io
 
+# Ceiling on how fast requests launch, in requests per second. The default of
+# 30 is HCP Terraform's documented limit, and the client adapts downward from
+# the server's rate-limit feedback on its own; set this only for an
+# organization whose granted limit sits well below the default.
+# rateLimit: 10
+
 # Organizations to archive. Leave empty (or omit) to archive every organization
 # the token can see, each into its own <output>/<org>/ subtree.
 organizations:

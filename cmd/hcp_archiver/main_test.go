@@ -38,6 +38,7 @@ func TestNewRootCmd(t *testing.T) {
 
 func TestConfigFromArgs(t *testing.T) {
 	fullConfig := "address: https://tfe.example.com\n" +
+		"rateLimit: 10\n" +
 		"organizations:\n  - acme\n  - globex\n" +
 		"scope:\n  stacks: true\n  hyok: true\n  registryDetail: true\n  auditTrail: true\n"
 
@@ -84,6 +85,7 @@ func TestConfigFromArgs(t *testing.T) {
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
 				assert.Equal(t, "https://tfe.example.com", cfg.Address)
+				assert.InEpsilon(t, 10.0, cfg.RateLimit, 1e-9)
 				assert.Equal(t, []string{"acme", "globex"}, cfg.Organizations)
 				assert.True(t, cfg.Stacks)
 				assert.True(t, cfg.HYOK)

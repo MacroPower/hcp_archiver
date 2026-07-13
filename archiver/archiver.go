@@ -199,6 +199,7 @@ func (a *Archiver) Run(ctx context.Context) error {
 	a.client, err = tfeclient.New(
 		tfeclient.WithToken(a.cfg.Token),
 		tfeclient.WithAddress(a.cfg.Address),
+		tfeclient.WithRateLimit(a.cfg.RateLimit),
 		tfeclient.WithWireBytes(a.wireBytes),
 		tfeclient.WithRateLimitCounter(a.rateLimited),
 		tfeclient.WithGate(&gate{sem: semaphore.NewWeighted(defaultConcurrency)}),

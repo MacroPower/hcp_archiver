@@ -71,6 +71,12 @@ type Config struct {
 	Workspaces []string
 	// ProgressInterval is the cadence at which progress is reported.
 	ProgressInterval time.Duration
+	// RateLimit is the ceiling of the client's adaptive rate governor, in
+	// requests per second; zero keeps the client's default. HCP Terraform's
+	// documented limit is 30 requests per second, but some organizations are
+	// provisioned lower, so this is the knob to turn a run down to what the
+	// server actually grants.
+	RateLimit float64
 	// RunHistoryAge bounds each workspace's archived run history to runs
 	// created within this window before the archive runs; zero leaves the age
 	// unbounded. When RunHistoryCount is also set, whichever bound admits more
@@ -106,6 +112,7 @@ type Config struct {
 //   - [WithProgressInterval]
 //   - [WithRunHistoryCount]
 //   - [WithRunHistoryAge]
+//   - [WithRateLimit]
 //   - [WithRetryAbsent]
 //   - [WithStacks]
 //   - [WithHYOK]
@@ -193,6 +200,18 @@ func WithRunHistoryCount(n int) Option {
 func WithRunHistoryAge(age time.Duration) Option {
 	return func(c *Config) {
 		c.RunHistoryAge = age
+	}
+}
+
+// WithRateLimit sets the ceiling of the client's adaptive rate governor, in
+// requests per second, for organizations whose server-side limit sits below
+// the client's default. A non-positive value is ignored so it does not clobber
+// that default, matching the client's own guard. It returns an [Option].
+func WithRateLimit(perSecond float64) Option {
+	return func(c *Config) {
+		if perSecond > 0 {
+			c.RateLimit = perSecond
+		}
 	}
 }
 

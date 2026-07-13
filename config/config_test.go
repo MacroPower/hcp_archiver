@@ -28,6 +28,7 @@ func TestNew_Defaults(t *testing.T) {
 	assert.Equal(t, config.DefaultProgressInterval, cfg.ProgressInterval)
 	assert.Zero(t, cfg.RunHistoryCount)
 	assert.Zero(t, cfg.RunHistoryAge)
+	assert.Zero(t, cfg.RateLimit)
 	assert.False(t, cfg.RetryAbsent)
 	assert.False(t, cfg.Stacks)
 	assert.False(t, cfg.HYOK)
@@ -62,6 +63,7 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 		config.WithProgressInterval(10*time.Second),
 		config.WithRunHistoryCount(500),
 		config.WithRunHistoryAge(90*24*time.Hour),
+		config.WithRateLimit(12.5),
 		config.WithRetryAbsent(true),
 		config.WithStacks(true),
 		config.WithHYOK(true),
@@ -78,11 +80,26 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 	assert.Equal(t, 10*time.Second, cfg.ProgressInterval)
 	assert.Equal(t, 500, cfg.RunHistoryCount)
 	assert.Equal(t, 90*24*time.Hour, cfg.RunHistoryAge)
+	assert.InEpsilon(t, 12.5, cfg.RateLimit, 1e-9)
 	assert.True(t, cfg.RetryAbsent)
 	assert.True(t, cfg.Stacks)
 	assert.True(t, cfg.HYOK)
 	assert.True(t, cfg.RegistryDetail)
 	assert.True(t, cfg.AuditTrail)
+}
+
+func TestNew_NonPositiveRateLimitKeepsDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.New(
+		config.WithToken("tok"),
+		config.WithOutputDir("/tmp/archive"),
+		config.WithRateLimit(0),
+		config.WithRateLimit(-5),
+	)
+	require.NoError(t, err)
+
+	assert.Zero(t, cfg.RateLimit)
 }
 
 func TestNew_TokenFromEnv(t *testing.T) {

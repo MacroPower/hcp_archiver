@@ -45,6 +45,13 @@
       "title": "Run History",
       "description": "RunHistory bounds how much of each workspace's run history is archived;\nunset archives every run."
     },
+    "rateLimit": {
+      "type": "number",
+      "title": "Rate Limit",
+      "description": "RateLimit is the ceiling on how fast requests launch, in requests per\nsecond; omitted, the client's default of 30 (HCP Terraform's documented\nlimit) applies. The client adapts downward from the server's rate-limit\nfeedback on its own, so set this only for an organization whose granted\nlimit sits well below the default and the run should not probe past it.",
+      "default": 30,
+      "exclusiveMinimum": 0
+    },
     "scope": {
       "$ref": "#/$defs/FileScope",
       "title": "Scope",
