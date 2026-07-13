@@ -15,11 +15,12 @@
 // a slot, so the same slots serve many small workspaces or many pieces of one
 // large workspace, whichever is ready. The bound is a fixed constant, because
 // concurrency is a resource cap rather than a throughput control: how fast
-// requests launch is decided by the client's adaptive rate governor, which,
-// when the server rate-limits the run, halves its rate and pauses every
-// launch until the server's advertised reset, then creeps back up while
-// responses stay clean. A rate-limited run therefore shows requests slowing,
-// with a cooldown pause in the progress views.
+// requests launch is decided by the client's adaptive rate governors (one per
+// server-side rate bucket), which, when the server rate-limits the run, halve
+// the affected bucket's rate and pause its launches until the server's
+// advertised reset, then creep back up while responses stay clean. A
+// rate-limited run therefore shows requests slowing, with a cooldown pause in
+// the progress views.
 //
 // It owns the cross-cutting runtime and nothing else: the request gate, the
 // ledger-flush and progress tickers, graceful shutdown that flushes the

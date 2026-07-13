@@ -2,28 +2,32 @@
 //
 // It wraps the go-tfe client behind a worker-safe surface so that every other
 // package can treat network access as an already-throttled, already-classified
-// capability. One adaptive rate governor is shared across all concurrent
+// capability. The adaptive rate governors are shared across all concurrent
 // workers: because N workers each paginating and downloading multiply the
-// request rate, per-request retry alone is not enough, so exactly one client
-// is constructed and shared. The governor is enforced at the HTTP transport,
-// so every attempt that leaves the process pays a token; the pages go-tfe's
-// ListAll methods fetch internally, the fresh requests its chunked log
-// readers make mid-stream, and every in-client retry cannot outrun the
-// aggregate rate. It is the run's single rate authority, adapting to the
-// server's feedback: it launches at a configured ceiling, and a rate-limited
-// (429) response halves the rate and pauses every launch until the server's
-// advertised reset. The pause is global because the server counts rejected
+// request rate, per-request retry alone is not enough, so exactly one client is
+// constructed and shared. There is one governor per server-side rate bucket: a
+// general one for most endpoints, and a far slower one for the two runs list
+// endpoints, which the server meters separately at 30 requests per minute (see
+// [DefaultRunsListRateLimit]). Pushback in one bucket never slows the other.
+// The governors are enforced at the HTTP transport, so every attempt that
+// leaves the process pays a token; the pages go-tfe's ListAll methods fetch
+// internally, the fresh requests its chunked log readers make mid-stream, and
+// every in-client retry cannot outrun the aggregate rate. Each governor is its
+// bucket's single rate authority, adapting to the server's feedback: it
+// launches at a configured ceiling, and a rate-limited (429) response halves
+// the rate and pauses every launch in the bucket until the server's advertised
+// reset. The pause spans the whole bucket because the server counts rejected
 // requests against its window too, so no rate is slow enough to pace into a
-// blown window; once it lifts, a clean stretch creeps the rate back up
-// toward the ceiling. The go-tfe client's own rate-limit machinery is kept
-// dormant: its server-error retry stays disabled, no 429 is ever surfaced to
-// it, and the X-RateLimit-Limit header its internal limiter configures
-// itself from is stripped off every response. An optional [Gate] bounds how
-// many requests are in flight at once; the gate caps concurrency only and
-// leaves the launch rate to the governor. The package also walks paginated
-// list endpoints (advancing the page number while the response reports a
-// next page) and follows the short-lived signed-URL download flow for state
-// blobs, configuration tarballs, and plan/apply logs.
+// blown window; once it lifts, a clean stretch creeps the rate back up toward
+// the ceiling. The go-tfe client's own rate-limit machinery is kept dormant:
+// its server-error retry stays disabled, no 429 is ever surfaced to it, and the
+// X-RateLimit-Limit header its internal limiter configures itself from is
+// stripped off every response. An optional [Gate] bounds how many requests are
+// in flight at once; the gate caps concurrency only and leaves the launch rate
+// to the governors. The package also walks paginated list endpoints (advancing
+// the page number while the response reports a next page) and follows the
+// short-lived signed-URL download flow for state blobs, configuration
+// tarballs, and plan/apply logs.
 //
 // Failures are classified so a resume can tell a temporary blip from a
 // permanent absence: transient (a network timeout, context cancellation or

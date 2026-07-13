@@ -376,26 +376,35 @@ Notes:
   to the manifest as the run record, which stays per-run.
 
 - **Concurrency and rate**: a fixed gate of 16 in-flight API requests, shared
-  by the whole run, bounds "how many at once"; "how fast" belongs to a single
-  adaptive rate governor at the HTTP transport, so the server's feedback moves
-  the rate, never the concurrency. Every physical attempt pays a governor
-  token before launching. A 429 halves the rate (once per cooldown window,
-  floor 1 rps), drains the bucket, and pauses every launch until the server's
-  advertised `X-RateLimit-Reset`. The pause is global because the server
-  counts rejected requests against its window too; pacing into a blown window
-  just buys more 429s. After the reset, clean responses creep the rate back
-  up one rps per two-second stretch toward the 30 rps ceiling. Workspace
-  walks fan out on coordinator goroutines (capped at the gate's size) that
-  hold no slot themselves, so parallelism follows the requests rather than a
-  fixed per-workspace assignment. `go-tfe`'s retry and rate machinery stays
-  dormant: its unbounded 5xx retry is replaced by a
-  bounded doubling backoff at the transport, 429s are retried there too (with
-  no local backoff, since re-entry waits out the cooldown in the governor)
-  and convert to a transient error once their budget is spent, and the
-  `X-RateLimit-Limit` header is stripped from every response so go-tfe's
-  internal limiter never engages. Guard shared manifest/counter writes with a
-  mutex. (Config-version ids are globally unique, so the shared
-  `config-versions/` dir is race-free.)
+  by the whole run, bounds "how many at once"; "how fast" belongs to
+  per-bucket adaptive rate governors at the HTTP transport, so the server's
+  feedback moves the rate, never the concurrency. The server meters most
+  endpoints from one general bucket (30 requests per second), but the two runs
+  list endpoints (`/workspaces/:id/runs`, `/organizations/:name/runs`) from
+  their own bucket of 30 requests per _minute_, documented only on the runs API
+  page, so each bucket gets its own governor and a 429 in one never pauses or
+  halves the other. The runs governor paces just under the documented budget
+  (29/min) and the run walk spends it carefully: pages are fetched at the
+  maximum size (100) and the per-workspace count probe reads the workspace's
+  advertised `RunsCount` instead of the listing. Every physical attempt pays a
+  token from its endpoint's governor before launching. A 429 halves that
+  bucket's rate (once per cooldown window, floored), drains the bucket, and
+  pauses its launches until the server's advertised `X-RateLimit-Reset`. The
+  pause spans the bucket because the server counts rejected requests against
+  its window too; pacing into a blown window just buys more 429s. After the
+  reset, clean responses creep the rate back up one rps per two-second stretch
+  toward the ceiling. A 429's `X-RateLimit-Limit` value is debug-logged, so an
+  endpoint metered outside the known buckets identifies itself in the trace.
+  Workspace walks fan out on coordinator goroutines (capped at the gate's size)
+  that hold no slot themselves, so parallelism follows the requests rather than
+  a fixed per-workspace assignment. `go-tfe`'s retry and rate machinery stays
+  dormant: its unbounded 5xx retry is replaced by a bounded doubling backoff at
+  the transport, 429s are retried there too (with no local backoff, since
+  re-entry waits out the cooldown in the governor) and convert to a transient
+  error once their budget is spent, and the `X-RateLimit-Limit` header is
+  stripped from every response so go-tfe's internal limiter never engages.
+  Guard shared manifest/counter writes with a mutex. (Config-version ids are
+  globally unique, so the shared `config-versions/` dir is race-free.)
 - **Not point-in-time consistent**: a long archive of a live org sees new runs
   and state versions appear mid-run. Acceptable for a best-effort snapshot,
   stated so readers know the archive is not a single instant.

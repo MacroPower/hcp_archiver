@@ -2,6 +2,7 @@ package tfeclient_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -219,4 +220,174 @@ func TestIdleReadNilWireCounterIsSafe(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Equal(t, "payload", string(body))
+}
+
+func TestRunsListPathClassification(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		path string
+		want bool
+	}{
+		"workspace runs list": {
+			path: "/api/v2/workspaces/ws-abc123/runs",
+			want: true,
+		},
+		"organization runs list": {
+			path: "/api/v2/organizations/acme/runs",
+			want: true,
+		},
+		"enterprise base path prefix": {
+			path: "/tfe/api/v2/workspaces/ws-1/runs",
+			want: true,
+		},
+		"run creation": {
+			path: "/api/v2/runs",
+			want: false,
+		},
+		"run read": {
+			path: "/api/v2/runs/run-abc123",
+			want: false,
+		},
+		"deeper child of the listing": {
+			path: "/api/v2/workspaces/ws-1/runs/queue",
+			want: false,
+		},
+		"stack deployment runs": {
+			path: "/api/v2/stack-deployment-groups/sdg-1/stack-deployment-runs",
+			want: false,
+		},
+		"empty owner id": {
+			path: "/api/v2/workspaces//runs",
+			want: false,
+		},
+		"other owner type": {
+			path: "/api/v2/projects/prj-1/runs",
+			want: false,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, tfeclient.RunsListPath(tc.path))
+		})
+	}
+}
+
+// rateLimit429 answers every request with a 429 whose reset advertises a long
+// cooldown, so the bucket that absorbed it stays visibly paused for the
+// asserting test.
+func rateLimit429(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("X-Ratelimit-Limit", "30")
+	w.Header().Set("X-Ratelimit-Reset", "30")
+	w.WriteHeader(http.StatusTooManyRequests)
+}
+
+func TestRunsList429LeavesGeneralBucketUntouched(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(rateLimit429))
+	t.Cleanup(srv.Close)
+
+	client := tfeclient.ResolveHTTPClient()
+	general, runs := tfeclient.ThrottleGovernors(client)
+	require.NotNil(t, general)
+	require.NotNil(t, runs)
+
+	// The first attempt draws a runs-bucket token and sees the 429; the retry
+	// then parks in the paused runs governor until the deadline ends the
+	// request, so the test stays bounded.
+	ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v2/workspaces/ws-1/runs", http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req) //nolint:bodyclose // The request errors, so there is no body.
+	require.Error(t, err)
+	require.Nil(t, resp)
+
+	rate, paused := runs.Snapshot()
+	assert.Positive(t, paused, "the runs-list bucket absorbed the 429's cooldown")
+	assert.InDelta(t, tfeclient.DefaultRunsListRateLimit, rate, 1e-9,
+		"the runs-list rate is already at its floor, so the halving cannot move it")
+
+	rate, paused = general.Snapshot()
+	assert.Zero(t, paused, "a runs-list 429 pauses no general traffic")
+	assert.InDelta(t, tfeclient.DefaultRateLimit, rate, 1e-9,
+		"a runs-list 429 does not halve the general rate")
+}
+
+func TestGeneral429LeavesRunsListBucketUntouched(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(rateLimit429))
+	t.Cleanup(srv.Close)
+
+	client := tfeclient.ResolveHTTPClient()
+	general, runs := tfeclient.ThrottleGovernors(client)
+	require.NotNil(t, general)
+	require.NotNil(t, runs)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodGet, srv.URL+"/api/v2/organizations/acme/workspaces", http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req) //nolint:bodyclose // The request errors, so there is no body.
+	require.Error(t, err)
+	require.Nil(t, resp)
+
+	rate, paused := general.Snapshot()
+	assert.Positive(t, paused, "the general bucket absorbed the 429's cooldown")
+	assert.InDelta(t, tfeclient.DefaultRateLimit/2, rate, 1e-9, "the general rate halves on its own 429")
+
+	rate, paused = runs.Snapshot()
+	assert.Zero(t, paused, "a general 429 pauses no runs-list traffic")
+	assert.InDelta(t, tfeclient.DefaultRunsListRateLimit, rate, 1e-9)
+}
+
+func TestLoggerDebugLogsRateLimitHeaders(t *testing.T) {
+	t.Parallel()
+
+	// The first response is a 429 carrying the bucket-identifying headers; the
+	// retry then succeeds, so the test observes the logged headers without
+	// waiting out a long cooldown (the tiny reset keeps the retry prompt).
+	var hits atomic.Int64
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) == 1 {
+			w.Header().Set("X-Ratelimit-Limit", "42")
+			w.Header().Set("X-Ratelimit-Reset", "0.01")
+			w.WriteHeader(http.StatusTooManyRequests)
+
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	var buf bytes.Buffer
+
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	client := tfeclient.ResolveHTTPClient(tfeclient.WithLogger(logger))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/api/v2/ping", http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	logged := buf.String()
+
+	assert.Contains(t, logged, "status=429")
+	assert.Contains(t, logged, "ratelimit_limit=42",
+		"a 429 logs the limit header so an undocumented bucket identifies itself")
+	assert.Contains(t, logged, "ratelimit_reset=0.01")
 }

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -55,7 +56,7 @@ func (e *idleReadError) Timeout() bool { return true }
 func (e *idleReadError) Temporary() bool { return true }
 
 // throttleTransport paces every outbound attempt through the run's shared
-// [Governor] and feeds every response back to it.
+// [Governor]s and feeds every response back to the governor that paced it.
 //
 // It lives at the transport rather than in [Client.Do] so that no request path
 // outruns the throttle: the pages go-tfe's ListAll methods fetch internally
@@ -65,20 +66,30 @@ func (e *idleReadError) Temporary() bool { return true }
 // governor sees exactly one signal per physical attempt. A cancellation while
 // waiting surfaces the context's error, which classifies transient.
 //
+// The server does not meter all endpoints from one bucket: the two runs list
+// endpoints have their own budget sixty times below the general one (see
+// [DefaultRunsListRateLimit]), so they are paced by their own governor. The
+// split also keeps each bucket's 429 feedback its own: a runs-list 429 must not
+// pause or halve general traffic that has server headroom, and vice versa.
+//
 // It also strips X-RateLimit-Limit from every response. The go-tfe client
 // reads that header once, during construction, to configure an internal rate
 // limiter of its own (at a fraction of the advertised limit, waited on for
 // every request); with the header gone that limiter configures to infinity
-// and never blocks, leaving the governor the one authority over the rate.
+// and never blocks, leaving the governors the one authority over the rate.
 type throttleTransport struct {
-	next http.RoundTripper
-	gov  *Governor
+	next    http.RoundTripper
+	gov     *Governor
+	runsGov *Governor
 }
 
-// RoundTrip waits for a rate token, delegates to the wrapped transport, and
-// reports the response's outcome to the governor.
+// RoundTrip waits for a rate token from the governor owning the request's
+// endpoint, delegates to the wrapped transport, and reports the response's
+// outcome back to that governor.
 func (t *throttleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	err := t.gov.Wait(req.Context())
+	gov := t.governorFor(req)
+
+	err := gov.Wait(req.Context())
 	if err != nil {
 		return nil, err
 	}
@@ -91,12 +102,39 @@ func (t *throttleTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	resp.Header.Del(headerRateLimitLimit)
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		t.gov.On429(resp.Header.Get(headerRateLimitReset))
+		gov.On429(resp.Header.Get(headerRateLimitReset))
 	} else {
-		t.gov.OnSuccess()
+		gov.OnSuccess()
 	}
 
 	return resp, nil
+}
+
+// governorFor returns the governor owning the request's endpoint: the runs-list
+// governor for the two runs list endpoints, the general governor for everything
+// else. A nil runs-list governor routes everything through the general one.
+func (t *throttleTransport) governorFor(req *http.Request) *Governor {
+	if t.runsGov != nil && runsListPath(req.URL.Path) {
+		return t.runsGov
+	}
+
+	return t.gov
+}
+
+// runsListPath reports whether path is one of the two runs list endpoints, GET
+// /workspaces/:workspace_id/runs or GET /organizations/:name/runs, which the
+// server meters in their own 30-requests-per-minute bucket. The match is on the
+// trailing path segments, so a Terraform Enterprise base path prefix does not
+// defeat it, and neither run reads (/runs/:id) nor run creation (/runs) match.
+func runsListPath(path string) bool {
+	segs := strings.Split(strings.Trim(path, "/"), "/")
+	n := len(segs)
+
+	if n < 3 || segs[n-1] != "runs" || segs[n-2] == "" {
+		return false
+	}
+
+	return segs[n-3] == "workspaces" || segs[n-3] == "organizations"
 }
 
 // idleTransport wraps every response body in an [idleBody], bounding mid-body
@@ -155,9 +193,22 @@ func (t *idleTransport) logRoundTrip(req *http.Request, resp *http.Response, err
 		slog.Duration("duration", elapsed),
 	}
 
-	if err != nil {
+	switch {
+	case err != nil:
 		attrs = append(attrs, slog.String("error", err.Error()))
-	} else {
+	case resp.StatusCode == http.StatusTooManyRequests:
+		// The limit header names the size of the bucket that throttled the
+		// request, so an endpoint metered outside the documented buckets
+		// identifies itself in the trace instead of masquerading as the general
+		// limit. This transport sits below the throttle wrapper that strips the
+		// limit header, so the value is still present here.
+		attrs = append(attrs,
+			slog.Int("status", resp.StatusCode),
+			slog.String("ratelimit_limit", resp.Header.Get(headerRateLimitLimit)),
+			slog.String("ratelimit_reset", resp.Header.Get(headerRateLimitReset)),
+		)
+
+	default:
 		attrs = append(attrs, slog.Int("status", resp.StatusCode))
 	}
 

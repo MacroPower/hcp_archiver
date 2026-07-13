@@ -58,3 +58,26 @@ func GovernorTokens(g *Governor) float64 {
 
 	return g.tokens
 }
+
+// RunsListPath exposes runsListPath to the external test package.
+func RunsListPath(path string) bool {
+	return runsListPath(path)
+}
+
+// ThrottleGovernors returns the general and runs-list governors wired into a
+// client built by [ResolveHTTPClient], in that order, so the external test
+// package can assert which bucket a response's rate feedback landed in. Both
+// are nil when the client does not carry the expected wrappers.
+func ThrottleGovernors(hc *http.Client) (*Governor, *Governor) {
+	rr, ok := hc.Transport.(*retryTransport)
+	if !ok {
+		return nil, nil
+	}
+
+	tt, ok := rr.next.(*throttleTransport)
+	if !ok {
+		return nil, nil
+	}
+
+	return tt.gov, tt.runsGov
+}

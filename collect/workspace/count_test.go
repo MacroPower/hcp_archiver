@@ -65,34 +65,18 @@ func TestCounts(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
-		runsStatus int
-		runsTotal  int
 		svStatus   int
 		svTotal    int
 		advertised int
 		wantRuns   int
 		wantSVs    int
 	}{
-		"probes report the listed totals over the advertised estimate": {
-			runsStatus: http.StatusOK, runsTotal: 74,
+		"the advertised run count and the probed state-version total": {
 			svStatus: http.StatusOK, svTotal: 55,
-			advertised: 31,
-			wantRuns:   74, wantSVs: 55,
-		},
-		"run probe failure falls back to the advertised count": {
-			runsStatus: http.StatusNotFound,
-			svStatus:   http.StatusOK, svTotal: 55,
 			advertised: 31,
 			wantRuns:   31, wantSVs: 55,
 		},
 		"state version probe failure falls back to zero": {
-			runsStatus: http.StatusOK, runsTotal: 74,
-			svStatus:   http.StatusNotFound,
-			advertised: 31,
-			wantRuns:   74, wantSVs: 0,
-		},
-		"both probes failing keep the advertised estimate": {
-			runsStatus: http.StatusNotFound,
 			svStatus:   http.StatusNotFound,
 			advertised: 31,
 			wantRuns:   31, wantSVs: 0,
@@ -107,14 +91,11 @@ func TestCounts(t *testing.T) {
 			mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			})
-			mux.HandleFunc("/api/v2/workspaces/ws-1/runs", func(w http.ResponseWriter, _ *http.Request) {
-				if tc.runsStatus != http.StatusOK {
-					w.WriteHeader(tc.runsStatus)
-
-					return
-				}
-
-				writeJSONAPI(t, w, listPayload(tc.runsTotal))
+			// The runs list endpoint has its own 30-requests-per-minute rate
+			// bucket, so counting must not spend it; the run total comes from
+			// the workspace's advertised RunsCount instead.
+			mux.HandleFunc("/api/v2/workspaces/ws-1/runs", func(http.ResponseWriter, *http.Request) {
+				t.Error("counting must not probe the rate-scarce runs list endpoint")
 			})
 			mux.HandleFunc("/api/v2/state-versions", func(w http.ResponseWriter, _ *http.Request) {
 				if tc.svStatus != http.StatusOK {
@@ -145,26 +126,26 @@ func TestCountsClampsToRunHistoryCount(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
-		oldest   time.Time
-		count    int
-		listed   int
-		wantRuns int
+		oldest     time.Time
+		count      int
+		advertised int
+		wantRuns   int
 	}{
-		"a count-only bound clamps the listed total": {
-			count: 10, listed: 74,
+		"a count-only bound clamps the advertised total": {
+			count: 10, advertised: 74,
 			wantRuns: 10,
 		},
-		"a listed total under the bound stands": {
-			count: 100, listed: 74,
+		"an advertised total under the bound stands": {
+			count: 100, advertised: 74,
 			wantRuns: 74,
 		},
-		"an age bound keeps the listed total": {
-			count: 10, oldest: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC), listed: 74,
+		"an age bound keeps the advertised total": {
+			count: 10, oldest: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC), advertised: 74,
 			wantRuns: 74,
 		},
-		"no bound keeps the listed total": {
-			listed:   74,
-			wantRuns: 74,
+		"no bound keeps the advertised total": {
+			advertised: 74,
+			wantRuns:   74,
 		},
 	}
 
@@ -176,9 +157,6 @@ func TestCountsClampsToRunHistoryCount(t *testing.T) {
 			mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			})
-			mux.HandleFunc("/api/v2/workspaces/ws-1/runs", func(w http.ResponseWriter, _ *http.Request) {
-				writeJSONAPI(t, w, listPayload(tc.listed))
-			})
 			mux.HandleFunc("/api/v2/state-versions", func(w http.ResponseWriter, _ *http.Request) {
 				writeJSONAPI(t, w, listPayload(0))
 			})
@@ -188,7 +166,7 @@ func TestCountsClampsToRunHistoryCount(t *testing.T) {
 
 			collector := newCollector(t, srv, workspace.WithRunHistoryLimit(tc.count, tc.oldest))
 
-			ws := &tfe.Workspace{ID: "ws-1", Name: "ws", RunsCount: tc.listed}
+			ws := &tfe.Workspace{ID: "ws-1", Name: "ws", RunsCount: tc.advertised}
 
 			runs, _ := collector.Counts(t.Context(), ws)
 			assert.Equal(t, tc.wantRuns, runs)
@@ -203,16 +181,14 @@ func TestCountsProbeQueries(t *testing.T) {
 	// organization and workspace filters errors on every call and its fallback
 	// silently reports zero; this pins the wire-level query so a mis-built probe
 	// cannot hide behind that fallback.
-	var runsQuery, svQuery url.Values
+	var svQuery url.Values
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("/api/v2/workspaces/ws-1/runs", func(w http.ResponseWriter, r *http.Request) {
-		runsQuery = r.URL.Query()
-
-		writeJSONAPI(t, w, listPayload(1))
+	mux.HandleFunc("/api/v2/workspaces/ws-1/runs", func(http.ResponseWriter, *http.Request) {
+		t.Error("counting must not probe the rate-scarce runs list endpoint")
 	})
 	mux.HandleFunc("/api/v2/state-versions", func(w http.ResponseWriter, r *http.Request) {
 		svQuery = r.URL.Query()
@@ -228,11 +204,8 @@ func TestCountsProbeQueries(t *testing.T) {
 	ws := &tfe.Workspace{ID: "ws-1", Name: "ws", RunsCount: 3}
 
 	runs, svs := collector.Counts(t.Context(), ws)
-	assert.Equal(t, 1, runs)
+	assert.Equal(t, 3, runs, "the run total is the advertised count, unprobed")
 	assert.Equal(t, 1, svs)
-
-	require.NotNil(t, runsQuery, "the run probe reaches the run listing")
-	assert.Equal(t, "1", runsQuery.Get("page[size]"), "the run probe requests a single item")
 
 	require.NotNil(t, svQuery, "the state-version probe reaches the listing")
 	assert.Equal(t, "1", svQuery.Get("page[size]"), "the state-version probe requests a single item")

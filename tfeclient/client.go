@@ -17,12 +17,25 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// DefaultRateLimit is the default ceiling of the adaptive rate governor, in
-// requests per second, shared across every worker using a [Client]. The
-// governor starts at the ceiling and adapts downward from the server's
-// rate-limit feedback, so this is the fastest the client will ever launch,
-// not a promise of sustained throughput.
+// DefaultRateLimit is the default ceiling of the general adaptive rate
+// governor, in requests per second, shared across every worker using a
+// [Client]. The governor starts at the ceiling and adapts downward from the
+// server's rate-limit feedback, so this is the fastest the client will ever
+// launch, not a promise of sustained throughput.
 const DefaultRateLimit float64 = 30
+
+// DefaultRunsListRateLimit is the default ceiling of the separate governor
+// pacing the two runs list endpoints (/workspaces/:workspace_id/runs and
+// /organizations/:name/runs), in requests per second. HCP Terraform meters
+// those two endpoints in a bucket of their own at 30 requests per minute, sixty
+// times below the general limit and documented only on the runs API page, so
+// pacing them from the general governor farms 429s whose pauses stall every
+// other endpoint. The default sits one request per minute under that budget: a
+// steady rate of exactly 30 per minute still places up to 31 launches inside
+// one sliding window (the fencepost request plus the bucket's one saved token),
+// and a single tripped 429 costs up to a minute of cooldown on an
+// already-scarce budget.
+const DefaultRunsListRateLimit float64 = 29.0 / 60
 
 // Pagination settings for [Paginate].
 const (
@@ -67,20 +80,23 @@ type Gate interface {
 // Client is the single, worker-safe point of contact with HCP Terraform.
 //
 // It holds exactly one underlying go-tfe client whose HTTP transport paces
-// every outbound attempt through one shared adaptive rate governor, so that N
-// concurrent workers paginating and downloading share a single aggregate
-// throttle rather than each retrying in isolation. The governor lives at the
-// transport rather than the request level so nothing outruns it: the pages
-// go-tfe's ListAll methods fetch internally, the fresh requests its chunked
-// log readers make mid-stream, and every in-client retry all pay for
-// themselves. The governor is the run's one rate authority: it starts at its
-// ceiling, halves on the server's rate-limit pushback, pauses all launches
-// until the server's advertised reset, and creeps back up while responses
-// stay clean; go-tfe's own rate-limit machinery is kept dormant (its
-// server-error retry disabled, a 429 never surfaced to it, and the rate-limit
-// header its internal limiter reads stripped). Every request routed
-// through [Client.Do] additionally takes a slot from the optional [Gate]
-// first, so a caller can bound the whole run's parallelism in one place.
+// every outbound attempt through shared adaptive rate governors, so that N
+// concurrent workers paginating and downloading share one aggregate throttle
+// rather than each retrying in isolation. The governors live at the transport
+// rather than the request level so nothing outruns them: the pages go-tfe's
+// ListAll methods fetch internally, the fresh requests its chunked log readers
+// make mid-stream, and every in-client retry all pay for themselves. There is
+// one governor per server-side rate bucket: a general one for most endpoints,
+// and a far slower one for the two runs list endpoints the server meters
+// separately (see [DefaultRunsListRateLimit]). Each governor is its bucket's
+// one rate authority: it starts at its ceiling, halves on the server's
+// rate-limit pushback, pauses its bucket's launches until the server's
+// advertised reset, and creeps back up while responses stay clean; a 429 in one
+// bucket never slows the other. Go-tfe's own rate-limit machinery is kept
+// dormant (its server-error retry disabled, a 429 never surfaced to it, and the
+// rate-limit header its internal limiter reads stripped). Every request routed
+// through [Client.Do] additionally takes a slot from the optional [Gate] first,
+// so a caller can bound the whole run's parallelism in one place.
 //
 // Create instances with [New]. A Client is safe for concurrent use.
 type Client struct {
@@ -89,9 +105,9 @@ type Client struct {
 	governor *Governor
 }
 
-// config holds the resolved settings a [Client] is built from. The governor
-// is derived from rateLimit by [newConfig] once the options are applied, so
-// [resolveHTTPClient] can bind it into the transport.
+// config holds the resolved settings a [Client] is built from. The governors
+// are derived from the rate limits by [newConfig] once the options are
+// applied, so [resolveHTTPClient] can bind them into the transport.
 type config struct {
 	httpClient            *http.Client
 	logger                *slog.Logger
@@ -99,9 +115,11 @@ type config struct {
 	rateLimited           *atomic.Int64
 	gate                  Gate
 	governor              *Governor
+	runsGovernor          *Governor
 	address               string
 	token                 string
 	rateLimit             float64
+	runsListRateLimit     float64
 	responseHeaderTimeout time.Duration
 	idleReadTimeout       time.Duration
 	serverErrorRetryDelay time.Duration
@@ -114,6 +132,7 @@ type config struct {
 //   - [WithToken]
 //   - [WithAddress]
 //   - [WithRateLimit]
+//   - [WithRunsListRateLimit]
 //   - [WithResponseHeaderTimeout]
 //   - [WithIdleReadTimeout]
 //   - [WithServerErrorRetry]
@@ -143,15 +162,28 @@ func WithAddress(address string) Option {
 	}
 }
 
-// WithRateLimit sets the adaptive rate governor's ceiling, in requests per
-// second. The governor starts at the ceiling and adapts downward from the
-// server's rate-limit feedback, so this bounds the fastest the client will
-// ever launch. A non-positive value keeps [DefaultRateLimit].
+// WithRateLimit sets the general adaptive rate governor's ceiling, in
+// requests per second. The governor starts at the ceiling and adapts downward
+// from the server's rate-limit feedback, so this bounds the fastest the
+// client will ever launch. The runs list endpoints are paced separately (see
+// [WithRunsListRateLimit]). A non-positive value keeps [DefaultRateLimit].
 // Returns an [Option].
 func WithRateLimit(perSecond float64) Option {
 	return func(c *config) {
 		if perSecond > 0 {
 			c.rateLimit = perSecond
+		}
+	}
+}
+
+// WithRunsListRateLimit sets the ceiling of the separate governor pacing the
+// two runs list endpoints, in requests per second, for a server whose
+// runs-list budget differs from HCP Terraform's documented 30 per minute. A
+// non-positive value keeps [DefaultRunsListRateLimit]. Returns an [Option].
+func WithRunsListRateLimit(perSecond float64) Option {
+	return func(c *config) {
+		if perSecond > 0 {
+			c.runsListRateLimit = perSecond
 		}
 	}
 }
@@ -306,6 +338,7 @@ func newConfig(opts []Option) config {
 	cfg := config{
 		address:               tfe.DefaultAddress,
 		rateLimit:             DefaultRateLimit,
+		runsListRateLimit:     DefaultRunsListRateLimit,
 		responseHeaderTimeout: DefaultResponseHeaderTimeout,
 		idleReadTimeout:       DefaultIdleReadTimeout,
 		serverErrorRetries:    DefaultServerErrorRetries,
@@ -316,9 +349,12 @@ func newConfig(opts []Option) config {
 		opt(&cfg)
 	}
 
-	// The governor is built once the options have settled the ceiling and the
-	// counter, so the transport wiring below can bind the one shared throttle.
+	// The governors are built once the options have settled the ceilings and
+	// the counter, so the transport wiring below can bind the shared throttles.
+	// Both increment the one rate-limited counter: it counts 429s observed on
+	// the wire, whichever bucket they landed in.
 	cfg.governor = NewGovernor(cfg.rateLimit, cfg.rateLimited)
+	cfg.runsGovernor = NewGovernor(cfg.runsListRateLimit, cfg.rateLimited)
 
 	return cfg
 }
@@ -396,7 +432,7 @@ func resolveHTTPClient(cfg *config) *http.Client {
 // both the built and the caller-supplied client paths.
 func wrapRetryAndThrottle(next http.RoundTripper, cfg *config) http.RoundTripper {
 	return &retryTransport{
-		next:             &throttleTransport{next: next, gov: cfg.governor},
+		next:             &throttleTransport{next: next, gov: cfg.governor, runsGov: cfg.runsGovernor},
 		retries:          max(cfg.serverErrorRetries, 0),
 		delay:            cfg.serverErrorRetryDelay,
 		rateLimitRetries: DefaultRateLimitRetries,
@@ -411,10 +447,12 @@ func (c *Client) TFE() *tfe.Client {
 	return c.tfe
 }
 
-// RateStatus reports the rate governor's current adaptive rate in requests
-// per second and how much of a rate-limit cooldown pause remains (zero while
-// launches are flowing), so a progress view can show the run adapting to the
-// server's capacity.
+// RateStatus reports the general rate governor's current adaptive rate in
+// requests per second and how much of a rate-limit cooldown pause remains
+// (zero while launches are flowing), so a progress view can show the run
+// adapting to the server's capacity. The runs-list governor is not reflected
+// here: its rate is a near-constant trickle by design, so the general governor
+// is the one whose movement means something.
 func (c *Client) RateStatus() (float64, time.Duration) {
 	return c.governor.Snapshot()
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/hashicorp/go-tfe"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // collectRuns archives the workspace's runs newest-first. A run's summary is
@@ -28,8 +29,12 @@ func (c *Collector) collectRuns(ctx context.Context, project string, ws *tfe.Wor
 		var list *tfe.RunList
 
 		err := c.env.Client().Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
+			// The runs list endpoint is metered in its own bucket of 30
+			// requests per minute, so each request fetches the maximum page
+			// rather than the default 20: a fifth of the spend from the walk's
+			// scarcest budget.
 			l, e := tc.Runs.List(ctx, wsID, &tfe.RunListOptions{
-				ListOptions: tfe.ListOptions{PageNumber: page},
+				ListOptions: tfe.ListOptions{PageNumber: page, PageSize: tfeclient.MaxPageSize},
 				Include: []tfe.RunIncludeOpt{
 					tfe.RunPlan,
 					tfe.RunApply,

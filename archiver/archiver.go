@@ -26,8 +26,8 @@ const defaultFlushInterval = 10 * time.Second
 // aliasing [collect.DefaultConcurrency] so the gate and every fan-out cap
 // share the collectors' number. Concurrency is a static resource bound here,
 // not a tuning knob: request pacing is decided entirely by the client's
-// adaptive rate governor, which reacts to the server's rate-limit feedback,
-// so there is nothing for a concurrency setting to adapt to.
+// adaptive rate governors, which react to the server's rate-limit feedback, so
+// there is nothing for a concurrency setting to adapt to.
 const defaultConcurrency = collect.DefaultConcurrency
 
 var (
@@ -61,7 +61,7 @@ var (
 // small workspaces, or many pieces of one large workspace) rather than being
 // pinned one-per-workspace. The bound is fixed at [defaultConcurrency]; how
 // fast those slots launch requests is decided by the client's adaptive rate
-// governor, which is where the server's rate-limit feedback lands.
+// governors, which are where the server's rate-limit feedback lands.
 //
 // Create instances with [New].
 type Archiver struct {
