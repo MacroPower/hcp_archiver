@@ -90,9 +90,11 @@ func (w *LogWriter) activeProgram() *tea.Program {
 	return w.program
 }
 
-// splitLogLines splits a log write into individual lines, dropping the trailing
-// newline the handler appends (each line is printed on its own line by the
-// program) and any resulting empty lines.
+// splitLogLines splits a log write into individual lines, trimming the trailing
+// newlines the handler appends (each line is printed on its own line by the
+// program) so they do not print a blank line after the record, and dropping a
+// write that is empty once trimmed. A blank line inside the record is kept, so
+// the record's own line breaks survive intact.
 func splitLogLines(p []byte) []string {
 	text := strings.TrimRight(string(p), "\n")
 	if text == "" {
