@@ -327,6 +327,101 @@ func TestPaginate(t *testing.T) {
 		assert.Nil(t, got, "a stalled pagination must not surface a partial listing as complete")
 		assert.Equal(t, 1, calls, "the stall is detected on the first non-advancing page")
 	})
+
+	t.Run("known extent loads pages concurrently and stitches page order", func(t *testing.T) {
+		t.Parallel()
+
+		const totalPages = 4
+
+		var (
+			mu       sync.Mutex
+			seenSize []int
+		)
+
+		// The fetch answers purely from the requested page number, so it is safe
+		// for the concurrent batch and the stitched order proves itself.
+		fetch := func(
+			_ context.Context,
+			_ *tfe.Client,
+			opts tfe.ListOptions,
+		) ([]int, *tfe.Pagination, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			seenSize = append(seenSize, opts.PageSize)
+
+			p := opts.PageNumber
+			next := p + 1
+			if p == totalPages {
+				next = 0
+			}
+
+			return []int{p*2 - 1, p * 2}, &tfe.Pagination{
+				CurrentPage: p,
+				NextPage:    next,
+				TotalPages:  totalPages,
+			}, nil
+		}
+
+		got, err := tfeclient.Paginate(t.Context(), c, fetch)
+
+		require.NoError(t, err)
+		assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, got, "items keep the listing's page order")
+		assert.Len(t, seenSize, totalPages)
+
+		for _, size := range seenSize {
+			assert.Equal(t, tfeclient.MaxPageSize, size, "every page is requested at the maximum size")
+		}
+	})
+
+	t.Run("a listing that grew during the batch is walked to its new end", func(t *testing.T) {
+		t.Parallel()
+
+		// The first page claims two pages, but by the time page 2 is read the
+		// listing has grown a third; its NextPage advertises the tail.
+		fetch := func(
+			_ context.Context,
+			_ *tfe.Client,
+			opts tfe.ListOptions,
+		) ([]int, *tfe.Pagination, error) {
+			switch opts.PageNumber {
+			case 1:
+				return []int{1, 2}, &tfe.Pagination{CurrentPage: 1, NextPage: 2, TotalPages: 2}, nil
+			case 2:
+				return []int{3, 4}, &tfe.Pagination{CurrentPage: 2, NextPage: 3, TotalPages: 3}, nil
+			default:
+				return []int{5}, &tfe.Pagination{CurrentPage: 3, NextPage: 0, TotalPages: 3}, nil
+			}
+		}
+
+		got, err := tfeclient.Paginate(t.Context(), c, fetch)
+
+		require.NoError(t, err)
+		assert.Equal(t, []int{1, 2, 3, 4, 5}, got, "the grown tail is appended after the batch")
+	})
+
+	t.Run("a stalled tail after the batch is an error", func(t *testing.T) {
+		t.Parallel()
+
+		// The final batch page claims a further page that does not advance past
+		// it, so the tail walk must surface the stall.
+		fetch := func(
+			_ context.Context,
+			_ *tfe.Client,
+			opts tfe.ListOptions,
+		) ([]int, *tfe.Pagination, error) {
+			if opts.PageNumber == 1 {
+				return []int{1}, &tfe.Pagination{CurrentPage: 1, NextPage: 2, TotalPages: 2}, nil
+			}
+
+			return []int{2}, &tfe.Pagination{CurrentPage: 2, NextPage: 2, TotalPages: 2}, nil
+		}
+
+		got, err := tfeclient.Paginate(t.Context(), c, fetch)
+
+		require.ErrorIs(t, err, tfeclient.ErrPaginationStalled)
+		assert.Nil(t, got, "a stalled tail must not surface a partial listing as complete")
+	})
 }
 
 // recordingGate records the order of gate and fn events so tests can assert

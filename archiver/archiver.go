@@ -180,6 +180,7 @@ func (a *Archiver) Run(ctx context.Context) error {
 		tfeclient.WithWireBytes(a.wireBytes),
 		tfeclient.WithRateLimitCounter(a.rateLimited),
 		tfeclient.WithGate(a.pool),
+		tfeclient.WithPageConcurrency(a.cfg.MaxConcurrency),
 		tfeclient.WithLogger(a.logger),
 	)
 	if err != nil {

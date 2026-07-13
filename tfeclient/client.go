@@ -14,6 +14,7 @@ import (
 
 	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-tfe"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/time/rate"
 )
 
@@ -26,6 +27,18 @@ const (
 	// DefaultBurst is the default token-bucket burst size for the shared
 	// limiter.
 	DefaultBurst = 30
+)
+
+// Pagination settings for [Paginate].
+const (
+	// MaxPageSize is the page size [Paginate] requests. The API serves at most
+	// 100 items per page and defaults to 20, so asking for the maximum makes a
+	// full enumeration cost a fifth of the round-trips.
+	MaxPageSize = 100
+
+	// DefaultPageConcurrency is the default ceiling on how many pages one
+	// [Paginate] call fetches at once ([WithPageConcurrency]).
+	DefaultPageConcurrency = 8
 )
 
 // DefaultResponseHeaderTimeout bounds the time [New]'s own HTTP client waits for
@@ -65,9 +78,10 @@ type Gate interface {
 //
 // Create instances with [New]. A Client is safe for concurrent use.
 type Client struct {
-	tfe     *tfe.Client
-	limiter *rate.Limiter
-	gate    Gate
+	tfe             *tfe.Client
+	limiter         *rate.Limiter
+	gate            Gate
+	pageConcurrency int
 }
 
 // config holds the resolved settings a [Client] is built from.
@@ -81,6 +95,7 @@ type config struct {
 	token                 string
 	limit                 rate.Limit
 	burst                 int
+	pageConcurrency       int
 	responseHeaderTimeout time.Duration
 	idleReadTimeout       time.Duration
 	serverErrorRetryDelay time.Duration
@@ -93,6 +108,7 @@ type config struct {
 //   - [WithToken]
 //   - [WithAddress]
 //   - [WithRateLimit]
+//   - [WithPageConcurrency]
 //   - [WithResponseHeaderTimeout]
 //   - [WithIdleReadTimeout]
 //   - [WithServerErrorRetry]
@@ -213,6 +229,19 @@ func WithRateLimitCounter(counter *atomic.Int64) Option {
 	}
 }
 
+// WithPageConcurrency sets the ceiling on how many pages one [Paginate] call
+// fetches at once, once its first page has revealed the listing's extent. The
+// archiver passes its worker-pool ceiling so one listing's fan-out never
+// queues more page fetches than the pool could ever run. A non-positive value
+// keeps the default. Returns an [Option].
+func WithPageConcurrency(n int) Option {
+	return func(c *config) {
+		if n > 0 {
+			c.pageConcurrency = n
+		}
+	}
+}
+
 // WithGate sets the [Gate] every request routed through [Client.Do] takes a
 // slot from before waiting on the rate limiter, bounding how many requests
 // are in flight at once across all workers. A nil gate leaves requests
@@ -278,9 +307,10 @@ func New(opts ...Option) (*Client, error) {
 	}
 
 	return &Client{
-		tfe:     tc,
-		limiter: rate.NewLimiter(cfg.limit, cfg.burst),
-		gate:    cfg.gate,
+		tfe:             tc,
+		limiter:         rate.NewLimiter(cfg.limit, cfg.burst),
+		gate:            cfg.gate,
+		pageConcurrency: cfg.pageConcurrency,
 	}, nil
 }
 
@@ -290,6 +320,7 @@ func newConfig(opts []Option) config {
 		address:               tfe.DefaultAddress,
 		limit:                 DefaultRateLimit,
 		burst:                 DefaultBurst,
+		pageConcurrency:       DefaultPageConcurrency,
 		responseHeaderTimeout: DefaultResponseHeaderTimeout,
 		idleReadTimeout:       DefaultIdleReadTimeout,
 		serverErrorRetries:    DefaultServerErrorRetries,
@@ -404,41 +435,138 @@ func (c *Client) Do(ctx context.Context, fn func(context.Context, *tfe.Client) e
 // listing is incomplete and must not be treated as a complete enumeration.
 var ErrPaginationStalled = errors.New("pagination stalled")
 
+// pageFetch is the page-read closure [Paginate] walks: one list call returning
+// the page's items and the server's pagination for it.
+type pageFetch[T any] func(context.Context, *tfe.Client, tfe.ListOptions) ([]T, *tfe.Pagination, error)
+
 // Paginate walks a paginated list endpoint through [Client.Do], accumulating
-// every page's items into one slice.
+// every page's items into one slice in page order.
 //
-// It advances the page number starting at 1, invoking fetch once per page with
-// the [tfe.ListOptions] to apply, and stops when the returned
-// [*tfe.Pagination] reports no next page. Each page fetch passes through the
-// shared limiter.
+// Every page is requested at [MaxPageSize] to minimize round-trips. The first
+// page is fetched alone, since its pagination reveals the listing's extent;
+// the remaining pages are then fetched concurrently, capped by
+// [WithPageConcurrency] and by the client's gate like every request, and
+// stitched in page order. A response that carries no extent (a nil pagination
+// or zero TotalPages) falls back to following NextPage serially. A listing
+// that grows while the batch is in flight advertises a further next page on
+// its last page, and the walk continues serially from there, so the tail is
+// never silently dropped. Paging through a list that is changing mid-walk can
+// duplicate or miss items whether or not the pages load concurrently; the
+// shorter window narrows that skew.
 //
 // A pagination that stalls (a NextPage that claims more pages but does not
 // advance) returns [ErrPaginationStalled] rather than the partial listing:
 // the callers of a complete enumeration settle absences and mark surfaces
 // complete from it, so a silently truncated list would convert the unreached
 // tail into recorded absences.
-func Paginate[T any](
-	ctx context.Context,
-	c *Client,
-	fetch func(context.Context, *tfe.Client, tfe.ListOptions) ([]T, *tfe.Pagination, error),
-) ([]T, error) {
+func Paginate[T any](ctx context.Context, c *Client, fetch pageFetch[T]) ([]T, error) {
+	first, pg, err := fetchPage(ctx, c, fetch, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	if pg == nil || pg.NextPage == 0 {
+		return first, nil
+	}
+
+	if pg.TotalPages <= 1 {
+		return paginateFrom(ctx, c, fetch, first, 1, pg.NextPage)
+	}
+
+	// The extent is known: fetch the remaining pages concurrently into
+	// per-page slots, so the goroutines share nothing and the stitched result
+	// keeps the listing's own order.
+	pages := make([][]T, pg.TotalPages+1)
+	pages[1] = first
+
+	lastPage := pg.TotalPages
+
+	var lastPg *tfe.Pagination
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(c.pageConcurrency)
+
+	for p := 2; p <= lastPage; p++ {
+		g.Go(func() error {
+			items, pgN, ferr := fetchPage(gctx, c, fetch, p)
+			if ferr != nil {
+				return ferr
+			}
+
+			pages[p] = items
+
+			// Only the final page can reveal growth past the batch; exactly one
+			// goroutine writes this, and the group's Wait orders the read below.
+			if p == lastPage {
+				lastPg = pgN
+			}
+
+			return nil
+		})
+	}
+
+	err = g.Wait()
+	if err != nil {
+		return nil, err //nolint:wrapcheck // Page fetch errors pass through unmodified for Classify.
+	}
+
 	var all []T
 
-	page := 1
+	for _, page := range pages {
+		all = append(all, page...)
+	}
 
+	// A listing that grew while the batch was in flight advertises a further
+	// page on the last one; walk the tail serially so it is not dropped.
+	if lastPg != nil && lastPg.NextPage != 0 {
+		return paginateFrom(ctx, c, fetch, all, lastPage, lastPg.NextPage)
+	}
+
+	return all, nil
+}
+
+// fetchPage reads one page through [Client.Do] at the maximum page size.
+func fetchPage[T any](ctx context.Context, c *Client, fetch pageFetch[T], page int) ([]T, *tfe.Pagination, error) {
+	var (
+		items []T
+		pg    *tfe.Pagination
+	)
+
+	err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
+		var e error
+
+		items, pg, e = fetch(ctx, tc, tfe.ListOptions{PageNumber: page, PageSize: MaxPageSize})
+
+		return e
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return items, pg, nil
+}
+
+// paginateFrom follows NextPage serially from the page numbered next, appending
+// each page's items to all. The prev argument is the page that advertised next.
+//
+// The server drives this walk through NextPage, and a well-formed response
+// always advances it. A NextPage that does not move past its own page would
+// otherwise loop forever, re-fetching the same page and growing the result
+// without bound; the stall surfaces as [ErrPaginationStalled] rather than a
+// truncated listing the caller would mistake for a complete one.
+func paginateFrom[T any](
+	ctx context.Context,
+	c *Client,
+	fetch pageFetch[T],
+	all []T,
+	prev, next int,
+) ([]T, error) {
 	for {
-		var (
-			items []T
-			pg    *tfe.Pagination
-		)
+		if next <= prev {
+			return nil, fmt.Errorf("%w: page %d reports next page %d", ErrPaginationStalled, prev, next)
+		}
 
-		err := c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
-			var e error
-
-			items, pg, e = fetch(ctx, tc, tfe.ListOptions{PageNumber: page})
-
-			return e
-		})
+		items, pg, err := fetchPage(ctx, c, fetch, next)
 		if err != nil {
 			return nil, err
 		}
@@ -446,22 +574,11 @@ func Paginate[T any](
 		all = append(all, items...)
 
 		if pg == nil || pg.NextPage == 0 {
-			break
+			return all, nil
 		}
 
-		// The server drives pagination through NextPage, and a well-formed response
-		// always advances it. A NextPage that does not move past the current page
-		// would otherwise loop forever, re-fetching the same page and growing all
-		// without bound; surface the stall rather than return a truncated listing
-		// the caller would mistake for a complete one.
-		if pg.NextPage <= page {
-			return nil, fmt.Errorf("%w: page %d reports next page %d", ErrPaginationStalled, page, pg.NextPage)
-		}
-
-		page = pg.NextPage
+		prev, next = next, pg.NextPage
 	}
-
-	return all, nil
 }
 
 // OpenState opens a state version blob at its signed download URL for streaming
