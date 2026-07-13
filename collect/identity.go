@@ -208,7 +208,8 @@ func (e *Env) writeIdentity(relPath string, ident *Identity) error {
 // the child directory's name, scanning the disk once per parent per run and
 // serving later claims from the cache. The scan is best-effort: a child with
 // no identity or an unreadable one is skipped, since its own claim fails
-// closed when it is visited.
+// closed when it is visited. A directory that does not yet exist caches an
+// empty map, but a real read fault is left uncached so a later claim retries.
 func (e *Env) ownersUnderLocked(parent string) map[string]string {
 	if owners, ok := e.idOwners[parent]; ok {
 		return owners
@@ -217,7 +218,8 @@ func (e *Env) ownersUnderLocked(parent string) map[string]string {
 	owners := make(map[string]string)
 
 	entries, err := os.ReadDir(e.store.AbsPath(parent))
-	if err == nil {
+	switch {
+	case err == nil:
 		for _, entry := range entries {
 			if !entry.IsDir() {
 				continue
@@ -230,6 +232,13 @@ func (e *Env) ownersUnderLocked(parent string) map[string]string {
 
 			owners[ident.ID] = entry.Name()
 		}
+
+	case !errors.Is(err, fs.ErrNotExist):
+		// A real read fault (a permission or I/O error, not a fresh parent that
+		// has no siblings yet) must not be cached: an empty map served for the
+		// whole run would silently disable rename detection under this parent.
+		// Leave the cache unset so a later claim retries the scan.
+		return owners
 	}
 
 	e.idOwners[parent] = owners
