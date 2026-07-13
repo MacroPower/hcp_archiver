@@ -93,8 +93,13 @@ type tuiModel struct {
 	width     int
 	height    int
 	tick      int
-	quitting  bool
-	sampled   bool
+	// The high-water line count of the task region (task rows plus the overflow
+	// line), advanced on each tick. The region is padded up to this mark so the
+	// panel holds its height as work items finish rather than shrinking, a change
+	// that would force the inline renderer to erase and resize mid-run.
+	taskRegionHigh int
+	quitting       bool
+	sampled        bool
 }
 
 // newTUIModel creates a new [tuiModel] that renders snapshots from take and, on
@@ -173,6 +178,11 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.snap = m.take()
 			m.sampled = true
 			m.observe(m.snap)
+
+			// Advance the task region's high-water mark so render can hold the
+			// panel's height as work items finish. Growth-only here; render caps
+			// it to what the terminal fits.
+			m.taskRegionHigh = max(m.taskRegionHigh, taskRegionLines(len(m.snap.tasks), m.taskLineBudget()))
 		}
 
 		m.spin, cmd = m.spin.Update(msg)
@@ -239,10 +249,11 @@ func (m *tuiModel) throughput(snap snapshot) float64 {
 // percent, the eta, and the target. One line per in-flight work item follows,
 // each with its own bar, percent, unit fraction, and name, in registration
 // order so rows hold still as their bars move; items past the cap are counted
-// on an overflow line. The last line carries the colored
-// per-status counts and the byte, rate, and elapsed metadata. Every field
-// before a line's trailing name or metadata holds a constant width, so the
-// panel does not reflow as values change.
+// on an overflow line. This region holds at its high-water line count, padded
+// with blank lines, so the panel does not shrink as work items finish. The last
+// line carries the colored per-status counts and the byte, rate, and elapsed
+// metadata. Every field before a line's trailing name or metadata holds a
+// constant width, so the panel does not reflow as values change.
 func (m *tuiModel) render(snap snapshot) string {
 	var line1 strings.Builder
 
@@ -311,15 +322,30 @@ func (m *tuiModel) render(snap snapshot) string {
 		metaLine += " " + styleRateLimited.Render(fmt.Sprintf("· 429s %d", snap.rateLimited))
 	}
 
-	lines := []string{m.fit(line1.String())}
+	budget := m.taskLineBudget()
 
-	visible := min(len(snap.tasks), m.taskLineBudget())
+	// Capacity: line one, up to budget task rows, the overflow slot, and the two
+	// footer lines.
+	lines := make([]string, 0, budget+4)
+	lines = append(lines, m.fit(line1.String()))
+
+	visible := min(len(snap.tasks), budget)
 	for _, task := range snap.tasks[:visible] {
 		lines = append(lines, m.fit(m.renderTask(task)))
 	}
 
 	if hidden := len(snap.tasks) - visible; hidden > 0 {
 		lines = append(lines, m.fit("  "+styleMeta.Render(fmt.Sprintf("… +%d more active", hidden))))
+	}
+
+	// Pad the task region up to its high-water line count so the panel holds its
+	// height as work items finish rather than shrinking. A shrinking inline frame
+	// forces the renderer to erase and resize, which corrupts the panel when a
+	// log line is inserted above it at the same moment. The mark is capped here
+	// at what the terminal fits (budget task rows plus the overflow slot), so a
+	// shorter terminal pulls it back down.
+	for target := min(m.taskRegionHigh, budget+1); len(lines)-1 < target; {
+		lines = append(lines, "")
 	}
 
 	lines = append(lines, m.fit(counts), m.fit(metaLine))
@@ -338,6 +364,18 @@ func (m *tuiModel) taskLineBudget() int {
 	}
 
 	return min(maxTaskLines, max(m.height-4, 0))
+}
+
+// taskRegionLines is the natural line count of the task region for a pool of the
+// given size under budget: one line per shown item, plus an overflow line once
+// the pool outruns the budget. The high-water mark advances to this count.
+func taskRegionLines(tasks, budget int) int {
+	visible := min(tasks, budget)
+	if tasks > visible {
+		return visible + 1
+	}
+
+	return visible
 }
 
 // renderTask formats one in-flight work item's line: its bar aligned under the

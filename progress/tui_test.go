@@ -130,6 +130,33 @@ func TestRenderPanel_TaskLinesFitTerminalHeight(t *testing.T) {
 	assert.Contains(t, ansi.Strip(rendered), "+9 more active")
 }
 
+func TestRenderPanel_HeightHoldsAsTasksFinish(t *testing.T) {
+	t.Parallel()
+
+	// The panel must not shrink as work items finish; a shrinking frame corrupts
+	// it mid-log (see render). The height holds and the surviving task still shows.
+	frames := progress.RenderPanelFrames(0, 0, tasksPanel(5), tasksPanel(2))
+
+	assert.Equal(t, strings.Count(frames[0], "\n"), strings.Count(frames[1], "\n"),
+		"panel height holds as tasks finish")
+	assert.Contains(t, ansi.Strip(frames[1]), "acme/ws-00", "remaining task still shown")
+}
+
+func TestRenderPanel_HighWaterClampsOnResizeDown(t *testing.T) {
+	t.Parallel()
+
+	// The reserved region is capped at what the terminal fits, so a resize to a
+	// shorter terminal pulls the high-water back down and the panel still fits
+	// without truncating a live task row.
+	//
+	// Grow to peak on a tall terminal, then shrink to six rows.
+	frame := progress.RenderPanelResize(80, 20, 80, 6, tasksPanel(8), tasksPanel(1))
+	lines := strings.Split(frame, "\n")
+
+	assert.LessOrEqual(t, len(lines), 6, "panel fits the shorter terminal")
+	assert.Contains(t, ansi.Strip(frame), "acme/ws-00", "live task not truncated by padding")
+}
+
 // barColumn returns the display column at which a rendered line's bar begins.
 func barColumn(t *testing.T, line string) int {
 	t.Helper()
@@ -150,6 +177,23 @@ func TestRenderPanel_Resumed(t *testing.T) {
 	panel.Tally.Resumed = true
 
 	golden.RequireEqual(t, []byte(progress.RenderPanel(panel)))
+}
+
+// tasksPanel is barPanel with the target cleared and n in-flight work items,
+// shared by the task-region tests.
+func tasksPanel(n int) progress.PanelSnapshot {
+	p := barPanel()
+	p.Tally.Target = ""
+
+	for i := range n {
+		p.Tasks = append(p.Tasks, progress.PanelTask{
+			Name:  fmt.Sprintf("acme/ws-%02d", i),
+			Total: 10,
+			Done:  i,
+		})
+	}
+
+	return p
 }
 
 // indeterminatePanel is barPanel with the phase's total unknown, so the bar

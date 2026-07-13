@@ -109,6 +109,57 @@ func MarqueeTick(ps PanelSnapshot, n int) string {
 	return m.render(ps.snap())
 }
 
+// newModelAt builds a model taking snapshots from take, sized by an initial
+// window message when width or height is set (a zero size keeps the unclipped
+// task budget, as the golden tests use).
+func newModelAt(width, height int, take func() snapshot) *tuiModel {
+	m := newTUIModel(take, nil)
+	if width > 0 || height > 0 {
+		m.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	}
+
+	return m
+}
+
+// RenderPanelFrames drives one persistent model through snaps by ticks at the
+// given terminal size, returning each rendered frame. The model advances its
+// task-region high-water mark on each tick, so the panel holds its height across
+// frames as it does in a live run.
+func RenderPanelFrames(width, height int, snaps ...PanelSnapshot) []string {
+	idx := 0
+	m := newModelAt(width, height, func() snapshot { return snaps[idx].snap() })
+
+	frames := make([]string, len(snaps))
+
+	for idx = range snaps {
+		m.Update(spinner.TickMsg{})
+
+		frames[idx] = m.render(m.snap)
+	}
+
+	return frames
+}
+
+// RenderPanelResize grows a persistent model's task region to its peak at the
+// first size, then renders after resizing to the second, returning the
+// post-resize frame. It exercises the high-water cap: a shorter terminal pulls
+// the reserved region back down so the panel still fits.
+func RenderPanelResize(width1, height1, width2, height2 int, peak, after PanelSnapshot) string {
+	snaps := []PanelSnapshot{peak, after}
+	idx := 0
+	m := newModelAt(width1, height1, func() snapshot { return snaps[idx].snap() })
+
+	m.Update(spinner.TickMsg{})
+	m.render(m.snap)
+
+	idx = 1
+
+	m.Update(tea.WindowSizeMsg{Width: width2, Height: height2})
+	m.Update(spinner.TickMsg{})
+
+	return m.render(m.snap)
+}
+
 // RenderSummary renders the styled summary block for ps.
 func RenderSummary(ps PanelSnapshot) string {
 	var r Reporter
