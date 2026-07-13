@@ -15,22 +15,14 @@ import (
 	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-tfe"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/time/rate"
 )
 
-// Default rate-limit settings for the shared limiter.
-const (
-	// DefaultRateLimit is the default sustained request rate, in requests per
-	// second, applied across every worker sharing a [Client].
-	DefaultRateLimit rate.Limit = 30
-
-	// DefaultBurst is the default token-bucket burst size for the shared
-	// limiter. It is deliberately a fraction of one second's sustained rate:
-	// the server enforces its limit per second, so a full bucket saved up
-	// during a lull and released on top of the sustained stream would land
-	// inside one window and read back as a burst of 429s.
-	DefaultBurst = 10
-)
+// DefaultRateLimit is the default ceiling of the adaptive rate governor, in
+// requests per second, shared across every worker using a [Client]. The
+// governor starts at the ceiling and adapts downward from the server's
+// rate-limit feedback, so this is the fastest the client will ever launch,
+// not a promise of sustained throughput.
+const DefaultRateLimit float64 = 30
 
 // Pagination settings for [Paginate].
 const (
@@ -39,8 +31,9 @@ const (
 	// full enumeration cost a fifth of the round-trips.
 	MaxPageSize = 100
 
-	// DefaultPageConcurrency is the default ceiling on how many pages one
-	// [Paginate] call fetches at once ([WithPageConcurrency]).
+	// DefaultPageConcurrency is the ceiling on how many pages one [Paginate]
+	// call fetches at once. It sits below the client's in-flight gate, which
+	// binds first, so it only keeps one listing from monopolizing the gate.
 	DefaultPageConcurrency = 8
 )
 
@@ -59,10 +52,11 @@ const DefaultResponseHeaderTimeout = 60 * time.Second
 const DefaultTLSHandshakeTimeout = 20 * time.Second
 
 // Gate bounds how many requests may be in flight at once. Acquire blocks
-// until a slot is free or ctx is done and Release returns the slot, so a
-// resizable implementation can scale the client's effective parallelism while
-// a run is live. See [go.jacobcolvin.com/hcp_archiver/workpool.Pool] for an
-// implementation.
+// until a slot is free or ctx is done and Release returns the slot. The gate
+// answers "how many at once" and nothing else; "how fast" belongs to the
+// client's adaptive rate governor, so server feedback moves the rate, never
+// the concurrency. The archiver satisfies it with a fixed-size counting
+// semaphore.
 type Gate interface {
 	// Acquire takes a slot, blocking until one is free or ctx is done.
 	Acquire(ctx context.Context) error
@@ -73,25 +67,30 @@ type Gate interface {
 // Client is the single, worker-safe point of contact with HCP Terraform.
 //
 // It holds exactly one underlying go-tfe client whose HTTP transport paces
-// every outbound attempt through one shared [rate.Limiter], so that N
+// every outbound attempt through one shared adaptive rate governor, so that N
 // concurrent workers paginating and downloading share a single aggregate
-// throttle rather than each retrying in isolation. The limiter lives at the
-// transport rather than the request level so nothing outruns it: the retries
-// go-tfe issues after a 429, the pages its ListAll methods fetch internally,
-// and the fresh requests its chunked log readers make mid-stream all pay for
-// themselves. Every request routed through [Client.Do] additionally takes a
-// slot from the optional [Gate] first, so a caller can bound and re-bound the
-// whole run's parallelism in one place.
+// throttle rather than each retrying in isolation. The governor lives at the
+// transport rather than the request level so nothing outruns it: the pages
+// go-tfe's ListAll methods fetch internally, the fresh requests its chunked
+// log readers make mid-stream, and every in-client retry all pay for
+// themselves. The governor is the run's one rate authority: it starts at its
+// ceiling, halves on the server's rate-limit pushback, pauses all launches
+// until the server's advertised reset, and creeps back up while responses
+// stay clean; go-tfe's own rate-limit machinery is kept dormant (its
+// server-error retry disabled, a 429 never surfaced to it, and the rate-limit
+// header its internal limiter reads stripped). Every request routed
+// through [Client.Do] additionally takes a slot from the optional [Gate]
+// first, so a caller can bound the whole run's parallelism in one place.
 //
 // Create instances with [New]. A Client is safe for concurrent use.
 type Client struct {
-	tfe             *tfe.Client
-	gate            Gate
-	pageConcurrency int
+	tfe      *tfe.Client
+	gate     Gate
+	governor *Governor
 }
 
-// config holds the resolved settings a [Client] is built from. The limiter is
-// derived from limit and burst by [newConfig] once the options are applied, so
+// config holds the resolved settings a [Client] is built from. The governor
+// is derived from rateLimit by [newConfig] once the options are applied, so
 // [resolveHTTPClient] can bind it into the transport.
 type config struct {
 	httpClient            *http.Client
@@ -99,12 +98,10 @@ type config struct {
 	wireBytes             *atomic.Int64
 	rateLimited           *atomic.Int64
 	gate                  Gate
-	limiter               *rate.Limiter
+	governor              *Governor
 	address               string
 	token                 string
-	limit                 rate.Limit
-	burst                 int
-	pageConcurrency       int
+	rateLimit             float64
 	responseHeaderTimeout time.Duration
 	idleReadTimeout       time.Duration
 	serverErrorRetryDelay time.Duration
@@ -117,7 +114,6 @@ type config struct {
 //   - [WithToken]
 //   - [WithAddress]
 //   - [WithRateLimit]
-//   - [WithPageConcurrency]
 //   - [WithResponseHeaderTimeout]
 //   - [WithIdleReadTimeout]
 //   - [WithServerErrorRetry]
@@ -147,17 +143,15 @@ func WithAddress(address string) Option {
 	}
 }
 
-// WithRateLimit sets the shared limiter's sustained rate, in requests per
-// second, and burst size. Non-positive values keep the defaults.
+// WithRateLimit sets the adaptive rate governor's ceiling, in requests per
+// second. The governor starts at the ceiling and adapts downward from the
+// server's rate-limit feedback, so this bounds the fastest the client will
+// ever launch. A non-positive value keeps [DefaultRateLimit].
 // Returns an [Option].
-func WithRateLimit(perSecond float64, burst int) Option {
+func WithRateLimit(perSecond float64) Option {
 	return func(c *config) {
 		if perSecond > 0 {
-			c.limit = rate.Limit(perSecond)
-		}
-
-		if burst > 0 {
-			c.burst = burst
+			c.rateLimit = perSecond
 		}
 	}
 }
@@ -195,16 +189,15 @@ func WithIdleReadTimeout(timeout time.Duration) Option {
 }
 
 // WithServerErrorRetry sets how the client retries a request that failed at
-// the transport or answered with a server error (5xx) when [New] builds its
-// own HTTP client: retries is the number of additional attempts after the
-// first, and delay is the wait before the first retry, doubling on each retry
-// after that (capped internally, so the worst-case stall stays in seconds).
-// Rate-limited (429) responses are not governed by this; the go-tfe client
-// retries those itself honoring the server's reset time. A non-positive
-// retries disables in-client retrying, leaving the failure to the caller's
-// recorded outcome and the next run; a non-positive delay retries
-// immediately. A caller-supplied [WithHTTPClient] takes precedence over it.
-// Returns an [Option].
+// the transport or answered with a server error (5xx): retries is the number
+// of additional attempts after the first, and delay is the wait before the
+// first retry, doubling on each retry after that (capped internally, so the
+// worst-case stall stays in seconds). Rate-limited (429) responses are not
+// governed by this; they carry their own fixed budget
+// ([DefaultRateLimitRetries]) and back off in the shared governor rather
+// than locally. A non-positive retries disables server-error retrying,
+// leaving the failure to the caller's recorded outcome and the next run; a
+// non-positive delay retries immediately. Returns an [Option].
 func WithServerErrorRetry(retries int, delay time.Duration) Option {
 	return func(c *config) {
 		c.serverErrorRetries = retries
@@ -225,36 +218,21 @@ func WithWireBytes(counter *atomic.Int64) Option {
 	}
 }
 
-// WithRateLimitCounter sets a shared counter that increments once per
-// rate-limited (HTTP 429) response observed on the wire when [New] builds its
-// own HTTP client. The go-tfe client retries a 429 internally after backing
-// off, so each retried attempt counts too; the counter is the raw pressure
-// signal an adaptive scaler samples, not a count of failed operations. A nil
-// counter disables counting, and a caller-supplied [WithHTTPClient] takes
-// precedence over it. Returns an [Option].
+// WithRateLimitCounter sets a shared counter the rate governor increments
+// once per rate-limited (HTTP 429) response observed on the wire, including
+// each retried attempt, so a progress view can surface how throttled the run
+// has been. It is raw telemetry, not a count of failed operations. A nil
+// counter disables counting. Returns an [Option].
 func WithRateLimitCounter(counter *atomic.Int64) Option {
 	return func(c *config) {
 		c.rateLimited = counter
 	}
 }
 
-// WithPageConcurrency sets the ceiling on how many pages one [Paginate] call
-// fetches at once, once its first page has revealed the listing's extent. The
-// archiver passes its worker-pool ceiling so one listing's fan-out never
-// queues more page fetches than the pool could ever run. A non-positive value
-// keeps the default. Returns an [Option].
-func WithPageConcurrency(n int) Option {
-	return func(c *config) {
-		if n > 0 {
-			c.pageConcurrency = n
-		}
-	}
-}
-
 // WithGate sets the [Gate] every request routed through [Client.Do] takes a
-// slot from before waiting on the rate limiter, bounding how many requests
+// slot from before waiting on the rate governor, bounding how many requests
 // are in flight at once across all workers. A nil gate leaves requests
-// bounded only by the limiter. Returns an [Option].
+// bounded only by the governor. Returns an [Option].
 func WithGate(g Gate) Option {
 	return func(c *config) {
 		c.gate = g
@@ -264,13 +242,12 @@ func WithGate(g Gate) Option {
 // WithLogger sets the logger every request is traced through when [New] builds
 // its own HTTP client. Each attempt on the wire emits one [slog.LevelDebug]
 // line carrying the method, URL, elapsed time to headers, and the status (or
-// transport error) that attempt saw; the go-tfe client retries rate-limited
-// responses and this client retries server errors ([WithServerErrorRetry]), so
-// a retried request logs once per attempt. Downloads log their full signed
-// artifact URL, so treat the debug
-// output as sensitively as the token itself. A nil logger disables the
-// logging, and a caller-supplied [WithHTTPClient] takes precedence over it.
-// Returns an [Option].
+// transport error) that attempt saw; the client retries server errors
+// ([WithServerErrorRetry]) and rate-limited responses, so a retried request
+// logs once per attempt. Downloads log their full signed artifact URL, so
+// treat the debug output as sensitively as the token itself. A nil logger
+// disables the logging, and a caller-supplied [WithHTTPClient] takes
+// precedence over it. Returns an [Option].
 func WithLogger(logger *slog.Logger) Option {
 	return func(c *config) {
 		c.logger = logger
@@ -289,7 +266,7 @@ func WithHTTPClient(hc *http.Client) Option {
 
 // New creates a new [Client].
 //
-// It constructs exactly one go-tfe client and one shared [rate.Limiter]. It
+// It constructs exactly one go-tfe client and one shared rate governor. It
 // returns [ErrMissingToken] if no token was supplied via [WithToken].
 func New(opts ...Option) (*Client, error) {
 	cfg := newConfig(opts)
@@ -298,13 +275,15 @@ func New(opts ...Option) (*Client, error) {
 		return nil, fmt.Errorf("new client: %w", ErrMissingToken)
 	}
 
-	// Server-error retry is deliberately owned by this package's bounded
-	// [retryTransport] rather than go-tfe: with RetryServerErrors on, go-tfe
+	// All retry policy is deliberately owned by this package's bounded
+	// [retryTransport] rather than go-tfe. With RetryServerErrors on, go-tfe
 	// retries a 5xx 30 times under a linearly growing backoff (over six
 	// minutes per request against a persistently failing endpoint, holding a
-	// worker slot the whole time), and none of it is configurable through
-	// [tfe.Config]. The 429 handling is unaffected: go-tfe retries rate-limited
-	// responses regardless of this flag, honoring the server's reset time.
+	// worker slot the whole time), none of it configurable through
+	// [tfe.Config]; the flag stays off. Its 429 retry ignores the flag, so it
+	// is starved instead: the transport never returns a 429 upward, retrying
+	// within its own budget and converting exhaustion to an error go-tfe does
+	// not retry.
 	tc, err := tfe.NewClient(&tfe.Config{
 		Address:           cfg.address,
 		Token:             cfg.token,
@@ -316,9 +295,9 @@ func New(opts ...Option) (*Client, error) {
 	}
 
 	return &Client{
-		tfe:             tc,
-		gate:            cfg.gate,
-		pageConcurrency: cfg.pageConcurrency,
+		tfe:      tc,
+		gate:     cfg.gate,
+		governor: cfg.governor,
 	}, nil
 }
 
@@ -326,9 +305,7 @@ func New(opts ...Option) (*Client, error) {
 func newConfig(opts []Option) config {
 	cfg := config{
 		address:               tfe.DefaultAddress,
-		limit:                 DefaultRateLimit,
-		burst:                 DefaultBurst,
-		pageConcurrency:       DefaultPageConcurrency,
+		rateLimit:             DefaultRateLimit,
 		responseHeaderTimeout: DefaultResponseHeaderTimeout,
 		idleReadTimeout:       DefaultIdleReadTimeout,
 		serverErrorRetries:    DefaultServerErrorRetries,
@@ -339,9 +316,9 @@ func newConfig(opts []Option) config {
 		opt(&cfg)
 	}
 
-	// The limiter is built once the options have settled the rate, so the
-	// transport wiring below can bind the one shared throttle.
-	cfg.limiter = rate.NewLimiter(cfg.limit, cfg.burst)
+	// The governor is built once the options have settled the ceiling and the
+	// counter, so the transport wiring below can bind the one shared throttle.
+	cfg.governor = NewGovernor(cfg.rateLimit, cfg.rateLimited)
 
 	return cfg
 }
@@ -350,9 +327,12 @@ func newConfig(opts []Option) config {
 // or otherwise builds a pooled client whose transport bounds the time to first
 // byte and each body read's idle wait. A caller-supplied [WithHTTPClient]
 // client keeps its own transport and tuning, so neither bound nor the
-// wire-byte counter applies to it; the shared rate limiter is the one
-// exception, wrapped around a copy, because the throttle is a correctness
-// bound no request path may escape rather than instrumentation.
+// wire-byte counter applies to it; the governor and retry transports are the
+// exception, wrapped around a copy, because their invariants are correctness
+// bounds no request path may escape rather than instrumentation: every
+// attempt pays the shared throttle, every response sheds its rate-limit
+// header, and no 429 ever reaches go-tfe (whose unconditional 429 retry and
+// fatal reset-header parse would otherwise survive on this path).
 //
 // Without one, go-tfe falls back to [cleanhttp.DefaultPooledClient], which sets
 // no ResponseHeaderTimeout and leaves Client.Timeout zero, so one stalled
@@ -378,7 +358,7 @@ func resolveHTTPClient(cfg *config) *http.Client {
 			next = http.DefaultTransport
 		}
 
-		hc.Transport = &throttleTransport{next: next, limiter: cfg.limiter}
+		hc.Transport = wrapRetryAndThrottle(next, cfg)
 
 		return &hc
 	}
@@ -401,33 +381,42 @@ func resolveHTTPClient(cfg *config) *http.Client {
 		logger:      cfg.logger,
 		idleTimeout: cfg.idleReadTimeout,
 		wireBytes:   cfg.wireBytes,
-		rateLimited: cfg.rateLimited,
 	}
 
-	// The throttle sits below the retry layers, so every attempt they
-	// generate (a 5xx retry here, a 429 retry in go-tfe above) pays its own
-	// rate token, and above the instrumented transport, so each attempt still
-	// logs and counts individually.
-	rt = &throttleTransport{next: rt, limiter: cfg.limiter}
+	return &http.Client{Transport: wrapRetryAndThrottle(rt, cfg)}
+}
 
-	// The bounded server-error retry sits above the throttle, and below the
-	// go-tfe client, whose own server-error retry stays disabled (see [New]).
-	if cfg.serverErrorRetries > 0 {
-		rt = &retryTransport{
-			next:    rt,
-			retries: cfg.serverErrorRetries,
-			delay:   cfg.serverErrorRetryDelay,
-		}
+// wrapRetryAndThrottle stacks the two transports every request path must pass
+// through around next: the governor transport below, so each physical attempt
+// pays a rate token and reports its outcome, and the bounded retry above it,
+// so every retried attempt re-enters the governor. The pair also holds the
+// invariant that go-tfe never sees a 429 (the retry converts an unretried one
+// to an error) and never sees the X-RateLimit-Limit header (the governor
+// transport strips it), keeping go-tfe's own rate-limit machinery dormant on
+// both the built and the caller-supplied client paths.
+func wrapRetryAndThrottle(next http.RoundTripper, cfg *config) http.RoundTripper {
+	return &retryTransport{
+		next:             &throttleTransport{next: next, gov: cfg.governor},
+		retries:          max(cfg.serverErrorRetries, 0),
+		delay:            cfg.serverErrorRetryDelay,
+		rateLimitRetries: DefaultRateLimitRetries,
 	}
-
-	return &http.Client{Transport: rt}
 }
 
 // TFE returns the underlying go-tfe client so collectors can build closures
 // over its many typed services. Requests made directly on the returned client
-// bypass the shared limiter; route them through [Client.Do] to stay throttled.
+// bypass the gate but not the governor, which lives in the client's HTTP
+// transport; route them through [Client.Do] to stay bounded.
 func (c *Client) TFE() *tfe.Client {
 	return c.tfe
+}
+
+// RateStatus reports the rate governor's current adaptive rate in requests
+// per second and how much of a rate-limit cooldown pause remains (zero while
+// launches are flowing), so a progress view can show the run adapting to the
+// server's capacity.
+func (c *Client) RateStatus() (float64, time.Duration) {
+	return c.governor.Snapshot()
 }
 
 // Do runs fn after taking a slot from the optional [Gate], passing the
@@ -473,8 +462,8 @@ type pageFetch[T any] func(context.Context, *tfe.Client, tfe.ListOptions) ([]T, 
 //
 // Every page is requested at [MaxPageSize] to minimize round-trips. The first
 // page is fetched alone, since its pagination reveals the listing's extent;
-// the remaining pages are then fetched concurrently, capped by
-// [WithPageConcurrency] and by the client's gate like every request, and
+// the remaining pages are then fetched concurrently, capped at
+// [DefaultPageConcurrency] and by the client's gate like every request, and
 // stitched in page order. A response that carries no extent (a nil pagination
 // or zero TotalPages) falls back to following NextPage serially. A listing
 // that grows while the batch is in flight advertises a further next page on
@@ -513,7 +502,7 @@ func Paginate[T any](ctx context.Context, c *Client, fetch pageFetch[T]) ([]T, e
 	var lastPg *tfe.Pagination
 
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(c.pageConcurrency)
+	g.SetLimit(DefaultPageConcurrency)
 
 	for p := 2; p <= lastPage; p++ {
 		g.Go(func() error {

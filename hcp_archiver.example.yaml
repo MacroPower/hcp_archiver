@@ -13,11 +13,6 @@ address: https://app.terraform.io
 organizations:
   - my-org
 
-# Ceiling on archive workers (in-flight API requests). Every run starts at one
-# worker and scales itself: up while the API stays quiet, down when it
-# rate-limits the run.
-maxConcurrency: 16
-
 # Bound on how much of each workspace's run history is archived, unlimited by
 # default. Each bound is optional: count keeps the newest N runs, age keeps
 # runs created within the window (a Go duration, e.g. 2160h for ~90 days).

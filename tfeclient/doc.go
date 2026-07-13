@@ -2,32 +2,39 @@
 //
 // It wraps the go-tfe client behind a worker-safe surface so that every other
 // package can treat network access as an already-throttled, already-classified
-// capability. One rate limiter is shared across all concurrent workers:
-// because N workers each paginating and downloading multiply the request
-// rate, per-request retry alone is not enough, so exactly one client is
-// constructed and shared. The limiter is enforced at the HTTP transport, so
-// every attempt that leaves the process pays a token; the retries go-tfe
-// issues after a 429, the pages its ListAll methods fetch internally, and the
-// fresh requests its chunked log readers make mid-stream cannot outrun the
-// aggregate rate. An optional [Gate] bounds how many requests are in flight
-// at once; a resizable gate lets the caller scale the run's parallelism live,
-// and the client's transport counts rate-limited (429) responses into a
-// caller-supplied counter so an adaptive scaler has a pressure signal to
-// react to. The package also walks paginated list endpoints (advancing the
-// page number while the response reports a next page) and follows the
-// short-lived signed-URL download flow for state blobs, configuration
-// tarballs, and plan/apply logs.
+// capability. One adaptive rate governor is shared across all concurrent
+// workers: because N workers each paginating and downloading multiply the
+// request rate, per-request retry alone is not enough, so exactly one client
+// is constructed and shared. The governor is enforced at the HTTP transport,
+// so every attempt that leaves the process pays a token; the pages go-tfe's
+// ListAll methods fetch internally, the fresh requests its chunked log
+// readers make mid-stream, and every in-client retry cannot outrun the
+// aggregate rate. It is the run's single rate authority, adapting to the
+// server's feedback: it launches at a configured ceiling, and a rate-limited
+// (429) response halves the rate and pauses every launch until the server's
+// advertised reset. The pause is global because the server counts rejected
+// requests against its window too, so no rate is slow enough to pace into a
+// blown window; once it lifts, a clean stretch creeps the rate back up
+// toward the ceiling. The go-tfe client's own rate-limit machinery is kept
+// dormant: its server-error retry stays disabled, no 429 is ever surfaced to
+// it, and the X-RateLimit-Limit header its internal limiter configures
+// itself from is stripped off every response. An optional [Gate] bounds how
+// many requests are in flight at once; the gate caps concurrency only and
+// leaves the launch rate to the governor. The package also walks paginated
+// list endpoints (advancing the page number while the response reports a
+// next page) and follows the short-lived signed-URL download flow for state
+// blobs, configuration tarballs, and plan/apply logs.
 //
 // Failures are classified so a resume can tell a temporary blip from a
 // permanent absence: transient (a network timeout, context cancellation or
-// deadline, or rate-limiter exhaustion), terminal (a permanent absence such as
-// a 404), or forbidden (an access denial). Rate-limited (429) responses are
-// retried inside go-tfe, honoring the server's reset time; server (5xx) and
-// transport failures are retried by this client's own bounded transport, since
-// go-tfe's server-error retry is disabled. If one still surfaces it is not
-// recognized structurally and classifies as unknown, which callers also treat
-// as retryable. Recording that distinction keeps a resume from mistaking a blip
-// for a permanently-gone object. A handful of endpoints do not
+// deadline, or rate limiting past the bounded retries), terminal (a permanent
+// absence such as a 404), or forbidden (an access denial). Server (5xx),
+// transport, and rate-limited (429) failures are all retried by this client's
+// own bounded transport, each under its own budget; a 429 that exhausts its
+// budget surfaces as an error wrapping [ErrRateLimited]. If a failure still
+// surfaces unrecognized structurally it classifies as unknown, which callers
+// also treat as retryable. Recording that distinction keeps a resume from
+// mistaking a blip for a permanently-gone object. A handful of endpoints do not
 // enumerate at all and are reachable only when another object references their
 // id (plan exports, HYOK encrypted data keys, the OIDC configuration types, and
 // the experimental provider-set and registry-component types); the wrapper

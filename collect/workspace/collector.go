@@ -16,8 +16,9 @@ import (
 // and its settings, and every workspace with its state versions and runs.
 //
 // The orchestrator enumerates projects and workspaces itself and fans
-// workspaces across a worker pool, so the collector exposes granular methods
-// ([Collector.CollectProject] and [Collector.CollectWorkspace]) rather than the
+// workspaces across the shared request gate, so the collector exposes
+// granular methods ([Collector.CollectProject] and
+// [Collector.CollectWorkspace]) rather than the
 // single-method collector contract. Work within one workspace fans out too:
 // the state-version and run walks run concurrently and each page's items
 // archive concurrently, with the client's request gate bounding the whole
@@ -188,7 +189,7 @@ func (c *Collector) archiveUser(ctx context.Context, u *tfe.User) error {
 	return c.mutable(ctx, c.env.Store().User(u.ID), u)
 }
 
-// doRead runs read through the shared client so it passes the rate limiter,
+// doRead runs read through the shared client so it passes the rate governor,
 // returning the value it yields.
 func doRead[T any](
 	ctx context.Context,

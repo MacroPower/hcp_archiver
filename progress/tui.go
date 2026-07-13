@@ -39,15 +39,15 @@ const (
 
 	// The metadata readouts pad to the width of the status column above them
 	// (its label plus digit reserve), so the panel's closing two lines align as
-	// one grid. The worker readout closes the line and needs no pad.
+	// one grid. The request-rate readout closes the line and needs no pad.
 	metaBytesWidth   = len("done ") + countDoneWidth
 	metaRateWidth    = len("errored ") + countErroredWidth
 	metaElapsedWidth = len("forbidden ") + countForbiddenWidth
 )
 
-// maxTaskLines caps how many in-flight work items the panel lists, so a large
-// worker pool cannot grow the panel past a screenful; the overflow line counts
-// the rest. The default workspace concurrency (4) fits well within it.
+// maxTaskLines caps how many in-flight work items the panel lists, so a wide
+// fan-out cannot grow the panel past a screenful; the overflow line counts
+// the rest.
 const maxTaskLines = 8
 
 // Bar cell glyphs, matching the determinate bar's defaults so the marquee looks
@@ -307,17 +307,23 @@ func (m *tuiModel) render(snap snapshot) string {
 		glyphElapsed, metaElapsedWidth, snap.elapsed.Round(time.Second).String(),
 	)
 
-	// The worker readout shows the adaptive pool moving: its size against the
-	// ceiling it may scale to. Once any rate limiting has been observed the 429
-	// total rides beside it in amber, so a shrunken pool carries its own
-	// explanation.
-	if snap.hasWorkers() {
-		meta += fmt.Sprintf(" "+glyphWorkers+" %d/%d workers", snap.workers, snap.maxWorkers)
+	// The request-rate readout shows the adaptive governor moving: the rate it
+	// currently admits. During a rate-limit cooldown an amber paused readout
+	// follows (a cooldown parks every in-flight request, so without it the
+	// panel would just look stuck), and once any rate limiting has been
+	// observed the amber 429 total rides along too, so a slowed rate carries
+	// its own explanation.
+	if snap.hasRate {
+		meta += fmt.Sprintf(" "+glyphRPS+" %.0f/s", snap.rps)
 	}
 
 	counts := "  " + statusCounts(t, countDoneWidth, countErroredWidth, countForbiddenWidth, countRetriedWidth)
 
 	metaLine := "  " + styleMeta.Render(meta)
+	if snap.hasRate && snap.pausedFor > 0 {
+		metaLine += " " + styleRateLimited.Render("· paused "+compactDuration(snap.pausedFor))
+	}
+
 	if snap.rateLimited > 0 {
 		metaLine += " " + styleRateLimited.Render(fmt.Sprintf("· 429s %d", snap.rateLimited))
 	}

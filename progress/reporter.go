@@ -30,14 +30,6 @@ type TallySource interface {
 	Tally() manifest.Tally
 }
 
-// WorkerSource reports the live size of the run's worker pool, so the view can
-// show the adaptive concurrency moving as the run is throttled and recovers.
-// The workpool package's Pool satisfies it through its Size method.
-type WorkerSource interface {
-	// Size returns the pool's current capacity in worker slots.
-	Size() int
-}
-
 // Reporter renders the live status of an archive run to a writer.
 //
 // It reads a [TallySource] and formats snapshots in the resolved
@@ -57,7 +49,7 @@ type Reporter struct {
 	start       time.Time
 	in          io.Reader
 	source      TallySource
-	workers     WorkerSource
+	rateStatus  func() (rps float64, pausedFor time.Duration)
 	sink        LogSink
 	w           io.Writer
 	now         func() time.Time
@@ -72,7 +64,6 @@ type Reporter struct {
 	interval    time.Duration
 	total       int
 	completed   int
-	maxWorkers  int
 	mu          sync.Mutex
 	writeMu     sync.Mutex
 }
@@ -88,7 +79,7 @@ type Reporter struct {
 //   - [WithLogSink]
 //   - [WithInterrupt]
 //   - [WithWireBytes]
-//   - [WithWorkers]
+//   - [WithRateStatus]
 //   - [WithRateLimited]
 type Option func(*Reporter)
 
@@ -174,24 +165,24 @@ func WithWireBytes(counter *atomic.Int64) Option {
 	}
 }
 
-// WithWorkers sets the [WorkerSource] whose live size, together with ceiling
-// (the count the pool may scale up to), every output form renders, so the
-// adaptive concurrency is visible as it sheds under rate limiting and
-// recovers. A nil source or non-positive ceiling leaves the worker readout
-// off. It returns an [Option].
-func WithWorkers(source WorkerSource, ceiling int) Option {
+// WithRateStatus sets the source of the client's adaptive rate: the current
+// requests-per-second the rate governor admits and how much of a rate-limit
+// cooldown pause remains. Every output form renders it, so the run slowing
+// under the server's pushback and recovering is visible as it happens; while
+// a cooldown parks every request, the paused readout says why nothing is
+// moving. A nil fn leaves the rate readout off. It returns an [Option].
+func WithRateStatus(fn func() (rps float64, pausedFor time.Duration)) Option {
 	return func(r *Reporter) {
-		if source != nil && ceiling > 0 {
-			r.workers = source
-			r.maxWorkers = ceiling
+		if fn != nil {
+			r.rateStatus = fn
 		}
 	}
 }
 
 // WithRateLimited sets the shared counter of rate-limited (HTTP 429) responses
-// observed on the wire, which the views surface alongside the worker readout
-// so an operator can see why the pool shrank. A nil counter leaves the readout
-// off. It returns an [Option].
+// observed on the wire, which the views surface alongside the rate readout
+// so an operator can see why the rate dropped. A nil counter leaves the
+// readout off. It returns an [Option].
 func WithRateLimited(counter *atomic.Int64) Option {
 	return func(r *Reporter) {
 		r.rateLimited = counter
@@ -423,6 +414,10 @@ func (r *Reporter) takeTasks() []taskProgress {
 }
 
 // snapshot is one rendered frame's worth of derived state, computed under lock.
+//
+// The hasRate flag is set from the option's presence ([WithRateStatus]), not
+// from the sampled figures, so a reading that is transiently zero does not
+// drop the readout at exactly the moment throttling is most interesting.
 type snapshot struct {
 	phase        string
 	tasks        []taskProgress
@@ -430,23 +425,13 @@ type snapshot struct {
 	elapsed      time.Duration
 	phaseElapsed time.Duration
 	rate         float64
+	rps          float64
+	pausedFor    time.Duration
 	wireBytes    int64
 	rateLimited  int64
 	total        int
 	completed    int
-	workers      int
-	maxWorkers   int
-}
-
-// hasWorkers reports whether the reporter was built over a worker source, so
-// the views render the adaptive worker readout only when one exists.
-//
-// It keys off maxWorkers, the ceiling set only when a source was supplied
-// (WithWorkers ignores a nil source or non-positive ceiling), not the live slot
-// count, so a source that transiently reports zero slots does not drop the
-// readout at exactly the moment throttling is most interesting.
-func (s snapshot) hasWorkers() bool {
-	return s.maxWorkers > 0
+	hasRate      bool
 }
 
 // hasBar reports whether the phase is determinate, so the view renders a bar and
@@ -511,9 +496,15 @@ func (r *Reporter) take() snapshot {
 		wire = r.wireBytes.Load()
 	}
 
-	workers := 0
-	if r.workers != nil {
-		workers = r.workers.Size()
+	var (
+		rps       float64
+		pausedFor time.Duration
+	)
+
+	// Sampling nests reporter.mu -> governor.mu; safe, since the governor
+	// never calls back into the reporter.
+	if r.rateStatus != nil {
+		rps, pausedFor = r.rateStatus()
 	}
 
 	var rateLimited int64
@@ -529,12 +520,13 @@ func (r *Reporter) take() snapshot {
 		elapsed:      elapsed,
 		phaseElapsed: now.Sub(r.phaseStart),
 		rate:         rate,
+		rps:          rps,
+		pausedFor:    pausedFor,
 		wireBytes:    wire,
 		rateLimited:  rateLimited,
 		total:        r.total,
 		completed:    r.completed,
-		workers:      workers,
-		maxWorkers:   r.maxWorkers,
+		hasRate:      r.rateStatus != nil,
 	}
 }
 
@@ -759,10 +751,16 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 			task.name, task.done, task.total, len(snap.tasks))
 	}
 
-	// The worker readout is a live figure, so only progress lines carry it; the
-	// rate-limited total is a run outcome worth keeping on the summary too.
-	if !summary && snap.hasWorkers() {
-		fmt.Fprintf(&b, " workers=%d/%d", snap.workers, snap.maxWorkers)
+	// The request rate is a live figure, so only progress lines carry it (a
+	// paused readout marks a rate-limit cooldown); the rate-limited total is a
+	// run outcome worth keeping on the summary too. The key is rps, since
+	// rate= already names byte throughput on this line.
+	if !summary && snap.hasRate {
+		fmt.Fprintf(&b, " rps=%.0f", snap.rps)
+
+		if snap.pausedFor > 0 {
+			fmt.Fprintf(&b, " paused=%s", compactDuration(snap.pausedFor))
+		}
 	}
 
 	if snap.rateLimited > 0 {
@@ -837,35 +835,37 @@ func (r *Reporter) summaryBlock(snap snapshot) string {
 // progress and are present only while a phase is determinate. Task, TaskTotal,
 // and TaskCompleted report the in-flight work item with the most remaining
 // units, with TasksActive counting every registered item; all are present only
-// while at least one is registered. Workers and MaxWorkers report the adaptive
-// worker pool's live size and ceiling, present only when the reporter watches
-// a pool; RateLimited is the cumulative count of rate-limited (429) responses,
-// present once any were observed.
+// while at least one is registered. RequestsPerSecond reports the adaptive
+// rate governor's current admitted request rate, present on progress lines
+// only when the reporter watches a rate source, with PausedMs carrying the
+// remaining rate-limit cooldown while one is in force; RateLimited is the
+// cumulative count of rate-limited (429) responses, present once any were
+// observed.
 type jsonLine struct {
-	PhaseTotal      *int    `json:"phaseTotal,omitempty"`
-	PhaseCompleted  *int    `json:"phaseCompleted,omitempty"`
-	TaskTotal       *int    `json:"taskTotal,omitempty"`
-	TaskCompleted   *int    `json:"taskCompleted,omitempty"`
-	Workers         *int    `json:"workers,omitempty"`
-	MaxWorkers      *int    `json:"maxWorkers,omitempty"`
-	Phase           string  `json:"phase,omitempty"`
-	Task            string  `json:"task,omitempty"`
-	Target          string  `json:"target,omitempty"`
-	TasksActive     int     `json:"tasksActive,omitempty"`
-	RateLimited     int64   `json:"rateLimited,omitempty"`
-	Done            int     `json:"done"`
-	Absent          int     `json:"absent"`
-	Skipped         int     `json:"skipped"`
-	Errored         int     `json:"errored"`
-	Forbidden       int     `json:"forbidden"`
-	NotApplicable   int     `json:"notApplicable"`
-	Retried         int64   `json:"retried"`
-	Total           int     `json:"total"`
-	BytesDownloaded int64   `json:"bytesDownloaded"`
-	ElapsedSeconds  float64 `json:"elapsedSeconds"`
-	BytesPerSecond  float64 `json:"bytesPerSecond"`
-	Summary         bool    `json:"summary,omitempty"`
-	Resumed         bool    `json:"resumed,omitempty"`
+	PhaseTotal        *int     `json:"phaseTotal,omitempty"`
+	PhaseCompleted    *int     `json:"phaseCompleted,omitempty"`
+	TaskTotal         *int     `json:"taskTotal,omitempty"`
+	TaskCompleted     *int     `json:"taskCompleted,omitempty"`
+	RequestsPerSecond *float64 `json:"requestsPerSecond,omitempty"`
+	Phase             string   `json:"phase,omitempty"`
+	Task              string   `json:"task,omitempty"`
+	Target            string   `json:"target,omitempty"`
+	TasksActive       int      `json:"tasksActive,omitempty"`
+	PausedMs          int64    `json:"pausedMs,omitempty"`
+	RateLimited       int64    `json:"rateLimited,omitempty"`
+	Done              int      `json:"done"`
+	Absent            int      `json:"absent"`
+	Skipped           int      `json:"skipped"`
+	Errored           int      `json:"errored"`
+	Forbidden         int      `json:"forbidden"`
+	NotApplicable     int      `json:"notApplicable"`
+	Retried           int64    `json:"retried"`
+	Total             int      `json:"total"`
+	BytesDownloaded   int64    `json:"bytesDownloaded"`
+	ElapsedSeconds    float64  `json:"elapsedSeconds"`
+	BytesPerSecond    float64  `json:"bytesPerSecond"`
+	Summary           bool     `json:"summary,omitempty"`
+	Resumed           bool     `json:"resumed,omitempty"`
 }
 
 // writeJSON encodes one snapshot as a compact JSON object followed by a
@@ -892,15 +892,15 @@ func (r *Reporter) writeJSON(snap snapshot, summary bool) error {
 		Resumed:         t.Resumed,
 	}
 
-	if snap.hasWorkers() {
-		// Pointers, not bare ints, so a fully throttled live count of 0 is still
-		// emitted alongside its ceiling rather than dropped by omitempty -- the two
-		// are documented to appear together, and 0/N is the moment throttling is
-		// most worth reporting.
-		workers := snap.workers
-		maxWorkers := snap.maxWorkers
-		line.Workers = &workers
-		line.MaxWorkers = &maxWorkers
+	// A live figure, kept off the summary line to match logfmt: once the run
+	// has ended the momentary rate is meaningless. A pointer, not a bare
+	// float, so a rate that reads zero mid-cooldown is still emitted rather
+	// than dropped by omitempty -- that is the moment throttling is most
+	// worth reporting.
+	if !summary && snap.hasRate {
+		rps := snap.rps
+		line.RequestsPerSecond = &rps
+		line.PausedMs = snap.pausedFor.Milliseconds()
 	}
 
 	if snap.hasBar() {

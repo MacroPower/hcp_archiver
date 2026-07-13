@@ -246,12 +246,13 @@ func TestCallerSuppliedClientIsThrottled(t *testing.T) {
 		}),
 	}
 
-	// A near-zero rate with a single burst token: the first request spends the
-	// token, and the second could not be served for days, so a short deadline
-	// must surface the limiter rather than the stub's instant answer.
+	// A near-zero rate ceiling leaves the governor's bucket a single token:
+	// the first request spends it, and the second could not be served for
+	// days, so a short deadline must surface the governor rather than the
+	// stub's instant answer.
 	hc := tfeclient.ResolveHTTPClient(
 		tfeclient.WithHTTPClient(stub),
-		tfeclient.WithRateLimit(0.000001, 1),
+		tfeclient.WithRateLimit(0.000001),
 	)
 
 	require.NotSame(t, stub, hc, "the caller's client is wrapped as a copy, not mutated")
@@ -271,7 +272,7 @@ func TestCallerSuppliedClientIsThrottled(t *testing.T) {
 
 	_, err = hc.Do(req) //nolint:bodyclose // The throttled attempt returns no response.
 
-	require.ErrorContains(t, err, "rate limiter wait", "the deadline surfaces the limiter, not the network")
+	require.ErrorContains(t, err, "rate governor wait", "the deadline surfaces the governor, not the network")
 	assert.Equal(t, 1, calls, "the throttled attempt never reaches the wrapped transport")
 }
 
@@ -961,9 +962,10 @@ func TestOpenClassifiesStatus(t *testing.T) {
 func TestRateLimitCounterCounts429s(t *testing.T) {
 	t.Parallel()
 
-	// The counter observes raw wire responses below any retry loop: two 429
-	// answers followed by a 200 must count exactly two, and the eventual
-	// success must count nothing.
+	// The governor counts each rate-limited response on the wire, below the
+	// retry loop: the transport retries the two 429s internally, so one
+	// request from the caller counts exactly two and surfaces the eventual
+	// success, which counts nothing.
 	status := []int{
 		http.StatusTooManyRequests,
 		http.StatusTooManyRequests,
@@ -981,22 +983,30 @@ func TestRateLimitCounterCounts429s(t *testing.T) {
 		call++
 		mu.Unlock()
 
+		// A zero reset keeps the governor from pausing the test for its
+		// fallback cooldown.
+		if code == http.StatusTooManyRequests {
+			w.Header().Set("X-Ratelimit-Reset", "0")
+		}
+
 		w.WriteHeader(code)
 	}))
 	t.Cleanup(srv.Close)
 
 	counter := new(atomic.Int64)
-	client := tfeclient.ResolveHTTPClient(tfeclient.WithRateLimitCounter(counter))
+	client := tfeclient.ResolveHTTPClient(
+		tfeclient.WithRateLimitCounter(counter),
+		tfeclient.WithRateLimit(1000),
+	)
 
-	for range status {
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
-		require.NoError(t, err)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+	require.NoError(t, err)
 
-		resp, err := client.Do(req)
-		require.NoError(t, err)
-		require.NoError(t, resp.Body.Close())
-	}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
 
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "the retried request surfaces the eventual success")
 	assert.Equal(t, int64(2), counter.Load())
 }
 
@@ -1090,25 +1100,167 @@ func TestServerErrorRetry(t *testing.T) {
 		assert.Equal(t, int64(1), hits.Load(), "a consumed body cannot be re-sent")
 	})
 
-	t.Run("a 429 passes through to the rate-limit handling", func(t *testing.T) {
+	t.Run("a persistent 429 converts to ErrRateLimited after its own budget", func(t *testing.T) {
 		t.Parallel()
 
 		var hits atomic.Int64
 
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			hits.Add(1)
+			// A zero reset keeps the governor from pausing the test for its
+			// fallback cooldown.
+			w.Header().Set("X-Ratelimit-Reset", "0")
 			w.WriteHeader(http.StatusTooManyRequests)
 		}))
 		t.Cleanup(srv.Close)
 
-		hc := tfeclient.ResolveHTTPClient(tfeclient.WithServerErrorRetry(3, 0))
+		hc := tfeclient.ResolveHTTPClient(
+			tfeclient.WithServerErrorRetry(3, 0),
+			tfeclient.WithRateLimit(1000),
+		)
 
-		status := doGet(t, hc, srv.URL)
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+		require.NoError(t, err)
 
-		assert.Equal(t, http.StatusTooManyRequests, status)
-		assert.Equal(t, int64(1), hits.Load(),
-			"rate limiting is the go-tfe client's to handle, honoring the server's reset time")
+		resp, err := hc.Do(req) //nolint:bodyclose // An exhausted rate-limit budget returns no response.
+
+		require.ErrorIs(t, err, tfeclient.ErrRateLimited, "an unretried 429 is an error, never a response")
+		assert.Nil(t, resp)
+		assert.Equal(t, int64(1+tfeclient.DefaultRateLimitRetries), hits.Load(),
+			"the first attempt plus the fixed rate-limit budget; the server-error budget does not multiply it")
+		assert.Equal(t, tfeclient.KindTransient, tfeclient.Classify(err),
+			"an exhausted budget stays retryable on the next run")
 	})
+
+	t.Run("a 429 on a request with a body is not retried and still converts", func(t *testing.T) {
+		t.Parallel()
+
+		var hits atomic.Int64
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.Header().Set("X-Ratelimit-Reset", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		t.Cleanup(srv.Close)
+
+		hc := tfeclient.ResolveHTTPClient(tfeclient.WithRateLimit(1000))
+
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+		require.NoError(t, err)
+
+		resp, err := hc.Do(req) //nolint:bodyclose // The converted 429 returns no response.
+
+		require.ErrorIs(t, err, tfeclient.ErrRateLimited)
+		assert.Nil(t, resp)
+		assert.Equal(t, int64(1), hits.Load(), "a consumed body cannot be re-sent")
+	})
+}
+
+func TestRateLimit429StormEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	// The regression this pins: go-tfe retries a 429 unconditionally (30
+	// times), sleeping every 429'd request to the same reset instant so they
+	// stampede the reopened window together, and its reset-header parse exits
+	// the process on a malformed value. The transport now owns 429s, so the
+	// whole go-tfe call must come back after exactly the bounded attempts with
+	// an error wrapping ErrRateLimited -- go-tfe adds no attempts of its own.
+	var hits atomic.Int64
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/v2/organization/audit-trail", func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("X-Ratelimit-Reset", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, err := tfeclient.New(
+		tfeclient.WithToken("test-token"),
+		tfeclient.WithAddress(srv.URL),
+		tfeclient.WithRateLimit(1000),
+	)
+	require.NoError(t, err)
+
+	start := time.Now()
+
+	err = c.Do(t.Context(), func(ctx context.Context, tc *tfe.Client) error {
+		_, e := tc.AuditTrails.List(ctx, &tfe.AuditTrailListOptions{})
+		if e != nil {
+			return fmt.Errorf("list audit trails: %w", e)
+		}
+
+		return nil
+	})
+
+	require.ErrorIs(t, err, tfeclient.ErrRateLimited)
+	assert.Equal(t, int64(1+tfeclient.DefaultRateLimitRetries), hits.Load(),
+		"the first attempt plus the bounded rate-limit retries, not go-tfe's 30")
+	assert.Equal(t, tfeclient.KindTransient, tfeclient.Classify(err))
+	assert.Less(t, time.Since(start), 10*time.Second)
+}
+
+func TestRateLimitHeaderStrippedEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	// Every response advertises a crawl-speed X-RateLimit-Limit. The go-tfe
+	// client reads that header during construction to configure an internal
+	// limiter of its own (a fraction of the advertised limit, waited on for every request);
+	// the governor transport strips the header off every response, including
+	// the constructor ping, so that limiter must never engage and the
+	// requests complete at the governor's pace.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Ratelimit-Limit", "1")
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/v2/plans/plan-1", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Ratelimit-Limit", "1")
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+
+		_, werr := io.WriteString(w, `{"data":{"id":"plan-1","type":"plans","attributes":{}}}`)
+		if werr != nil {
+			return
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, err := tfeclient.New(
+		tfeclient.WithToken("test-token"),
+		tfeclient.WithAddress(srv.URL),
+		tfeclient.WithRateLimit(1000),
+	)
+	require.NoError(t, err)
+
+	const requests = 5
+
+	start := time.Now()
+
+	for range requests {
+		err = c.Do(t.Context(), func(ctx context.Context, tc *tfe.Client) error {
+			_, e := tc.Plans.Read(ctx, "plan-1")
+			if e != nil {
+				return fmt.Errorf("read plan: %w", e)
+			}
+
+			return nil
+		})
+		require.NoError(t, err)
+	}
+
+	// At the advertised limit go-tfe's internal limiter would pace well under
+	// one request per second; five requests finishing promptly proves it
+	// never configured.
+	assert.Less(t, time.Since(start), 3*time.Second,
+		"go-tfe's internal limiter never engages once the header is stripped")
 }
 
 func TestServerErrorStallIsBoundedEndToEnd(t *testing.T) {

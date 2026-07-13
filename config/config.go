@@ -11,10 +11,6 @@ import (
 const (
 	// DefaultAddress is the HCP Terraform API address used when none is given.
 	DefaultAddress = "https://app.terraform.io"
-	// DefaultMaxConcurrency is the ceiling the worker count may scale up to
-	// while no rate limiting is observed. Every run starts at one worker and
-	// scales itself toward the ceiling.
-	DefaultMaxConcurrency = 16
 	// DefaultProgressMode is the progress mode used when none is given.
 	DefaultProgressMode = ProgressModeAuto
 	// DefaultProgressInterval is the reporting cadence used when none is given.
@@ -40,8 +36,6 @@ var (
 	ErrMissingToken = errors.New("api token is required (set HCP_TOKEN, TFC_TOKEN, or TFE_TOKEN)")
 	// ErrMissingOutputDir indicates that no output directory was supplied.
 	ErrMissingOutputDir = errors.New("output directory is required")
-	// ErrInvalidMaxConcurrency indicates a concurrency ceiling below one.
-	ErrInvalidMaxConcurrency = errors.New("max concurrency must be at least 1")
 	// ErrInvalidProgressMode indicates an unrecognized progress mode.
 	ErrInvalidProgressMode = errors.New("invalid progress mode")
 	// ErrInvalidProgressInterval indicates a progress interval of zero or less.
@@ -71,12 +65,6 @@ type Config struct {
 	Organizations []string
 	// ProgressInterval is the cadence at which progress is reported.
 	ProgressInterval time.Duration
-	// MaxConcurrency is the ceiling the worker count may scale up to while no
-	// rate limiting is observed. A worker is one in-flight API request, not one
-	// workspace: workers pull whatever unit of work is ready, so several can
-	// serve a single large workspace at once. Every run starts at one worker
-	// and scales itself toward the ceiling.
-	MaxConcurrency int
 	// RunHistoryAge bounds each workspace's archived run history to runs
 	// created within this window before the archive runs; zero leaves the age
 	// unbounded. When RunHistoryCount is also set, whichever bound admits more
@@ -108,7 +96,6 @@ type Config struct {
 //   - [WithOutputDir]
 //   - [WithProgressMode]
 //   - [WithProgressInterval]
-//   - [WithMaxConcurrency]
 //   - [WithRunHistoryCount]
 //   - [WithRunHistoryAge]
 //   - [WithRetryAbsent]
@@ -164,14 +151,6 @@ func WithProgressMode(mode ProgressMode) Option {
 func WithProgressInterval(interval time.Duration) Option {
 	return func(c *Config) {
 		c.ProgressInterval = interval
-	}
-}
-
-// WithMaxConcurrency sets the ceiling the worker count may scale up to while
-// no rate limiting is observed. It returns an [Option].
-func WithMaxConcurrency(n int) Option {
-	return func(c *Config) {
-		c.MaxConcurrency = n
 	}
 }
 
@@ -241,7 +220,6 @@ func New(opts ...Option) (*Config, error) {
 		Address:          DefaultAddress,
 		ProgressMode:     DefaultProgressMode,
 		ProgressInterval: DefaultProgressInterval,
-		MaxConcurrency:   DefaultMaxConcurrency,
 	}
 
 	for _, opt := range opts {
@@ -263,9 +241,9 @@ func New(opts ...Option) (*Config, error) {
 // Validate reports whether the [Config] is internally consistent.
 //
 // It returns [ErrMissingToken], [ErrMissingOutputDir],
-// [ErrInvalidMaxConcurrency], [ErrInvalidRunHistoryCount],
-// [ErrInvalidRunHistoryAge], [ErrInvalidProgressMode], or
-// [ErrInvalidProgressInterval] wrapped with context on the first problem found.
+// [ErrInvalidRunHistoryCount], [ErrInvalidRunHistoryAge],
+// [ErrInvalidProgressMode], or [ErrInvalidProgressInterval] wrapped with
+// context on the first problem found.
 func (c *Config) Validate() error {
 	if c.Token == "" {
 		return ErrMissingToken
@@ -273,10 +251,6 @@ func (c *Config) Validate() error {
 
 	if c.OutputDir == "" {
 		return ErrMissingOutputDir
-	}
-
-	if c.MaxConcurrency < 1 {
-		return fmt.Errorf("%w: %d", ErrInvalidMaxConcurrency, c.MaxConcurrency)
 	}
 
 	if c.RunHistoryCount < 0 {

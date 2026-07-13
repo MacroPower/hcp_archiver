@@ -39,7 +39,6 @@ func TestNewRootCmd(t *testing.T) {
 func TestConfigFromArgs(t *testing.T) {
 	fullConfig := "address: https://tfe.example.com\n" +
 		"organizations:\n  - acme\n  - globex\n" +
-		"maxConcurrency: 32\n" +
 		"scope:\n  stacks: true\n  hyok: true\n  registryDetail: true\n  auditTrail: true\n"
 
 	tcs := map[string]struct {
@@ -59,7 +58,6 @@ func TestConfigFromArgs(t *testing.T) {
 				assert.Equal(t, "secret", cfg.Token)
 				assert.Equal(t, config.DefaultAddress, cfg.Address)
 				assert.Empty(t, cfg.Organizations)
-				assert.Equal(t, config.DefaultMaxConcurrency, cfg.MaxConcurrency)
 				assert.Equal(t, config.ProgressModeAuto, cfg.ProgressMode)
 				assert.False(t, cfg.Stacks)
 			},
@@ -87,7 +85,6 @@ func TestConfigFromArgs(t *testing.T) {
 				t.Helper()
 				assert.Equal(t, "https://tfe.example.com", cfg.Address)
 				assert.Equal(t, []string{"acme", "globex"}, cfg.Organizations)
-				assert.Equal(t, 32, cfg.MaxConcurrency)
 				assert.True(t, cfg.Stacks)
 				assert.True(t, cfg.HYOK)
 				assert.True(t, cfg.RegistryDetail)

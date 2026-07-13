@@ -247,8 +247,8 @@ func TestRenderPanel_MetaAlignsWithCounts(t *testing.T) {
 	// Each metadata glyph sits in the display column of the status glyph above
 	// it, so the panel's two closing lines read as one grid.
 	panel := barPanel()
-	panel.Workers = 4
-	panel.MaxWorkers = 16
+	panel.HasRate = true
+	panel.RPS = 12
 
 	lines := strings.Split(progress.RenderPanel(panel), "\n")
 	require.Len(t, lines, 3)
@@ -256,7 +256,7 @@ func TestRenderPanel_MetaAlignsWithCounts(t *testing.T) {
 	counts := ansi.Strip(lines[1])
 	meta := ansi.Strip(lines[2])
 
-	pairs := map[string]string{"✓": "⇣", "✗": "⇢", "⊘": "◷", "↻": "⚙"}
+	pairs := map[string]string{"✓": "⇣", "✗": "⇢", "⊘": "◷", "↻": "⇉"}
 	for status, readout := range pairs {
 		assert.Equal(t, column(t, counts, status), column(t, meta, readout),
 			"%s sits under %s", readout, status)
@@ -331,30 +331,33 @@ func TestRenderSummary(t *testing.T) {
 	golden.RequireEqual(t, []byte(progress.RenderSummary(panel)))
 }
 
-func TestRenderPanel_Workers(t *testing.T) {
+func TestRenderPanel_RateStatus(t *testing.T) {
 	t.Parallel()
 
-	// The adaptive worker readout rides in the metadata segment, and once any
-	// rate limiting has been observed the amber 429 total follows it, so a
-	// shrunken pool carries its own explanation.
+	// The adaptive request-rate readout rides in the metadata segment; during
+	// a cooldown the amber paused readout follows it, and once any rate
+	// limiting has been observed the amber 429 total rides along too, so a
+	// slowed rate carries its own explanation.
 	panel := barPanel()
-	panel.Workers = 4
-	panel.MaxWorkers = 16
+	panel.HasRate = true
+	panel.RPS = 12
+	panel.PausedFor = 4 * time.Second
 	panel.RateLimited = 12
 
 	golden.RequireEqual(t, []byte(progress.RenderPanel(panel)))
 }
 
-func TestRenderPanel_WorkersCleanRunOmits429s(t *testing.T) {
+func TestRenderPanel_RateStatusCleanRunOmitsAmber(t *testing.T) {
 	t.Parallel()
 
 	panel := barPanel()
-	panel.Workers = 16
-	panel.MaxWorkers = 16
+	panel.HasRate = true
+	panel.RPS = 30
 
 	out := ansi.Strip(progress.RenderPanel(panel))
-	assert.Contains(t, out, "16/16 workers")
+	assert.Contains(t, out, "30/s")
 	assert.NotContains(t, out, "429", "a run never rate limited shows no 429 readout")
+	assert.NotContains(t, out, "paused", "no cooldown means no paused readout")
 }
 
 func TestRenderSummary_RateLimited(t *testing.T) {

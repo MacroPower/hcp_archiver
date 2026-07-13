@@ -237,7 +237,7 @@ func (c *Collector) archiveTrailPage(
 }
 
 // listPage reads one page of audit trails created after since, routed through
-// the shared limiter.
+// the shared governor.
 func (c *Collector) listPage(ctx context.Context, since time.Time, page int) (*tfe.AuditTrailList, error) {
 	var list *tfe.AuditTrailList
 

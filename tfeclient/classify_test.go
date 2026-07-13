@@ -49,6 +49,10 @@ func TestClassify(t *testing.T) {
 			err:  fmt.Errorf("dial: %w", timeoutError{}),
 			want: tfeclient.KindTransient,
 		},
+		"rate limited is transient": {
+			err:  fmt.Errorf("do: %w", tfeclient.ErrRateLimited),
+			want: tfeclient.KindTransient,
+		},
 		"generic error is unknown": {
 			err:  errors.New("boom"),
 			want: tfeclient.KindUnknown,

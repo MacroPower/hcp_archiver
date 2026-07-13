@@ -28,11 +28,11 @@ const (
 // collectProjects archives every project in the organization and returns a map
 // from project id to project name for resolving each workspace's project.
 //
-// Enumeration paginates through the shared limiter; each project is archived by
-// the workspace collector's project method, fanned across the run's shared
-// worker pool exactly like the workspaces after it: each goroutine is only a
+// Enumeration paginates through the shared governor; each project is archived
+// by the workspace collector's project method, fanned across the run's shared
+// request gate exactly like the workspaces after it: each goroutine is only a
 // coordinator, every request it causes takes a slot from the client's gate, and
-// the fan-out is capped at the pool's ceiling. A project goroutine returns
+// the fan-out is capped at the gate's size. A project goroutine returns
 // non-nil only on a cancellation, which cancels the group.
 func (a *Archiver) collectProjects(
 	ctx context.Context,
@@ -88,7 +88,7 @@ func (a *Archiver) collectProjects(
 	env.SetTarget("")
 
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(a.cfg.MaxConcurrency)
+	g.SetLimit(defaultConcurrency)
 
 	for _, p := range projects {
 		g.Go(func() error {
@@ -112,17 +112,16 @@ func (a *Archiver) collectProjects(
 }
 
 // collectWorkspaces archives every workspace in the organization, fanning them
-// across the run's shared worker pool.
+// across the run's shared request gate.
 //
 // Enumeration hydrates each workspace's project relation so its project name
 // resolves from names. The goroutine per workspace is only a coordinator: it
-// holds no worker slot itself, and every request it causes takes one from the
+// holds no request slot itself, and every request it causes takes one from the
 // client's gate, so slots flow across workspace boundaries (many small
-// workspaces at once, or many workers inside one large workspace) and the
-// pool's live size, not this fan-out, bounds the real parallelism. The
-// fan-out is capped at the pool's ceiling so the in-flight task list stays
-// meaningful. A workspace goroutine returns non-nil only on a cancellation,
-// which cancels the group.
+// workspaces at once, or many requests inside one large workspace) and the
+// gate, not this fan-out, bounds the real parallelism. The fan-out is capped
+// at the gate's size so the in-flight task list stays meaningful. A workspace
+// goroutine returns non-nil only on a cancellation, which cancels the group.
 func (a *Archiver) collectWorkspaces(
 	ctx context.Context,
 	env *collect.Env,
@@ -186,7 +185,7 @@ func (a *Archiver) collectWorkspaces(
 
 	var counters errgroup.Group
 
-	counters.SetLimit(a.cfg.MaxConcurrency)
+	counters.SetLimit(defaultConcurrency)
 
 	for i, ws := range workspaces {
 		counters.Go(func() error {
@@ -215,7 +214,7 @@ func (a *Archiver) collectWorkspaces(
 	reporter.SetTotal(totalWeight)
 
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(a.cfg.MaxConcurrency)
+	g.SetLimit(defaultConcurrency)
 
 	for i, ws := range workspaces {
 		g.Go(func() error {
@@ -236,7 +235,7 @@ func (a *Archiver) collectWorkspaces(
 			if err != nil && gctx.Err() == nil {
 				// Best-effort: a non-cancellation failure (e.g. a transient
 				// list error) for one workspace is logged and does not cancel
-				// the pool, so it never aborts the rest of the organization. A
+				// the group, so it never aborts the rest of the organization. A
 				// re-run re-walks the workspace and picks up what it missed.
 				// The abandoned walk is a dropped surface: the listings it never
 				// finished record no entries, so nothing else marks the gap.
@@ -257,7 +256,7 @@ func (a *Archiver) collectWorkspaces(
 
 			// Seal the workspace's now-frozen cold artifacts into bundles. It runs
 			// only after a clean collection, so the collections are complete; a
-			// failure is logged and does not abort the pool, since the loose
+			// failure is logged and does not abort the group, since the loose
 			// sources stay canonical until a bundle verifies and a re-run re-seals.
 			err = wsc.SealWorkspace(gctx, project, ws.Name)
 			if err != nil && gctx.Err() == nil {

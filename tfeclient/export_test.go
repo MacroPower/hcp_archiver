@@ -13,7 +13,7 @@ func NewLogReader(rc io.ReadCloser) io.ReadCloser {
 
 // ResolveHTTPClient builds the HTTP client [New] would construct from opts,
 // exposing the response-header-timeout wiring to the external test package
-// directly rather than through the retrying go-tfe client (whose retries would
+// directly rather than through the go-tfe client (whose constructor ping would
 // amplify a header-timeout failure).
 func ResolveHTTPClient(opts ...Option) *http.Client {
 	cfg := newConfig(opts)
@@ -22,18 +22,17 @@ func ResolveHTTPClient(opts ...Option) *http.Client {
 }
 
 // UnderlyingTransport returns the [*http.Transport] beneath the retry,
-// throttle, and idle-bounding wrappers of a client built by
+// governor, and idle-bounding wrappers of a client built by
 // [ResolveHTTPClient], so the external test package can assert the transport
 // tuning (handshake bound, idle pool sizing) directly. It returns nil when the
 // client does not carry the expected wrappers.
 func UnderlyingTransport(hc *http.Client) *http.Transport {
-	rt := hc.Transport
-
-	if rr, ok := rt.(*retryTransport); ok {
-		rt = rr.next
+	rr, ok := hc.Transport.(*retryTransport)
+	if !ok {
+		return nil
 	}
 
-	tt, ok := rt.(*throttleTransport)
+	tt, ok := rr.next.(*throttleTransport)
 	if !ok {
 		return nil
 	}
@@ -49,4 +48,13 @@ func UnderlyingTransport(hc *http.Client) *http.Transport {
 	}
 
 	return tr
+}
+
+// GovernorTokens reads g's current token balance without refilling, so a test
+// can assert the bucket drained on a 429.
+func GovernorTokens(g *Governor) float64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return g.tokens
 }

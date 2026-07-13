@@ -48,7 +48,7 @@ hcp_archiver version
 What and how to archive lives in a YAML configuration file; only per-run and
 secret settings are flags or environment variables. Point `--config` (`-c`) at
 the file or set `HCP_ARCHIVER_CONFIG`; with neither, the built-in defaults apply
-(every visible organization, default surfaces only, up to 16 workers).
+(every visible organization, default surfaces only).
 
 ```yaml
 # yaml-language-server: $schema=./config/config.schema.json
@@ -59,11 +59,6 @@ address: https://app.terraform.io
 # Organizations to archive; omit or leave empty for every visible org.
 organizations:
   - my-org
-
-# Ceiling on archive workers (in-flight API requests). Every run starts at one
-# worker and scales itself: doubling while the API stays quiet, halving when it
-# rate-limits the run, and creeping back up after.
-maxConcurrency: 16
 
 # Bound on each workspace's archived run history, unlimited by default: count
 # keeps the newest N runs, age keeps runs created within the window (a Go
@@ -183,11 +178,9 @@ Settings are grouped by how much they vary; see
 - **Configuration file** (every key optional, defaulted per field): `address`
   (the API endpoint, default `https://app.terraform.io`), `organizations` (a
   list; empty or omitted archives every organization the token can see in turn),
-  `maxConcurrency` (the ceiling on archive workers; every run starts at one
-  worker, shared across workspaces, and scales itself up while the API stays
-  quiet and down while it rate-limits the run), a `runHistory` block bounding
-  each workspace's archived run history (`count` keeps the newest N runs,
-  `age` keeps runs created within a Go-duration window; with both set,
+  a `runHistory` block bounding each workspace's archived run history
+  (`count` keeps the newest N runs, `age` keeps runs created within a
+  Go-duration window; with both set,
   whichever admits more history wins; unlimited by default), and a `scope`
   block of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
   `registryDetail`, `auditTrail`), each off by default.

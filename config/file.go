@@ -40,11 +40,10 @@ var (
 // File is the on-disk YAML configuration describing what to archive and how.
 //
 // It holds the settings that are stable across runs: the API address, the
-// organizations to archive, the worker concurrency ceiling, and the opt-in
-// scope toggles. Per-run and secret settings (the output directory, the progress
-// mode, the retry-absent toggle, and the API token) are supplied by flags and
-// the environment instead, so a configuration file never carries a
-// machine-specific path or a credential.
+// organizations to archive, and the opt-in scope toggles. Per-run and secret
+// settings (the output directory, the progress mode, the retry-absent toggle,
+// and the API token) are supplied by flags and the environment instead, so a
+// configuration file never carries a machine-specific path or a credential.
 //
 // Every field is optional; an absent field takes the package default. Create
 // instances with [LoadFile], or [DefaultFile] for the defaults alone.
@@ -54,10 +53,6 @@ type File struct {
 	// Organizations limits the run to the named organizations. An empty list
 	// archives every organization the token can see.
 	Organizations []string `json:"organizations,omitempty" jsonschema:"title=Organizations"`
-	// MaxConcurrency is the ceiling the worker count may scale up to while no
-	// rate limiting is observed; every run starts at one worker. It defaults to
-	// [DefaultMaxConcurrency].
-	MaxConcurrency int `json:"maxConcurrency,omitempty" jsonschema:"title=Max Concurrency,minimum=1,default=16"`
 	// RunHistory bounds how much of each workspace's run history is archived;
 	// unset archives every run.
 	RunHistory FileRunHistory `json:"runHistory,omitzero" jsonschema:"title=Run History"`
@@ -99,8 +94,7 @@ type FileScope struct {
 // no configuration file is supplied.
 func DefaultFile() *File {
 	return &File{
-		Address:        DefaultAddress,
-		MaxConcurrency: DefaultMaxConcurrency,
+		Address: DefaultAddress,
 	}
 }
 

@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
 // DefaultIdleReadTimeout bounds how long a response body read may sit with no
@@ -56,34 +54,53 @@ func (e *idleReadError) Timeout() bool { return true }
 // Temporary reports true; the stall is retryable on a fresh connection.
 func (e *idleReadError) Temporary() bool { return true }
 
-// throttleTransport paces every outbound attempt through the run's shared rate
-// limiter.
+// throttleTransport paces every outbound attempt through the run's shared
+// [Governor] and feeds every response back to it.
 //
 // It lives at the transport rather than in [Client.Do] so that no request path
-// outruns the throttle: the retries go-tfe issues after a 429 and the pages
-// its ListAll methods fetch internally all run inside one Do call, and the
-// chunked log readers it hands back issue fresh requests mid-stream after Do
-// has already returned. Each of those attempts passes here and pays its own
-// token. A cancellation while waiting surfaces the context's error, which
-// classifies transient.
+// outruns the throttle: the pages go-tfe's ListAll methods fetch internally
+// all run inside one Do call, and the chunked log readers it hands back issue
+// fresh requests mid-stream after Do has already returned. Each of those
+// attempts passes here, pays its own token, and reports its outcome, so the
+// governor sees exactly one signal per physical attempt. A cancellation while
+// waiting surfaces the context's error, which classifies transient.
+//
+// It also strips X-RateLimit-Limit from every response. The go-tfe client
+// reads that header once, during construction, to configure an internal rate
+// limiter of its own (at a fraction of the advertised limit, waited on for
+// every request); with the header gone that limiter configures to infinity
+// and never blocks, leaving the governor the one authority over the rate.
 type throttleTransport struct {
-	next    http.RoundTripper
-	limiter *rate.Limiter
+	next http.RoundTripper
+	gov  *Governor
 }
 
-// RoundTrip waits for a rate token, then delegates to the wrapped transport.
+// RoundTrip waits for a rate token, delegates to the wrapped transport, and
+// reports the response's outcome to the governor.
 func (t *throttleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	err := t.limiter.Wait(req.Context())
+	err := t.gov.Wait(req.Context())
 	if err != nil {
-		return nil, fmt.Errorf("rate limiter wait: %w", err)
+		return nil, err
 	}
 
-	return t.next.RoundTrip(req) //nolint:wrapcheck // A transparent transport wrapper.
+	resp, err := t.next.RoundTrip(req)
+	if err != nil {
+		return resp, err //nolint:wrapcheck // A transparent transport wrapper.
+	}
+
+	resp.Header.Del(headerRateLimitLimit)
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		t.gov.On429(resp.Header.Get(headerRateLimitReset))
+	} else {
+		t.gov.OnSuccess()
+	}
+
+	return resp, nil
 }
 
 // idleTransport wraps every response body in an [idleBody], bounding mid-body
-// stalls and optionally counting raw wire bytes as they arrive and
-// rate-limited responses as they land.
+// stalls and optionally counting raw wire bytes as they arrive.
 //
 // The idle bound works by closing the body from a timer, which unblocks a
 // pending Read only under HTTP/1 connection semantics; the client this wraps
@@ -93,15 +110,14 @@ type idleTransport struct {
 	next        http.RoundTripper
 	logger      *slog.Logger
 	wireBytes   *atomic.Int64
-	rateLimited *atomic.Int64
 	idleTimeout time.Duration
 }
 
 // RoundTrip delegates to the wrapped transport and instruments the response
 // body of any successful exchange; the [http.RoundTripper] contract guarantees
-// a non-nil body when the error is nil. It sits below the go-tfe client's
-// internal retry loop, so every rate-limited attempt is observed here even
-// though the caller only ever sees the final outcome.
+// a non-nil body when the error is nil. It sits below every retry loop, so a
+// retried request is observed here once per attempt even though the caller
+// only ever sees the final outcome.
 func (t *idleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	start := time.Now()
 
@@ -111,10 +127,6 @@ func (t *idleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	if err != nil {
 		return resp, err //nolint:wrapcheck // A transparent transport wrapper.
-	}
-
-	if t.rateLimited != nil && resp.StatusCode == http.StatusTooManyRequests {
-		t.rateLimited.Add(1)
 	}
 
 	resp.Body = &idleBody{
@@ -129,9 +141,9 @@ func (t *idleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // logRoundTrip emits one debug line for the attempt that just completed on the
 // wire, carrying the method, URL, elapsed time, and the status the attempt saw
 // (or the transport error when it never got a response). It sits below the
-// go-tfe client's internal retry loop, so a retried request logs once per
-// attempt, and the elapsed time covers only the headers: the body streams to
-// the caller after RoundTrip returns.
+// retry layers, so a retried request logs once per attempt, and the elapsed
+// time covers only the headers: the body streams to the caller after
+// RoundTrip returns.
 func (t *idleTransport) logRoundTrip(req *http.Request, resp *http.Response, err error, elapsed time.Duration) {
 	if t.logger == nil {
 		return

@@ -567,16 +567,15 @@ func TestHumanBytes(t *testing.T) {
 	}
 }
 
-// fakePool is a static [progress.WorkerSource] for tests.
-type fakePool struct {
-	size int
+// staticRateStatus returns a rate-status source that always reports rps and
+// pausedFor, standing in for the client's governor.
+func staticRateStatus(rps float64, pausedFor time.Duration) func() (float64, time.Duration) {
+	return func() (float64, time.Duration) {
+		return rps, pausedFor
+	}
 }
 
-func (f fakePool) Size() int {
-	return f.size
-}
-
-func TestReporter_HumanLine_Workers(t *testing.T) {
+func TestReporter_HumanLine_RateStatus(t *testing.T) {
 	t.Parallel()
 
 	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
@@ -591,27 +590,51 @@ func TestReporter_HumanLine_Workers(t *testing.T) {
 		config.ProgressModeHuman,
 		src,
 		progress.WithClock(fixedClock(base, base.Add(time.Second), base.Add(2*time.Second))),
-		progress.WithWorkers(fakePool{size: 4}, 16),
+		progress.WithRateStatus(staticRateStatus(12, 4*time.Second)),
 		progress.WithRateLimited(rateLimited),
 	)
 
 	require.NoError(t, r.Report())
 
 	line := buf.String()
-	assert.Contains(t, line, "workers=4/16")
+	assert.Contains(t, line, "rps=12")
+	assert.Contains(t, line, "paused=4s")
 	assert.Contains(t, line, "rateLimited=12")
 
-	// The summary keeps the run's rate-limited total but drops the live worker
+	// The summary keeps the run's rate-limited total but drops the live rate
 	// readout, which is meaningless once the run has ended.
 	buf.Reset()
 	require.NoError(t, r.Summary())
 
 	line = buf.String()
-	assert.NotContains(t, line, "workers=")
+	assert.NotContains(t, line, "rps=")
+	assert.NotContains(t, line, "paused=")
 	assert.Contains(t, line, "rateLimited=12")
 }
 
-func TestReporter_HumanLine_NoWorkersWithoutSource(t *testing.T) {
+func TestReporter_HumanLine_NoPausedWhileFlowing(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	src := fakeSource{tally: manifest.Tally{Done: 1}}
+
+	buf := &bytes.Buffer{}
+	r := progress.New(
+		buf,
+		config.ProgressModeHuman,
+		src,
+		progress.WithClock(fixedClock(base, base.Add(time.Second))),
+		progress.WithRateStatus(staticRateStatus(30, 0)),
+	)
+
+	require.NoError(t, r.Report())
+
+	line := buf.String()
+	assert.Contains(t, line, "rps=30")
+	assert.NotContains(t, line, "paused=", "no cooldown means no paused readout")
+}
+
+func TestReporter_HumanLine_NoRateWithoutSource(t *testing.T) {
 	t.Parallel()
 
 	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
@@ -628,11 +651,11 @@ func TestReporter_HumanLine_NoWorkersWithoutSource(t *testing.T) {
 	require.NoError(t, r.Report())
 
 	line := buf.String()
-	assert.NotContains(t, line, "workers=")
+	assert.NotContains(t, line, "rps=")
 	assert.NotContains(t, line, "rateLimited=")
 }
 
-func TestReporter_JSONLine_Workers(t *testing.T) {
+func TestReporter_JSONLine_RateStatus(t *testing.T) {
 	t.Parallel()
 
 	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
@@ -647,28 +670,39 @@ func TestReporter_JSONLine_Workers(t *testing.T) {
 		config.ProgressModeJSON,
 		src,
 		progress.WithClock(fixedClock(base, base.Add(time.Second))),
-		progress.WithWorkers(fakePool{size: 2}, 16),
+		progress.WithRateStatus(staticRateStatus(7.5, 1500*time.Millisecond)),
 		progress.WithRateLimited(rateLimited),
 	)
 
 	require.NoError(t, r.Report())
 
 	var line struct {
-		Workers     *int   `json:"workers"`
-		MaxWorkers  *int   `json:"maxWorkers"`
-		RateLimited *int64 `json:"rateLimited"`
+		RequestsPerSecond *float64 `json:"requestsPerSecond"`
+		PausedMs          *int64   `json:"pausedMs"`
+		RateLimited       *int64   `json:"rateLimited"`
 	}
 
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &line))
-	require.NotNil(t, line.Workers)
-	require.NotNil(t, line.MaxWorkers)
+	require.NotNil(t, line.RequestsPerSecond)
+	require.NotNil(t, line.PausedMs)
 	require.NotNil(t, line.RateLimited)
-	assert.Equal(t, 2, *line.Workers)
-	assert.Equal(t, 16, *line.MaxWorkers)
+	assert.InEpsilon(t, 7.5, *line.RequestsPerSecond, 1e-9)
+	assert.Equal(t, int64(1500), *line.PausedMs)
 	assert.Equal(t, int64(7), *line.RateLimited)
+
+	// The summary drops the live rate figures, matching logfmt.
+	buf.Reset()
+	require.NoError(t, r.Summary())
+
+	var summary map[string]any
+
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &summary))
+	assert.NotContains(t, summary, "requestsPerSecond")
+	assert.NotContains(t, summary, "pausedMs")
+	assert.Contains(t, summary, "rateLimited")
 }
 
-func TestReporter_JSONLine_NoWorkersWithoutSource(t *testing.T) {
+func TestReporter_JSONLine_NoRateWithoutSource(t *testing.T) {
 	t.Parallel()
 
 	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
@@ -687,7 +721,7 @@ func TestReporter_JSONLine_NoWorkersWithoutSource(t *testing.T) {
 	var line map[string]any
 
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &line))
-	assert.NotContains(t, line, "workers")
-	assert.NotContains(t, line, "maxWorkers")
+	assert.NotContains(t, line, "requestsPerSecond")
+	assert.NotContains(t, line, "pausedMs")
 	assert.NotContains(t, line, "rateLimited")
 }

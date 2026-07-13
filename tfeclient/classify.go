@@ -20,6 +20,13 @@ var (
 	// URL to fetch.
 	ErrMissingLogURL = errors.New("log URL is missing")
 
+	// ErrRateLimited is the sentinel wrapped by the error a request returns
+	// when the server rate limited it (HTTP 429) past the bounded in-client
+	// retries. It classifies as [KindTransient]: the governor has already
+	// lowered the launch rate, so a re-run (or the next pass) retries the
+	// object under the adapted rate.
+	ErrRateLimited = errors.New("rate limited")
+
 	// The errForbidden403 sentinel is joined with a raw [tfe.ClientRequest.DoRaw]
 	// HTTP error so the combined error's first line reads "403 Forbidden", the
 	// text [isForbidden] recognizes. A plain wrap would let the root walk unwrap
@@ -43,7 +50,7 @@ const (
 	KindUnknown Kind = iota
 
 	// KindTransient is a retryable error: context cancellation or deadline,
-	// a network timeout, or rate-limiter exhaustion.
+	// a network timeout, or rate limiting ([ErrRateLimited]).
 	KindTransient
 
 	// KindTerminal is a permanent absence, such as a 404 surfaced as
@@ -74,9 +81,10 @@ func (k Kind) String() string {
 // Classify reports the [Kind] of err.
 //
 // It recognizes [tfe.ErrResourceNotFound] as [KindTerminal]; context
-// cancellation, deadlines, and network timeouts as [KindTransient]; and an
-// access denial (an HTTP 403) as [KindForbidden]. A nil error and any error not
-// matched structurally are [KindUnknown].
+// cancellation, deadlines, network timeouts, and rate limiting
+// ([ErrRateLimited]) as [KindTransient]; and an access denial (an HTTP 403)
+// as [KindForbidden]. A nil error and any error not matched structurally are
+// [KindUnknown].
 //
 // The go-tfe v1 client discards the HTTP status of a 403 and surfaces only the
 // joined error payload, whose title is "forbidden", so a forbidden error is
@@ -88,6 +96,8 @@ func Classify(err error) Kind {
 	case errors.Is(err, tfe.ErrResourceNotFound):
 		return KindTerminal
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return KindTransient
+	case errors.Is(err, ErrRateLimited):
 		return KindTransient
 	case isTimeout(err):
 		return KindTransient

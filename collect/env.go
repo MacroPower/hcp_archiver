@@ -28,8 +28,10 @@ const (
 	DefaultAbsentConfirmDelay = 2 * time.Second
 )
 
-// DefaultConcurrency is the default per-collection fan-out ceiling
-// ([Env.Concurrency]), matching the archiver's default worker-pool ceiling.
+// DefaultConcurrency is the fixed bound on concurrent API work: the archiver
+// sizes its in-flight request gate from it, and each collection caps its
+// fan-out at it ([Env.Concurrency]). One constant serves both so the fan-out
+// can never outrun the gate.
 const DefaultConcurrency = 16
 
 // Env is the shared environment every domain collector composes to archive an
@@ -53,7 +55,6 @@ type Env struct {
 	idOwners           map[string]map[string]string
 	idMu               sync.Mutex
 	blobRetries        int
-	concurrency        int
 	blobRetryDelay     time.Duration
 	absentConfirmDelay time.Duration
 }
@@ -63,7 +64,6 @@ type Env struct {
 // Options of this type:
 //   - [WithAbsentConfirm]
 //   - [WithBlobRetry]
-//   - [WithConcurrency]
 //   - [WithTarget]
 type Option func(*Env)
 
@@ -100,16 +100,6 @@ func WithTarget(target string) Option {
 	}
 }
 
-// WithConcurrency sets the per-collection fan-out ceiling ([Env.Concurrency]).
-// The archiver passes its worker-pool ceiling so a collection's fan-out never
-// queues more work than the pool could ever run. A value below one is raised
-// to one. It returns an [Option].
-func WithConcurrency(n int) Option {
-	return func(e *Env) {
-		e.concurrency = max(1, n)
-	}
-}
-
 // NewEnv creates a new [Env] binding client, st, and ledger.
 //
 // The archiver builds one Env per organization from that org's client, store,
@@ -121,7 +111,6 @@ func NewEnv(client *tfeclient.Client, st *store.Store, ledger *manifest.Ledger, 
 		ledger:             ledger,
 		idOwners:           make(map[string]map[string]string),
 		blobRetries:        DefaultBlobRetries,
-		concurrency:        DefaultConcurrency,
 		blobRetryDelay:     DefaultBlobRetryDelay,
 		absentConfirmDelay: DefaultAbsentConfirmDelay,
 	}
@@ -135,7 +124,7 @@ func NewEnv(client *tfeclient.Client, st *store.Store, ledger *manifest.Ledger, 
 
 // Client returns the shared API client so a collector can build fetch closures
 // over its typed services. Route requests through the client so they share the
-// run's single rate limiter.
+// run's single rate governor.
 func (e *Env) Client() *tfeclient.Client {
 	return e.client
 }
@@ -155,12 +144,13 @@ func (e *Env) SetTarget(target string) {
 }
 
 // Concurrency returns the ceiling a collector caps one collection's fan-out
-// at (its errgroup SetLimit). Real request parallelism is bounded by the
-// client's gate either way; the cap keeps a huge collection from parking
-// thousands of goroutines on the gate at once, where their synchronized
-// retries would concentrate load on a single endpoint.
+// at (its errgroup SetLimit), fixed at [DefaultConcurrency]. Real request
+// parallelism is bounded by the client's gate either way; the cap keeps a
+// huge collection from parking thousands of goroutines on the gate at once,
+// where their synchronized retries would concentrate load on a single
+// endpoint.
 func (e *Env) Concurrency() int {
-	return e.concurrency
+	return DefaultConcurrency
 }
 
 // Skip records the object at relPath as intentionally deferred, a settled state

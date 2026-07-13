@@ -18,13 +18,6 @@
       "title": "Organizations",
       "description": "Organizations limits the run to the named organizations. An empty list\narchives every organization the token can see."
     },
-    "maxConcurrency": {
-      "type": "integer",
-      "title": "Max Concurrency",
-      "description": "MaxConcurrency is the ceiling the worker count may scale up to while no\nrate limiting is observed; every run starts at one worker. It defaults to\n[DefaultMaxConcurrency].",
-      "default": 16,
-      "minimum": 1
-    },
     "runHistory": {
       "$ref": "#/$defs/FileRunHistory",
       "title": "Run History",
@@ -86,6 +79,6 @@
     }
   },
   "title": "File",
-  "description": "File is the on-disk YAML configuration describing what to archive and how.\n\nIt holds the settings that are stable across runs: the API address, the\norganizations to archive, the worker concurrency ceiling, and the opt-in\nscope toggles. Per-run and secret settings (the output directory, the progress\nmode, the retry-absent toggle, and the API token) are supplied by flags and\nthe environment instead, so a configuration file never carries a\nmachine-specific path or a credential.\n\nEvery field is optional; an absent field takes the package default. Create\ninstances with [LoadFile], or [DefaultFile] for the defaults alone.",
+  "description": "File is the on-disk YAML configuration describing what to archive and how.\n\nIt holds the settings that are stable across runs: the API address, the\norganizations to archive, and the opt-in scope toggles. Per-run and secret\nsettings (the output directory, the progress mode, the retry-absent toggle,\nand the API token) are supplied by flags and the environment instead, so a\nconfiguration file never carries a machine-specific path or a credential.\n\nEvery field is optional; an absent field takes the package default. Create\ninstances with [LoadFile], or [DefaultFile] for the defaults alone.",
   "additionalProperties": false
 }

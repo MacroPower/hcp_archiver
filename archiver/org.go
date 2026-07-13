@@ -42,7 +42,7 @@ func resolveOrgs(ctx context.Context, orgs []string, list func(context.Context) 
 }
 
 // listOrgNames enumerates the names of every organization visible to the
-// client, paginating through the shared limiter.
+// client, paginating through the shared governor.
 func listOrgNames(ctx context.Context, client *tfeclient.Client) ([]string, error) {
 	orgs, err := tfeclient.Paginate(ctx, client,
 		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.Organization, *tfe.Pagination, error) {
@@ -83,14 +83,13 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 		return manifest.Tally{}, fmt.Errorf("load manifest: %w", err)
 	}
 
-	env := collect.NewEnv(a.client, st, ledger,
-		collect.WithConcurrency(a.cfg.MaxConcurrency))
+	env := collect.NewEnv(a.client, st, ledger)
 	reporter := progress.New(a.w, a.cfg.ProgressMode, ledger,
 		progress.WithInterval(a.cfg.ProgressInterval),
 		progress.WithInterrupt(a.cancelRun),
 		progress.WithLogSink(a.logSink),
 		progress.WithWireBytes(a.wireBytes),
-		progress.WithWorkers(a.pool, a.cfg.MaxConcurrency),
+		progress.WithRateStatus(a.client.RateStatus),
 		progress.WithRateLimited(a.rateLimited),
 	)
 

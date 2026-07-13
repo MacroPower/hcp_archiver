@@ -9,14 +9,16 @@
 // first line; the colored per-status counts on a second line; and bytes, rate,
 // and elapsed time on a closing third line. The panel's rate averages a
 // short trailing window, so it reflects current throughput and visibly drops on
-// a stall. A reporter built over a [WorkerSource] also shows the adaptive
-// worker pool beside the rate (its live size against the ceiling it may scale
-// to) and, once any rate limiting has been observed, an amber running total of
-// 429 responses, so the pool shrinking under throttling explains itself;
-// logfmt carries the same as workers= and rateLimited=, JSON as workers,
-// maxWorkers, and rateLimited, and the closing summary keeps the run's
-// rate-limited total. Log output routes through a [LogSink] so log lines scroll in
-// scrollback above the panel instead of corrupting it. Off a terminal (a pipe,
+// a stall. A reporter built with [WithRateStatus] also shows the client's
+// adaptive request rate beside the byte rate; while a rate-limit cooldown
+// pauses launches, an amber paused readout marks the wait (a cooldown parks
+// every in-flight request, so without it the run would just look stuck); and
+// once any rate limiting has been observed, an amber running total of 429
+// responses appears, so a slowed rate explains itself. Logfmt carries the
+// same as rps=, paused=, and rateLimited=, JSON as requestsPerSecond,
+// pausedMs, and rateLimited, and the closing summary keeps the run's
+// rate-limited total. Log output routes through a [LogSink] so log lines
+// scroll in scrollback above the panel instead of corrupting it. Off a terminal (a pipe,
 // a redirect, or a test buffer) the same signal falls back to a logfmt line.
 // The machine mode ([config.ProgressModeJSON]) is one JSON object per line for
 // wrapping in CI or a watcher. The mode defaults to the panel on an interactive

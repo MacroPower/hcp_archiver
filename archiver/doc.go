@@ -5,28 +5,28 @@
 // collector, then drives the walk. It enumerates the organizations the token can
 // see (all of them when no organization is named) and, for each, archives the
 // directly-owned org-level objects once, walks that organization's projects in
-// order, fans its workspaces across a shared worker pool, always gathers the
-// registry surface (deepened by the registry-detail toggle), and adds the
-// optional stacks and audit surfaces as their toggles allow.
+// order, fans its workspaces across the run's shared request gate, always
+// gathers the registry surface (deepened by the registry-detail toggle), and
+// adds the optional stacks and audit surfaces as their toggles allow.
 // Because each organization has its own archive tree and manifest, a fresh
 // store and ledger are built per organization.
 //
-// The worker pool bounds in-flight API requests, not workspaces: every request
-// takes a slot through the client's gate, so the same slots serve many small
-// workspaces or many pieces of one large workspace, whichever is ready. A
-// controller scales the pool between one worker and the configured ceiling from
-// observed rate limiting, the way TCP finds a path's capacity: it doubles on
-// each clean window until the first 429 (slow start), then halves on any window
-// that saw 429s and adds one worker per clean window thereafter, so the run
-// ramps up quickly, sheds load when the server pushes back, and recovers on its
-// own.
+// The gate bounds in-flight API requests, not workspaces: every request takes
+// a slot, so the same slots serve many small workspaces or many pieces of one
+// large workspace, whichever is ready. The bound is a fixed constant, because
+// concurrency is a resource cap rather than a throughput control: how fast
+// requests launch is decided by the client's adaptive rate governor, which,
+// when the server rate-limits the run, halves its rate and pauses every
+// launch until the server's advertised reset, then creeps back up while
+// responses stay clean. A rate-limited run therefore shows requests slowing,
+// with a cooldown pause in the progress views.
 //
-// It owns the cross-cutting runtime and nothing else: the worker pool and its
-// controller, the ledger-flush and progress tickers, graceful shutdown that
-// flushes the ledger on a signal, and the closing run record. It holds no
-// per-object API knowledge of its own; that lives in the collectors it
-// schedules. Its responsibility is purely which work runs, in what order, and
-// with how much concurrency.
+// It owns the cross-cutting runtime and nothing else: the request gate, the
+// ledger-flush and progress tickers, graceful shutdown that flushes the
+// ledger on a signal, and the closing run record. It holds no per-object API
+// knowledge of its own; that lives in the collectors it schedules. Its
+// responsibility is purely which work runs, in what order, and with how much
+// concurrency.
 //
 // # Guarantees and scope
 //

@@ -19,7 +19,6 @@ func TestDefaultFile(t *testing.T) {
 	file := config.DefaultFile()
 
 	assert.Equal(t, config.DefaultAddress, file.Address)
-	assert.Equal(t, config.DefaultMaxConcurrency, file.MaxConcurrency)
 	assert.Empty(t, file.Organizations)
 	assert.Equal(t, config.FileRunHistory{}, file.RunHistory)
 	assert.Equal(t, config.FileScope{}, file.Scope)
@@ -75,14 +74,12 @@ func TestLoadFile(t *testing.T) {
 			yaml: "# yaml-language-server: $schema=./config.schema.json\n" +
 				"address: https://tfe.example.com\n" +
 				"organizations:\n  - one\n  - two\n" +
-				"maxConcurrency: 32\n" +
 				"runHistory:\n  count: 250\n  age: 2160h\n" +
 				"scope:\n  stacks: true\n  hyok: true\n  registryDetail: true\n  auditTrail: true\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, "https://tfe.example.com", file.Address)
 				assert.Equal(t, []string{"one", "two"}, file.Organizations)
-				assert.Equal(t, 32, file.MaxConcurrency)
 				assert.Equal(t, 250, file.RunHistory.Count)
 				assert.Equal(t, 2160*time.Hour, file.RunHistory.Age)
 				assert.True(t, file.Scope.Stacks)
