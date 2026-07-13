@@ -35,9 +35,12 @@ func (c *Collector) collectModules(ctx context.Context) error {
 
 	// The modules archive concurrently, each under its own namespace/name/
 	// provider paths; under detail each fans into per-version reads of its own,
-	// so the client's gate, not this loop, bounds the real parallelism. An
-	// archive returns non-nil only on a cancellation, which cancels the group.
+	// so the client's gate, not this loop, bounds the real parallelism, and the
+	// fan-out is capped at the environment's ceiling so a huge registry cannot
+	// park thousands of goroutines on the gate. An archive returns non-nil only
+	// on a cancellation, which cancels the group.
 	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(c.env.Concurrency())
 
 	for _, mod := range modules {
 		g.Go(func() error {
@@ -159,9 +162,10 @@ func (c *Collector) archiveModuleDetail(ctx context.Context, mod *tfe.RegistryMo
 	}
 
 	// Each version is one frozen read at its own path, and a module accumulates
-	// them for as long as it publishes, so they fetch concurrently; the settled
-	// versions skip inside Object.
+	// them for as long as it publishes, so they fetch concurrently, capped at
+	// the environment's ceiling; the settled versions skip inside Object.
 	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(c.env.Concurrency())
 
 	for _, vs := range mod.VersionStatuses {
 		// A non-concrete or empty version cannot address a per-version read and

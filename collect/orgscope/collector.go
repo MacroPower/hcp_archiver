@@ -171,14 +171,16 @@ func paginate[T any](
 //
 // The list read is best-effort: a read that does not complete is logged and the
 // collection skipped (see [paginate]), so nothing is archived this run and a
-// re-run retries. The listed items then archive concurrently, mirroring
-// [collect.Walk]'s per-page fan-out: each goroutine is only a coordinator, and
-// every request it causes takes a slot from the client's gate, so the pool's
-// live size, not this fan-out, bounds the real parallelism. Items write under
-// distinct per-id paths, and the user sub-objects shared across teams dedupe
-// through the seen-set, so concurrent archives never contend on one ledger
-// entry. An archive returns non-nil only on a cancellation of ctx, which
-// cancels the group and propagates.
+// re-run retries. The listed items then archive concurrently: each goroutine
+// is only a coordinator, and every request it causes takes a slot from the
+// client's gate, so the pool's live size bounds the real parallelism. The
+// fan-out is capped at the environment's ceiling ([collect.Env.Concurrency])
+// so a huge collection, whose items mostly hit one endpoint (each team's
+// notification configs, say), cannot park thousands of goroutines on the gate
+// at once. Items write under distinct per-id paths, and the user sub-objects
+// shared across teams dedupe through the seen-set, so concurrent archives
+// never contend on one ledger entry. An archive returns non-nil only on a
+// cancellation of ctx, which cancels the group and propagates.
 func enumerate[T any](
 	ctx context.Context,
 	c *Collector,
@@ -194,6 +196,7 @@ func enumerate[T any](
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(c.env.Concurrency())
 
 	for _, item := range items {
 		g.Go(func() error {

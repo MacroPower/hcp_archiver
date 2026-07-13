@@ -83,7 +83,8 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 		return manifest.Tally{}, fmt.Errorf("load manifest: %w", err)
 	}
 
-	env := collect.NewEnv(a.client, st, ledger)
+	env := collect.NewEnv(a.client, st, ledger,
+		collect.WithConcurrency(a.cfg.MaxConcurrency))
 	reporter := progress.New(a.w, a.cfg.ProgressMode, ledger,
 		progress.WithInterval(a.cfg.ProgressInterval),
 		progress.WithInterrupt(a.cancelRun),

@@ -28,6 +28,10 @@ const (
 	DefaultAbsentConfirmDelay = 2 * time.Second
 )
 
+// DefaultConcurrency is the default per-collection fan-out ceiling
+// ([Env.Concurrency]), matching the archiver's default worker-pool ceiling.
+const DefaultConcurrency = 16
+
 // Env is the shared environment every domain collector composes to archive an
 // object end to end.
 //
@@ -49,6 +53,7 @@ type Env struct {
 	idOwners           map[string]map[string]string
 	idMu               sync.Mutex
 	blobRetries        int
+	concurrency        int
 	blobRetryDelay     time.Duration
 	absentConfirmDelay time.Duration
 }
@@ -58,6 +63,7 @@ type Env struct {
 // Options of this type:
 //   - [WithAbsentConfirm]
 //   - [WithBlobRetry]
+//   - [WithConcurrency]
 //   - [WithTarget]
 type Option func(*Env)
 
@@ -94,6 +100,16 @@ func WithTarget(target string) Option {
 	}
 }
 
+// WithConcurrency sets the per-collection fan-out ceiling ([Env.Concurrency]).
+// The archiver passes its worker-pool ceiling so a collection's fan-out never
+// queues more work than the pool could ever run. A value below one is raised
+// to one. It returns an [Option].
+func WithConcurrency(n int) Option {
+	return func(e *Env) {
+		e.concurrency = max(1, n)
+	}
+}
+
 // NewEnv creates a new [Env] binding client, st, and ledger.
 //
 // The archiver builds one Env per organization from that org's client, store,
@@ -105,6 +121,7 @@ func NewEnv(client *tfeclient.Client, st *store.Store, ledger *manifest.Ledger, 
 		ledger:             ledger,
 		idOwners:           make(map[string]map[string]string),
 		blobRetries:        DefaultBlobRetries,
+		concurrency:        DefaultConcurrency,
 		blobRetryDelay:     DefaultBlobRetryDelay,
 		absentConfirmDelay: DefaultAbsentConfirmDelay,
 	}
@@ -135,6 +152,15 @@ func (e *Env) Store() *store.Store {
 // a long walk surfaces where it is working.
 func (e *Env) SetTarget(target string) {
 	e.ledger.SetTarget(target)
+}
+
+// Concurrency returns the ceiling a collector caps one collection's fan-out
+// at (its errgroup SetLimit). Real request parallelism is bounded by the
+// client's gate either way; the cap keeps a huge collection from parking
+// thousands of goroutines on the gate at once, where their synchronized
+// retries would concentrate load on a single endpoint.
+func (e *Env) Concurrency() int {
+	return e.concurrency
 }
 
 // Skip records the object at relPath as intentionally deferred, a settled state

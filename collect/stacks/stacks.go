@@ -102,13 +102,14 @@ func (c *Collector) Collect(ctx context.Context) error {
 
 	// The stacks archive concurrently, mirroring the workspace fan-out: each
 	// goroutine is only a coordinator, every request it causes takes a slot from
-	// the client's gate, so the pool's live size bounds the real parallelism.
-	// No single stack is the target then, so clear it for the whole phase. A
-	// stack goroutine returns non-nil only on a cancellation, which cancels the
-	// group.
+	// the client's gate, so the pool's live size bounds the real parallelism,
+	// and the fan-out is capped at the environment's ceiling. No single stack
+	// is the target then, so clear it for the whole phase. A stack goroutine
+	// returns non-nil only on a cancellation, which cancels the group.
 	c.env.SetTarget("")
 
 	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(c.env.Concurrency())
 
 	for _, stack := range stacks {
 		g.Go(func() error {

@@ -36,9 +36,12 @@ func (c *Collector) collectProviders(ctx context.Context) error {
 
 	// The providers archive concurrently, each under its own namespace/name
 	// paths; under detail each fans into per-version reads of its own, so the
-	// client's gate, not this loop, bounds the real parallelism. An archive
-	// returns non-nil only on a cancellation, which cancels the group.
+	// client's gate, not this loop, bounds the real parallelism, and the
+	// fan-out is capped at the environment's ceiling so a huge registry cannot
+	// park thousands of goroutines on the gate. An archive returns non-nil only
+	// on a cancellation, which cancels the group.
 	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(c.env.Concurrency())
 
 	for _, prov := range providers {
 		g.Go(func() error {
@@ -99,8 +102,10 @@ func (c *Collector) archiveProviderDetail(ctx context.Context, prov *tfe.Registr
 
 	// Each version is a frozen write plus one platform list at its own paths,
 	// and a provider accumulates them for as long as it publishes, so they
-	// fetch concurrently; the settled versions skip inside Object.
+	// fetch concurrently, capped at the environment's ceiling; the settled
+	// versions skip inside Object.
 	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(c.env.Concurrency())
 
 	for _, ver := range versions {
 		g.Go(func() error {

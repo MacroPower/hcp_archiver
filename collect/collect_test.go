@@ -64,6 +64,38 @@ func (timeoutError) Error() string   { return "i/o timeout" }
 func (timeoutError) Timeout() bool   { return true }
 func (timeoutError) Temporary() bool { return true }
 
+func TestEnvConcurrency(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		opts []collect.Option
+		want int
+	}{
+		"defaults to the package default": {
+			opts: nil,
+			want: collect.DefaultConcurrency,
+		},
+		"takes the configured ceiling": {
+			opts: []collect.Option{collect.WithConcurrency(4)},
+			want: 4,
+		},
+		"raises a ceiling below one": {
+			opts: []collect.Option{collect.WithConcurrency(0)},
+			want: 1,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env, _, _ := newEnv(t, tc.opts...)
+
+			assert.Equal(t, tc.want, env.Concurrency())
+		})
+	}
+}
+
 func TestEnvObject(t *testing.T) {
 	t.Parallel()
 

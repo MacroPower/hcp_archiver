@@ -63,9 +63,11 @@ func (c *Collector) collectStates(ctx context.Context, project string, stack *tf
 	}
 
 	// A stack accumulates generations for as long as it lives, and each is one
-	// streamed download, so they fetch concurrently; the settled generations
-	// skip inside Blob, and the gate bounds the real parallelism.
+	// streamed download, so they fetch concurrently, capped at the
+	// environment's ceiling; the settled generations skip inside Blob, and the
+	// gate bounds the real parallelism.
 	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(c.env.Concurrency())
 
 	for _, state := range states {
 		stateFile := c.env.Store().StackStateFile(
