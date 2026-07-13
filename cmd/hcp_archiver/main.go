@@ -258,6 +258,16 @@ func signalContext(parent context.Context) (context.Context, context.CancelFunc)
 		select {
 		case <-done:
 		case s := <-sig:
+			// A second signal and normal completion can become ready together,
+			// since stop() closes done as the graceful shutdown returns, and a
+			// select picks a ready case at random. Re-check done and prefer the
+			// clean exit: force-quit only when shutdown is still underway.
+			select {
+			case <-done:
+				return
+			default:
+			}
+
 			// 128+signal is the conventional exit code for a signal-terminated
 			// process: 130 for SIGINT (ctrl+c), 143 for SIGTERM.
 			if sysSig, ok := s.(syscall.Signal); ok {
