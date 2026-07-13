@@ -153,14 +153,14 @@ now reach.
 A run ends with a per-status summary line; the counts are the resume model made
 visible:
 
-- **done** — fetched and written.
-- **absent** — gone (a 404, confirmed by an in-run re-probe), re-probed only
+- `done`: fetched and written.
+- `absent`: gone (a 404, confirmed by an in-run re-probe), re-probed only
   with `--retry-absent`.
-- **forbidden** — the token may not read it (a 403); retried on the next run, so
+- `forbidden`: the token may not read it (a 403); retried on the next run, so
   a broader token can still capture it (see above). Counted apart from an error.
-- **errored** — a transient or unclassified failure, retried next run; a healthy
+- `errored`: a transient or unclassified failure, retried next run; a healthy
   archive ends with `errored=0`.
-- **skipped** / **n/a** — intentionally deferred or not applicable to this
+- `skipped` / `n/a`: intentionally deferred or not applicable to this
   archive; settled, and never mistaken for a gap.
 
 A non-zero `errored` is the count to investigate; `forbidden`, `absent`,
@@ -195,47 +195,58 @@ Settings are grouped by how much they vary; see
 ## Output layout
 
 ```
-archive/<org>/
-  org.json                          organization metadata
-  .ledger/                          sharded per-object ledger + run records & watermarks
-
-  # org-level objects (not scoped to a single project)
-  teams/<id>/
-    team.json                       definition + access matrix, members, SSO/SCIM
-    notification-configs.json       team-scoped alerting
-  memberships.json                  org roster: email, status, user + team refs
-  users/<id>.json                   users referenced by runs, events, teams
-  oauth-clients/<id>/               VCS connection + per-token metadata
-  github-app-installations.json     GitHub App installs (metadata only)
-  variable-sets/<id>/               set metadata + variables
-  policy-sets/<id>/                 set metadata, versions, parameters
-  policies/<id>.json                policy metadata
-  policies/<id>.<ext>               Sentinel/OPA source
-  run-tasks.json                    org run-task definitions
-  agent-pools/<id>.json             pool config + allowed/excluded scopes
-  token-ttl-policies.json           org token max-TTL governance
-  audit-trails/                     audit config + windowed who-did-what pages
-  reserved-tag-keys.json            org tag governance
-  hyok-configurations/<id>/         HYOK + OIDC config, key versions (optional)
-  registry/                         modules, no-code modules, providers, GPG keys
-  config-versions/<cv-id>.tar.gz    deduped org-wide; runs reference by id
-
-  # project-scoped objects nest beneath the owning project
-  projects/<project-name>/
-    project.json                    defaults + tag bindings
-    team-access.json                project RBAC
-    effective-tag-bindings.json     resolved bindings, including inherited
-    notification-configs.json       project-scoped alerting
-    workspaces/<ws-name>/
-      workspace.json                full settings + project ref
-      variables.json                sensitive values read back blank upstream
-      readme.md, tags.json, team-access.json, notification-configs.json
-      run-triggers.json, run-tasks.json, remote-state-consumers.json
-      state-versions/               raw + JSON state blobs, per-version metadata
-      runs/<run-id>/                run summary, config version, plan/apply logs,
-                                    plan json, cost estimate, comments, events,
-                                    policy checks, task stages, TF policy outcomes
-    stacks/<name>/                  stack config, deployment groups, runs, states
+📁 archive/<org>/
+│
+│   # org root
+├── 📄 org.json                          # organization metadata
+├── 📁 .ledger/                          # sharded per-object ledger + run records & watermarks
+│
+│   # org-level objects (not scoped to a single project)
+├── 📁 teams/<id>/
+│   ├── 📄 team.json                     # definition + access matrix, members, SSO/SCIM
+│   └── 📄 notification-configs.json     # team-scoped alerting
+├── 📄 memberships.json                  # org roster: email, status, user + team refs
+├── 📁 users/
+│   └── 📄 <id>.json                     # users referenced by runs, events, teams
+├── 📁 oauth-clients/<id>/               # VCS connection + per-token metadata
+├── 📄 github-app-installations.json     # GitHub App installs (metadata only)
+├── 📁 variable-sets/<id>/               # set metadata + variables
+├── 📁 policy-sets/<id>/                 # set metadata, versions, parameters
+├── 📁 policies/
+│   ├── 📄 <id>.json                     # policy metadata
+│   └── 📄 <id>.<ext>                    # Sentinel/OPA source
+├── 📄 run-tasks.json                    # org run-task definitions
+├── 📁 agent-pools/
+│   └── 📄 <id>.json                     # pool config + allowed/excluded scopes
+├── 📄 token-ttl-policies.json           # org token max-TTL governance
+├── 📁 audit-trails/                     # audit config + windowed who-did-what pages
+├── 📄 reserved-tag-keys.json            # org tag governance
+├── 📁 hyok-configurations/<id>/         # HYOK + OIDC config, key versions (optional)
+├── 📁 registry/                         # modules, no-code modules, providers, GPG keys
+├── 📁 config-versions/
+│   └── 📄 <cv-id>.tar.gz                # deduped org-wide; runs reference by id
+│
+│   # project-scoped objects nest beneath the owning project
+└── 📁 projects/<project-name>/
+    ├── 📄 project.json                  # defaults + tag bindings
+    ├── 📄 team-access.json              # project RBAC
+    ├── 📄 effective-tag-bindings.json   # resolved bindings, including inherited
+    ├── 📄 notification-configs.json     # project-scoped alerting
+    ├── 📁 workspaces/<ws-name>/
+    │   ├── 📄 workspace.json            # full settings + project ref
+    │   ├── 📄 variables.json            # sensitive values read back blank upstream
+    │   ├── 📄 readme.md                 # workspace README
+    │   ├── 📄 tags.json                 # workspace tags
+    │   ├── 📄 team-access.json          # workspace RBAC
+    │   ├── 📄 notification-configs.json # workspace-scoped alerting
+    │   ├── 📄 run-triggers.json         # inbound run triggers
+    │   ├── 📄 run-tasks.json            # workspace run-task attachments
+    │   ├── 📄 remote-state-consumers.json # who may read this state
+    │   ├── 📁 state-versions/           # raw + JSON state blobs, per-version metadata
+    │   └── 📁 runs/<run-id>/            # run summary, config version, plan/apply logs,
+    │                                    # plan json, cost estimate, comments, events,
+    │                                    # policy checks, task stages, TF policy outcomes
+    └── 📁 stacks/<name>/                # stack config, deployment groups, runs, states
 ```
 
 Layout rules worth knowing:
