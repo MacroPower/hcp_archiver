@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 // DefaultIdleReadTimeout bounds how long a response body read may sit with no
@@ -53,6 +55,31 @@ func (e *idleReadError) Timeout() bool { return true }
 
 // Temporary reports true; the stall is retryable on a fresh connection.
 func (e *idleReadError) Temporary() bool { return true }
+
+// throttleTransport paces every outbound attempt through the run's shared rate
+// limiter.
+//
+// It lives at the transport rather than in [Client.Do] so that no request path
+// outruns the throttle: the retries go-tfe issues after a 429 and the pages
+// its ListAll methods fetch internally all run inside one Do call, and the
+// chunked log readers it hands back issue fresh requests mid-stream after Do
+// has already returned. Each of those attempts passes here and pays its own
+// token. A cancellation while waiting surfaces the context's error, which
+// classifies transient.
+type throttleTransport struct {
+	next    http.RoundTripper
+	limiter *rate.Limiter
+}
+
+// RoundTrip waits for a rate token, then delegates to the wrapped transport.
+func (t *throttleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	err := t.limiter.Wait(req.Context())
+	if err != nil {
+		return nil, fmt.Errorf("rate limiter wait: %w", err)
+	}
+
+	return t.next.RoundTrip(req) //nolint:wrapcheck // A transparent transport wrapper.
+}
 
 // idleTransport wraps every response body in an [idleBody], bounding mid-body
 // stalls and optionally counting raw wire bytes as they arrive and

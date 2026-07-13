@@ -228,6 +228,53 @@ func TestResolveHTTPClientTransportTuning(t *testing.T) {
 	assert.Equal(t, tfeclient.DefaultResponseHeaderTimeout, tr.ResponseHeaderTimeout)
 }
 
+func TestCallerSuppliedClientIsThrottled(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+
+	stub := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    r,
+			}, nil
+		}),
+	}
+
+	// A near-zero rate with a single burst token: the first request spends the
+	// token, and the second could not be served for days, so a short deadline
+	// must surface the limiter rather than the stub's instant answer.
+	hc := tfeclient.ResolveHTTPClient(
+		tfeclient.WithHTTPClient(stub),
+		tfeclient.WithRateLimit(0.000001, 1),
+	)
+
+	require.NotSame(t, stub, hc, "the caller's client is wrapped as a copy, not mutated")
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://offline.invalid/", http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := hc.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+	defer cancel()
+
+	req, err = http.NewRequestWithContext(ctx, http.MethodGet, "http://offline.invalid/", http.NoBody)
+	require.NoError(t, err)
+
+	_, err = hc.Do(req) //nolint:bodyclose // The throttled attempt returns no response.
+
+	require.ErrorContains(t, err, "rate limiter wait", "the deadline surfaces the limiter, not the network")
+	assert.Equal(t, 1, calls, "the throttled attempt never reaches the wrapped transport")
+}
+
 func TestPaginate(t *testing.T) {
 	t.Parallel()
 

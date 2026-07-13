@@ -25,8 +25,11 @@ const (
 	DefaultRateLimit rate.Limit = 30
 
 	// DefaultBurst is the default token-bucket burst size for the shared
-	// limiter.
-	DefaultBurst = 30
+	// limiter. It is deliberately a fraction of one second's sustained rate:
+	// the server enforces its limit per second, so a full bucket saved up
+	// during a lull and released on top of the sustained stream would land
+	// inside one window and read back as a burst of 429s.
+	DefaultBurst = 10
 )
 
 // Pagination settings for [Paginate].
@@ -69,28 +72,34 @@ type Gate interface {
 
 // Client is the single, worker-safe point of contact with HCP Terraform.
 //
-// It holds exactly one underlying go-tfe client and one shared
-// [rate.Limiter], so that N concurrent workers paginating and downloading
-// share a single aggregate throttle rather than each retrying in isolation.
-// Every request routed through [Client.Do] first takes a slot from the
-// optional [Gate], then waits on that limiter, so a caller can bound and
-// re-bound the whole run's parallelism in one place.
+// It holds exactly one underlying go-tfe client whose HTTP transport paces
+// every outbound attempt through one shared [rate.Limiter], so that N
+// concurrent workers paginating and downloading share a single aggregate
+// throttle rather than each retrying in isolation. The limiter lives at the
+// transport rather than the request level so nothing outruns it: the retries
+// go-tfe issues after a 429, the pages its ListAll methods fetch internally,
+// and the fresh requests its chunked log readers make mid-stream all pay for
+// themselves. Every request routed through [Client.Do] additionally takes a
+// slot from the optional [Gate] first, so a caller can bound and re-bound the
+// whole run's parallelism in one place.
 //
 // Create instances with [New]. A Client is safe for concurrent use.
 type Client struct {
 	tfe             *tfe.Client
-	limiter         *rate.Limiter
 	gate            Gate
 	pageConcurrency int
 }
 
-// config holds the resolved settings a [Client] is built from.
+// config holds the resolved settings a [Client] is built from. The limiter is
+// derived from limit and burst by [newConfig] once the options are applied, so
+// [resolveHTTPClient] can bind it into the transport.
 type config struct {
 	httpClient            *http.Client
 	logger                *slog.Logger
 	wireBytes             *atomic.Int64
 	rateLimited           *atomic.Int64
 	gate                  Gate
+	limiter               *rate.Limiter
 	address               string
 	token                 string
 	limit                 rate.Limit
@@ -308,7 +317,6 @@ func New(opts ...Option) (*Client, error) {
 
 	return &Client{
 		tfe:             tc,
-		limiter:         rate.NewLimiter(cfg.limit, cfg.burst),
 		gate:            cfg.gate,
 		pageConcurrency: cfg.pageConcurrency,
 	}, nil
@@ -331,14 +339,20 @@ func newConfig(opts []Option) config {
 		opt(&cfg)
 	}
 
+	// The limiter is built once the options have settled the rate, so the
+	// transport wiring below can bind the one shared throttle.
+	cfg.limiter = rate.NewLimiter(cfg.limit, cfg.burst)
+
 	return cfg
 }
 
 // resolveHTTPClient returns the caller-supplied HTTP client when one was set,
 // or otherwise builds a pooled client whose transport bounds the time to first
 // byte and each body read's idle wait. A caller-supplied [WithHTTPClient]
-// client is returned as-is, so neither bound nor the wire-byte counter applies
-// to it.
+// client keeps its own transport and tuning, so neither bound nor the
+// wire-byte counter applies to it; the shared rate limiter is the one
+// exception, wrapped around a copy, because the throttle is a correctness
+// bound no request path may escape rather than instrumentation.
 //
 // Without one, go-tfe falls back to [cleanhttp.DefaultPooledClient], which sets
 // no ResponseHeaderTimeout and leaves Client.Timeout zero, so one stalled
@@ -357,7 +371,16 @@ func newConfig(opts []Option) config {
 // stalled read by closing the connection.
 func resolveHTTPClient(cfg *config) *http.Client {
 	if cfg.httpClient != nil {
-		return cfg.httpClient
+		hc := *cfg.httpClient
+
+		next := hc.Transport
+		if next == nil {
+			next = http.DefaultTransport
+		}
+
+		hc.Transport = &throttleTransport{next: next, limiter: cfg.limiter}
+
+		return &hc
 	}
 
 	tr := cleanhttp.DefaultPooledTransport()
@@ -381,8 +404,13 @@ func resolveHTTPClient(cfg *config) *http.Client {
 		rateLimited: cfg.rateLimited,
 	}
 
-	// The bounded server-error retry sits above the instrumented transport, so
-	// each retried attempt still logs and counts individually, and below the
+	// The throttle sits below the retry layers, so every attempt they
+	// generate (a 5xx retry here, a 429 retry in go-tfe above) pays its own
+	// rate token, and above the instrumented transport, so each attempt still
+	// logs and counts individually.
+	rt = &throttleTransport{next: rt, limiter: cfg.limiter}
+
+	// The bounded server-error retry sits above the throttle, and below the
 	// go-tfe client, whose own server-error retry stays disabled (see [New]).
 	if cfg.serverErrorRetries > 0 {
 		rt = &retryTransport{
@@ -402,16 +430,22 @@ func (c *Client) TFE() *tfe.Client {
 	return c.tfe
 }
 
-// Do runs fn after taking a slot from the optional [Gate] and waiting on the
-// shared limiter, passing the underlying go-tfe client. It is the single
-// chokepoint every request should pass through so the whole run shares one
-// aggregate throttle and one parallelism bound. The gate is taken before the
-// limiter so a queued request does not burn a rate token it cannot use yet,
-// and the slot is held until fn returns, so buffered downloads count against
-// the bound for their whole transfer. The error from fn is returned
-// unmodified so callers can classify it with [Classify], [IsTransient],
-// [IsTerminal], or [IsForbidden].
+// Do runs fn after taking a slot from the optional [Gate], passing the
+// underlying go-tfe client. It is the single chokepoint every API call should
+// pass through so the whole run shares one parallelism bound; the slot is
+// held until fn returns, so buffered downloads count against the bound for
+// their whole transfer. Rate limiting is not applied here but at the HTTP
+// transport, where every attempt the call causes pays its own token; taking
+// the gate first still means a queued request starts no attempt it cannot use
+// yet. A ctx already done returns its error without invoking fn. The error
+// from fn is returned unmodified so callers can classify it with [Classify],
+// [IsTransient], [IsTerminal], or [IsForbidden].
 func (c *Client) Do(ctx context.Context, fn func(context.Context, *tfe.Client) error) error {
+	err := ctx.Err()
+	if err != nil {
+		return fmt.Errorf("request context: %w", err)
+	}
+
 	if c.gate != nil {
 		err := c.gate.Acquire(ctx)
 		if err != nil {
@@ -419,11 +453,6 @@ func (c *Client) Do(ctx context.Context, fn func(context.Context, *tfe.Client) e
 		}
 
 		defer c.gate.Release()
-	}
-
-	err := c.limiter.Wait(ctx)
-	if err != nil {
-		return fmt.Errorf("rate limiter wait: %w", err)
 	}
 
 	return fn(ctx, c.tfe)

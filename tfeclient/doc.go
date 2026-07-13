@@ -2,18 +2,21 @@
 //
 // It wraps the go-tfe client behind a worker-safe surface so that every other
 // package can treat network access as an already-throttled, already-classified
-// capability. One rate limiter is shared across all concurrent workers: because
-// N workers each paginating and downloading multiply the request rate, per-
-// request retry alone is not enough, so exactly one client is constructed and
-// shared and the limiter bounds the aggregate rate of the whole run. An
-// optional [Gate] sits in front of the limiter and bounds how many requests
-// are in flight at once; a resizable gate lets the caller scale the run's
-// parallelism live, and the client's transport counts rate-limited (429)
-// responses into a caller-supplied counter so an adaptive scaler has a
-// pressure signal to react to. The package also walks paginated list
-// endpoints (advancing the page number while the response reports a next
-// page) and follows the short-lived signed-URL download flow for state blobs,
-// configuration tarballs, and plan/apply logs.
+// capability. One rate limiter is shared across all concurrent workers:
+// because N workers each paginating and downloading multiply the request
+// rate, per-request retry alone is not enough, so exactly one client is
+// constructed and shared. The limiter is enforced at the HTTP transport, so
+// every attempt that leaves the process pays a token; the retries go-tfe
+// issues after a 429, the pages its ListAll methods fetch internally, and the
+// fresh requests its chunked log readers make mid-stream cannot outrun the
+// aggregate rate. An optional [Gate] bounds how many requests are in flight
+// at once; a resizable gate lets the caller scale the run's parallelism live,
+// and the client's transport counts rate-limited (429) responses into a
+// caller-supplied counter so an adaptive scaler has a pressure signal to
+// react to. The package also walks paginated list endpoints (advancing the
+// page number while the response reports a next page) and follows the
+// short-lived signed-URL download flow for state blobs, configuration
+// tarballs, and plan/apply logs.
 //
 // Failures are classified so a resume can tell a temporary blip from a
 // permanent absence: transient (a network timeout, context cancellation or
