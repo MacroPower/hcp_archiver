@@ -424,13 +424,7 @@ func (l *Ledger) Entry(relPath string) (Entry, bool) {
 		return Entry{}, false
 	}
 
-	out := *e
-	if e.Signature != nil {
-		sig := *e.Signature
-		out.Signature = &sig
-	}
-
-	return out, true
+	return cloneEntry(*e), true
 }
 
 // RecordDone records a successful fetch of relPath with its content signature.

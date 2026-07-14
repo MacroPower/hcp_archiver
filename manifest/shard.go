@@ -255,11 +255,7 @@ func (s *shard) drainDirty() drainedState {
 			continue
 		}
 
-		cp := *e
-		if e.Signature != nil {
-			sig := *e.Signature
-			cp.Signature = &sig
-		}
+		cp := cloneEntry(*e)
 
 		d.recs = append(d.recs, walRecord{Kind: walEntry, Path: relPath, Entry: &cp})
 	}
@@ -329,11 +325,7 @@ func (s *shard) document() document {
 			continue
 		}
 
-		cp := *e
-		if e.Signature != nil {
-			sig := *e.Signature
-			cp.Signature = &sig
-		}
+		cp := cloneEntry(*e)
 
 		entries[relPath] = &cp
 	}

@@ -30,6 +30,19 @@ type Entry struct {
 	counted bool
 }
 
+// cloneEntry returns a detached copy of e with its [Signature] deep-copied, so a
+// later mutation of either the copy or the original aliases neither. It is the
+// shared per-entry copy [shard.drainDirty], [shard.document], and [Ledger.Entry]
+// make before an entry leaves the ledger lock.
+func cloneEntry(e Entry) Entry {
+	if e.Signature != nil {
+		sig := *e.Signature
+		e.Signature = &sig
+	}
+
+	return e
+}
+
 // RunRecord summarizes a single archive run.
 //
 // It is written into the ledger by [Ledger.FinishRun] and returned to the
