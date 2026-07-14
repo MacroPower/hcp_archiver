@@ -64,6 +64,9 @@ type remoteBundle struct {
 	ra    io.ReaderAt
 	ready chan struct{}
 	err   error
+	// Byte length of the bundle object, the bound a member's recorded compressed
+	// span is checked against before it sizes an allocation.
+	size int64
 }
 
 // loadOrgRemote reads the organization root's remote marker into an
@@ -144,7 +147,7 @@ func (r *orgRemote) bundle(relBundle string) (*remoteBundle, error) {
 	r.bundles[relBundle] = b
 	r.mu.Unlock()
 
-	zr, ra, err := r.buildBundle(relBundle)
+	zr, ra, size, err := r.buildBundle(relBundle)
 	if err != nil {
 		// Wake any same-key waiter that captured this entry, then drop it so the
 		// next caller rebuilds. The order matters: closing ready before the delete
@@ -161,6 +164,7 @@ func (r *orgRemote) bundle(relBundle string) (*remoteBundle, error) {
 
 	b.zr = zr
 	b.ra = ra
+	b.size = size
 	close(b.ready)
 
 	return b, nil
@@ -173,10 +177,10 @@ func (r *orgRemote) bundle(relBundle string) (*remoteBundle, error) {
 // outside [orgRemote.mu] so distinct bundles build in parallel.
 //
 //nolint:contextcheck // Only the stored browse context exists behind ReaderAt.
-func (r *orgRemote) buildBundle(relBundle string) (*zip.Reader, io.ReaderAt, error) {
+func (r *orgRemote) buildBundle(relBundle string) (*zip.Reader, io.ReaderAt, int64, error) {
 	client, err := r.clientBuild()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 
 	key := r.cfg.Key(r.orgName, relBundle)
@@ -186,11 +190,12 @@ func (r *orgRemote) buildBundle(relBundle string) (*zip.Reader, io.ReaderAt, err
 
 	info, err := client.Head(headCtx, key)
 	if err != nil {
-		return nil, nil, fmt.Errorf("probe remote bundle: %w", err)
+		return nil, nil, 0, fmt.Errorf("probe remote bundle: %w", err)
 	}
 
 	if info.Archived && !info.Restored {
-		return nil, nil, fmt.Errorf("%w: %s (storage class %s); request a restore, wait for it to complete, and retry",
+		return nil, nil, 0, fmt.Errorf(
+			"%w: %s (storage class %s); request a restore, wait for it to complete, and retry",
 			remote.ErrRestoreRequired, key, info.StorageClass)
 	}
 
@@ -201,10 +206,10 @@ func (r *orgRemote) buildBundle(relBundle string) (*zip.Reader, io.ReaderAt, err
 
 	zr, err := zip.NewReader(ra, info.Size)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse remote bundle %q: %w", key, err)
+		return nil, nil, 0, fmt.Errorf("parse remote bundle %q: %w", key, err)
 	}
 
-	return zr, ra, nil
+	return zr, ra, info.Size, nil
 }
 
 // clientBuild returns the lazily-built remote client. The build runs once per
@@ -247,6 +252,16 @@ func extractMember(b *remoteBundle, f *zip.File, relPath string) ([]byte, error)
 	offset, err := f.DataOffset()
 	if err != nil {
 		return nil, fmt.Errorf("locate member %q: %w", relPath, err)
+	}
+
+	// The central directory is untrusted: bit rot in a member's CompressedSize64
+	// can record a span larger than the bundle, and make([]byte, that) would OOM
+	// or panic on a length past maxInt. Reject a span that overruns the object
+	// before allocating, mirroring the CRC check that rejects corrupt content. The
+	// oversized-size guard precedes the sum so the addition below cannot overflow.
+	//nolint:gosec // b.size and offset are non-negative object lengths.
+	if offset < 0 || f.CompressedSize64 > uint64(b.size) || uint64(offset)+f.CompressedSize64 > uint64(b.size) {
+		return nil, fmt.Errorf("member %q has an out-of-range span in remote bundle", relPath)
 	}
 
 	compressed := make([]byte, f.CompressedSize64)
