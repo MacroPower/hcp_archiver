@@ -63,6 +63,25 @@ func TestGovernorHalvesOncePerCooldownWindow(t *testing.T) {
 	assert.InEpsilon(t, 7.5, rps, 1e-9)
 }
 
+func TestGovernorHalvesOncePerZeroResetBurst(t *testing.T) {
+	t.Parallel()
+
+	// A burst of 429s advertising an immediate (zero) reset is still one blown
+	// window: it must halve once, not once per response down to the floor, even
+	// though a zero reset cannot push the cooldown into the future.
+	clock := newTestClock()
+	g := tfeclient.NewGovernor(30, nil, tfeclient.WithGovernorClock(clock.Now))
+
+	for range 16 {
+		g.On429("0")
+	}
+
+	rps, paused := g.Snapshot()
+
+	assert.InEpsilon(t, 15.0, rps, 1e-9, "one halving for the whole burst")
+	assert.Zero(t, paused, "a zero reset advertises no cooldown")
+}
+
 func TestGovernorCooldownExtendsMonotonically(t *testing.T) {
 	t.Parallel()
 

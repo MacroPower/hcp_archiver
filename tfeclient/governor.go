@@ -185,7 +185,13 @@ func (g *Governor) On429(resetHeader string) {
 	now := g.now()
 	g.refillLocked(now)
 
-	if !now.Before(g.pauseUntil) {
+	// Halve at most once per cooldown window. A concurrency-wide burst of 429s
+	// from one blown window is a single signal, so gate the halving on the time
+	// since the last decrease rather than on pauseUntil: a zero or negative
+	// advertised reset (a "0" header, or one clamped up from a clock-skewed
+	// negative) cannot push pauseUntil into the future, so a pauseUntil guard
+	// would fire per response and collapse the rate to the floor.
+	if g.lastDecrease.IsZero() || now.Sub(g.lastDecrease) >= GovernorFallbackPause {
 		g.rate = math.Max(g.floor, g.rate/2)
 		g.lastDecrease = now
 	}
