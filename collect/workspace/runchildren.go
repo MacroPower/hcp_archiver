@@ -328,6 +328,17 @@ func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string,
 	relPath := st.RunFile(project, ws, run.ID, "policy-checks.json")
 	runID := run.ID
 
+	// Skip the metered PolicyChecks.List once this run's checks and their logs
+	// have settled, so a long-running sibling that keeps the runs walk re-running
+	// does not re-list every already-archived run each pass. The logs share this
+	// run's own shard, so an errored log leaves policy-checks.json unsettled (it
+	// settles Done only after every log below) and ShouldFetch re-lists to
+	// recover it -- the same reason run-events.json needs no gate for its own
+	// errored state.
+	if !c.env.ShouldFetch(relPath) {
+		return nil
+	}
+
 	checks, err := paginateAll(ctx, c,
 		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.PolicyCheck, *tfe.Pagination, error) {
 			l, e := tc.PolicyChecks.List(ctx, runID, &tfe.PolicyCheckListOptions{ListOptions: o})
@@ -345,11 +356,6 @@ func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string,
 		return c.recordErrored(ctx, relPath, err)
 	}
 
-	writeErr := c.object(ctx, relPath, checks)
-	if writeErr != nil {
-		return writeErr
-	}
-
 	for _, pc := range checks {
 		checkID := pc.ID
 
@@ -362,7 +368,9 @@ func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string,
 		}
 	}
 
-	return nil
+	// Settle policy-checks.json Done last, after every log, so the skip signal
+	// above never lands ahead of the logs it stands for.
+	return c.object(ctx, relPath, checks)
 }
 
 // archiveTaskStages archives the run's task stages as listed; their task-result
