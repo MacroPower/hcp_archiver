@@ -17,9 +17,11 @@ import (
 )
 
 const (
-	syncBucket = "sync-bucket"
-	syncPrefix = "hcp"
-	syncOrg    = "org"
+	syncBucket     = "sync-bucket"
+	syncPrefix     = "hcp"
+	syncOrg        = "org"
+	syncEvictClass = "DEEP_ARCHIVE"
+	syncSyncClass  = "STANDARD_IA"
 )
 
 // syncFixture is a remote-configured environment over a real store and ledger,
@@ -52,6 +54,7 @@ func newSyncFixture(t *testing.T, cfg remote.Config) syncFixture {
 
 	env := collect.NewEnv(nil, st, ledger,
 		collect.WithRemote(client, cfg, syncOrg),
+		collect.WithStorageClasses(syncEvictClass, syncSyncClass),
 		collect.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 
@@ -289,6 +292,35 @@ func TestSyncArchiveIncrementalGate(t *testing.T) {
 				"a comparable inventory ETag must settle without a Head")
 		})
 	}
+}
+
+func TestSyncArchiveAppliesStorageClasses(t *testing.T) {
+	t.Parallel()
+
+	const (
+		zip      = "projects/prod/workspaces/api/bundles/logs.gen0001.zip"
+		loose    = "org.json"
+		zipBytes = "zip bytes"
+	)
+
+	f := newSyncFixture(t, remote.Config{})
+
+	f.write(t, zip, []byte(zipBytes))
+	f.write(t, zip+".sidecar.ndjson", []byte(`{"name":"x"}`))
+	f.write(t, loose, []byte(`{"org":"acme"}`))
+
+	stats := f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+
+	evicted, ok := f.fake.Object(f.key(zip))
+	require.True(t, ok)
+	assert.Equal(t, syncEvictClass, evicted.StorageClass,
+		"an evicted surface takes the eviction class")
+
+	synced, ok := f.fake.Object(f.key(loose))
+	require.True(t, ok)
+	assert.Equal(t, syncSyncClass, synced.StorageClass,
+		"a synced file takes the sync class")
 }
 
 func TestSyncArchiveSecondSweepUploadsNothing(t *testing.T) {

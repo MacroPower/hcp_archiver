@@ -77,7 +77,10 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 	envOpts := []collect.Option{collect.WithLogger(a.logger)}
 
 	if a.remote != nil {
-		envOpts = append(envOpts, collect.WithRemote(a.remote, remoteConfig(a.cfg.Remote), orgName))
+		envOpts = append(envOpts,
+			collect.WithRemote(a.remote, remoteConfig(a.cfg.Remote), orgName),
+			collect.WithStorageClasses(a.cfg.Remote.StorageClass, a.cfg.Remote.SyncStorageClass),
+		)
 
 		// The marker is written before any collector runs so even an archive
 		// interrupted mid-run records where its evicted bundles live.

@@ -9,9 +9,10 @@ import (
 // the organization's archive is mirrored, written beside org.json.
 const MarkerName = ".remote.json"
 
-// Config describes the S3-compatible backend the archive is mirrored to:
-// sealed cold bundles and settled tarballs are evicted there, and every other
-// archive file is synced there at each organization run's close.
+// Config describes how to reach the S3-compatible backend the archive is
+// mirrored to: transport settings plus transfer tuning, never write policy —
+// the storage class of a write is an argument to [Client.Upload] and
+// [Client.Put], chosen by the caller per motion.
 //
 // It carries no credentials: a [Client] authenticates through the AWS SDK
 // default chain, so nothing secret ever lives in a configuration file.
@@ -25,17 +26,6 @@ type Config struct {
 	Endpoint string
 	// Region is the bucket's region; empty defers to the SDK default chain.
 	Region string
-	// StorageClass is the class evicted cold surfaces (bundles and settled
-	// configuration-version tarballs) are written with (e.g. STANDARD,
-	// GLACIER, DEEP_ARCHIVE); empty takes the store's default.
-	StorageClass string
-	// SyncStorageClass is the class synced search-layer files are written
-	// with (e.g. STANDARD, STANDARD_IA); empty takes the store's default.
-	// It is separate from StorageClass because synced files change and
-	// re-upload across runs — churn an archival class's minimum-storage
-	// charges punish — and the disaster-recovery download of the prefix
-	// would be gated behind restores.
-	SyncStorageClass string
 	// PartSize is the multipart upload part size in bytes; zero takes the
 	// transfer manager's default.
 	PartSize int64

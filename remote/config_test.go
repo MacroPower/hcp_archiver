@@ -62,10 +62,9 @@ func TestMarkerRoundTrip(t *testing.T) {
 		Region:         "us-east-1",
 		ForcePathStyle: true,
 
-		// Write-side settings a marker intentionally drops.
-		StorageClass: "DEEP_ARCHIVE",
-		PartSize:     1 << 26,
-		Concurrency:  4,
+		// Write-side tuning a marker intentionally drops.
+		PartSize:    1 << 26,
+		Concurrency: 4,
 	}
 
 	got := cfg.Marker().Config()

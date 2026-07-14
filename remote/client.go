@@ -246,21 +246,21 @@ func (c *Client) Exists(ctx context.Context, key string) (bool, ObjectInfo, erro
 // that dies midway are aborted rather than left to accrue storage (a bucket
 // lifecycle rule aborting incomplete multipart uploads still catches the
 // parts a crash strands). Unless checksums are disabled, the body carries a
-// SHA-256 checksum the server validates on receipt, and the configured
-// storage class is applied.
+// SHA-256 checksum the server validates on receipt. The object is written
+// with the given storage class; empty takes the store's default.
 //
 // The size argument does not bound the upload — the bytes streamed are
 // whatever r yields — it only grows the part size when needed so a very
 // large body still fits the transfer manager's part-count ceiling.
-func (c *Client) Upload(ctx context.Context, key string, r io.Reader, size int64) error {
+func (c *Client) Upload(ctx context.Context, key string, r io.Reader, size int64, class string) error {
 	input := &s3.PutObjectInput{
 		Bucket: aws.String(c.cfg.Bucket),
 		Key:    aws.String(key),
 		Body:   r,
 	}
 
-	if c.cfg.StorageClass != "" {
-		input.StorageClass = types.StorageClass(c.cfg.StorageClass)
+	if class != "" {
+		input.StorageClass = types.StorageClass(class)
 	}
 
 	if !c.cfg.DisableChecksums {
@@ -281,24 +281,24 @@ func (c *Client) Upload(ctx context.Context, key string, r io.Reader, size int64
 }
 
 // Put writes r to the object at key in one PutObject request, applying the
-// configured sync storage class and, unless checksums are disabled, a
-// SHA-256 checksum the server validates and records.
+// given storage class (empty takes the store's default) and, unless
+// checksums are disabled, a SHA-256 checksum the server validates and
+// records.
 //
 // Unlike [Client.Upload] it never goes multipart, which is what makes the
 // stored checksum a full-object digest a later [Client.Head] can compare
 // against local bytes; a multipart upload records only a composite. A single
-// request is valid to 5 GiB, far above any synced search-layer file. Callers
-// should pass a seekable reader (an [*os.File]) so the SDK can rewind the
-// body on a retry.
-func (c *Client) Put(ctx context.Context, key string, r io.Reader) error {
+// request is valid to 5 GiB, far above any synced search-layer file. The
+// body must seek (an [*os.File] does) so the SDK can rewind it on a retry.
+func (c *Client) Put(ctx context.Context, key string, r io.ReadSeeker, class string) error {
 	input := &s3.PutObjectInput{
 		Bucket: aws.String(c.cfg.Bucket),
 		Key:    aws.String(key),
 		Body:   r,
 	}
 
-	if c.cfg.SyncStorageClass != "" {
-		input.StorageClass = types.StorageClass(c.cfg.SyncStorageClass)
+	if class != "" {
+		input.StorageClass = types.StorageClass(class)
 	}
 
 	if !c.cfg.DisableChecksums {

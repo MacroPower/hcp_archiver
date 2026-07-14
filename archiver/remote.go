@@ -15,16 +15,16 @@ import (
 )
 
 // remoteConfig maps the validated configuration surface onto the remote
-// client's configuration — the one place the two shapes meet, so the config
-// package never imports the AWS SDK.
+// client's transport configuration — the one place the two shapes meet, so
+// the config package never imports the AWS SDK. The storage classes are
+// write policy, not transport, and flow to the environment separately
+// through [collect.WithStorageClasses].
 func remoteConfig(rc *config.RemoteConfig) remote.Config {
 	return remote.Config{
 		Bucket:           rc.Bucket,
 		Prefix:           rc.Prefix,
 		Endpoint:         rc.Endpoint,
 		Region:           rc.Region,
-		StorageClass:     rc.StorageClass,
-		SyncStorageClass: rc.SyncStorageClass,
 		PartSize:         rc.PartSize,
 		Concurrency:      rc.Concurrency,
 		ForcePathStyle:   rc.ForcePathStyle,

@@ -40,16 +40,17 @@ func TestNewMissingBucket(t *testing.T) {
 func TestUploadSingle(t *testing.T) {
 	t.Parallel()
 
-	client, fake := newClient(t, remote.Config{StorageClass: "DEEP_ARCHIVE"})
+	client, fake := newClient(t, remote.Config{})
 
 	body := []byte("sealed bundle bytes")
-	err := client.Upload(t.Context(), "acme/bundles/logs.gen0001.zip", bytes.NewReader(body), int64(len(body)))
+	err := client.Upload(t.Context(), "acme/bundles/logs.gen0001.zip",
+		bytes.NewReader(body), int64(len(body)), "DEEP_ARCHIVE")
 	require.NoError(t, err)
 
 	obj, ok := fake.Object("acme/bundles/logs.gen0001.zip")
 	require.True(t, ok, "object should be stored")
 	assert.Equal(t, body, obj.Data)
-	assert.Equal(t, "DEEP_ARCHIVE", obj.StorageClass, "configured storage class should be applied")
+	assert.Equal(t, "DEEP_ARCHIVE", obj.StorageClass, "the per-call storage class should be applied")
 	assert.Equal(t, 1, fake.PutCalls(), "a small body should upload in one PutObject")
 	assert.Equal(t, []string{"SHA256"}, fake.PutChecksums(), "writes should carry a server-validated checksum")
 }
@@ -64,7 +65,7 @@ func TestUploadMultipart(t *testing.T) {
 	_, err := rand.Read(body)
 	require.NoError(t, err)
 
-	err = client.Upload(t.Context(), "big.zip", bytes.NewReader(body), int64(len(body)))
+	err = client.Upload(t.Context(), "big.zip", bytes.NewReader(body), int64(len(body)), "")
 	require.NoError(t, err)
 
 	obj, ok := fake.Object("big.zip")
@@ -80,7 +81,7 @@ func TestUploadDisableChecksums(t *testing.T) {
 
 	client, fake := newClient(t, remote.Config{DisableChecksums: true})
 
-	err := client.Upload(t.Context(), "k", bytes.NewReader([]byte("x")), 1)
+	err := client.Upload(t.Context(), "k", bytes.NewReader([]byte("x")), 1, "")
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{""}, fake.PutChecksums(), "checksums off should omit the checksum algorithm")
@@ -94,7 +95,7 @@ func TestUploadAbortsOnFailure(t *testing.T) {
 
 	body := make([]byte, 2*manager.MinUploadPartSize)
 
-	err := client.Upload(t.Context(), "big.zip", bytes.NewReader(body), int64(len(body)))
+	err := client.Upload(t.Context(), "big.zip", bytes.NewReader(body), int64(len(body)), "")
 	require.Error(t, err)
 
 	_, ok := fake.Object("big.zip")
@@ -178,19 +179,15 @@ func TestHead(t *testing.T) {
 func TestPut(t *testing.T) {
 	t.Parallel()
 
-	client, fake := newClient(t, remote.Config{
-		StorageClass:     "DEEP_ARCHIVE",
-		SyncStorageClass: "STANDARD_IA",
-	})
+	client, fake := newClient(t, remote.Config{})
 
 	body := []byte("loose search-layer file")
-	require.NoError(t, client.Put(t.Context(), "acme/org.json", bytes.NewReader(body)))
+	require.NoError(t, client.Put(t.Context(), "acme/org.json", bytes.NewReader(body), "STANDARD_IA"))
 
 	obj, ok := fake.Object("acme/org.json")
 	require.True(t, ok, "object should be stored")
 	assert.Equal(t, body, obj.Data)
-	assert.Equal(t, "STANDARD_IA", obj.StorageClass,
-		"a synced file takes the sync class, not the eviction class")
+	assert.Equal(t, "STANDARD_IA", obj.StorageClass, "the per-call storage class should be applied")
 	assert.Equal(t, 1, fake.PutCalls(), "Put must stay a single request so the checksum is full-object")
 	assert.Equal(t, 0, fake.Completed(), "Put never goes multipart")
 	assert.Equal(t, []string{"SHA256"}, fake.PutChecksums())
@@ -203,7 +200,7 @@ func TestPutDisableChecksums(t *testing.T) {
 
 	client, fake := newClient(t, remote.Config{DisableChecksums: true})
 
-	require.NoError(t, client.Put(t.Context(), "k", bytes.NewReader([]byte("x"))))
+	require.NoError(t, client.Put(t.Context(), "k", bytes.NewReader([]byte("x")), ""))
 	assert.Equal(t, []string{""}, fake.PutChecksums(), "checksums off should omit the checksum algorithm")
 
 	obj, ok := fake.Object("k")

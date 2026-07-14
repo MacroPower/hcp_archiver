@@ -153,7 +153,7 @@ func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 }
 
 // uploadFile streams one local file to the remote store at key through the
-// transfer manager, which applies the cold storage class.
+// transfer manager, applying the cold storage class.
 func (e *Env) uploadFile(ctx context.Context, absPath, key string, size int64) error {
 	//nolint:gosec // The path is composed by the store from its archive root.
 	f, err := os.Open(absPath)
@@ -161,7 +161,7 @@ func (e *Env) uploadFile(ctx context.Context, absPath, key string, size int64) e
 		return fmt.Errorf("open offload source: %w", err)
 	}
 
-	uploadErr := e.remote.Upload(ctx, key, f, size)
+	uploadErr := e.remote.Upload(ctx, key, f, size, e.evictClass)
 	closeErr := f.Close()
 
 	switch {
@@ -490,7 +490,7 @@ func (e *Env) syncFile(
 
 // putFile uploads one search-layer file in a single PutObject request, which
 // is what makes the stored checksum a full-object digest later sweeps can
-// compare; the open file is seekable, so the SDK can rewind it on a retry.
+// compare, applying the sync storage class.
 func (e *Env) putFile(ctx context.Context, relPath string) error {
 	//nolint:gosec // The path is composed by the store from its archive root.
 	f, err := os.Open(e.store.AbsPath(relPath))
@@ -498,7 +498,7 @@ func (e *Env) putFile(ctx context.Context, relPath string) error {
 		return fmt.Errorf("open sync source: %w", err)
 	}
 
-	putErr := e.remote.Put(ctx, e.RemoteKey(relPath), f)
+	putErr := e.remote.Put(ctx, e.RemoteKey(relPath), f, e.syncClass)
 	closeErr := f.Close()
 
 	switch {
