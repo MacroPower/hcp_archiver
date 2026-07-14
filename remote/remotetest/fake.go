@@ -102,6 +102,11 @@ type Fake struct {
 	ListErr error
 	// DeleteErr fails every DeleteObjects call.
 	DeleteErr error
+	// HeadHook, when set, runs at the start of each HeadObject call with the
+	// call's context. A test cancels a context it controls from inside it to
+	// model a cancellation surfacing mid-flight; HeadObject then returns the
+	// context's error instead of serving the object.
+	HeadHook func(ctx context.Context)
 
 	bucket            string
 	getRanges         []string
@@ -421,8 +426,17 @@ func (f *Fake) AbortMultipartUpload(
 // HeadObject serves an object's metadata: length, storage class, and the raw
 // restore header. An absent object answers the typed NotFound.
 func (f *Fake) HeadObject(
-	_ context.Context, in *s3.HeadObjectInput, _ ...func(*s3.Options),
+	ctx context.Context, in *s3.HeadObjectInput, _ ...func(*s3.Options),
 ) (*s3.HeadObjectOutput, error) {
+	if f.HeadHook != nil {
+		f.HeadHook(ctx)
+
+		err := ctx.Err()
+		if err != nil {
+			return nil, err //nolint:wrapcheck // A faked mid-flight cancellation.
+		}
+	}
+
 	bucketErr := f.checkBucket(in.Bucket)
 	if bucketErr != nil {
 		return nil, bucketErr

@@ -253,13 +253,21 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 		}
 
 		evictErr := e.OffloadFile(ctx, relPath)
-		if evictErr != nil {
+
+		switch {
+		case evictErr != nil && ctx.Err() != nil:
+			// A cancellation surfacing from inside the offload is the wind-down,
+			// not an eviction failure: return like the top-of-loop guard, leaving
+			// the surface for the next run rather than counting it failed.
+			return counters.stats()
+		case evictErr != nil:
 			e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_evict_error",
 				slog.String("path", relPath),
 				slog.String("error", evictErr.Error()),
 			)
 			counters.failed.Add(1)
-		} else {
+
+		default:
 			counters.evicted.Add(1)
 		}
 
@@ -472,6 +480,11 @@ func (e *Env) syncFile(
 	}
 
 	switch {
+	case err != nil && ctx.Err() != nil:
+		// A cancellation surfacing mid-upload is the wind-down, not a per-file
+		// failure: the worker settles nothing and leaves the file for the next
+		// run, matching the evict loop's in-flight guard.
+
 	case err != nil:
 		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_file_error",
 			slog.String("path", relPath),

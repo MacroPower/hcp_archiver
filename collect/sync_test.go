@@ -470,6 +470,31 @@ func TestSyncArchiveCanceledContextUploadsNothing(t *testing.T) {
 	assert.Empty(t, f.fake.Keys())
 }
 
+func TestSyncArchiveEvictCancellationIsNotFailure(t *testing.T) {
+	t.Parallel()
+
+	const zip = "projects/prod/workspaces/api/bundles/logs.gen0001.zip"
+
+	f := newSyncFixture(t, remote.Config{})
+
+	// A sealed zip with its sidecar is eligible for eviction, so the evict loop
+	// runs OffloadFile, whose first Head is where the cancellation surfaces.
+	f.write(t, zip, []byte("zip bytes"))
+	f.write(t, zip+".sidecar.ndjson", []byte(`{"name":"x"}`))
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	// Cancel mid-offload: the Head probe inside OffloadFile trips the wind-down,
+	// so the eviction error must not be counted a failure.
+	f.fake.HeadHook = func(context.Context) { cancel() }
+
+	stats := f.env.SyncArchive(ctx)
+
+	assert.Zero(t, stats.Failed, "an in-flight cancellation is the wind-down, not a failure")
+	assert.Zero(t, stats.Evicted, "the offload did not complete")
+	assert.True(t, f.exists(t, zip), "the local bundle stays canonical for the next run")
+}
+
 func TestSyncArchivePerFileFailureWarnsAndContinues(t *testing.T) {
 	t.Parallel()
 
