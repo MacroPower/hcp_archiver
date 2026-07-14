@@ -73,7 +73,8 @@ func (c *Collector) archiveProvider(ctx context.Context, prov *tfe.RegistryProvi
 }
 
 // archiveProviderDetail lists a private provider's versions and archives each
-// version's frozen metadata together with its platform list.
+// version's metadata together with its platform list. A private version stays
+// mutable while it publishes, so both are re-read every run.
 func (c *Collector) archiveProviderDetail(ctx context.Context, prov *tfe.RegistryProvider) error {
 	pid := tfe.RegistryProviderID{
 		OrganizationName: c.org,
@@ -100,10 +101,12 @@ func (c *Collector) archiveProviderDetail(ctx context.Context, prov *tfe.Registr
 		return c.listFailed(ctx, "provider-versions", err)
 	}
 
-	// Each version is a frozen write plus one platform list at its own paths,
+	// Each version is a metadata write plus one platform list at its own paths,
 	// and a provider accumulates them for as long as it publishes, so they
-	// fetch concurrently, capped at the environment's ceiling; the settled
-	// versions skip inside Object.
+	// fetch concurrently, capped at the environment's ceiling. A version is not
+	// immutable while it publishes, so both writes go through Mutable, which
+	// re-reads every run and skips the on-disk update only when the payload is
+	// unchanged.
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(c.env.Concurrency())
 
@@ -116,9 +119,17 @@ func (c *Collector) archiveProviderDetail(ctx context.Context, prov *tfe.Registr
 	return g.Wait() //nolint:wrapcheck // Archive errors already carry their context.
 }
 
-// archiveProviderVersion writes a provider version's frozen metadata and its
-// platform list, keeping the per-platform shasums that stand in for the
-// undownloadable binaries.
+// archiveProviderVersion writes a provider version's metadata and its platform
+// list, keeping the per-platform shasums that stand in for the undownloadable
+// binaries.
+//
+// Both go through Mutable, not Object: a private provider version publishes its
+// shasums, signature, and platforms across several requests after it first
+// lists, with no version-level terminal signal, so a run that captured it
+// mid-flight refreshes it on the next run instead of freezing the partial,
+// unsigned snapshot forever. The version write hands back the already-listed
+// value, adding no API call; only the platform list re-runs, and Mutable skips
+// the on-disk update when the payload is unchanged.
 func (c *Collector) archiveProviderVersion(
 	ctx context.Context,
 	prov *tfe.RegistryProvider,
@@ -128,7 +139,7 @@ func (c *Collector) archiveProviderVersion(
 	st := c.env.Store()
 	versionPath := st.RegistryProviderFile(prov.Namespace, prov.Name, versionFilename(ver.Version))
 
-	err := c.env.Object(ctx, versionPath, func(_ context.Context) (any, error) {
+	err := c.env.Mutable(ctx, versionPath, func(_ context.Context) (any, error) {
 		return ver, nil
 	})
 	if err != nil {
@@ -160,5 +171,5 @@ func (c *Collector) archiveProviderVersion(
 		return out, wrap("fetch registry provider platforms", e)
 	}
 
-	return wrap("archive registry provider platforms", c.env.Object(ctx, platformsPath, fetch))
+	return wrap("archive registry provider platforms", c.env.Mutable(ctx, platformsPath, fetch))
 }
