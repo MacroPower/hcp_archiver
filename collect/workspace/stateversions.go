@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/go-tfe"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // collectStateVersions archives the workspace's state versions newest-first.
@@ -32,7 +33,10 @@ func (c *Collector) collectStateVersions(
 
 		err := c.env.Client().Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
 			l, e := tc.StateVersions.List(ctx, &tfe.StateVersionListOptions{
-				ListOptions:  tfe.ListOptions{PageNumber: page},
+				// Request the max page size against the metered list bucket, as
+				// the runs pager does, so a deep state-version history costs the
+				// fewest round-trips.
+				ListOptions:  tfe.ListOptions{PageNumber: page, PageSize: tfeclient.MaxPageSize},
 				Organization: org,
 				Workspace:    wsName,
 			})
