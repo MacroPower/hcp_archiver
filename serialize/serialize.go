@@ -50,12 +50,12 @@ func Marshal(v any) ([]byte, error) {
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
-// addressable returns v unchanged unless it is a non-pointer struct or array
-// value, in which case it returns a pointer to a copy: the jsonapi encoder
-// requires a pointer to the model it marshals.
+// addressable returns v unchanged unless it is a non-pointer struct value, in
+// which case it returns a pointer to a copy: the jsonapi encoder requires a
+// pointer to the model it marshals.
 func addressable(v any) any {
 	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Struct && rv.Kind() != reflect.Array {
+	if rv.Kind() != reflect.Struct {
 		return v
 	}
 
@@ -117,7 +117,10 @@ func isJSONAPIModel(v any) bool {
 
 	t = deref(t)
 
-	if t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+	// The jsonapi encoder marshals a struct pointer or a slice of them, never a
+	// Go array, so only a slice element is followed here; an array falls through
+	// to the struct check below and, failing it, to the encoding/json path.
+	if t.Kind() == reflect.Slice {
 		t = deref(t.Elem())
 	}
 
