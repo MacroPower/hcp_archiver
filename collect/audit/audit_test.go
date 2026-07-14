@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,9 +116,18 @@ func (f auditFixture) watermark() time.Time {
 func (f auditFixture) pageIDs(t *testing.T, since time.Time, page int) []string {
 	t.Helper()
 
-	relPath := f.store.AuditTrailFile(audit.PageName(since, page))
+	return pageEventIDs(t, f.store, since, page)
+}
 
-	raw, err := os.ReadFile(f.store.AbsPath(relPath))
+// pageEventIDs decodes the archived page file at the since cursor and page number
+// and returns the ids of the events it holds, the shared body of the fixtures'
+// page assertions.
+func pageEventIDs(t *testing.T, st *store.Store, since time.Time, page int) []string {
+	t.Helper()
+
+	relPath := st.AuditTrailFile(audit.PageName(since, page))
+
+	raw, err := os.ReadFile(st.AbsPath(relPath))
 	require.NoError(t, err, "%s should be written", relPath)
 
 	var events []struct {
@@ -301,6 +311,158 @@ func TestCollectTrailsResumeAppendsOnlyNewerEvents(t *testing.T) {
 	assert.Equal(t, []string{"ev-2"}, f2.pageIDs(t, base, 1),
 		"the resumed walk archives only events past the prior watermark")
 	assert.Equal(t, base.Add(time.Minute), f2.watermark())
+}
+
+// resumeFixture serves audit-trail pages from a swappable table over a single
+// store and ledger, so a multi-run resume that re-lists an already-settled page
+// under an unchanged cursor can be exercised across runs.
+type resumeFixture struct {
+	collector *audit.Collector
+	store     *store.Store
+	ledger    *manifest.Ledger
+
+	mu    sync.Mutex
+	pages map[int]trailPage
+}
+
+// newResumeFixture builds a resume fixture over a fresh store and ledger, its
+// page table starting empty and set per run with setPages.
+func newResumeFixture(t *testing.T) *resumeFixture {
+	t.Helper()
+
+	f := &resumeFixture{pages: map[int]trailPage{}}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/v2/organization/audit-trail", func(w http.ResponseWriter, r *http.Request) {
+		page := 1
+		if raw := r.URL.Query().Get("page[number]"); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if !assert.NoError(t, err) {
+				w.WriteHeader(http.StatusBadRequest)
+
+				return
+			}
+
+			page = n
+		}
+
+		p, ok := f.page(page)
+		if !assert.Truef(t, ok, "unexpected page %d requested", page) {
+			w.WriteHeader(http.StatusBadRequest)
+
+			return
+		}
+
+		if p.status != 0 && p.status != http.StatusOK {
+			w.WriteHeader(p.status)
+
+			return
+		}
+
+		body := map[string]any{
+			"pagination": &tfe.AuditTrailPagination{CurrentPage: page, NextPage: p.nextPage},
+			"data":       p.events,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(body))
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	client, err := tfeclient.New(tfeclient.WithToken("test-token"), tfeclient.WithAddress(srv.URL))
+	require.NoError(t, err)
+
+	st := store.New(t.TempDir())
+
+	ledger, err := manifest.Load(st.Root())
+	require.NoError(t, err)
+
+	f.collector = audit.New(collect.NewEnv(client, st, ledger), "acme")
+	f.store = st
+	f.ledger = ledger
+
+	return f
+}
+
+// setPages replaces the table the server serves for the next run.
+func (f *resumeFixture) setPages(pages map[int]trailPage) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.pages = pages
+}
+
+// page returns the served response for a page number under the lock.
+func (f *resumeFixture) page(n int) (trailPage, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	p, ok := f.pages[n]
+
+	return p, ok
+}
+
+// run starts a fresh run and walks the trail, like a re-invocation would.
+func (f *resumeFixture) run(t *testing.T) {
+	t.Helper()
+
+	f.ledger.StartRun()
+	require.NoError(t, f.collector.CollectTrails(t.Context()))
+}
+
+// watermark reads the trail walk's Since cursor.
+func (f *resumeFixture) watermark() time.Time {
+	return f.ledger.HighWaterMark(f.store.AuditTrailDir())
+}
+
+func TestCollectTrailsResumeDoesNotStepPastAnUnpersistedEvent(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	a := event("ev-a", base.Add(1*time.Second))
+	b := event("ev-b", base.Add(2*time.Second))
+	c := event("ev-c", base.Add(3*time.Second))
+
+	f := newResumeFixture(t)
+
+	// Run 1 archives page 1 = [A, B] then halts on a terminal list error at page
+	// 2, so the watermark stays put and page 1 is left settled under the zero
+	// cursor.
+	f.setPages(map[int]trailPage{
+		1: {events: []*tfe.AuditTrail{a, b}, nextPage: 2},
+		2: {status: http.StatusBadRequest},
+	})
+	f.run(t)
+
+	require.True(t, f.watermark().IsZero(), "the halted run does not advance the cursor")
+	require.Equal(t, []string{"ev-a", "ev-b"}, pageEventIDs(t, f.store, time.Time{}, 1))
+
+	// Between runs event C (> B) arrives, so run 2 re-lists page 1 = [A, B, C]
+	// under the still-zero cursor and completes. Page 1 is already Done, so
+	// Object skips the re-list and C is not persisted this run; the watermark
+	// must advance only to the newest persisted event (B), never past C.
+	f.setPages(map[int]trailPage{
+		1: {events: []*tfe.AuditTrail{a, b, c}, nextPage: 0},
+	})
+	f.run(t)
+
+	assert.Equal(t, b.Timestamp, f.watermark(),
+		"the watermark advances to the newest persisted event, not the re-listed one")
+	assert.Equal(t, []string{"ev-a", "ev-b"}, pageEventIDs(t, f.store, time.Time{}, 1),
+		"the already-settled page keeps its stored events; C was not persisted")
+
+	// Run 3 re-lists under the advanced cursor B, so page 1 is a fresh name and C
+	// is now strictly newer than the cursor: it is finally persisted.
+	f.run(t)
+
+	assert.Equal(t, []string{"ev-c"}, pageEventIDs(t, f.store, b.Timestamp, 1),
+		"C is captured on the run after the watermark advanced past B")
+	assert.Equal(t, c.Timestamp, f.watermark())
 }
 
 // TestPageNameDistinctAcrossSubSecondCursors pins the property the resume

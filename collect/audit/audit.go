@@ -2,12 +2,15 @@ package audit
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	tfe "github.com/hashicorp/go-tfe"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
 )
 
 // configFile is the leaf name of the organization audit-configuration file
@@ -102,6 +105,16 @@ func (c *Collector) collectConfig(ctx context.Context) error {
 // an advanced watermark appends a fresh set. A page the token cannot read halts
 // the walk without advancing the watermark, so a later elevated run retries
 // from the same cursor.
+//
+// The watermark is sourced from the events actually persisted this run, never
+// from the raw re-listed items: a page settled on a prior run is skipped by
+// Object's settled-guard, so a newer event the re-list carries on it is not
+// archived and must not step the cursor past it. That page's contribution is
+// read back from its stored file; a freshly written page's is its own events.
+// Because visible audit events are ordered by creation time, a genuinely new
+// event sorts later than every persisted one, so the cursor advances only up to
+// what was persisted and the new event is captured on the following run, once
+// the advanced cursor lists it under a fresh page name.
 func (c *Collector) collectTrails(ctx context.Context) error {
 	st := c.env.Store()
 	key := st.AuditTrailDir()
@@ -129,6 +142,12 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 		// empty page never ends the walk: only the pagination reporting no next
 		// page does, and a non-empty later page may still follow an empty one.
 		if listErr != nil || len(fresh) > 0 {
+			relPath := st.AuditTrailFile(pageName(since, page))
+
+			// Whether Object will persist fresh or short-circuit on an already-Done
+			// page is fixed by the ledger before the call decides it.
+			preDone := c.pageDone(relPath)
+
 			halt, err := c.archiveTrailPage(ctx, since, page, fresh, listErr)
 			if err != nil {
 				return err
@@ -137,10 +156,15 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 			if halt {
 				return nil
 			}
-		}
 
-		if t := newestTimestamp(list.Items); t.After(newest) {
-			newest = t
+			t, halt := c.persistedNewest(key, relPath, fresh, preDone)
+			if halt {
+				return nil
+			}
+
+			if t.After(newest) {
+				newest = t
+			}
 		}
 
 		p := list.AuditTrailPagination
@@ -228,6 +252,67 @@ func (c *Collector) archiveTrailPage(
 	}
 
 	return false, nil
+}
+
+// persistedNewest returns the newest timestamp actually archived for a page --
+// the source the watermark advances from -- and whether a read-back failure
+// forces the walk to halt.
+//
+// A page already Done before this run's Object call kept its stored events
+// (Object short-circuited the re-listed set), so its newest is read back from
+// the stored file; a freshly written page persisted its fresh events, so those
+// are the source. Sourcing from the raw re-listed items instead would step the
+// cursor past an event the settled-guard never persisted, dropping it. A Done
+// page is search-layer JSON that is never evicted, so a read-back failure is not
+// expected; if it happens, the page contributes nothing to the watermark and the
+// walk halts, so a transient read error cannot advance the cursor.
+func (c *Collector) persistedNewest(
+	key, relPath string,
+	fresh []*tfe.AuditTrail,
+	preDone bool,
+) (time.Time, bool) {
+	persisted := fresh
+
+	if preDone {
+		stored, err := c.readPersistedPage(relPath)
+		if err != nil {
+			c.env.MarkSurfaceDropped(key, err)
+
+			return time.Time{}, true
+		}
+
+		persisted = stored
+	}
+
+	return newestTimestamp(persisted), false
+}
+
+// pageDone reports whether the audit-trail page at relPath is already recorded
+// [manifest.StatusDone], the state in which [collect.Env.Object] short-circuits
+// its write.
+func (c *Collector) pageDone(relPath string) bool {
+	entry, ok := c.env.Entry(relPath)
+
+	return ok && entry.Status == manifest.StatusDone
+}
+
+// readPersistedPage decodes the stored audit-trail page at relPath into its
+// events. Pages are archived as plain JSON arrays of audit trails.
+func (c *Collector) readPersistedPage(relPath string) ([]*tfe.AuditTrail, error) {
+	//nolint:gosec // The path is composed by the store from its archive root.
+	data, err := os.ReadFile(c.env.Store().AbsPath(relPath))
+	if err != nil {
+		return nil, fmt.Errorf("read audit trail page %q: %w", relPath, err)
+	}
+
+	var events []*tfe.AuditTrail
+
+	err = json.Unmarshal(data, &events)
+	if err != nil {
+		return nil, fmt.Errorf("decode audit trail page %q: %w", relPath, err)
+	}
+
+	return events, nil
 }
 
 // listPage reads one page of audit trails created after since, routed through
