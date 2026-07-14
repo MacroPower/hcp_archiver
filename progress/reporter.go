@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"slices"
 	"strings"
@@ -473,8 +474,18 @@ func (s snapshot) eta() (time.Duration, bool) {
 	}
 
 	perUnit := s.phaseElapsed / time.Duration(s.completed)
+	remaining := int64(s.total - s.completed)
 
-	return perUnit * time.Duration(s.total-s.completed), true
+	// The perUnit-times-remaining product is int64 nanoseconds and can overflow at
+	// a large outstanding count, wrapping negative so compactDuration renders a
+	// bogus near-zero eta for a phase that will in truth run far longer. Saturate
+	// to the ">99h" ceiling compactDuration already caps at instead. A zero perUnit
+	// (elapsed below the completed count) also short-circuits the divide here.
+	if pn := int64(perUnit); pn > 0 && remaining > math.MaxInt64/pn {
+		return 100 * time.Hour, true
+	}
+
+	return perUnit * time.Duration(remaining), true
 }
 
 // take builds a [snapshot] from the current tally and clock. The caller holds
