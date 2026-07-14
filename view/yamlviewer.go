@@ -40,22 +40,8 @@ func newYAMLViewerScreen(name, content string) *yamlViewerScreen {
 // update handles navigation keys itself and forwards scrolling to the
 // viewport.
 func (s *yamlViewerScreen) update(msg tea.Msg) tea.Cmd {
-	if key, ok := msg.(tea.KeyPressMsg); ok {
-		switch key.String() {
-		case keyEsc, keyBackspace:
-			return pop()
-		case "q":
-			return tea.Quit
-		case "g", "home":
-			s.vp.GotoTop()
-
-			return nil
-
-		case "G", "end":
-			s.vp.GotoBottom()
-
-			return nil
-		}
+	if cmd, handled := scrollKey(msg, func() { s.vp.GotoTop() }, func() { s.vp.GotoBottom() }); handled {
+		return cmd
 	}
 
 	var cmd tea.Cmd

@@ -8,6 +8,38 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+// scrollKey handles the navigation keys the viewer screens share -- back, quit,
+// and jump to top or bottom -- returning the command and whether it consumed the
+// key. The top and bottom callbacks scroll the caller's own viewport, whose
+// GotoTop/GotoBottom signatures differ between the plain and highlighting
+// viewports and whose Update returns its concrete type, so only the key handling
+// is shared here. A key it does not recognize is left for the caller to forward
+// to its viewport.
+func scrollKey(msg tea.Msg, top, bottom func()) (tea.Cmd, bool) {
+	key, ok := msg.(tea.KeyPressMsg)
+	if !ok {
+		return nil, false
+	}
+
+	switch key.String() {
+	case keyEsc, keyBackspace:
+		return pop(), true
+	case "q":
+		return tea.Quit, true
+	case "g", "home":
+		top()
+
+		return nil, true
+
+	case "G", "end":
+		bottom()
+
+		return nil, true
+	}
+
+	return nil, false
+}
+
 // viewerScreen scrolls one archived plain-text document: a log or the mixed
 // text-and-JSON overview. JSON documents go through [yamlViewerScreen]
 // instead, which adds syntax highlighting.
@@ -32,22 +64,8 @@ func newViewerScreen(name, content string) *viewerScreen {
 // update handles navigation keys itself and forwards scrolling to the
 // viewport.
 func (s *viewerScreen) update(msg tea.Msg) tea.Cmd {
-	if key, ok := msg.(tea.KeyPressMsg); ok {
-		switch key.String() {
-		case keyEsc, keyBackspace:
-			return pop()
-		case "q":
-			return tea.Quit
-		case "g", "home":
-			s.vp.GotoTop()
-
-			return nil
-
-		case "G", "end":
-			s.vp.GotoBottom()
-
-			return nil
-		}
+	if cmd, handled := scrollKey(msg, func() { s.vp.GotoTop() }, func() { s.vp.GotoBottom() }); handled {
+		return cmd
 	}
 
 	var cmd tea.Cmd
