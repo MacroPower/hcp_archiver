@@ -76,6 +76,11 @@ func loadOrgRemote(root, orgName string, opts archiveOptions) (*orgRemote, error
 		return nil, fmt.Errorf("parse remote marker %q: %w", remote.MarkerName, err)
 	}
 
+	if marker.Version > remote.MarkerVersion {
+		return nil, fmt.Errorf("remote marker %q is version %d, newer than this build reads (%d)",
+			remote.MarkerName, marker.Version, remote.MarkerVersion)
+	}
+
 	return &orgRemote{
 		ctx:       opts.ctx,
 		newClient: opts.newClient,

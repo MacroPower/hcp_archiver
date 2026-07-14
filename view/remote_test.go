@@ -159,6 +159,18 @@ func TestWorkspaceOpen_RemoteRestoredObjectReads(t *testing.T) {
 	assert.Equal(t, "plan output line\n", string(data))
 }
 
+func TestOpenArchive_RemoteMarkerFromNewerBuildIsRejected(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+	writeFile(t, filepath.Join(root, "my-org"), ".remote.json",
+		`{"version":99,"bucket":"`+viewBucket+`"}`)
+
+	_, err := view.OpenArchive(root, view.WithContext(t.Context()))
+	require.ErrorContains(t, err, "newer than this build reads",
+		"a marker schema from the future must refuse loudly, not misread")
+}
+
 func TestWorkspaceOpen_RemoteClientFailureIsRemembered(t *testing.T) {
 	t.Parallel()
 

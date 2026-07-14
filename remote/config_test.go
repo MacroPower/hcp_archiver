@@ -67,7 +67,9 @@ func TestMarkerRoundTrip(t *testing.T) {
 		Concurrency: 4,
 	}
 
-	got := cfg.Marker().Config()
+	marker := cfg.Marker()
+	assert.Equal(t, remote.MarkerVersion, marker.Version,
+		"a written marker should record the current schema version")
 
 	assert.Equal(t, remote.Config{
 		Bucket:         "archive",
@@ -75,5 +77,5 @@ func TestMarkerRoundTrip(t *testing.T) {
 		Endpoint:       "https://s3.example.com",
 		Region:         "us-east-1",
 		ForcePathStyle: true,
-	}, got, "marker should round-trip the read-relevant fields and drop the rest")
+	}, marker.Config(), "marker should round-trip the read-relevant fields and drop the rest")
 }

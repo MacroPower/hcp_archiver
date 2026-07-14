@@ -678,9 +678,11 @@ all-local archive makes the next run's sweep upload the entire search layer
 (a one-time pass whose `sync_progress` log lines track it) and evict every
 pre-existing bundle that has a sidecar and every ledger-proven tarball.
 
-Each org's root gains a small `.remote.json` marker recording the
-read-relevant backend settings (bucket, prefix, endpoint, region, path
-style). `view` reads it to serve a sealed member whose zip is no longer on
+Each org's root gains a small `.remote.json` marker recording a schema
+version and the read-relevant backend settings (bucket, prefix, endpoint,
+region, path style); the version lets a future build change the marker's
+shape while old markers keep reading, and a reader refuses a marker newer
+than it understands. `view` reads it to serve a sealed member whose zip is no longer on
 disk: it Heads the object, parses the zip central directory over a handful of
 ranged GETs (cached per session), then fetches the member's compressed span
 in **one** ranged GET and decompresses locally — never the whole bundle. An

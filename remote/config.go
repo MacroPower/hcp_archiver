@@ -9,6 +9,12 @@ import (
 // the organization's archive is mirrored, written beside org.json.
 const MarkerName = ".remote.json"
 
+// MarkerVersion is the marker schema version this build writes and the newest
+// it understands. A marker is read by binaries built long after the archive
+// was written, so the version is the one escape hatch for changing its shape:
+// a reader rejects a marker whose recorded version is greater than this.
+const MarkerVersion = 1
+
 // Config describes how to reach the S3-compatible backend the archive is
 // mirrored to: transport settings plus transfer tuning, never write policy —
 // the storage class of a write is an argument to [Client.Upload] and
@@ -62,6 +68,10 @@ type Marker struct {
 	Endpoint string `json:"endpoint,omitempty"`
 	// Region is the bucket's region.
 	Region string `json:"region,omitempty"`
+	// Version is the marker schema version, [MarkerVersion] when written by
+	// this build; zero in markers from builds that predate versioning, which
+	// read as version-1 shapes.
+	Version int `json:"version"`
 	// ForcePathStyle records path-style bucket addressing.
 	ForcePathStyle bool `json:"forcePathStyle,omitempty"`
 }
@@ -69,6 +79,7 @@ type Marker struct {
 // Marker extracts the read-relevant fields of the [Config].
 func (cfg Config) Marker() Marker {
 	return Marker{
+		Version:        MarkerVersion,
 		Bucket:         cfg.Bucket,
 		Prefix:         cfg.Prefix,
 		Endpoint:       cfg.Endpoint,
