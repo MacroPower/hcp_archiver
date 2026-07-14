@@ -10,7 +10,6 @@ import (
 	tfe "github.com/hashicorp/go-tfe"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
-	"go.jacobcolvin.com/hcp_archiver/manifest"
 )
 
 // configFile is the leaf name of the organization audit-configuration file
@@ -144,9 +143,10 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 		if listErr != nil || len(fresh) > 0 {
 			relPath := st.AuditTrailFile(pageName(since, page))
 
-			// Whether Object will persist fresh or short-circuit on an already-Done
-			// page is fixed by the ledger before the call decides it.
-			preDone := c.pageDone(relPath)
+			// Whether Object will persist fresh or short-circuit on an
+			// already-settled page is fixed by the ledger before the call decides
+			// it.
+			settled := c.pageShortCircuited(relPath)
 
 			halt, err := c.archiveTrailPage(ctx, since, page, fresh, listErr)
 			if err != nil {
@@ -157,7 +157,7 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 				return nil
 			}
 
-			t, halt := c.persistedNewest(key, relPath, fresh, preDone)
+			t, halt := c.persistedNewest(key, relPath, fresh, settled)
 			if halt {
 				return nil
 			}
@@ -258,22 +258,25 @@ func (c *Collector) archiveTrailPage(
 // the source the watermark advances from -- and whether a read-back failure
 // forces the walk to halt.
 //
-// A page already Done before this run's Object call kept its stored events
-// (Object short-circuited the re-listed set), so its newest is read back from
-// the stored file; a freshly written page persisted its fresh events, so those
-// are the source. Sourcing from the raw re-listed items instead would step the
-// cursor past an event the settled-guard never persisted, dropping it. A Done
-// page is search-layer JSON that is never evicted, so a read-back failure is not
-// expected; if it happens, the page contributes nothing to the watermark and the
-// walk halts, so a transient read error cannot advance the cursor.
+// A page Object short-circuited this run kept its stored events (the re-listed
+// set was never written), so its newest is read back from the stored file; a
+// freshly written page persisted its fresh events, so those are the source.
+// Sourcing from the raw re-listed items instead would step the cursor past an
+// event the short-circuited write never persisted, dropping it -- including the
+// case of an Absent page (a prior terminal error) that a later run re-lists real
+// events for, whose stored file does not exist, forcing the halt below rather
+// than an advance past events no file holds. A Done page is search-layer JSON
+// that is never evicted, so a read-back failure is not expected; if it happens,
+// the page contributes nothing to the watermark and the walk halts, so a
+// transient read error cannot advance the cursor.
 func (c *Collector) persistedNewest(
 	key, relPath string,
 	fresh []*tfe.AuditTrail,
-	preDone bool,
+	settled bool,
 ) (time.Time, bool) {
 	persisted := fresh
 
-	if preDone {
+	if settled {
 		stored, err := c.readPersistedPage(relPath)
 		if err != nil {
 			c.env.MarkSurfaceDropped(key, err)
@@ -287,13 +290,18 @@ func (c *Collector) persistedNewest(
 	return newestTimestamp(persisted), false
 }
 
-// pageDone reports whether the audit-trail page at relPath is already recorded
-// [manifest.StatusDone], the state in which [collect.Env.Object] short-circuits
-// its write.
-func (c *Collector) pageDone(relPath string) bool {
-	entry, ok := c.env.Entry(relPath)
+// pageShortCircuited reports whether [collect.Env.Object] will skip its write
+// for the audit-trail page at relPath: it has a ledger entry that is settled and
+// not up for a re-fetch, so the call leaves the stored file untouched. This is
+// broader than StatusDone -- an Absent page (a prior terminal list error) is
+// settled too, and Object short-circuits it identically -- so it is exactly the
+// condition under which the page's contribution must be read back from the
+// stored file rather than taken from the re-listed events the write never
+// persisted.
+func (c *Collector) pageShortCircuited(relPath string) bool {
+	_, ok := c.env.Entry(relPath)
 
-	return ok && entry.Status == manifest.StatusDone
+	return ok && !c.env.ShouldFetch(relPath)
 }
 
 // readPersistedPage decodes the stored audit-trail page at relPath into its
