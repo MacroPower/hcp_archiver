@@ -245,9 +245,9 @@ func decompressMember(method uint16, compressed []byte) ([]byte, error) {
 	}
 }
 
-// timedReaderAt issues each ReadAt through a fresh [remote.Client.ReaderAt]
-// bound to its own timeout, so a reader cached for the whole session (inside
-// a parsed [*zip.Reader]) still bounds every individual request.
+// timedReaderAt adapts [remote.Client.ReadAt] to [io.ReaderAt], giving each
+// read its own timeout, so a reader cached for the whole session (inside a
+// parsed [*zip.Reader]) still bounds every individual request.
 type timedReaderAt struct {
 	ctx    context.Context //nolint:containedctx // ReadAt has no context parameter.
 	client *remote.Client
@@ -261,5 +261,5 @@ func (t *timedReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	defer cancel()
 
 	//nolint:wrapcheck // A transparent pass-through; the client already wraps.
-	return t.client.ReaderAt(ctx, t.key, t.size).ReadAt(p, off)
+	return t.client.ReadAt(ctx, t.key, t.size, p, off)
 }

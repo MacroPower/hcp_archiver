@@ -7,7 +7,7 @@
 // while the grep-able search layer (loose JSON, roll-ups, sidecar indexes)
 // stays on local disk. A [Client] uploads a bundle with server-validated
 // checksums, confirms it landed with [Client.Head], and serves later reads
-// through [Client.ReaderAt], whose ranged GETs let a zip central directory be
+// through [Client.ReadAt], whose ranged GETs let a zip central directory be
 // parsed and a single member fetched without downloading the bundle.
 //
 // The backend is anything speaking the S3 API: AWS S3 itself, or a compatible

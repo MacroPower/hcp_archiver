@@ -3,6 +3,7 @@ package remote_test
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -13,6 +14,20 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/remote/remotetest"
 )
+
+// readerAt adapts [remote.Client.ReadAt] to [io.ReaderAt] under a fixed
+// context, the shape zip parsing needs, as the view layer's adapter does.
+type readerAt struct {
+	ctx    context.Context
+	client *remote.Client
+	key    string
+	size   int64
+}
+
+func (r readerAt) ReadAt(p []byte, off int64) (int, error) {
+	//nolint:wrapcheck // A transparent pass-through; the client already wraps.
+	return r.client.ReadAt(r.ctx, r.key, r.size, p, off)
+}
 
 // buildZip renders members (name -> content) into an in-memory zip, half the
 // members deflated and half stored, mirroring the logs and state bundles.
@@ -44,7 +59,7 @@ func buildZip(t *testing.T, members map[string]string) []byte {
 	return buf.Bytes()
 }
 
-func TestReaderAtServesZip(t *testing.T) {
+func TestReadAtServesZip(t *testing.T) {
 	t.Parallel()
 
 	members := map[string]string{
@@ -58,7 +73,9 @@ func TestReaderAtServesZip(t *testing.T) {
 	fake.SetObject("logs.gen0001.zip", remotetest.Object{Data: bundle})
 
 	size := int64(len(bundle))
-	zr, err := zip.NewReader(client.ReaderAt(t.Context(), "logs.gen0001.zip", size), size)
+	ra := readerAt{ctx: t.Context(), client: client, key: "logs.gen0001.zip", size: size}
+
+	zr, err := zip.NewReader(ra, size)
 	require.NoError(t, err, "the central directory should parse over ranged GETs")
 
 	for name, want := range members {
@@ -76,7 +93,7 @@ func TestReaderAtServesZip(t *testing.T) {
 	}
 }
 
-func TestReaderAtRestoreRequired(t *testing.T) {
+func TestReadAtRestoreRequired(t *testing.T) {
 	t.Parallel()
 
 	client, fake := newClient(t, remote.Config{})
@@ -86,23 +103,21 @@ func TestReaderAtRestoreRequired(t *testing.T) {
 	})
 
 	buf := make([]byte, 4)
-	_, err := client.ReaderAt(t.Context(), "cold.zip", 12).ReadAt(buf, 0)
+	_, err := client.ReadAt(t.Context(), "cold.zip", 12, buf, 0)
 	require.ErrorIs(t, err, remote.ErrRestoreRequired)
 }
 
-func TestReaderAtEdges(t *testing.T) {
+func TestReadAtEdges(t *testing.T) {
 	t.Parallel()
 
 	client, fake := newClient(t, remote.Config{})
 	fake.SetObject("k", remotetest.Object{Data: []byte("0123456789")})
 
-	ra := client.ReaderAt(t.Context(), "k", 10)
-
 	t.Run("clipped at end", func(t *testing.T) {
 		t.Parallel()
 
 		buf := make([]byte, 6)
-		n, err := ra.ReadAt(buf, 7)
+		n, err := client.ReadAt(t.Context(), "k", 10, buf, 7)
 		require.ErrorIs(t, err, io.EOF, "a read clipped by the object's end reports EOF")
 		assert.Equal(t, 3, n)
 		assert.Equal(t, "789", string(buf[:n]))
@@ -111,7 +126,7 @@ func TestReaderAtEdges(t *testing.T) {
 	t.Run("past end", func(t *testing.T) {
 		t.Parallel()
 
-		n, err := ra.ReadAt(make([]byte, 1), 10)
+		n, err := client.ReadAt(t.Context(), "k", 10, make([]byte, 1), 10)
 		require.ErrorIs(t, err, io.EOF)
 		assert.Zero(t, n)
 	})
@@ -120,7 +135,7 @@ func TestReaderAtEdges(t *testing.T) {
 		t.Parallel()
 
 		buf := make([]byte, 10)
-		n, err := ra.ReadAt(buf, 0)
+		n, err := client.ReadAt(t.Context(), "k", 10, buf, 0)
 		require.NoError(t, err)
 		assert.Equal(t, 10, n)
 		assert.Equal(t, "0123456789", string(buf))
