@@ -55,6 +55,21 @@ type config struct {
 //   - [WithDirMode]
 type Option func(*config)
 
+// resolveConfig seeds the owner-only default modes and applies opts, the shared
+// option handling of [Write] and [Append].
+func resolveConfig(opts ...Option) config {
+	cfg := config{
+		fileMode: DefaultFileMode,
+		dirMode:  DefaultDirMode,
+	}
+
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	return cfg
+}
+
 // WithFileMode sets the mode applied to the written file, overriding
 // [DefaultFileMode]. It returns an [Option].
 func WithFileMode(mode fs.FileMode) Option {
@@ -126,14 +141,7 @@ func WriteReader(name string, r io.Reader, opts ...Option) error {
 // content is in place; only its durability across a crash is unconfirmed, not
 // its presence.
 func Write(name string, fn func(io.Writer) error, opts ...Option) error {
-	cfg := config{
-		fileMode: DefaultFileMode,
-		dirMode:  DefaultDirMode,
-	}
-
-	for _, opt := range opts {
-		opt(&cfg)
-	}
+	cfg := resolveConfig(opts...)
 
 	dir := filepath.Dir(name)
 
@@ -213,14 +221,7 @@ func stage(f *os.File, tmpName, name string, mode fs.FileMode, fn func(io.Writer
 // append into a fresh subtree is durable; a created file takes the file mode
 // (see [WithFileMode]).
 func Append(name string, data []byte, opts ...Option) (int64, error) {
-	cfg := config{
-		fileMode: DefaultFileMode,
-		dirMode:  DefaultDirMode,
-	}
-
-	for _, opt := range opts {
-		opt(&cfg)
-	}
+	cfg := resolveConfig(opts...)
 
 	dir := filepath.Dir(name)
 
