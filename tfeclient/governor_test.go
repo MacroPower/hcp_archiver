@@ -95,6 +95,9 @@ func TestGovernorResetHeaderParsing(t *testing.T) {
 		"missing falls back":       {reset: "", want: tfeclient.GovernorFallbackPause},
 		"unparseable falls back":   {reset: "soon", want: tfeclient.GovernorFallbackPause},
 		"trailing junk falls back": {reset: "1.5s", want: tfeclient.GovernorFallbackPause},
+		"NaN falls back":           {reset: "NaN", want: tfeclient.GovernorFallbackPause},
+		"positive infinity back":   {reset: "+Inf", want: tfeclient.GovernorFallbackPause},
+		"negative infinity back":   {reset: "-Inf", want: tfeclient.GovernorFallbackPause},
 	}
 
 	for name, tc := range tests {

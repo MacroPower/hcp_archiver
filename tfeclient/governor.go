@@ -246,12 +246,13 @@ func (g *Governor) Snapshot() (float64, time.Duration) {
 
 // parseRateLimitReset reads an X-RateLimit-Reset header value (fractional
 // seconds until the server's limit window reopens) into a cooldown duration,
-// clamped to [0, GovernorMaxPause]. A missing or unparseable header falls
-// back to [GovernorFallbackPause]; it is never fatal, unlike go-tfe's own
-// parse of the same header.
+// clamped to [0, GovernorMaxPause]. A missing, unparseable, or non-finite
+// header (NaN or an infinity, which [strconv.ParseFloat] accepts) falls back to
+// [GovernorFallbackPause]; it is never fatal, unlike go-tfe's own parse of the
+// same header.
 func parseRateLimitReset(value string) time.Duration {
 	seconds, err := strconv.ParseFloat(value, 64)
-	if err != nil {
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
 		return GovernorFallbackPause
 	}
 
