@@ -31,8 +31,15 @@ const tmpPattern = ".atomicfile-*.tmp"
 // IsTemp reports whether a file's base name matches this package's staging
 // pattern: a partial write a crash left behind, never part of the archive.
 // Sweeps over the tree consult it rather than hardcoding the pattern.
+//
+// The prefix and suffix are split from tmpPattern around its [os.CreateTemp]
+// "*" wildcard, so the constant stays the one source of truth for both the
+// writer and this predicate rather than re-encoding the two halves as literals
+// that could drift.
 func IsTemp(name string) bool {
-	return strings.HasPrefix(name, ".atomicfile-") && strings.HasSuffix(name, ".tmp")
+	prefix, suffix, _ := strings.Cut(tmpPattern, "*")
+
+	return strings.HasPrefix(name, prefix) && strings.HasSuffix(name, suffix)
 }
 
 // config holds the resolved settings for a single write.
