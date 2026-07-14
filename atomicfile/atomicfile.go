@@ -364,7 +364,10 @@ func mkdirAllSynced(dir string, mode fs.FileMode) error {
 // file path in stage and Append which chmod for the same reason. The parents are
 // flushed unconditionally, even one a concurrent creator won the race to make,
 // because the dentry still needs flushing from this process and a redundant
-// fsync (or chmod to the same mode) is harmless.
+// fsync (or chmod to the same mode) is harmless. The deepest created directory
+// is then flushed for its own inode: no level below it makes it a parent-sync
+// target, so without this its just-chmodded mode would rely on a later write's
+// syncDir to become durable, leaving the error path uncovered.
 func mkdirAllSync(dir string, mode fs.FileMode, sync func(string) error) error {
 	info, err := os.Stat(dir)
 	if err == nil && info.IsDir() {
@@ -413,6 +416,14 @@ func mkdirAllSync(dir string, mode fs.FileMode, sync func(string) error) error {
 		if err != nil {
 			return fmt.Errorf("sync created directory %q: %w", parent, err)
 		}
+	}
+
+	// Flush the deepest created directory's own inode: the loop flushed each
+	// level's parent, making every dentry durable, but nothing made dir's own
+	// mode durable, since no created level sits below it to sync it as a parent.
+	err = sync(dir)
+	if err != nil {
+		return fmt.Errorf("sync created directory %q: %w", dir, err)
 	}
 
 	return nil

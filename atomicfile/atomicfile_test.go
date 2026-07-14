@@ -244,14 +244,17 @@ func TestMkdirAllSync_flushesEveryCreatedAncestor(t *testing.T) {
 	require.NoError(t, atomicfile.MkdirAllSync(target, 0o700, rec))
 
 	// The parent of every created level is flushed exactly once, so each new
-	// directory's dentry is durable, not just the leaf's.
+	// directory's dentry is durable, and the deepest created directory is flushed
+	// for its own inode too, so its mode is durable without a later write's sync.
 	want := []string{
 		root,
 		filepath.Join(root, "a"),
 		filepath.Join(root, "a", "b"),
 		filepath.Join(root, "a", "b", "c"),
+		target,
 	}
-	assert.ElementsMatch(t, want, synced, "each created level's parent is flushed once")
+	assert.ElementsMatch(t, want, synced,
+		"each created level's parent is flushed, plus the deepest directory itself")
 
 	info, err := os.Stat(target)
 	require.NoError(t, err)
