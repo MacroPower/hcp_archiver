@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/go-tfe"
@@ -89,6 +90,11 @@ func (k Kind) String() string {
 // The go-tfe v1 client discards the HTTP status of a 403 and surfaces only the
 // joined error payload, whose title is "forbidden", so a forbidden error is
 // recognized by that text rather than a sentinel or status code.
+//
+// A raw [tfe.ClientRequest.DoRaw] error carries only a generic "error HTTP
+// response: N" with no sentinel; its status is read from that text as a last
+// resort, so a 404 or 403 from an SDK convenience method that bypasses
+// [Client.openRaw] still classifies rather than falling through to unknown.
 func Classify(err error) Kind {
 	switch {
 	case err == nil:
@@ -104,8 +110,75 @@ func Classify(err error) Kind {
 	case isForbidden(err):
 		return KindForbidden
 	default:
+		return classifyRawHTTP(err)
+	}
+}
+
+// classifyRawHTTP classifies a raw [tfe.ClientRequest.DoRaw] error by the HTTP
+// status embedded in its "error HTTP response: N" text. It is the fallback for
+// the SDK's own convenience methods (StackStates.Description,
+// StackDeploymentSteps.Artifacts) that call DoRaw directly rather than through
+// [Client.openRaw], and so never receive the typed error [statusError] yields.
+// It applies the same mapping that path gets -- 404 terminal, 403 forbidden --
+// so a missing artifact settles absent and a scope-denied one forbidden rather
+// than as a generic error that never settles. Any other status, or a message
+// that is not the DoRaw form, is [KindUnknown].
+func classifyRawHTTP(err error) Kind {
+	status, ok := rawHTTPStatus(err)
+	if !ok {
 		return KindUnknown
 	}
+
+	switch status {
+	case http.StatusNotFound:
+		return KindTerminal
+	case http.StatusForbidden:
+		return KindForbidden
+	default:
+		return KindUnknown
+	}
+}
+
+// rawHTTPStatus extracts the HTTP status code from a raw
+// [tfe.ClientRequest.DoRaw] error, whose root cause reads "error HTTP response:
+// N" with no typed sentinel, reporting the code and whether the text matched.
+// The match runs against the unwrapped root cause so an outer wrap does not hide
+// it, and a message that is not the DoRaw form, or whose code does not parse,
+// reports false.
+func rawHTTPStatus(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+
+	root := err
+
+	for {
+		unwrapped := errors.Unwrap(root)
+		if unwrapped == nil {
+			break
+		}
+
+		root = unwrapped
+	}
+
+	const prefix = "error HTTP response: "
+
+	msg := root.Error()
+	if !strings.HasPrefix(msg, prefix) {
+		return 0, false
+	}
+
+	fields := strings.Fields(msg[len(prefix):])
+	if len(fields) == 0 {
+		return 0, false
+	}
+
+	code, convErr := strconv.Atoi(fields[0])
+	if convErr != nil {
+		return 0, false
+	}
+
+	return code, true
 }
 
 // IsTerminal reports whether err is a permanent absence, i.e. its [Kind] is

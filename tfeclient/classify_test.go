@@ -81,6 +81,18 @@ func TestClassify(t *testing.T) {
 			),
 			want: tfeclient.KindUnknown,
 		},
+		"raw DoRaw 404 is terminal": {
+			err:  fmt.Errorf("read artifact: %w", errors.New("error HTTP response: 404")),
+			want: tfeclient.KindTerminal,
+		},
+		"raw DoRaw 403 is forbidden": {
+			err:  fmt.Errorf("read artifact: %w", errors.New("error HTTP response: 403")),
+			want: tfeclient.KindForbidden,
+		},
+		"raw DoRaw 500 is unknown": {
+			err:  fmt.Errorf("read artifact: %w", errors.New("error HTTP response: 500")),
+			want: tfeclient.KindUnknown,
+		},
 	}
 
 	for name, tc := range tests {
