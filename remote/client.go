@@ -234,22 +234,6 @@ func fullObjectChecksum(checksum *string) []byte {
 	return sum
 }
 
-// Exists reports whether an object is present at key, returning its metadata
-// when it is. Unlike [Client.Head], an absent object is a false report, not
-// an error.
-func (c *Client) Exists(ctx context.Context, key string) (bool, ObjectInfo, error) {
-	info, err := c.Head(ctx, key)
-
-	switch {
-	case errors.Is(err, ErrNotFound):
-		return false, ObjectInfo{}, nil
-	case err != nil:
-		return false, ObjectInfo{}, err
-	}
-
-	return true, info, nil
-}
-
 // Upload streams r to the object at key, letting the transfer manager split
 // a large body into a concurrent multipart upload; the parts of an upload
 // that dies midway are aborted rather than left to accrue storage (a bucket

@@ -332,19 +332,3 @@ func TestDeleteEmpty(t *testing.T) {
 
 	require.NoError(t, client.Delete(t.Context(), nil), "no keys means no requests")
 }
-
-func TestExists(t *testing.T) {
-	t.Parallel()
-
-	client, fake := newClient(t, remote.Config{})
-	fake.SetObject("present", remotetest.Object{Data: []byte("abc")})
-
-	ok, info, err := client.Exists(t.Context(), "present")
-	require.NoError(t, err)
-	assert.True(t, ok)
-	assert.Equal(t, int64(3), info.Size)
-
-	ok, _, err = client.Exists(t.Context(), "absent")
-	require.NoError(t, err, "an absent object is a report, not an error")
-	assert.False(t, ok)
-}

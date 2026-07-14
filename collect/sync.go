@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/md5" //nolint:gosec // Only reproduces the S3 ETag algorithm, not a security control.
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -101,12 +102,10 @@ func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 		return fmt.Errorf("stat offload source: %w", err)
 	}
 
-	present, info, err := rc.Exists(ctx, key)
-	if err != nil {
-		return fmt.Errorf("probe remote copy: %w", err)
-	}
+	info, err := rc.Head(ctx, key)
 
-	if !present {
+	switch {
+	case errors.Is(err, remote.ErrNotFound):
 		start := time.Now()
 
 		uploadErr := e.uploadFile(ctx, absPath, key, local.Size())
@@ -125,6 +124,9 @@ func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 			slog.String("storage_class", info.StorageClass),
 			slog.Duration("duration", time.Since(start)),
 		)
+
+	case err != nil:
+		return fmt.Errorf("probe remote copy: %w", err)
 	}
 
 	if info.Size != local.Size() {
