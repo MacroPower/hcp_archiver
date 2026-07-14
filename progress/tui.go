@@ -88,6 +88,9 @@ type tuiModel struct {
 	spin      spinner.Model
 	take      func() snapshot
 	interrupt func()
+	// The phase of the previous tick's snapshot, so a phase change can reset the
+	// task region's high-water instead of inheriting the prior phase's peak.
+	lastPhase string
 	samples   []rateSample
 	snap      snapshot
 	width     int
@@ -179,9 +182,18 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sampled = true
 			m.observe(m.snap)
 
+			// On entering a new phase, drop the high-water so a phase that
+			// registers no tasks (registry, stacks, audit) does not keep the panel
+			// padded to the previous phase's peak. The phase change repaints the
+			// panel anyway, so resetting the height here is safe.
+			if m.snap.phase != m.lastPhase {
+				m.lastPhase = m.snap.phase
+				m.taskRegionHigh = 0
+			}
+
 			// Advance the task region's high-water mark so render can hold the
-			// panel's height as work items finish. Growth-only here; render caps
-			// it to what the terminal fits.
+			// panel's height as work items finish within the phase. Growth-only
+			// here; render caps it to what the terminal fits.
 			m.taskRegionHigh = max(m.taskRegionHigh, taskRegionLines(len(m.snap.tasks), m.taskLineBudget()))
 		}
 
