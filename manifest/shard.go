@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -315,17 +316,44 @@ func (s *shard) restoreDirty(d drainedState) {
 	s.runDirty = s.runDirty || d.run
 }
 
-// document builds the shard's full snapshot document. It runs under the owning
-// ledger's read lock.
+// document builds a fully detached snapshot document for the shard: its maps
+// and each entry are copied rather than shared with the live shard, so the
+// caller may marshal it after releasing the ledger lock while records keep
+// mutating the shard. It runs under the owning ledger's read lock, and mirrors
+// the per-entry copy [shard.drainDirty] makes for the same reason.
 func (s *shard) document() document {
+	entries := make(map[string]*Entry, len(s.entries))
+
+	for relPath, e := range s.entries {
+		if e == nil {
+			continue
+		}
+
+		cp := *e
+		if e.Signature != nil {
+			sig := *e.Signature
+			cp.Signature = &sig
+		}
+
+		entries[relPath] = &cp
+	}
+
+	var lastRun *RunRecord
+
+	if s.lastRun != nil {
+		lr := *s.lastRun
+		lr.Totals = copyStatusCounts(s.lastRun.Totals)
+		lastRun = &lr
+	}
+
 	return document{
 		Version:        schemaVersion,
 		LastRunAt:      s.lastRunAt,
-		LastRun:        s.lastRun,
+		LastRun:        lastRun,
 		RunCount:       s.runCount,
-		HighWaterMarks: s.watermarks,
-		Entries:        s.entries,
-		Completed:      s.completed,
-		Settled:        s.settled,
+		HighWaterMarks: maps.Clone(s.watermarks),
+		Entries:        entries,
+		Completed:      maps.Clone(s.completed),
+		Settled:        maps.Clone(s.settled),
 	}
 }

@@ -1115,9 +1115,10 @@ func (l *Ledger) Flush() error {
 // recorded during the flush) is skipped and folded on a later flush, once its
 // newest state has reached the log; without that guard the snapshot could
 // capture an in-memory status the log does not yet carry, and a crash before the
-// log removal would replay the stale log record over the newer snapshot. The
-// marshal holds a read lock, briefly blocking recording workers, but spans one
-// shard rather than the whole ledger.
+// log removal would replay the stale log record over the newer snapshot.
+// Building the detached snapshot copy holds a read lock, briefly blocking
+// recording workers, but the marshal that follows runs unlocked, so a large
+// shard's encode no longer stalls writers on other shards for its duration.
 func (l *Ledger) compactShard(sh *shard) error {
 	l.mu.RLock()
 
@@ -1128,10 +1129,10 @@ func (l *Ledger) compactShard(sh *shard) error {
 	}
 
 	doc := sh.document()
-	data, err := json.MarshalIndent(doc, "", "  ")
 
 	l.mu.RUnlock()
 
+	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal shard %q: %w", sh.dir, err)
 	}
