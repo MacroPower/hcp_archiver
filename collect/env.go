@@ -108,10 +108,11 @@ func WithTarget(target string) Option {
 	}
 }
 
-// WithRemote enables offloading of sealed cold bundles: client reaches the
-// S3-compatible store, and cfg with orgName compose the object keys through
-// [Env.RemoteKey]. A nil client leaves offloading disabled. It returns an
-// [Option].
+// WithRemote enables mirroring to an S3-compatible store — cold surfaces
+// evict through [Env.OffloadFile] and everything else syncs through
+// [Env.SyncArchive]: client reaches the store, and cfg with orgName compose
+// the object keys through [Env.RemoteKey]. A nil client keeps the archive
+// local-only. It returns an [Option].
 func WithRemote(client *remote.Client, cfg remote.Config, orgName string) Option {
 	return func(e *Env) {
 		e.remote = client
@@ -173,8 +174,8 @@ func (e *Env) Store() *store.Store {
 	return e.store
 }
 
-// Remote returns the client for the S3-compatible store sealed bundles are
-// offloaded to, or nil when offloading is disabled; the nil return is the
+// Remote returns the client for the S3-compatible store the archive is
+// mirrored to, or nil when no remote is configured; the nil return is the
 // gate every remote code path checks first.
 func (e *Env) Remote() *remote.Client {
 	return e.remote

@@ -113,6 +113,7 @@ func TestLoadFile(t *testing.T) {
 				"  region: us-east-1\n" +
 				"  forcePathStyle: true\n" +
 				"  storageClass: DEEP_ARCHIVE\n" +
+				"  syncStorageClass: STANDARD_IA\n" +
 				"  checksums: false\n" +
 				"  partSize: 67108864\n" +
 				"  concurrency: 4\n",
@@ -125,6 +126,7 @@ func TestLoadFile(t *testing.T) {
 					Endpoint:         "https://s3.example.com",
 					Region:           "us-east-1",
 					StorageClass:     "DEEP_ARCHIVE",
+					SyncStorageClass: "STANDARD_IA",
 					PartSize:         67108864,
 					Concurrency:      4,
 					ForcePathStyle:   true,

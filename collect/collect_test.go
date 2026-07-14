@@ -227,6 +227,134 @@ func TestEnvMutableAlwaysRefetches(t *testing.T) {
 	assert.NotEqual(t, "seed", entry.Signature.Hash, "the refreshed signature replaces the seed")
 }
 
+func TestEnvMutableSealedElsewhereSkipsWrite(t *testing.T) {
+	t.Parallel()
+
+	// A run.json coalesced into a roll-up: recorded done with this exact
+	// content, loose file removed by the seal. An unchanged re-read must not
+	// re-materialize the loose file (the next seal would append a duplicate
+	// roll-up line) and must not churn the entry.
+	const relPath = "projects/example/workspaces/ws/runs/run-1/run.json"
+
+	env, st, ledger := newEnv(t)
+
+	fetch := func(_ context.Context) (any, error) {
+		return cannedProject(), nil
+	}
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, fetch))
+
+	before, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+
+	// Model the seal: the roll-up holds the bytes, the loose source is gone.
+	require.NoError(t, os.Remove(st.AbsPath(relPath)))
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, fetch))
+
+	exists, err := st.Exists(relPath)
+	require.NoError(t, err)
+	assert.False(t, exists, "an unchanged sealed object is not re-materialized")
+
+	after, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, before.Attempts, after.Attempts,
+		"the skip leaves the entry untouched rather than churning Attempts")
+}
+
+func TestEnvMutableSealedElsewhereWritesChangedPayload(t *testing.T) {
+	t.Parallel()
+
+	const relPath = "projects/example/workspaces/ws/runs/run-1/run.json"
+
+	env, st, ledger := newEnv(t)
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return cannedProject(), nil
+	}))
+	require.NoError(t, os.Remove(st.AbsPath(relPath)))
+
+	// The payload changed after the seal (a force-canceled run gaining a new
+	// status text, say): the loose file must come back so the next seal
+	// appends the newer line.
+	changed := cannedProject()
+	changed.Name = "renamed"
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return changed, nil
+	}))
+
+	exists, err := st.Exists(relPath)
+	require.NoError(t, err)
+	assert.True(t, exists, "a changed payload writes loose again")
+
+	entry, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusDone, entry.Status)
+}
+
+func TestEnvMutableSealedElsewhereFilePresentDedupes(t *testing.T) {
+	t.Parallel()
+
+	// With the loose file still on disk, the sealed-elsewhere gate stays out
+	// of the way: the write path's own dedup keeps the file and re-records.
+	const relPath = "projects/example/workspaces/ws/runs/run-1/run.json"
+
+	env, st, ledger := newEnv(t)
+
+	fetch := func(_ context.Context) (any, error) {
+		return cannedProject(), nil
+	}
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, fetch))
+	require.NoError(t, env.Mutable(t.Context(), relPath, fetch))
+
+	exists, err := st.Exists(relPath)
+	require.NoError(t, err)
+	assert.True(t, exists)
+
+	entry, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, 2, entry.Attempts, "a present file re-records normally")
+}
+
+func TestEnvMutableSealedElsewhereStatErrorFailsOpen(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions, so no stat error can be provoked")
+	}
+
+	// A stat that errors for a reason other than absence (here EACCES from an
+	// unsearchable parent) must not be read as "absent and sealed": the gate
+	// fails open and the write path proceeds, surfacing the real problem as a
+	// recorded write failure instead of silently skipping.
+	env, st, ledger := newEnv(t)
+
+	const relPath = "guarded/run.json"
+
+	fetch := func(_ context.Context) (any, error) {
+		return cannedProject(), nil
+	}
+
+	// First write with a clear path records done with the payload's signature.
+	require.NoError(t, env.Mutable(t.Context(), relPath, fetch))
+
+	dir := st.AbsPath("guarded")
+	require.NoError(t, os.Chmod(dir, 0o000))
+	t.Cleanup(func() {
+		//nolint:errcheck,gosec // Restore so TempDir cleanup can remove the tree.
+		os.Chmod(dir, 0o700)
+	})
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, fetch))
+
+	entry, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, entry.Status,
+		"an unverifiable absence proceeds to the write, whose failure is recorded")
+}
+
 func TestEnvBytes(t *testing.T) {
 	t.Parallel()
 

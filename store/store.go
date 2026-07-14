@@ -87,18 +87,24 @@ type WriteResult struct {
 }
 
 // WriteJSON marshals v through [serialize.Marshal] and commits the result to an
-// archive-relative path, overwriting mutable metadata only when it changes.
-//
-// When an identical file already exists the write is skipped and the returned
-// [WriteResult] reports Changed false with the current signature; otherwise the
-// bytes are committed atomically and Changed is true. The signature is computed
-// over the marshaled payload either way.
+// archive-relative path through [Store.WriteJSONBytes].
 func (s *Store) WriteJSON(relPath string, v any) (WriteResult, error) {
 	data, err := serialize.Marshal(v)
 	if err != nil {
 		return WriteResult{}, fmt.Errorf("marshal %q: %w", relPath, err)
 	}
 
+	return s.WriteJSONBytes(relPath, data)
+}
+
+// WriteJSONBytes commits already-marshaled JSON to an archive-relative path,
+// overwriting mutable metadata only when it changes.
+//
+// When an identical file already exists the write is skipped and the returned
+// [WriteResult] reports Changed false with the current signature; otherwise the
+// bytes are committed atomically and Changed is true. The signature is computed
+// over the payload either way.
+func (s *Store) WriteJSONBytes(relPath string, data []byte) (WriteResult, error) {
 	res := WriteResult{
 		SHA256: sum(data),
 		Size:   int64(len(data)),
@@ -117,7 +123,7 @@ func (s *Store) WriteJSON(relPath string, v any) (WriteResult, error) {
 	default:
 	}
 
-	err = atomicfile.WriteFile(abs, data)
+	err := atomicfile.WriteFile(abs, data)
 	if err != nil {
 		return WriteResult{}, fmt.Errorf("write %q: %w", relPath, err)
 	}

@@ -93,16 +93,18 @@ var (
 
 // Runs returns the workspace's archived runs, newest first.
 //
-// Every run keeps its run.json as a loose file (it is the one mutable per-run
-// object), so the run list needs no sealed-form lookups. A run whose run.json
-// is missing or malformed still lists by id, with its parsed fields zero, so
-// one damaged file does not hide the run.
+// Run ids are enumerated across both physical forms — loose run directories
+// and sealed keys — and each run.json is read through [Workspace.Open], so an
+// in-flight run's loose summary and a terminal run's roll-up line list
+// together. A run whose run.json is missing or malformed still lists by id,
+// with its parsed fields zero, so one damaged file or roll-up line does not
+// hide the run.
 func (w *Workspace) Runs() ([]Run, error) {
 	runsDir := path.Join(w.dir, "runs")
 
-	ids, err := subdirNames(w.org.AbsPath(runsDir))
+	ids, err := w.runIDs()
 	if err != nil {
-		return nil, fmt.Errorf("list runs: %w", err)
+		return nil, err
 	}
 
 	runs := make([]Run, 0, len(ids))
@@ -110,7 +112,7 @@ func (w *Workspace) Runs() ([]Run, error) {
 	for _, id := range ids {
 		run := Run{ID: id}
 
-		data, readErr := os.ReadFile(w.org.AbsPath(path.Join(runsDir, id, "run.json")))
+		data, readErr := w.Open(path.Join(runsDir, id, "run.json"))
 		if readErr == nil {
 			resources, decodeErr := DecodeResources(data)
 			if decodeErr == nil && len(resources) == 1 {
@@ -130,6 +132,40 @@ func (w *Workspace) Runs() ([]Run, error) {
 	})
 
 	return runs, nil
+}
+
+// runIDs enumerates the workspace's archived run ids across both physical
+// forms: the loose runs/<id>/ directories and the first path segment of every
+// sealed key under runs/, deduplicated. Any sealed child keeps its run
+// visible, so a run whose own roll-up line is the corrupt one still lists. It
+// is the one enumeration behind both the run list and the run count, so a
+// fully coalesced workspace (no runs/ directory at all) counts the same runs
+// it lists.
+func (w *Workspace) runIDs() ([]string, error) {
+	runsDir := path.Join(w.dir, "runs")
+
+	ids, err := subdirNames(w.org.AbsPath(runsDir))
+	if err != nil {
+		return nil, fmt.Errorf("list runs: %w", err)
+	}
+
+	sealed, err := w.sealedNames(runsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, relPath := range sealed {
+		// A sealed key is archive-relative: trim the runs dir to expose the
+		// run id as the first remaining segment.
+		rest := strings.TrimPrefix(relPath, runsDir+"/")
+
+		id, _, _ := strings.Cut(rest, "/")
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+
+	return dedupe(ids), nil
 }
 
 // fillRun copies a run resource's display attributes onto run.

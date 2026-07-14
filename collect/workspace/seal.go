@@ -12,7 +12,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/seal"
@@ -29,7 +28,8 @@ var (
 	}
 
 	// Immutable run-child filenames, each mapped to the roll-up it coalesces into;
-	// run.json is absent, being mutable, and stays loose.
+	// run.json is absent because it is mutable: it coalesces into runsRollup
+	// through its own terminal-status gate rather than by filename alone.
 	runRollups = map[string]string{
 		"config-version.json":         "config-versions.ndjson",
 		"config-version-ingress.json": "config-versions.ndjson",
@@ -49,6 +49,10 @@ var (
 // coalesce into.
 const stateMetaRollup = "state-versions.ndjson"
 
+// runsRollup is the roll-up the run.json summaries of settled, terminal runs
+// coalesce into; an in-flight run's summary stays loose and keeps refreshing.
+const runsRollup = "runs.ndjson"
+
 // SealWorkspace packs the workspace's frozen cold artifacts into bundles and
 // roll-ups beside its loose metadata, then removes the loose originals.
 //
@@ -57,12 +61,17 @@ const stateMetaRollup = "state-versions.ndjson"
 // JSON-format state blobs seal into a stored state bundle, kept uncompressed so
 // the irreplaceable state stays greppable on disk; and the immutable small
 // metadata (the per-run children and per-state-version meta sidecars) coalesces
-// into per-workspace NDJSON roll-ups. Only run.json, the mutable run summary,
-// stays a loose file. Only settled artifacts of a fully-walked collection are
-// sealed, and each loose source is removed only after its bundle or roll-up is
-// durable and verified, so a pass is safe to interrupt and re-run. Nothing is
-// re-fetched: the ledger keys are unchanged, so a re-run treats a sealed object
-// exactly as it did the loose one.
+// into per-workspace NDJSON roll-ups. The run.json summary is mutable, so it
+// coalesces only once its run is terminal: a settled summary whose recorded
+// status is final folds into the runs roll-up, while an in-flight run's stays
+// loose and keeps refreshing ([collect.Env.Mutable]'s sealed-elsewhere gate is
+// what keeps the coalesced copy from being re-materialized by the next
+// re-walk). Only settled artifacts of a fully-walked collection are sealed,
+// and each loose source is removed only after its bundle or roll-up is durable
+// and verified, so a pass is safe to interrupt and re-run. Nothing is
+// re-fetched: the ledger keys are unchanged, so a re-run treats a sealed
+// object exactly as it did the loose one. Run directories emptied by the seal
+// are pruned.
 func (c *Collector) SealWorkspace(ctx context.Context, project, ws string) error {
 	logs, err := c.frozenRunArtifacts(project, ws)
 	if err != nil {
@@ -92,6 +101,11 @@ func (c *Collector) SealWorkspace(ctx context.Context, project, ws string) error
 	err = c.coalesce(ctx, project, ws, metadata)
 	if err != nil {
 		return err
+	}
+
+	err = c.removeEmptyRunDirs(project, ws)
+	if err != nil {
+		return fmt.Errorf("prune empty run dirs: %w", err)
 	}
 
 	// With a remote store configured, sweep every sealed local bundle out to
@@ -139,7 +153,7 @@ func (c *Collector) evictBundles(ctx context.Context, project, ws string) error 
 			return fmt.Errorf("evict bundles: %w", ctx.Err())
 		}
 
-		sidecar := filepath.Join(bundlesDir, name+".sidecar.ndjson")
+		sidecar := filepath.Join(bundlesDir, name+seal.SidecarSuffix)
 
 		_, statErr := os.Stat(sidecar)
 		if statErr != nil {
@@ -155,103 +169,13 @@ func (c *Collector) evictBundles(ctx context.Context, project, ws string) error 
 
 		relPath := st.Join(bundlesRel, name)
 
-		evictErr := c.evictBundle(ctx, relPath)
+		evictErr := c.env.OffloadFile(ctx, relPath)
 		if evictErr != nil {
 			c.env.Log().LogAttrs(ctx, slog.LevelWarn, "bundle_evict_error",
 				slog.String("path", relPath),
 				slog.String("error", evictErr.Error()),
 			)
 		}
-	}
-
-	return nil
-}
-
-// evictBundle uploads one sealed bundle if the remote store does not already
-// hold it, re-confirms the remote copy, and only then removes the local zip.
-//
-// Every state is derived from what is observable — the local zip, its
-// sidecar, and a HeadObject probe — so any crash point self-heals on the
-// next sweep with no persisted flags: an interrupted upload re-uploads (an
-// incomplete multipart upload is not an object), an upload that finished
-// before the local delete is found by the probe and evicted without
-// re-uploading, and a finished eviction is a no-op. The write itself is
-// verified by the server-side checksum on upload plus the size check here;
-// the bundle's bytes were already read back and hash-verified locally by
-// seal.Seal, so existence and size are the verify-before-delete gate.
-func (c *Collector) evictBundle(ctx context.Context, relPath string) error {
-	rc := c.env.Remote()
-	st := c.env.Store()
-	key := c.env.RemoteKey(relPath)
-	absPath := st.AbsPath(relPath)
-
-	local, err := os.Stat(absPath)
-	if err != nil {
-		return fmt.Errorf("stat bundle: %w", err)
-	}
-
-	present, info, err := rc.Exists(ctx, key)
-	if err != nil {
-		return fmt.Errorf("probe remote copy: %w", err)
-	}
-
-	if !present {
-		start := time.Now()
-
-		uploadErr := c.uploadBundle(ctx, absPath, key, local.Size())
-		if uploadErr != nil {
-			return uploadErr
-		}
-
-		info, err = rc.Head(ctx, key)
-		if err != nil {
-			return fmt.Errorf("confirm remote copy: %w", err)
-		}
-
-		c.env.Log().LogAttrs(ctx, slog.LevelInfo, "bundle_uploaded",
-			slog.String("key", key),
-			slog.Int64("bytes", local.Size()),
-			slog.String("storage_class", info.StorageClass),
-			slog.Duration("duration", time.Since(start)),
-		)
-	}
-
-	if info.Size != local.Size() {
-		return fmt.Errorf(
-			"remote copy of %q is %d bytes, local is %d; keeping the local bundle",
-			key, info.Size, local.Size(),
-		)
-	}
-
-	err = os.Remove(absPath)
-	if err != nil {
-		return fmt.Errorf("remove evicted bundle: %w", err)
-	}
-
-	c.env.Log().LogAttrs(ctx, slog.LevelInfo, "bundle_evicted",
-		slog.String("path", relPath),
-		slog.String("key", key),
-	)
-
-	return nil
-}
-
-// uploadBundle streams one local zip to the remote store at key.
-func (c *Collector) uploadBundle(ctx context.Context, absPath, key string, size int64) error {
-	//nolint:gosec // The path is composed by the store from its archive root.
-	f, err := os.Open(absPath)
-	if err != nil {
-		return fmt.Errorf("open bundle: %w", err)
-	}
-
-	uploadErr := c.env.Remote().Upload(ctx, key, f, size)
-	closeErr := f.Close()
-
-	switch {
-	case uploadErr != nil:
-		return fmt.Errorf("upload bundle: %w", uploadErr)
-	case closeErr != nil:
-		return fmt.Errorf("close bundle after upload: %w", closeErr)
 	}
 
 	return nil
@@ -330,11 +254,11 @@ func (c *Collector) frozenStateArtifacts(project, ws string) ([]seal.Member, err
 	return members, nil
 }
 
-// frozenMetadata returns the workspace's loose, settled immutable metadata
-// grouped by the roll-up it coalesces into: the immutable per-run children and
-// the per-state-version meta sidecars, excluding the mutable run.json, which
-// stays loose. Each collection contributes only once it has been walked to its
-// end.
+// frozenMetadata returns the workspace's loose, settled frozen metadata
+// grouped by the roll-up it coalesces into: the immutable per-run children,
+// the run.json summaries of terminal runs, and the per-state-version meta
+// sidecars. An in-flight run's mutable run.json stays loose. Each collection
+// contributes only once it has been walked to its end.
 func (c *Collector) frozenMetadata(project, ws string) (map[string][]seal.Member, error) {
 	st := c.env.Store()
 	out := make(map[string][]seal.Member)
@@ -359,6 +283,14 @@ func (c *Collector) frozenMetadata(project, ws string) (map[string][]seal.Member
 					out[rollup] = append(out[rollup], seal.Member{Name: relPath, Source: st.AbsPath(relPath)})
 				}
 			}
+
+			// The mutable run.json freezes only once its recorded status is
+			// terminal; the status lives in the document, not the ledger, so
+			// the loose file itself is the gate.
+			runJSON := st.RunFile(project, ws, runID, "run.json")
+			if c.settled(runJSON) && terminalRunFile(st.AbsPath(runJSON)) {
+				out[runsRollup] = append(out[runsRollup], seal.Member{Name: runJSON, Source: st.AbsPath(runJSON)})
+			}
 		}
 	}
 
@@ -381,6 +313,49 @@ func (c *Collector) frozenMetadata(project, ws string) (map[string][]seal.Member
 	}
 
 	return out, nil
+}
+
+// removeEmptyRunDirs removes the workspace's now-empty runs/<id>/ directories,
+// then the runs/ directory itself if nothing is left — the residue of a seal
+// that coalesced a run's last loose file. A vanished directory is tolerated;
+// a directory that still holds anything is left alone.
+func (c *Collector) removeEmptyRunDirs(project, ws string) error {
+	st := c.env.Store()
+	runsDir := st.AbsPath(st.Join(st.WorkspaceDir(project, ws), "runs"))
+
+	runIDs, err := subdirs(runsDir)
+	if err != nil {
+		return err
+	}
+
+	for _, runID := range runIDs {
+		err = removeIfEmpty(st.AbsPath(st.RunDir(project, ws, runID)))
+		if err != nil {
+			return err
+		}
+	}
+
+	return removeIfEmpty(runsDir)
+}
+
+// removeIfEmpty removes dir when it holds no entries, tolerating a dir that
+// does not exist or vanishes between the check and the remove.
+func removeIfEmpty(dir string) error {
+	entries, err := listNames(dir, func(fs.DirEntry) bool { return true })
+	if err != nil {
+		return err
+	}
+
+	if len(entries) > 0 {
+		return nil
+	}
+
+	err = os.Remove(dir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove %q: %w", dir, err)
+	}
+
+	return nil
 }
 
 // settled reports whether the object at relPath is recorded done, the gate that
@@ -581,7 +556,7 @@ func parseGeneration(name, prefix string) int {
 		return 0
 	}
 
-	digits, ok := strings.CutSuffix(rest, ".zip.sidecar.ndjson")
+	digits, ok := strings.CutSuffix(rest, ".zip"+seal.SidecarSuffix)
 	if !ok {
 		digits, ok = strings.CutSuffix(rest, ".zip")
 		if !ok {

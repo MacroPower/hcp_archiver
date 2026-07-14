@@ -57,7 +57,8 @@ var (
 // Create instances with [New]. All fields are plain values; a Config performs
 // no I/O beyond reading the environment during construction.
 type Config struct {
-	// Remote offloads sealed cold bundles to an S3-compatible object store;
+	// Remote mirrors the archive to an S3-compatible object store, evicting
+	// sealed cold bundles and settled tarballs and syncing everything else;
 	// nil keeps the whole archive on local disk.
 	Remote *RemoteConfig
 	// Token is the HCP Terraform API token used to authenticate.
@@ -108,24 +109,29 @@ type Config struct {
 	AuditTrail bool
 }
 
-// RemoteConfig holds the resolved settings for offloading sealed cold
-// bundles to an S3-compatible object store. It mirrors the remote package's
-// client configuration field for field so this package needs no AWS
-// dependency; the archiver performs the mapping. Credentials are never part
-// of it: the client authenticates through the AWS SDK default chain.
+// RemoteConfig holds the resolved settings for mirroring the archive to an
+// S3-compatible object store: sealed cold bundles and settled tarballs are
+// evicted to it, and the rest of the archive is synced to it at each
+// organization run's close. It mirrors the remote package's client
+// configuration field for field so this package needs no AWS dependency; the
+// archiver performs the mapping. Credentials are never part of it: the
+// client authenticates through the AWS SDK default chain.
 type RemoteConfig struct {
-	// Bucket names the bucket sealed bundles are uploaded to.
+	// Bucket names the bucket archive objects are uploaded to.
 	Bucket string
-	// Prefix is an optional key prefix bundles are stored under.
+	// Prefix is an optional key prefix objects are stored under.
 	Prefix string
 	// Endpoint overrides the S3 endpoint URL for compatible stores; empty
 	// resolves the AWS default for the region.
 	Endpoint string
 	// Region is the bucket's region; empty defers to the SDK default chain.
 	Region string
-	// StorageClass is the storage class bundles are written with; empty
-	// takes the store's default.
+	// StorageClass is the storage class evicted cold surfaces (bundles and
+	// settled tarballs) are written with; empty takes the store's default.
 	StorageClass string
+	// SyncStorageClass is the storage class synced search-layer files are
+	// written with; empty takes the store's default.
+	SyncStorageClass string
 	// PartSize is the multipart upload part size in bytes; zero takes the
 	// transfer manager's default.
 	PartSize int64
@@ -295,8 +301,9 @@ func WithAuditTrail(enabled bool) Option {
 	}
 }
 
-// WithRemote enables offloading of sealed cold bundles to the S3-compatible
-// store rc describes. It returns an [Option].
+// WithRemote enables mirroring the archive to the S3-compatible store rc
+// describes: cold surfaces evict there and everything else syncs there. It
+// returns an [Option].
 func WithRemote(rc RemoteConfig) Option {
 	return func(c *Config) {
 		c.Remote = &rc

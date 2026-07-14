@@ -46,15 +46,18 @@ scope:
   registryDetail: false
   auditTrail: false
 
-# Offload sealed cold bundles (per-workspace logs and state zips) to an
-# S3-compatible object store as each workspace seals, keeping local disk
-# bounded to the grep-able search layer. Omit to keep everything local.
+# Mirror the archive to an S3-compatible object store: sealed cold bundles and
+# settled configuration tarballs are evicted there (uploaded, verified, then
+# removed locally), and every other archive file syncs there at each org run's
+# close, so the bucket holds a complete copy while local disk stays the
+# canonical grep-able search layer. Omit to keep everything local.
 # Credentials come from the AWS SDK default chain, never from this file.
 # remote:
-#   bucket: my-archive-bucket # required to enable offloading
+#   bucket: my-archive-bucket # required to enable the mirror
 #   prefix: hcp-archive
 #   region: us-east-1
-#   storageClass: DEEP_ARCHIVE # applied on first write
+#   storageClass: DEEP_ARCHIVE # evicted bundles and tarballs
+#   syncStorageClass: STANDARD_IA # synced search-layer files
 #   endpoint: https://s3.example.com # S3-compatible stores (MinIO, R2, Ceph)
 #   forcePathStyle: true # the addressing shape MinIO/Ceph expect
 #   checksums: false # only for stores that reject checksum headers

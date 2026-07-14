@@ -17,10 +17,10 @@ func TestDiscoverShardsWithGlobMetaInRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "arch[iv]e")
 
 	for _, dir := range []string{
-		filepath.Join(root, ledgerDirName),
-		filepath.Join(root, "config-versions", ledgerDirName),
-		filepath.Join(root, "projects", "p1", "workspaces", "w1", ledgerDirName),
-		filepath.Join(root, "projects", "p1", "stacks", "s1", ledgerDirName),
+		filepath.Join(root, LedgerDirName),
+		filepath.Join(root, "config-versions", LedgerDirName),
+		filepath.Join(root, "projects", "p1", "workspaces", "w1", LedgerDirName),
+		filepath.Join(root, "projects", "p1", "stacks", "s1", LedgerDirName),
 	} {
 		require.NoError(t, os.MkdirAll(dir, 0o750))
 	}

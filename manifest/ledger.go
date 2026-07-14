@@ -236,10 +236,10 @@ func (l *Ledger) Close() error {
 // with the subtree it indexes; the empty key is the org root.
 func (l *Ledger) shardDir(sk string) string {
 	if sk == "" {
-		return filepath.Join(l.root, ledgerDirName)
+		return filepath.Join(l.root, LedgerDirName)
 	}
 
-	return filepath.Join(l.root, filepath.FromSlash(sk), ledgerDirName)
+	return filepath.Join(l.root, filepath.FromSlash(sk), LedgerDirName)
 }
 
 // discoverShards finds the .ledger directories beneath root and maps each to its
@@ -287,8 +287,8 @@ func discoverShards(root string) (map[string]string, error) {
 
 	// The two fixed-depth shards live at literal paths.
 	for _, dir := range []string{
-		filepath.Join(root, ledgerDirName),
-		filepath.Join(root, configVersionsSegment, ledgerDirName),
+		filepath.Join(root, LedgerDirName),
+		filepath.Join(root, configVersionsSegment, LedgerDirName),
 	} {
 		err := add(dir)
 		if err != nil {
@@ -314,7 +314,7 @@ func discoverShards(root string) (map[string]string, error) {
 			}
 
 			for _, child := range children {
-				err = add(filepath.Join(kindDir, child, ledgerDirName))
+				err = add(filepath.Join(kindDir, child, LedgerDirName))
 				if err != nil {
 					return nil, err
 				}

@@ -43,7 +43,7 @@
     "remote": {
       "$ref": "#/$defs/FileRemote",
       "title": "Remote",
-      "description": "Remote offloads sealed cold bundles to an S3-compatible object store;\nunset keeps the whole archive on local disk."
+      "description": "Remote mirrors the archive to an S3-compatible object store, evicting\nsealed cold bundles and settled tarballs and syncing everything else;\nunset keeps the whole archive on local disk."
     },
     "runHistory": {
       "$ref": "#/$defs/FileRunHistory",
@@ -71,12 +71,12 @@
         "bucket": {
           "type": "string",
           "title": "Bucket",
-          "description": "Bucket names the bucket sealed bundles are uploaded to; required when\nany other remote field is set."
+          "description": "Bucket names the bucket archive objects are uploaded to; required when\nany other remote field is set."
         },
         "prefix": {
           "type": "string",
           "title": "Prefix",
-          "description": "Prefix is an optional key prefix bundles are stored under."
+          "description": "Prefix is an optional key prefix objects are stored under."
         },
         "endpoint": {
           "type": "string",
@@ -104,13 +104,22 @@
         "storageClass": {
           "type": "string",
           "title": "Storage Class",
-          "description": "StorageClass is the storage class bundles are written with; empty\ntakes the store's default. Any class the store accepts is allowed, so\ncompatible stores' custom classes work; the examples are the AWS ones.",
+          "description": "StorageClass is the storage class evicted cold surfaces (bundles and\nsettled configuration-version tarballs) are written with; empty takes\nthe store's default. Any class the store accepts is allowed, so\ncompatible stores' custom classes work; the examples are the AWS ones.",
           "examples": [
             "STANDARD",
             "STANDARD_IA",
             "GLACIER_IR",
             "GLACIER",
             "DEEP_ARCHIVE"
+          ]
+        },
+        "syncStorageClass": {
+          "type": "string",
+          "title": "Sync Storage Class",
+          "description": "SyncStorageClass is the storage class synced search-layer files are\nwritten with; empty takes the store's default. Keep it a directly\nreadable class (not GLACIER or DEEP_ARCHIVE): synced files change and\nre-upload as the archive evolves, and restoring means downloading\nthem.",
+          "examples": [
+            "STANDARD",
+            "STANDARD_IA"
           ]
         },
         "partSize": {
@@ -132,7 +141,7 @@
           "description": "ForcePathStyle addresses the bucket as a path segment rather than a\nvirtual host, the shape MinIO and Ceph RGW expect."
         }
       },
-      "description": "FileRemote offloads sealed cold bundles (a workspace's logs and state\nzips) to an S3-compatible object store as each workspace seals, bounding\nlocal disk to the search layer plus in-flight work. Setting any field\nrequires Bucket; leaving the whole section unset keeps the archive\nentirely local. Credentials are never configured here: the client\nauthenticates through the AWS SDK default chain (environment variables,\nshared configuration, an instance or task role).",
+      "description": "FileRemote mirrors the archive to an S3-compatible object store. With the\nsection set, the store holds a complete copy: sealed cold bundles and\nsettled configuration-version tarballs are evicted to it (uploaded,\nverified, then removed locally), and every other archive file is synced to\nit incrementally at each organization run's close, with local disk staying\nthe canonical searchable copy. Eviction takes StorageClass; the synced\nsearch layer takes SyncStorageClass. Setting any field requires Bucket;\nleaving the whole section unset keeps the archive entirely local.\nCredentials are never configured here: the client authenticates through\nthe AWS SDK default chain (environment variables, shared configuration,\nan instance or task role).",
       "additionalProperties": false
     },
     "FileRunHistory": {

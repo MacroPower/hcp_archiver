@@ -1,0 +1,693 @@
+package collect
+
+import (
+	"context"
+	"crypto/md5" //nolint:gosec // Only reproduces the S3 ETag algorithm, not a security control.
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
+	"hash"
+	"io"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"golang.org/x/sync/errgroup"
+
+	"go.jacobcolvin.com/hcp_archiver/atomicfile"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/remote"
+	"go.jacobcolvin.com/hcp_archiver/seal"
+	"go.jacobcolvin.com/hcp_archiver/store"
+)
+
+// SyncStats tallies one [Env.SyncArchive] sweep.
+type SyncStats struct {
+	// UploadedBytes is the total size of the files uploaded.
+	UploadedBytes int64
+	// Uploaded counts files uploaded because the remote copy was absent or
+	// differed.
+	Uploaded int
+	// Skipped counts files whose remote copy already matched.
+	Skipped int
+	// Evicted counts cold surfaces (sealed bundles, settled tarballs) moved
+	// remote and removed locally.
+	Evicted int
+	// Pruned counts stale remote keys deleted because nothing local backs
+	// them anymore.
+	Pruned int
+	// Failed counts failed sweep operations — a file's upload or eviction,
+	// the inventory listing, the walk, or a prune batch; each is logged and
+	// the next run's sweep retries.
+	Failed int
+}
+
+// syncCounters is the goroutine-shared accumulator behind [SyncStats]; the
+// synced files fan out over an errgroup, so every field is atomic.
+type syncCounters struct {
+	uploadedBytes atomic.Int64
+	uploaded      atomic.Int64
+	skipped       atomic.Int64
+	evicted       atomic.Int64
+	pruned        atomic.Int64
+	failed        atomic.Int64
+}
+
+// stats converts the accumulator into the returned [SyncStats].
+func (c *syncCounters) stats() SyncStats {
+	return SyncStats{
+		UploadedBytes: c.uploadedBytes.Load(),
+		Uploaded:      int(c.uploaded.Load()),
+		Skipped:       int(c.skipped.Load()),
+		Evicted:       int(c.evicted.Load()),
+		Pruned:        int(c.pruned.Load()),
+		Failed:        int(c.failed.Load()),
+	}
+}
+
+// processed returns how many files reached an outcome, the progress-line
+// counter.
+func (c *syncCounters) processed() int64 {
+	return c.uploaded.Load() + c.skipped.Load() + c.evicted.Load() + c.failed.Load()
+}
+
+// OffloadFile moves the local file at relPath to the remote store: it uploads
+// the file if the store does not already hold its key, re-confirms the remote
+// copy, and only then removes the local file.
+//
+// Every state is derived from what is observable — the local file and a
+// HeadObject probe — so any crash point self-heals on the next sweep with no
+// persisted flags: an interrupted upload re-uploads (an incomplete multipart
+// upload is not an object), an upload that finished before the local delete
+// is found by the probe and evicted without re-uploading, and a finished
+// eviction is a no-op. The write itself is verified by the server-side
+// checksum on upload plus the size check here; callers only hand this method
+// files whose bytes were already verified locally (a sealed bundle's
+// read-back, a tarball's ledger signature), so existence and size are the
+// verify-before-delete gate.
+func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
+	rc := e.remote
+	key := e.RemoteKey(relPath)
+	absPath := e.store.AbsPath(relPath)
+
+	local, err := os.Stat(absPath)
+	if err != nil {
+		return fmt.Errorf("stat offload source: %w", err)
+	}
+
+	present, info, err := rc.Exists(ctx, key)
+	if err != nil {
+		return fmt.Errorf("probe remote copy: %w", err)
+	}
+
+	if !present {
+		start := time.Now()
+
+		uploadErr := e.uploadFile(ctx, absPath, key, local.Size())
+		if uploadErr != nil {
+			return uploadErr
+		}
+
+		info, err = rc.Head(ctx, key)
+		if err != nil {
+			return fmt.Errorf("confirm remote copy: %w", err)
+		}
+
+		e.logger.LogAttrs(ctx, slog.LevelInfo, "offload_uploaded",
+			slog.String("key", key),
+			slog.Int64("bytes", local.Size()),
+			slog.String("storage_class", info.StorageClass),
+			slog.Duration("duration", time.Since(start)),
+		)
+	}
+
+	if info.Size != local.Size() {
+		return fmt.Errorf(
+			"remote copy of %q is %d bytes, local is %d; keeping the local file",
+			key, info.Size, local.Size(),
+		)
+	}
+
+	err = os.Remove(absPath)
+	if err != nil {
+		return fmt.Errorf("remove evicted file: %w", err)
+	}
+
+	e.logger.LogAttrs(ctx, slog.LevelInfo, "offload_evicted",
+		slog.String("path", relPath),
+		slog.String("key", key),
+	)
+
+	return nil
+}
+
+// uploadFile streams one local file to the remote store at key through the
+// transfer manager, which applies the cold storage class.
+func (e *Env) uploadFile(ctx context.Context, absPath, key string, size int64) error {
+	//nolint:gosec // The path is composed by the store from its archive root.
+	f, err := os.Open(absPath)
+	if err != nil {
+		return fmt.Errorf("open offload source: %w", err)
+	}
+
+	uploadErr := e.remote.Upload(ctx, key, f, size)
+	closeErr := f.Close()
+
+	switch {
+	case uploadErr != nil:
+		return fmt.Errorf("upload: %w", uploadErr)
+	case closeErr != nil:
+		return fmt.Errorf("close after upload: %w", closeErr)
+	}
+
+	return nil
+}
+
+// syncAction classifies what the sweep does with one walked file.
+type syncAction int
+
+const (
+	// Leave the file alone: an unverified orphan zip or an unproven
+	// tarball, kept local and never uploaded.
+	actionSkip syncAction = iota
+	// Offload the file and remove it locally: a sealed bundle or a settled
+	// configuration-version tarball.
+	actionEvict
+	// Upload the file if the remote copy is absent or differs, keeping the
+	// local copy canonical.
+	actionSync
+)
+
+// SyncArchive mirrors the organization's archive tree to the remote store; it
+// is a no-op without one configured.
+//
+// It walks every regular file under the store root and classifies it. Sealed
+// bundles with their sidecar beside them and settled configuration-version
+// tarballs are evicted through [Env.OffloadFile] (the bundle case is a
+// backstop for seal-time eviction: a workspace filtered out of later runs, a
+// prior failure, a remote newly pointed at an old archive). The ledger flock
+// target and the per-shard log.ndjson are never uploaded — a stale remote log
+// replayed onto a restored tree could resurrect old ledger state; the
+// post-compaction snapshot.json is the durable record. Everything else syncs
+// incrementally, gated by one upfront LIST inventory: an absent key or a size
+// change uploads; a size match compares the inventory ETag against the local
+// MD5 when the ETag is a plain single-part MD5; an uncomparable ETag falls
+// back to one HeadObject and the store's full-object SHA-256; with neither
+// comparable (checksums disabled) a size match is trusted.
+//
+// After the uploads, remote keys nothing local backs anymore are pruned, so
+// the mirror tracks local deletions and files later sealed into other forms;
+// evicted surfaces (a bundle whose sidecar is still local, a tarball whose
+// ledger entry is done) are exempt, being remote-only by design. Per-file
+// failures are logged and counted, never fatal: local disk stays canonical
+// and the next run re-sweeps. A context cancellation stops the sweep early,
+// leaving the rest to the next run.
+func (e *Env) SyncArchive(ctx context.Context) SyncStats {
+	if e.remote == nil {
+		return SyncStats{}
+	}
+
+	counters := &syncCounters{}
+	orgPrefix := e.RemoteKey("") + "/"
+
+	inventory, err := e.remote.List(ctx, orgPrefix)
+	if err != nil {
+		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_inventory_error",
+			slog.String("prefix", orgPrefix),
+			slog.String("error", err.Error()),
+		)
+
+		counters.failed.Add(1)
+
+		return counters.stats()
+	}
+
+	sweep, err := e.classifyTree(ctx)
+	if err != nil {
+		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_walk_error",
+			slog.String("error", err.Error()),
+		)
+
+		counters.failed.Add(1)
+
+		return counters.stats()
+	}
+
+	// Cold surfaces move sequentially: each is one large upload already
+	// parallelized inside the transfer manager, and each ends in a local
+	// delete, which deserves the simplest possible ordering.
+	for _, relPath := range sweep.evict {
+		if ctx.Err() != nil {
+			return counters.stats()
+		}
+
+		evictErr := e.OffloadFile(ctx, relPath)
+		if evictErr != nil {
+			e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_evict_error",
+				slog.String("path", relPath),
+				slog.String("error", evictErr.Error()),
+			)
+			counters.failed.Add(1)
+		} else {
+			counters.evicted.Add(1)
+		}
+
+		e.logSyncProgress(ctx, counters)
+	}
+
+	e.syncFiles(ctx, sweep.sync, inventory, counters)
+
+	if ctx.Err() == nil {
+		e.pruneRemote(ctx, orgPrefix, inventory, sweep, counters)
+	}
+
+	return counters.stats()
+}
+
+// treeSweep is one classification pass over the archive tree: the files to
+// evict, the files to sync, and the remote key of every file the mirror must
+// not prune.
+type treeSweep struct {
+	keep  map[string]struct{}
+	evict []string
+	sync  []string
+}
+
+// classifyTree walks the store root and sorts every regular file into the
+// sweep's evict or sync list, per the classification ladder on
+// [Env.SyncArchive]. A skipped-but-eligible file (an orphan zip, an unproven
+// tarball) lands in neither list but still marks its key kept, so the prune
+// step cannot delete a remote copy out from under a local file the sweep
+// declined to touch; staging temps and ledger-internal files mark nothing.
+func (e *Env) classifyTree(ctx context.Context) (*treeSweep, error) {
+	root := e.store.Root()
+	sweep := &treeSweep{keep: make(map[string]struct{})}
+
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case !d.Type().IsRegular():
+			return nil
+		}
+
+		rel, relErr := filepath.Rel(root, p)
+		if relErr != nil {
+			return fmt.Errorf("relativize %q: %w", p, relErr)
+		}
+
+		relPath := filepath.ToSlash(rel)
+		if !syncEligible(relPath) {
+			return nil
+		}
+
+		sweep.keep[e.RemoteKey(relPath)] = struct{}{}
+
+		switch e.classifyFile(ctx, relPath) {
+		case actionEvict:
+			sweep.evict = append(sweep.evict, relPath)
+		case actionSync:
+			sweep.sync = append(sweep.sync, relPath)
+		case actionSkip:
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk archive tree: %w", err)
+	}
+
+	slices.Sort(sweep.evict)
+	slices.Sort(sweep.sync)
+
+	return sweep, nil
+}
+
+// syncEligible reports whether a file belongs to the mirror at all. Staging
+// temps are partial writes a crash left behind; the ledger's flock target
+// carries meaning only as a kernel lock; and the per-shard replay log is
+// dangerous to mirror — a stale remote log.ndjson restored over a newer
+// snapshot would replay resurrected ledger state. None is uploaded or
+// protected from pruning.
+func syncEligible(relPath string) bool {
+	base := path.Base(relPath)
+
+	if atomicfile.IsTemp(base) {
+		return false
+	}
+
+	if path.Base(path.Dir(relPath)) == manifest.LedgerDirName {
+		return base != manifest.LockFileName && base != manifest.LogFileName
+	}
+
+	return true
+}
+
+// classifyFile applies the sweep's classification ladder to one eligible file.
+func (e *Env) classifyFile(ctx context.Context, relPath string) syncAction {
+	if isBundleZip(relPath) {
+		// Only a zip with its sidecar beside it is sealed and verified; an
+		// orphan from a crash mid-seal is unverified, with its loose sources
+		// still canonical, and must never be uploaded.
+		if !e.bundleSealed(relPath) {
+			return actionSkip
+		}
+
+		return actionEvict
+	}
+
+	if isConfigTarball(relPath) {
+		return e.classifyTarball(ctx, relPath)
+	}
+
+	return actionSync
+}
+
+// bundleSealed reports whether the zip at relPath is proven by the sidecar
+// beside it: seal.Seal writes the sidecar only after the bundle's read-back
+// verifies, so its presence is the sealed-and-verified marker. A stat error
+// reports unproven.
+func (e *Env) bundleSealed(relPath string) bool {
+	ok, err := e.store.Exists(relPath + seal.SidecarSuffix)
+
+	return err == nil && ok
+}
+
+// classifyTarball gates a configuration-version tarball on its ledger record:
+// only a done entry whose recorded size matches the local bytes proves the
+// file, and only a proven tarball is evicted. An unproven one is neither
+// evicted nor synced — a synced copy at the eviction key could later pass a
+// proper eviction's size gate and let it delete the only proven local bytes,
+// and a ledger-declared size mismatch means the local file is suspect — so it
+// is skipped with a warning and stays local.
+func (e *Env) classifyTarball(ctx context.Context, relPath string) syncAction {
+	entry, ok := e.ledger.Entry(relPath)
+	if ok && entry.Status == manifest.StatusDone && entry.Signature != nil {
+		info, err := os.Stat(e.store.AbsPath(relPath))
+		if err == nil && info.Size() == entry.Signature.Size {
+			return actionEvict
+		}
+	}
+
+	e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_tarball_unproven",
+		slog.String("path", relPath),
+	)
+
+	return actionSkip
+}
+
+// isBundleZip reports a sealed-bundle zip: a .zip directly under a bundles/
+// directory.
+func isBundleZip(relPath string) bool {
+	return strings.HasSuffix(relPath, ".zip") && path.Base(path.Dir(relPath)) == store.BundlesDirName
+}
+
+// isConfigTarball reports an org-wide configuration-version tarball.
+func isConfigTarball(relPath string) bool {
+	return strings.HasPrefix(relPath, store.ConfigVersionsDirName+"/") && strings.HasSuffix(relPath, ".tar.gz")
+}
+
+// syncFiles settles each search-layer file against the inventory, fanned out
+// at the environment's concurrency ceiling. Workers record outcomes in
+// counters and never fail the group; a canceled context drains without
+// starting new files.
+func (e *Env) syncFiles(
+	ctx context.Context,
+	files []string,
+	inventory map[string]remote.ListedObject,
+	counters *syncCounters,
+) {
+	var g errgroup.Group
+
+	g.SetLimit(e.Concurrency())
+
+	for _, relPath := range files {
+		if ctx.Err() != nil {
+			break
+		}
+
+		g.Go(func() error {
+			// A cancellation mid-fan-out is not a worker failure: the started
+			// worker just declines the file, leaving it to the next run.
+			//nolint:nilerr // See above: a canceled worker settles nothing.
+			if ctx.Err() != nil {
+				return nil
+			}
+
+			e.syncFile(ctx, relPath, inventory, counters)
+			e.logSyncProgress(ctx, counters)
+
+			return nil
+		})
+	}
+
+	//nolint:errcheck // Workers never return an error; Wait is the barrier.
+	_ = g.Wait()
+}
+
+// syncFile settles one file against the remote store: upload when the remote
+// copy is absent or differs, skip when it matches.
+func (e *Env) syncFile(
+	ctx context.Context,
+	relPath string,
+	inventory map[string]remote.ListedObject,
+	counters *syncCounters,
+) {
+	needed, size, err := e.uploadNeeded(ctx, relPath, inventory)
+	if err == nil && needed {
+		err = e.putFile(ctx, relPath)
+	}
+
+	switch {
+	case err != nil:
+		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_file_error",
+			slog.String("path", relPath),
+			slog.String("error", err.Error()),
+		)
+		counters.failed.Add(1)
+
+	case needed:
+		counters.uploaded.Add(1)
+		counters.uploadedBytes.Add(size)
+
+	default:
+		counters.skipped.Add(1)
+	}
+}
+
+// putFile uploads one search-layer file in a single PutObject request, which
+// is what makes the stored checksum a full-object digest later sweeps can
+// compare; the open file is seekable, so the SDK can rewind it on a retry.
+func (e *Env) putFile(ctx context.Context, relPath string) error {
+	//nolint:gosec // The path is composed by the store from its archive root.
+	f, err := os.Open(e.store.AbsPath(relPath))
+	if err != nil {
+		return fmt.Errorf("open sync source: %w", err)
+	}
+
+	putErr := e.remote.Put(ctx, e.RemoteKey(relPath), f)
+	closeErr := f.Close()
+
+	switch {
+	case putErr != nil:
+		return fmt.Errorf("put sync source: %w", putErr)
+	case closeErr != nil:
+		return fmt.Errorf("close sync source: %w", closeErr)
+	}
+
+	return nil
+}
+
+// uploadNeeded is the incremental gate: it reports whether the file's remote
+// copy is absent or differs, and the local size. The comparison degrades in
+// order — size, then the inventory ETag against the local MD5 when the ETag
+// is a plain single-part MD5, then one HeadObject for the store's recorded
+// full-object SHA-256, then size alone when nothing else is comparable.
+func (e *Env) uploadNeeded(
+	ctx context.Context,
+	relPath string,
+	inventory map[string]remote.ListedObject,
+) (bool, int64, error) {
+	info, err := os.Stat(e.store.AbsPath(relPath))
+	if err != nil {
+		return false, 0, fmt.Errorf("stat sync source: %w", err)
+	}
+
+	listed, ok := inventory[e.RemoteKey(relPath)]
+	if !ok || listed.Size != info.Size() {
+		return true, info.Size(), nil
+	}
+
+	if isPlainMD5(listed.ETag) {
+		local, hashErr := e.hashFile(relPath, md5.New()) //nolint:gosec // ETag comparison only.
+		if hashErr != nil {
+			return false, 0, hashErr
+		}
+
+		// Fold case: isPlainMD5 admits uppercase hex, and a store serving it
+		// must not mismatch every run and re-upload forever.
+		return !strings.EqualFold(hex.EncodeToString(local), listed.ETag), info.Size(), nil
+	}
+
+	remoteInfo, err := e.remote.Head(ctx, e.RemoteKey(relPath))
+	if err != nil {
+		return false, 0, fmt.Errorf("head sync target: %w", err)
+	}
+
+	if remoteInfo.SHA256 != "" {
+		local, hashErr := e.hashFile(relPath, sha256.New())
+		if hashErr != nil {
+			return false, 0, hashErr
+		}
+
+		return base64.StdEncoding.EncodeToString(local) != remoteInfo.SHA256, info.Size(), nil
+	}
+
+	// Neither integrity field is comparable (checksums disabled on a store
+	// with opaque ETags): an equal size is the whole gate, the documented
+	// trade-off of turning checksums off.
+	return false, info.Size(), nil
+}
+
+// hashFile streams the file at relPath through h and returns the digest.
+func (e *Env) hashFile(relPath string, h hash.Hash) ([]byte, error) {
+	//nolint:gosec // The path is composed by the store from its archive root.
+	f, err := os.Open(e.store.AbsPath(relPath))
+	if err != nil {
+		return nil, fmt.Errorf("open sync source: %w", err)
+	}
+
+	_, copyErr := io.Copy(h, f)
+	closeErr := f.Close()
+
+	switch {
+	case copyErr != nil:
+		return nil, fmt.Errorf("hash sync source: %w", copyErr)
+	case closeErr != nil:
+		return nil, fmt.Errorf("close sync source: %w", closeErr)
+	}
+
+	return h.Sum(nil), nil
+}
+
+// isPlainMD5 reports whether an ETag is a single-part MD5 — 32 hex characters
+// with no multipart "-N" suffix — the only shape comparable against a locally
+// computed digest. Multipart uploads, SSE-KMS encryption, and some compatible
+// stores produce opaque ETags this rejects.
+func isPlainMD5(etag string) bool {
+	if len(etag) != 32 {
+		return false
+	}
+
+	for _, r := range etag {
+		hexDigit := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+		if !hexDigit {
+			return false
+		}
+	}
+
+	return true
+}
+
+// pruneRemote deletes the inventory keys the sweep saw no local file for, so
+// the mirror does not accumulate stale copies of files later sealed into
+// other forms (a restored stale loose run.json would shadow its newer roll-up
+// line) and a locally deleted subtree is forgotten remotely, consistent with
+// the ledger's "deleting .ledger forgets" stance.
+//
+// Evicted surfaces are exempt: a bundle zip whose sidecar is still local and
+// a configuration-version tarball whose ledger entry is done are remote-only
+// by design. As a guard against a wrong or empty root, nothing is pruned when
+// the walk saw no local file at all.
+func (e *Env) pruneRemote(
+	ctx context.Context,
+	orgPrefix string,
+	inventory map[string]remote.ListedObject,
+	sweep *treeSweep,
+	counters *syncCounters,
+) {
+	if len(sweep.keep) == 0 {
+		return
+	}
+
+	var stale []string
+
+	for key := range inventory {
+		if _, kept := sweep.keep[key]; kept {
+			continue
+		}
+
+		relPath, ok := strings.CutPrefix(key, orgPrefix)
+		if !ok || e.evictedSurface(relPath) {
+			continue
+		}
+
+		stale = append(stale, key)
+	}
+
+	if len(stale) == 0 {
+		return
+	}
+
+	slices.Sort(stale)
+
+	err := e.remote.Delete(ctx, stale)
+	if err != nil {
+		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_prune_error",
+			slog.Int("keys", len(stale)),
+			slog.String("error", err.Error()),
+		)
+		counters.failed.Add(1)
+
+		return
+	}
+
+	counters.pruned.Add(int64(len(stale)))
+}
+
+// evictedSurface reports whether a remote-only key is one the sweep itself
+// moved off local disk: a sealed bundle still proven by its local sidecar, or
+// a configuration-version tarball the ledger records done.
+func (e *Env) evictedSurface(relPath string) bool {
+	if isBundleZip(relPath) {
+		return e.bundleSealed(relPath)
+	}
+
+	if isConfigTarball(relPath) {
+		entry, ok := e.ledger.Entry(relPath)
+
+		return ok && entry.Status == manifest.StatusDone
+	}
+
+	return false
+}
+
+// syncProgressInterval is how many settled files pass between progress lines.
+const syncProgressInterval = 1000
+
+// logSyncProgress emits a progress line every [syncProgressInterval] settled
+// files; the close sweep runs after the live progress reporter has stopped,
+// so slog lines are its only visibility.
+func (e *Env) logSyncProgress(ctx context.Context, counters *syncCounters) {
+	n := counters.processed()
+	if n == 0 || n%syncProgressInterval != 0 {
+		return
+	}
+
+	e.logger.LogAttrs(ctx, slog.LevelInfo, "sync_progress",
+		slog.Int64("files", n),
+		slog.Int64("uploaded", counters.uploaded.Load()),
+		slog.Int64("skipped", counters.skipped.Load()),
+		slog.Int64("evicted", counters.evicted.Load()),
+		slog.Int64("failed", counters.failed.Load()),
+	)
+}

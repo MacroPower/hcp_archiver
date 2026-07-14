@@ -62,34 +62,15 @@ func (f sealFixture) markComplete(project, ws string) {
 	f.ledger.MarkCollectionComplete(f.store.StateVersionDir(project, ws))
 }
 
-// rollupContent reads back the byte-for-byte content a roll-up recorded for an
-// archive-relative path.
+// rollupContent reads back the byte-for-byte content of the oldest line a
+// roll-up recorded for an archive-relative path.
 func rollupContent(t *testing.T, st *store.Store, project, ws, rollup, relPath string) []byte {
 	t.Helper()
 
-	data, err := os.ReadFile(st.AbsPath(st.Join(st.RollupDir(project, ws), rollup)))
-	require.NoError(t, err)
+	lines := rollupLines(t, st, project, ws, rollup, relPath)
+	require.NotEmpty(t, lines, "path %q not found in roll-up %s", relPath, rollup)
 
-	for line := range bytes.SplitSeq(data, []byte("\n")) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-
-		var entry struct {
-			Path    string `json:"path"`
-			Content string `json:"content"`
-		}
-
-		require.NoError(t, json.Unmarshal(line, &entry))
-
-		if entry.Path == relPath {
-			return []byte(entry.Content)
-		}
-	}
-
-	t.Fatalf("path %q not found in roll-up %s", relPath, rollup)
-
-	return nil
+	return []byte(lines[0])
 }
 
 func TestSealWorkspace_BundlesFrozenArtifacts(t *testing.T) {
@@ -263,4 +244,162 @@ func TestSealWorkspace_GenerationsAppend(t *testing.T) {
 		"a new generation holds the newly frozen artifact")
 	assert.False(t, f.exists(st.RunFile(project, ws, "run-2", "plan.log")),
 		"the newly frozen artifact is sealed")
+}
+
+// runJSON renders a minimal archived run document recording status, the shape
+// terminalRunFile reads.
+func runJSON(status string) []byte {
+	return []byte(`{"data":{"attributes":{"status":"` + status + `"}}}`)
+}
+
+// rollupLines returns every line a roll-up recorded for an archive-relative
+// path, oldest first.
+func rollupLines(t *testing.T, st *store.Store, project, ws, rollup, relPath string) []string {
+	t.Helper()
+
+	data, err := os.ReadFile(st.AbsPath(st.Join(st.RollupDir(project, ws), rollup)))
+	require.NoError(t, err)
+
+	var out []string
+
+	for line := range bytes.SplitSeq(data, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+
+		var entry struct {
+			Path    string `json:"path"`
+			Content string `json:"content"`
+		}
+
+		require.NoError(t, json.Unmarshal(line, &entry))
+
+		if entry.Path == relPath {
+			out = append(out, entry.Content)
+		}
+	}
+
+	return out
+}
+
+func TestSealWorkspace_CoalescesTerminalRunJSON(t *testing.T) {
+	t.Parallel()
+
+	f := newSealFixture(t)
+	st := f.store
+	project, ws := "prod", "api"
+
+	relPath := st.RunFile(project, ws, "run-1", "run.json")
+	f.writeDone(t, relPath, runJSON("applied"))
+	f.markComplete(project, ws)
+
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	assert.False(t, f.exists(relPath), "a settled terminal run.json coalesces away")
+	assert.Equal(t, runJSON("applied"),
+		rollupContent(t, f.store, project, ws, "runs.ndjson", relPath),
+		"the roll-up carries the summary byte for byte")
+
+	// The run directory held only run.json, so the seal empties it; both it and
+	// the now-empty runs/ parent are pruned.
+	assert.False(t, f.exists(st.RunDir(project, ws, "run-1")), "the emptied run dir is pruned")
+	assert.False(t, f.exists(st.Join(st.WorkspaceDir(project, ws), "runs")),
+		"the emptied runs dir is pruned")
+}
+
+func TestSealWorkspace_RunJSONStaysLoose(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		content  []byte
+		unsettle bool
+	}{
+		"an in-flight run": {
+			content: runJSON("planning"),
+		},
+		"an unrecognized status": {
+			content: runJSON("some_future_state"),
+		},
+		"an unparseable document": {
+			content: []byte("not json"),
+		},
+		"an unsettled summary": {
+			content:  runJSON("applied"),
+			unsettle: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSealFixture(t)
+			st := f.store
+			project, ws := "prod", "api"
+
+			relPath := st.RunFile(project, ws, "run-1", "run.json")
+
+			if tc.unsettle {
+				_, err := st.WriteBytes(relPath, tc.content)
+				require.NoError(t, err)
+				f.ledger.RecordErrored(relPath, errors.New("boom"), false)
+			} else {
+				f.writeDone(t, relPath, tc.content)
+			}
+
+			f.markComplete(project, ws)
+
+			require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+			assert.True(t, f.exists(relPath), "the summary stays loose")
+			assert.False(t, f.exists(st.Join(st.RollupDir(project, ws), "runs.ndjson")),
+				"nothing coalesces into the runs roll-up")
+			assert.True(t, f.exists(st.RunDir(project, ws, "run-1")),
+				"a run dir still holding its summary is not pruned")
+		})
+	}
+}
+
+func TestSealWorkspace_RunJSONIncompleteCollectionStaysLoose(t *testing.T) {
+	t.Parallel()
+
+	f := newSealFixture(t)
+	st := f.store
+	project, ws := "prod", "api"
+
+	relPath := st.RunFile(project, ws, "run-1", "run.json")
+	f.writeDone(t, relPath, runJSON("applied"))
+
+	// The runs collection was never walked to its end, so even a terminal
+	// summary is not frozen.
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	assert.True(t, f.exists(relPath))
+	assert.False(t, f.exists(st.Join(st.RollupDir(project, ws), "runs.ndjson")))
+}
+
+func TestSealWorkspace_RunJSONResealAppendsNewerLine(t *testing.T) {
+	t.Parallel()
+
+	f := newSealFixture(t)
+	st := f.store
+	project, ws := "prod", "api"
+
+	relPath := st.RunFile(project, ws, "run-1", "run.json")
+	f.writeDone(t, relPath, runJSON("canceled"))
+	f.markComplete(project, ws)
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	// The run's summary legitimately changed after the first seal (a canceled
+	// run force-canceled, say): the refreshed loose copy re-freezes and the
+	// roll-up gains a newer, different line under the same path.
+	f.writeDone(t, relPath, runJSON("force_canceled"))
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	lines := rollupLines(t, f.store, project, ws, "runs.ndjson", relPath)
+	require.Len(t, lines, 2, "each seal appends its own line")
+	assert.Equal(t, string(runJSON("canceled")), lines[0])
+	assert.Equal(t, string(runJSON("force_canceled")), lines[1],
+		"the newest line carries the updated content")
+	assert.False(t, f.exists(relPath))
 }

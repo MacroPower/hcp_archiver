@@ -513,24 +513,40 @@ invisible to the collector.
 - **Immutable small metadata coalesces into per-workspace NDJSON roll-ups.** Coalescing,
   not bundling the blobs, holds object count down: most _files_ per run
   are small JSON, so bundling the blobs alone leaves the ~1.6M small JSONs as the
-  floor, while coalescing collapses object count ~13x. `run.json` is the one
-  **mutable** small JSON, dedup-checked and refreshed at the walk boundary while a
-  run is in-flight, so it is never coalesced; it stays a loose file, the one
-  remaining loose per-run object. Its seven sibling children and the state-version
-  `meta.json` are immutable and `ShouldFetch`-gated, and those are what coalesce.
-  Coalescing is confined to the seal boundary, where the object is already frozen,
+  floor, while coalescing collapses object count far below it. The seven
+  immutable run children and the state-version `meta.json` are
+  `ShouldFetch`-gated and coalesce by filename alone. `run.json` is the one
+  **mutable** small JSON, dedup-checked and refreshed at the walk boundary while
+  a run is in-flight, so it coalesces through its own gate: at the seal
+  boundary, a `run.json` that is settled **and** whose recorded status is
+  terminal (read from the document itself; the ledger entry carries no run
+  status) folds into `rollups/runs.ndjson`, its emptied run directory is
+  pruned, and an in-flight run's summary stays loose and keeps refreshing.
+  Coalescing stays confined to the seal boundary, where the object is frozen,
   single-threaded, and settled, so the append is pure and the relpath stays the
-  ledger key: the immutable children and `meta.json` coalesce directly, while
-  `run.json` stays loose. Coalescing `run.json` at collect time (born as a line)
-  would instead invert the relpath-is-the-key coupling, the newest-first
-  early-stop, `WriteJSON`'s parse-free whole-file dedup, and per-object atomicity,
-  and folding a still-mutable file would only churn it, so it stays loose (there is
-  no `runs.ndjson`). Each coalesced line is a JSON object:
+  ledger key; coalescing `run.json` at collect time (born as a line) would
+  instead invert the relpath-is-the-key coupling, the newest-first early-stop,
+  `WriteJSON`'s parse-free whole-file dedup, and per-object atomicity. What
+  keeps the roll-up append-once is the collect side's sealed-elsewhere gate: a
+  re-walk that re-reads a coalesced run and finds the payload byte-identical to
+  the ledger's recorded done signature, with the loose file absent, skips the
+  write instead of resurrecting the loose copy (which the next seal would fold
+  again as a duplicate line). A run that legitimately changed after its seal (a
+  canceled run force-canceled, say) writes loose again and the next seal
+  appends a newer line; readers keep the newest line per path. Each coalesced
+  line is a JSON object:
   `{"path": <relpath>, "sha256": <hex>, "content": <file bytes as an escaped JSON string>}`.
   The line is not byte-equal to the original file, but the `content` field carries the
   exact bytes verbatim (reproducing the file on extraction and staying greppable
   for field tokens) and the `sha256` is the content signature already in the
   ledger.
+
+  The sealed-elsewhere gate is a deliberate, archive-wide shift in `Mutable`'s
+  semantics: a hand-deleted mutable file whose fresh payload is unchanged is no
+  longer re-materialized. That is consistent with `Object` — the ledger, not
+  file existence, is the record — and with the ledger's own "deleting
+  `.ledger/` forgets" stance (deleting the shard re-materializes the file once,
+  and the next seal appends a duplicate-content line readers dedupe).
 
 A sidecar index (`<bundle>.sidecar.ndjson`) sits beside each bundle, outside it:
 one NDJSON line per member, with exactly the fields `name`, `bundle`, `method`,
@@ -545,31 +561,84 @@ matches the ledger signature) and the sidecar is written, so the loose copy stay
 canonical until the bundle is durable and verified; an interrupted seal leaves the
 loose files canonical and simply re-runs.
 
-### Remote offload of sealed bundles (optional)
+### Remote offload and full-archive sync (optional)
 
-With a `remote:` block configured, sealed bundles do not stay on disk: as each
-workspace seals, an eviction sweep uploads every verified local bundle to an
-S3-compatible object store (AWS S3, MinIO, R2, Ceph RGW via endpoint +
-path-style settings) and deletes the local zip once the remote copy is
-confirmed. Peak local disk is then bounded to the search layer plus in-flight
-unsealed work, which is what lets a 5k+ workspace org's archive run on a
-machine that could never hold the whole thing at once. Only the cold bundles
-move; the search layer — loose files, roll-ups, ledger shards, and **every
-sidecar index** — stays local, so browsing and grep remain offline
-operations.
+With a `remote:` block configured, the object store holds a **complete copy**
+of the archive, in two motions with different semantics:
 
-Object keys mirror the local tree: `<prefix>/<org>/<archive-relative path>`,
-so a bucket listing reads like the archive and the sidecar's `bundle` field
-still names the object. Credentials come only from the AWS SDK default chain;
-the YAML carries endpoint/bucket/class tuning, never a secret. Uploads stream
-with a server-validated SHA-256 checksum (multipart for large state bundles),
-and the configured storage class is set on first write, so a bundle can land
-directly in an archival class without a transition charge.
+- **Eviction** (upload → verify → delete local) moves the cold surfaces off
+  disk: sealed bundles as each workspace seals, and org-wide
+  `config-versions/<id>.tar.gz` tarballs once the ledger proves them. Peak
+  local disk is then bounded to the search layer plus in-flight unsealed work,
+  which is what lets a 5k+ workspace org's archive run on a machine that could
+  never hold the whole thing at once.
+- **Sync** (incremental upload, local kept) mirrors everything else — loose
+  files, roll-ups, sidecar indexes, ledger snapshots — at each org run's
+  close, after the final ledger flush and while the cross-process flock is
+  still held. Local disk stays the canonical search layer, so browsing and
+  grep remain offline operations; the bucket is the disaster-recovery copy
+  (re-download the prefix to restore).
 
-The sweep extends verify-before-delete one hop without any cross-run state:
-every step is derived from three observable facts — is the local zip present,
-is its sidecar present, does `HeadObject` answer — so each crash point
-self-heals on the next run:
+Sync is always-on when `remote:` is configured; there is no separate knob:
+remote configured means the bucket converges on a complete archive. Object
+keys mirror the local tree: `<prefix>/<org>/<archive-relative path>`, so a
+bucket listing reads like the archive and the sidecar's `bundle` field still
+names the object. Credentials come only from the AWS SDK default chain; the
+YAML carries endpoint/bucket/class tuning, never a secret. Evicted uploads
+stream with a server-validated SHA-256 checksum (multipart for large state
+bundles) and take `storageClass`, so a bundle can land directly in an archival
+class without a transition charge; synced files take `syncStorageClass`
+(empty takes the store's default) and always upload in a **single** PutObject
+request, which is what makes their stored checksum a full-object digest later
+runs can compare; a multipart upload records only a composite `-N` checksum
+that matches nothing computable locally.
+
+The close sweep walks every regular file under the org root and classifies it
+top-down:
+
+1. an atomicfile staging temp: skip (a crash's partial write);
+2. `.ledger/lock`: skip (meaningful only as a kernel flock target);
+3. `.ledger/log.ndjson`: skip — a stale remote log replayed onto a restored
+   tree could resurrect old ledger state; the post-compaction `snapshot.json`
+   (which the final flush guarantees is current) is the durable record;
+4. `bundles/*.zip` with its sidecar beside it: evict, the sweep-side backstop
+   for seal-time eviction (a workspace filtered out of later runs, a prior
+   upload failure, a remote newly pointed at an old archive);
+5. `bundles/*.zip` without a sidecar: skip (unverified orphan; never upload);
+6. `config-versions/*.tar.gz` recorded done with the ledger signature's size
+   matching the local bytes: evict; otherwise skip with a warning (an
+   unproven tarball is never synced either, because a synced copy at the
+   eviction key could later pass a proper eviction's size gate and let it
+   delete the only proven local bytes);
+7. everything else: sync incrementally.
+
+The incremental gate is driven by one upfront LIST inventory of the org prefix
+(~1 request per 1000 keys, instead of a HEAD per file) and degrades in order:
+key absent → upload; size differs → upload; size equal → compare the inventory
+ETag against the local MD5 when the ETag is a plain single-part MD5 (true for
+this tool's own PutObject writes on S3/MinIO/R2 without SSE-KMS); ETag opaque →
+one HeadObject and compare the store's recorded full-object SHA-256; neither
+comparable (`checksums: false`) → trust the size match, the documented
+trade-off of turning checksums off (a same-length content change is skipped
+until its size changes). Synced files fan out concurrently; evictions run
+sequentially. Per-file failures warn and count, never abort: local stays
+canonical and the next run re-sweeps, and sync failures never affect the run's
+exit code.
+
+After the uploads, a **prune** step makes the mirror true: every inventory key
+the walk saw no local file for is batch-deleted, except the evicted surfaces
+(a bundle zip whose sidecar is still local, a tarball whose ledger entry is
+done), which are remote-only by design. Without it the mirror would accumulate
+stale loose copies of files later sealed into other forms: a restored stale
+`runs/<id>/run.json` would shadow its newer roll-up line, since reads prefer
+loose. The consequence is deliberate and mirrors the ledger's stance: deleting
+a subtree locally forgets it remotely on the next run. As a guard against a
+wrong or empty root, nothing is pruned when the walk saw no local file at all.
+
+Bundle eviction extends verify-before-delete one hop without any cross-run
+state: every step is derived from three observable facts — is the local zip
+present, is its sidecar present, does `HeadObject` answer — so each crash
+point self-heals on the next run:
 
 - **zip, no sidecar** (died mid-`seal.Seal`): the zip is unverified and the
   loose files are still canonical. The sweep never uploads it; the next seal
@@ -592,11 +661,14 @@ the local zip simply stays canonical, exactly as if no remote were
 configured. Because eviction removes zips but never sidecars, generation
 numbering takes its maximum over both the `*.zip` and `*.zip.sidecar.ndjson`
 names — a zip-only scan would restart at gen0001 once bundles left disk and
-overwrite remote history at the same key.
+overwrite remote history at the same key. Tarball eviction recovers from the
+same crash points the same way; its local proof is the ledger's done entry
+and recorded size rather than a sidecar.
 
 Migration needs no special mode: pointing a `remote:` block at an existing
-all-local archive makes the next run's sweep upload and evict every
-pre-existing bundle that has a sidecar.
+all-local archive makes the next run's sweep upload the entire search layer
+(a one-time pass whose `sync_progress` log lines track it) and evict every
+pre-existing bundle that has a sidecar and every ledger-proven tarball.
 
 Each org's root gains a small `.remote.json` marker recording the
 read-relevant backend settings (bucket, prefix, endpoint, region, path
@@ -631,14 +703,16 @@ irreplaceable state raw costs pennies a month.
 
 ### Mapping onto object-store storage classes
 
-By default the tool writes only local files; with a `remote:` block it also
-uploads the sealed cold bundles itself (Remote offload above), setting the
-configured storage class on first write. Either way the layout is
-deliberately split so that one lifecycle rule covers each kind of file —
-whether the tool's own offload or an operator's backup performs the upload —
-and so that an audit proceeds the same way on disk: narrow first, then read one
-thing. The **search layer** (the loose mutable workspace files, `run.json`, the
-NDJSON roll-ups, every sidecar index, and the ledger shards) is small, listable,
+By default the tool writes only local files; with a `remote:` block it
+mirrors the whole archive itself (Remote offload and full-archive sync
+above), setting `storageClass` on the evicted cold surfaces and
+`syncStorageClass` on the synced search layer at first write. Either way the
+layout is deliberately split so that one class covers each kind of file —
+whether the tool's own mirror or an operator's backup performs the upload —
+and so that an audit proceeds the same way on disk: narrow first, then read
+one thing. The **search layer** (the loose mutable workspace files, in-flight
+`run.json`, the NDJSON roll-ups, every sidecar index, and the ledger shards)
+is small, listable,
 and zero-latency to grep, so it belongs in a hot, always-listable class (S3
 Standard, say). The **cold bundles** are byte-heavy and rarely read, so they map
 onto an archival class (Glacier Deep Archive, say). Two properties make that
@@ -663,16 +737,19 @@ tool applies it itself when a `remote:` block sets `storageClass`; the other
 rows stay local, and their tier is what an operator's own backup lifecycle
 would set.
 
-| Tier                      | Objects                                                                                                                                                           | Backup tier  | Form                                                              |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------- |
-| Loose, mutable, greppable | the 9 per-ws settings files (`workspace.json`, `variables.json`, `tags.json`, team access, notification configs, ...), `run.json`, ledger shards, sidecar indexes | Standard     | one file per relpath                                              |
-| Coalesced roll-ups        | the 7 immutable run children + state-version `meta.json` (`run.json` is mutable and stays loose)                                                                  | Standard     | per-ws `*.ndjson`, keyed by relpath                               |
-| Cold bundles              | `plan.log` / `plan.json` / `apply.log` / `cost-estimate.log` / `policy-check-*.log`; raw + json state                                                             | Deep Archive | write-once generational `logs.zip` + `state.zip`, sidecar-indexed |
+| Tier                      | Objects                                                                                                                                                                     | Backup tier  | Form                                                              |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------- |
+| Loose, mutable, greppable | the 9 per-ws settings files (`workspace.json`, `variables.json`, `tags.json`, team access, notification configs, ...), in-flight `run.json`, ledger shards, sidecar indexes | Standard     | one file per relpath                                              |
+| Coalesced roll-ups        | the 7 immutable run children + state-version `meta.json` + the `run.json` of settled terminal runs (an in-flight run's stays loose until it freezes)                        | Standard     | per-ws `*.ndjson`, keyed by relpath                               |
+| Cold bundles              | `plan.log` / `plan.json` / `apply.log` / `cost-estimate.log` / `policy-check-*.log`; raw + json state                                                                       | Deep Archive | write-once generational `logs.zip` + `state.zip`, sidecar-indexed |
 
 At 1000 workspaces x 200 frozen runs x 30 state versions (config-version tarballs
-excluded, equal either way), object count holds near ~200k where one file per
-object gives ~2.7M, about ~13x fewer, since `run.json` stays a loose file per run
-rather than folding. The compressed backup sits near ~29GB where the raw tree is
+excluded, equal either way), coalescing without the runs roll-up already holds
+object count near ~200k where one file per object gives ~2.7M, about ~13x fewer;
+folding terminal `run.json` — the archive's largest loose-file population, ~1
+per run — collapses those ~200k loose summaries into one `runs.ndjson` line
+each, leaving loose count proportional to _in-flight_ runs rather than run
+history. The compressed backup sits near ~29GB where the raw tree is
 ~137GB, and the per-object tax falls from ~37x the payload to ~3x. An operator who
 backs the result up to an object store sees a first-year bill near ~$12 against
 ~$142 for the naive layout. The dollars are small; the structural win (request
@@ -685,11 +762,13 @@ which moves only payload GB, the part an archive tier already prices near zero.
 ```
 projects/<project>/workspaces/<ws>/
   workspace.json  variables.json  readme.md  tags.json ...   # loose, mutable
-  runs/<run-id>/run.json                                     # loose, mutable; one per run, never coalesced
+  runs/<run-id>/run.json                                     # loose while in flight; terminal runs coalesce
+                                                             #   into rollups/runs.ndjson, emptied dirs pruned
   .ledger/
     snapshot.json                                            # ledger shard, keys = relpaths
     log.ndjson                                               #   append-only; compacts when log > snapshot
   rollups/
+    runs.ndjson                                              # run.json of settled terminal runs
     config-versions.ndjson                                   # the immutable run children, one JSON line each
     plan-summaries.ndjson  apply-summaries.ndjson
     cost-estimates.ndjson  comments.ndjson  run-events.ndjson

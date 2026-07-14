@@ -2,7 +2,9 @@ package workspace
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/hashicorp/go-tfe"
 
@@ -118,4 +120,33 @@ func runTerminal(status tfe.RunStatus) bool {
 	default:
 		return false
 	}
+}
+
+// terminalRunFile reports whether the loose run.json at absPath records a
+// terminal run status, the seal-time gate that decides whether a run's summary
+// is frozen enough to coalesce. The ledger entry carries no run status, so the
+// archived document itself ({"data":{"attributes":{"status":...}}}) is the
+// only place to read it. A missing or unparseable file reports false, the safe
+// direction: the summary stays loose and keeps refreshing.
+func terminalRunFile(absPath string) bool {
+	//nolint:gosec // The path is composed by the store from its archive root.
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return false
+	}
+
+	var doc struct {
+		Data struct {
+			Attributes struct {
+				Status string `json:"status"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+
+	err = json.Unmarshal(data, &doc)
+	if err != nil {
+		return false
+	}
+
+	return runTerminal(tfe.RunStatus(doc.Data.Attributes.Status))
 }

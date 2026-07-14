@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
@@ -172,6 +173,154 @@ func TestHead(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestPut(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newClient(t, remote.Config{
+		StorageClass:     "DEEP_ARCHIVE",
+		SyncStorageClass: "STANDARD_IA",
+	})
+
+	body := []byte("loose search-layer file")
+	require.NoError(t, client.Put(t.Context(), "acme/org.json", bytes.NewReader(body)))
+
+	obj, ok := fake.Object("acme/org.json")
+	require.True(t, ok, "object should be stored")
+	assert.Equal(t, body, obj.Data)
+	assert.Equal(t, "STANDARD_IA", obj.StorageClass,
+		"a synced file takes the sync class, not the eviction class")
+	assert.Equal(t, 1, fake.PutCalls(), "Put must stay a single request so the checksum is full-object")
+	assert.Equal(t, 0, fake.Completed(), "Put never goes multipart")
+	assert.Equal(t, []string{"SHA256"}, fake.PutChecksums())
+	assert.NotEmpty(t, obj.ChecksumSHA256, "a checksummed Put records a full-object checksum")
+	assert.NotContains(t, obj.ETag, "-", "a Put ETag is a plain MD5, never composite")
+}
+
+func TestPutDisableChecksums(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newClient(t, remote.Config{DisableChecksums: true})
+
+	require.NoError(t, client.Put(t.Context(), "k", bytes.NewReader([]byte("x"))))
+	assert.Equal(t, []string{""}, fake.PutChecksums(), "checksums off should omit the checksum algorithm")
+
+	obj, ok := fake.Object("k")
+	require.True(t, ok)
+	assert.Empty(t, obj.ChecksumSHA256)
+}
+
+func TestHeadChecksum(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		obj  remotetest.Object
+		want string
+	}{
+		"full-object checksum passes through": {
+			obj:  remotetest.Object{Data: []byte("ab"), ChecksumSHA256: "abc123="},
+			want: "abc123=",
+		},
+		"composite checksum is blanked": {
+			obj:  remotetest.Object{Data: []byte("ab"), ChecksumSHA256: "abc123=-3"},
+			want: "",
+		},
+		"absent checksum stays empty": {
+			obj:  remotetest.Object{Data: []byte("ab")},
+			want: "",
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			client, fake := newClient(t, remote.Config{})
+			fake.SetObject("k", tt.obj)
+
+			info, err := client.Head(t.Context(), "k")
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, info.SHA256)
+			assert.Equal(t, []string{"ENABLED"}, fake.HeadChecksumModes(),
+				"Head must request the checksum fields or the store omits them")
+		})
+	}
+}
+
+func TestList(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newClient(t, remote.Config{})
+	fake.SetObject("hcp/acme/org.json", remotetest.Object{Data: []byte("abcd"), ETag: "etag-a"})
+	fake.SetObject("hcp/acme/users/u1.json", remotetest.Object{Data: []byte("ab"), ETag: "etag-b"})
+	fake.SetObject("hcp/other/org.json", remotetest.Object{Data: []byte("x")})
+
+	got, err := client.List(t.Context(), "hcp/acme/")
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]remote.ListedObject{
+		"hcp/acme/org.json":      {Size: 4, ETag: "etag-a"},
+		"hcp/acme/users/u1.json": {Size: 2, ETag: "etag-b"},
+	}, got, "only keys under the prefix list, with quotes stripped from ETags")
+}
+
+func TestListPaginates(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newClient(t, remote.Config{})
+
+	// One past the fake's thousand-key page size forces a second page.
+	for i := range 1001 {
+		fake.SetObject(fmt.Sprintf("p/%04d", i), remotetest.Object{Data: []byte("x")})
+	}
+
+	got, err := client.List(t.Context(), "p/")
+	require.NoError(t, err)
+
+	assert.Len(t, got, 1001, "pagination should surface every key")
+	assert.Equal(t, 2, fake.ListCalls())
+}
+
+func TestDelete(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newClient(t, remote.Config{})
+	fake.SetObject("a", remotetest.Object{Data: []byte("x")})
+	fake.SetObject("b", remotetest.Object{Data: []byte("y")})
+
+	require.NoError(t, client.Delete(t.Context(), []string{"a", "b", "absent"}))
+
+	assert.Empty(t, fake.Keys(), "named keys should be removed")
+	assert.Equal(t, []string{"a", "b", "absent"}, fake.Deleted(),
+		"an absent key deletes as a no-op, per S3 semantics")
+}
+
+func TestDeleteBatches(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newClient(t, remote.Config{})
+
+	// One past the thousand-key request ceiling forces a second batch.
+	keys := make([]string, 1001)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("k/%04d", i)
+		fake.SetObject(keys[i], remotetest.Object{Data: []byte("x")})
+	}
+
+	require.NoError(t, client.Delete(t.Context(), keys))
+
+	assert.Empty(t, fake.Keys(), "every key should be removed across batches")
+	assert.Equal(t, 2, fake.DeleteCalls())
+}
+
+func TestDeleteEmpty(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newClient(t, remote.Config{})
+	fake.DeleteErr = errors.New("must not be called")
+
+	require.NoError(t, client.Delete(t.Context(), nil), "no keys means no requests")
 }
 
 func TestExists(t *testing.T) {

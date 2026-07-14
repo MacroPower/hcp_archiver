@@ -202,8 +202,10 @@ func (w *Workspace) index() (map[string]sealedRef, error) {
 }
 
 // indexRollups records each roll-up line's path and byte offset, so a lookup
-// re-reads only its one line. A duplicate path keeps the newest line, matching
-// how a re-folded member appends an identical record.
+// re-reads only its one line. A duplicate path keeps the newest line: a
+// re-folded member appends an identical record, and a member re-frozen after
+// its content changed (a terminal run.json updated between seals) appends a
+// newer, different one — the newest is canonical in both cases.
 func (w *Workspace) indexRollups(idx map[string]sealedRef) error {
 	files, err := listFiles(w.org.AbsPath(path.Join(w.dir, "rollups")), ".ndjson")
 	if err != nil {

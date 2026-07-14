@@ -87,16 +87,19 @@ scope:
   registryDetail: true
   auditTrail: true
 
-# Offload sealed cold bundles (per-workspace logs and state zips) to an
-# S3-compatible object store as each workspace seals, bounding local disk to
-# the grep-able search layer plus in-flight work. Omit the block to keep the
+# Mirror the archive to an S3-compatible object store: sealed cold bundles
+# and settled configuration tarballs are evicted there (uploaded, verified,
+# then removed locally), and every other file syncs there at each org run's
+# close, so the bucket holds a complete copy while local disk stays the
+# grep-able search layer plus in-flight work. Omit the block to keep the
 # whole archive on local disk. Credentials come from the AWS SDK default
 # chain (environment, shared config, instance/task role), never from here.
 remote:
-  bucket: my-archive-bucket # required to enable offloading
+  bucket: my-archive-bucket # required to enable the mirror
   prefix: hcp-archive # optional key prefix
   region: us-east-1
-  storageClass: DEEP_ARCHIVE # applied on first write; any class the store accepts
+  storageClass: DEEP_ARCHIVE # evicted bundles/tarballs; any class the store accepts
+  # syncStorageClass: STANDARD_IA    # synced search-layer files; empty takes the store's default
   # endpoint: https://s3.example.com # S3-compatible stores (MinIO, R2, Ceph)
   # forcePathStyle: true             # the addressing shape MinIO/Ceph expect
   # checksums: false                 # only for stores that reject checksum headers
@@ -146,53 +149,74 @@ Navigation descends with `enter`, returns with `esc`, filters any list with
 transparently, so an object displays the same whether it is still a loose file
 or has been sealed into an NDJSON roll-up or a zip bundle.
 
-For an archive whose bundles were offloaded (see
-[Offloading sealed bundles](#offloading-sealed-bundles-to-object-storage)),
+For an archive mirrored to object storage (see
+[Mirroring the archive](#mirroring-the-archive-to-object-storage)),
 browsing and grep stay fully offline — the search layer, including every
-sidecar index, is local — and only opening a sealed member reaches the remote
-store, fetching just that member with ranged reads rather than the whole
-bundle. That read path needs object-store credentials from the AWS SDK
-default chain; a read-only key (`s3:GetObject` on the archive prefix) is the
-right shape. A member whose bundle sits unrestored in an archival class
-(GLACIER, DEEP_ARCHIVE) shows a clear "restore required" message on the
-status line instead of hanging; restore the object and open it again.
+sidecar index, is local — and only opening a sealed member whose bundle was
+evicted reaches the remote store, fetching just that member with ranged reads
+rather than the whole bundle. That read path needs object-store credentials
+from the AWS SDK default chain; a read-only key (`s3:GetObject` on the
+archive prefix) is the right shape. A member whose bundle sits unrestored in
+an archival class (GLACIER, DEEP_ARCHIVE) shows a clear "restore required"
+message on the status line instead of hanging; restore the object and open it
+again. Evicted configuration tarballs have no in-tool read path; fetch one
+directly from its mirrored key (`<prefix>/<org>/config-versions/<id>.tar.gz`)
+with any S3 client.
 
-### Offloading sealed bundles to object storage
+### Mirroring the archive to object storage
 
-A large organization's archive can outgrow local disk: the byte-heavy part is
-the sealed cold bundles (each workspace's `logs.gen*.zip` and
-`state.gen*.zip`). With a `remote:` block configured, the archiver uploads
-each bundle to an S3-compatible store at the moment its workspace seals and
-deletes the local zip only after the remote copy is confirmed, so peak local
-disk stays bounded to the grep-able search layer plus in-flight work. The
-search layer — loose JSON, roll-ups, sidecar indexes, and the ledger — always
-stays local.
+With a `remote:` block configured, the bucket converges on a **complete copy**
+of the archive, in two motions. The cold surfaces are **evicted** (uploaded,
+verified, then removed locally): each workspace's sealed `logs.gen*.zip` and
+`state.gen*.zip` at the moment it seals, and each org-wide
+`config-versions/<id>.tar.gz` once the ledger has proven its bytes. Peak
+local disk then stays bounded to the grep-able search layer plus in-flight
+work. Everything else is **synced** at each org run's close — loose JSON,
+roll-ups, sidecar indexes, ledger snapshots — with the local copy kept: local
+disk stays the canonical, searchable archive, and the bucket is the long-term
+and disaster-recovery copy. Restoring is one download of the org prefix.
 
-Verification is layered: a bundle is uploaded only after it has sealed and
-read back intact locally, the upload carries a SHA-256 checksum the server
-validates on write, and the local zip is removed only once a follow-up probe
-confirms the object at the expected size. Any failure leaves the local zip in
-place as the canonical copy, and the next run re-sweeps it. Pointing a
-`remote:` block at an existing all-local archive migrates it: the next run
-uploads and evicts every previously sealed bundle.
+The sync is incremental: one bucket LIST per run inventories the mirror
+(~1 request per 1000 keys) and only absent or changed files upload, compared
+by size and checksum (ETag when it is a plain MD5, the store's recorded
+SHA-256 otherwise; with `checksums: false` the comparison degrades to size
+alone). The mirror also **prunes**: a remote copy of a file that no longer
+exists locally — a loose `run.json` later coalesced into a roll-up, or a
+subtree you deleted — is removed on the next run, so the bucket tracks the
+archive rather than accumulating stale copies. Evicted bundles and tarballs
+are exempt; they are remote-only by design. Eviction verification is layered:
+a bundle is uploaded only after it has sealed and read back intact locally,
+the upload carries a SHA-256 checksum the server validates on write, and the
+local file is removed only once a follow-up probe confirms the object at the
+expected size. Any failure leaves the local copy in place as canonical, warns,
+and is retried by the next run's sweep; sync failures never fail the run.
+Pointing a `remote:` block at an existing all-local archive migrates it: the
+next run's sweep uploads everything (a one-time pass that can take a while on
+a large archive; `sync_progress` log lines track it) and evicts every
+previously sealed bundle.
 
 Credentials are never configured in YAML. The client uses the AWS SDK default
 chain — `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `~/.aws/config`
 profiles (`AWS_PROFILE`), SSO, or an instance/task role. The archiving
-identity needs `s3:PutObject`, `s3:GetObject` (Head), and
-`s3:AbortMultipartUpload` on the archive prefix; `view` needs only
-`s3:GetObject`, and a separate read-only key for browsing is the recommended
-split.
+identity needs `s3:PutObject`, `s3:GetObject` (Head), `s3:ListBucket`,
+`s3:DeleteObject`, and `s3:AbortMultipartUpload` on the archive prefix;
+`view` needs only `s3:GetObject`, and a separate read-only key for browsing
+is the recommended split.
 
-Two bucket lifecycle rules are worth setting:
+Storage classes split by motion: `storageClass` applies to the evicted cold
+surfaces and `syncStorageClass` to the synced search layer. Two choices are
+worth making deliberately:
 
-- **Abort incomplete multipart uploads** after a few days: an upload killed
-  mid-flight is re-run safely by the next sweep, but its already-uploaded
-  parts otherwise linger as billable storage.
+- **Abort incomplete multipart uploads** after a few days (a lifecycle rule):
+  an upload killed mid-flight is re-run safely by the next sweep, but its
+  already-uploaded parts otherwise linger as billable storage.
 - Prefer `storageClass: DEEP_ARCHIVE` (or another archival class) in the
   configuration over a class-transition rule: bundles are write-once, so
   landing them directly in the archival class avoids paying for a transition
-  out of Standard. Compatible stores accept their own class names here.
+  out of Standard. Keep `syncStorageClass` a directly-readable class
+  (STANDARD, STANDARD_IA): synced files are re-compared, re-uploaded, and
+  pruned as the archive changes. Compatible stores accept their own class
+  names here.
 
 ### Resuming and re-running
 
@@ -267,10 +291,11 @@ Settings are grouped by how much they vary; see
   whichever admits more history wins; unlimited by default), a `scope`
   block of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
   `registryDetail`, `auditTrail`), each off by default, and a `remote` block
-  ([Offloading sealed bundles](#offloading-sealed-bundles-to-object-storage))
-  naming the S3-compatible store sealed bundles are offloaded to (`bucket`
+  ([Mirroring the archive](#mirroring-the-archive-to-object-storage))
+  naming the S3-compatible store the archive is mirrored to (`bucket`
   required to enable; optional `prefix`, `endpoint`, `region`,
-  `forcePathStyle`, `storageClass`, `checksums`, `partSize`, `concurrency`).
+  `forcePathStyle`, `storageClass`, `syncStorageClass`, `checksums`,
+  `partSize`, `concurrency`).
 
 ## Output layout
 
@@ -280,7 +305,7 @@ Settings are grouped by how much they vary; see
 │   # org root
 ├── 📄 org.json                          # organization metadata
 ├── 📁 .ledger/                          # sharded per-object ledger + run records & watermarks
-├── 📄 .remote.json                      # only with remote offload: where evicted bundles live
+├── 📄 .remote.json                      # only with a remote: where the mirror lives
 │
 │   # org-level objects (not scoped to a single project)
 ├── 📁 teams/<id>/
@@ -352,9 +377,11 @@ Layout rules worth knowing:
   above is the logical namespace: every object's stable path. A collected
   workspace's plan/apply logs, plan JSON, and raw + JSON state pack into
   per-workspace `zip` bundles under `bundles/` (each with a `.sidecar.ndjson`
-  index), and the immutable run children and state-version metadata coalesce into
-  NDJSON roll-ups under `rollups/`; `run.json` stays loose. Every object keeps its
-  stable path as the key, so resume and incremental re-run are unaffected.
+  index), and the immutable run children, state-version metadata, and the
+  `run.json` of finished runs coalesce into NDJSON roll-ups under `rollups/`
+  (`runs.ndjson` among them); an in-flight run's `run.json` stays loose until
+  the run reaches a terminal state. Every object keeps its stable path as the
+  key, so resume and incremental re-run are unaffected.
 
 ## Limitations
 

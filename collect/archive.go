@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/serialize"
 	"go.jacobcolvin.com/hcp_archiver/store"
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
@@ -42,6 +43,14 @@ func (e *Env) Object(ctx context.Context, relPath string, fetch func(context.Con
 // write skips the on-disk update when the payload is unchanged, so a re-read
 // that finds no change costs only the fetch. Error handling matches
 // [Env.Object].
+//
+// A re-read whose payload is byte-identical to what the ledger records done is
+// not re-materialized when the loose file is absent: that is the fingerprint
+// of an object sealed elsewhere (a terminal run.json coalesced into a
+// roll-up), and rewriting it would resurrect the loose copy and duplicate the
+// roll-up line on the next seal. The ledger, not file existence, is the record
+// — consistent with [Env.Object] — so a hand-deleted, unchanged mutable file
+// also stays deleted. A changed payload always writes.
 func (e *Env) Mutable(ctx context.Context, relPath string, fetch func(context.Context) (any, error)) error {
 	return e.archiveJSON(ctx, relPath, fetch)
 }
@@ -305,7 +314,16 @@ func (e *Env) archiveJSON(ctx context.Context, relPath string, fetch func(contex
 		return e.fail(ctx, relPath, err)
 	}
 
-	res, err := e.store.WriteJSON(relPath, v)
+	data, err := serialize.Marshal(v)
+	if err != nil {
+		return e.failWrite(ctx, relPath, fmt.Errorf("marshal %q: %w", relPath, err))
+	}
+
+	if e.sealedElsewhere(relPath, data) {
+		return nil
+	}
+
+	res, err := e.store.WriteJSONBytes(relPath, data)
 	if err != nil {
 		return e.failWrite(ctx, relPath, err)
 	}
@@ -313,6 +331,39 @@ func (e *Env) archiveJSON(ctx context.Context, relPath string, fetch func(contex
 	e.recordDone(relPath, res)
 
 	return nil
+}
+
+// sealedElsewhere reports whether the freshly marshaled payload at relPath is
+// already recorded done with exactly this content while the loose file is
+// absent — the fingerprint of an object whose bytes were sealed into another
+// form (a terminal run.json coalesced into a roll-up, verified before its
+// loose source was removed). Writing it again would resurrect the loose file
+// and make the next seal append a duplicate roll-up line, so [Env.archiveJSON]
+// skips the write and leaves the entry untouched: re-recording it would only
+// churn Attempts and dirty the shard for a no-op.
+//
+// The comparison requires a recorded hash and never falls back to size alone
+// ([manifest.Signature.Equal] would), because a size-only match could bless a
+// different payload. A stat error on the loose file fails open — the object is
+// treated as present and the write proceeds — so only a clean "absent" report
+// gates the skip.
+func (e *Env) sealedElsewhere(relPath string, data []byte) bool {
+	entry, ok := e.ledger.Entry(relPath)
+	if !ok || entry.Status != manifest.StatusDone || entry.Signature == nil || entry.Signature.Hash == "" {
+		return false
+	}
+
+	sig := manifest.SignatureOf(data)
+	if entry.Signature.Hash != sig.Hash || entry.Signature.Size != sig.Size {
+		return false
+	}
+
+	present, err := e.store.Exists(relPath)
+	if err != nil {
+		return false
+	}
+
+	return !present
 }
 
 // recordDone records a successful write and counts its bytes when the commit

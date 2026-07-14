@@ -1,11 +1,15 @@
 // Package remotetest provides an in-memory S3-compatible fake implementing
-// [remote.S3API], so tests exercise the remote upload, head, and ranged-read
-// paths without a network or a real store.
+// [remote.S3API], so tests exercise the remote upload, head, ranged-read,
+// list, and delete paths without a network or a real store.
 package remotetest
 
 import (
 	"bytes"
 	"context"
+	"crypto/md5" //nolint:gosec // Only reproduces the S3 ETag algorithm, not a security control.
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"maps"
@@ -18,6 +22,23 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
+// MD5Hex returns the hex MD5 of data, the ETag S3 records for a
+// single-request, non-KMS write; tests compose expected ETags with it.
+func MD5Hex(data []byte) string {
+	//nolint:gosec // MD5 is the S3 ETag algorithm being faked, not a security control.
+	sum := md5.Sum(data)
+
+	return hex.EncodeToString(sum[:])
+}
+
+// sha256Base64 returns the base64 SHA-256 of data, the S3 wire form of a
+// full-object checksum.
+func sha256Base64(data []byte) string {
+	sum := sha256.Sum256(data)
+
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
 // Object is one stored object with the metadata the fake serves.
 type Object struct {
 	// StorageClass is the class the object reports; GLACIER and DEEP_ARCHIVE
@@ -26,6 +47,15 @@ type Object struct {
 	// Restore is the raw x-amz-restore header value, empty when no restore
 	// was ever requested.
 	Restore string
+	// ETag is the object's entity tag without quotes: the plain MD5 hex of
+	// the data for a PutObject write, a composite "<md5>-N" for a completed
+	// multipart upload. The fake serves it quoted, as S3 does.
+	ETag string
+	// ChecksumSHA256 is the recorded checksum in S3 wire form: base64 of the
+	// data's SHA-256 for a PutObject write that carried the algorithm, a
+	// composite "<base64>-N" for a multipart upload, empty when the write
+	// carried no checksum.
+	ChecksumSHA256 string
 	// Data is the object's content.
 	Data []byte
 }
@@ -43,9 +73,10 @@ func (o Object) restored() bool {
 
 // upload is one in-flight multipart upload.
 type upload struct {
-	parts map[int32][]byte
-	key   string
-	class string
+	parts    map[int32][]byte
+	key      string
+	class    string
+	checksum string
 }
 
 // Fake is an in-memory S3-compatible store implementing [remote.S3API].
@@ -67,16 +98,24 @@ type Fake struct {
 	HeadErr error
 	// GetErr fails every GetObject call.
 	GetErr error
+	// ListErr fails every ListObjectsV2 call.
+	ListErr error
+	// DeleteErr fails every DeleteObjects call.
+	DeleteErr error
 
-	bucket       string
-	getRanges    []string
-	putChecksums []string
-	mu           sync.Mutex
-	nextUploadID int
-	putCalls     int
-	headCalls    int
-	completed    int
-	aborted      int
+	bucket            string
+	getRanges         []string
+	putChecksums      []string
+	headChecksumModes []string
+	deleted           []string
+	mu                sync.Mutex
+	nextUploadID      int
+	putCalls          int
+	headCalls         int
+	listCalls         int
+	deleteCalls       int
+	completed         int
+	aborted           int
 }
 
 // New creates a new [Fake] serving bucket; a request naming any other bucket
@@ -138,6 +177,39 @@ func (f *Fake) PutChecksums() []string {
 	defer f.mu.Unlock()
 
 	return slices.Clone(f.putChecksums)
+}
+
+// HeadChecksumModes returns the checksum mode of each HeadObject call in
+// order, "" for calls that carried none.
+func (f *Fake) HeadChecksumModes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return slices.Clone(f.headChecksumModes)
+}
+
+// Deleted returns the keys removed by DeleteObjects calls, in request order.
+func (f *Fake) Deleted() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return slices.Clone(f.deleted)
+}
+
+// ListCalls returns how many ListObjectsV2 calls were served.
+func (f *Fake) ListCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.listCalls
+}
+
+// DeleteCalls returns how many DeleteObjects calls were served.
+func (f *Fake) DeleteCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.deleteCalls
 }
 
 // GetRanges returns the Range header of each GetObject call in order, "" for
@@ -206,7 +278,20 @@ func (f *Fake) PutObject(
 
 	f.putCalls++
 	f.putChecksums = append(f.putChecksums, string(in.ChecksumAlgorithm))
-	f.objects[*in.Key] = Object{Data: data, StorageClass: string(in.StorageClass)}
+
+	obj := Object{
+		Data:         data,
+		StorageClass: string(in.StorageClass),
+		ETag:         MD5Hex(data),
+	}
+
+	// A single-request write records a full-object checksum, the property the
+	// sync gate's Head comparison rests on.
+	if in.ChecksumAlgorithm == types.ChecksumAlgorithmSha256 {
+		obj.ChecksumSHA256 = sha256Base64(data)
+	}
+
+	f.objects[*in.Key] = obj
 
 	return &s3.PutObjectOutput{}, nil
 }
@@ -227,9 +312,10 @@ func (f *Fake) CreateMultipartUpload(
 	id := "upload-" + strconv.Itoa(f.nextUploadID)
 	f.putChecksums = append(f.putChecksums, string(in.ChecksumAlgorithm))
 	f.uploads[id] = &upload{
-		key:   *in.Key,
-		class: string(in.StorageClass),
-		parts: make(map[int32][]byte),
+		key:      *in.Key,
+		class:    string(in.StorageClass),
+		checksum: string(in.ChecksumAlgorithm),
+		parts:    make(map[int32][]byte),
 	}
 
 	return &s3.CreateMultipartUploadOutput{UploadId: &id}, nil
@@ -291,7 +377,21 @@ func (f *Fake) CompleteMultipartUpload(
 		data = append(data, up.parts[num]...)
 	}
 
-	f.objects[up.key] = Object{Data: data, StorageClass: up.class}
+	// A completed multipart upload records composite integrity metadata: the
+	// "-N" suffix marks both the ETag and any checksum as digests over the
+	// parts, not the object, exactly the shapes the sync gate must refuse to
+	// compare against local bytes.
+	obj := Object{
+		Data:         data,
+		StorageClass: up.class,
+		ETag:         fmt.Sprintf("%s-%d", MD5Hex(data), len(up.parts)),
+	}
+
+	if up.checksum == string(types.ChecksumAlgorithmSha256) {
+		obj.ChecksumSHA256 = fmt.Sprintf("%s-%d", sha256Base64(data), len(up.parts))
+	}
+
+	f.objects[up.key] = obj
 	delete(f.uploads, *in.UploadId)
 
 	f.completed++
@@ -336,6 +436,7 @@ func (f *Fake) HeadObject(
 	}
 
 	f.headCalls++
+	f.headChecksumModes = append(f.headChecksumModes, string(in.ChecksumMode))
 
 	obj, ok := f.objects[*in.Key]
 	if !ok {
@@ -352,7 +453,108 @@ func (f *Fake) HeadObject(
 		out.Restore = &obj.Restore
 	}
 
+	// As on S3, the checksum fields are served only when the request asks
+	// for them.
+	if in.ChecksumMode == types.ChecksumModeEnabled && obj.ChecksumSHA256 != "" {
+		out.ChecksumSHA256 = &obj.ChecksumSHA256
+	}
+
 	return out, nil
+}
+
+// ListObjectsV2 serves one page of the keys under the requested prefix,
+// sorted, honoring MaxKeys and the continuation token (an opaque start key).
+func (f *Fake) ListObjectsV2(
+	_ context.Context, in *s3.ListObjectsV2Input, _ ...func(*s3.Options),
+) (*s3.ListObjectsV2Output, error) {
+	bucketErr := f.checkBucket(in.Bucket)
+	if bucketErr != nil {
+		return nil, bucketErr
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.ListErr != nil {
+		return nil, f.ListErr
+	}
+
+	f.listCalls++
+
+	var prefix, after string
+
+	if in.Prefix != nil {
+		prefix = *in.Prefix
+	}
+
+	if in.ContinuationToken != nil {
+		after = *in.ContinuationToken
+	}
+
+	pageSize := 1000
+	if in.MaxKeys != nil && *in.MaxKeys > 0 {
+		pageSize = int(*in.MaxKeys)
+	}
+
+	var keys []string
+
+	for _, key := range slices.Sorted(maps.Keys(f.objects)) {
+		if strings.HasPrefix(key, prefix) && key > after {
+			keys = append(keys, key)
+		}
+	}
+
+	truncated := len(keys) > pageSize
+	if truncated {
+		keys = keys[:pageSize]
+	}
+
+	out := &s3.ListObjectsV2Output{IsTruncated: &truncated}
+
+	for _, key := range keys {
+		obj := f.objects[key]
+		size := int64(len(obj.Data))
+		etag := `"` + obj.ETag + `"`
+		out.Contents = append(out.Contents, types.Object{
+			Key:  &key,
+			Size: &size,
+			ETag: &etag,
+		})
+	}
+
+	if truncated {
+		out.NextContinuationToken = &keys[len(keys)-1]
+	}
+
+	return out, nil
+}
+
+// DeleteObjects removes the named keys, recording them; an absent key
+// deletes as a no-op, per S3 semantics.
+func (f *Fake) DeleteObjects(
+	_ context.Context, in *s3.DeleteObjectsInput, _ ...func(*s3.Options),
+) (*s3.DeleteObjectsOutput, error) {
+	bucketErr := f.checkBucket(in.Bucket)
+	if bucketErr != nil {
+		return nil, bucketErr
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.DeleteErr != nil {
+		return nil, f.DeleteErr
+	}
+
+	f.deleteCalls++
+
+	for _, id := range in.Delete.Objects {
+		delete(f.objects, *id.Key)
+
+		f.deleted = append(f.deleted, *id.Key)
+	}
+
+	return &s3.DeleteObjectsOutput{}, nil
 }
 
 // GetObject serves an object's bytes, honoring a bytes=start-end range. An

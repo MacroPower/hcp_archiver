@@ -1,7 +1,11 @@
 package archiver
 
+import "go.jacobcolvin.com/hcp_archiver/remote"
+
 // Test hooks exposing unexported helpers to the external test package.
 var (
+	// SyncOrg exposes (*Archiver).syncOrg for tests.
+	SyncOrg = (*Archiver).syncOrg
 	// ResolveOrgs exposes resolveOrgs for tests.
 	ResolveOrgs = resolveOrgs
 	// ProjectNameFor exposes projectNameFor for tests.
@@ -21,3 +25,9 @@ var (
 
 // DefaultProjectName exposes defaultProjectName for tests.
 const DefaultProjectName = defaultProjectName
+
+// SetRemote injects the remote client [Archiver.Run] would normally build, so
+// a test can drive the close sweep without AWS credentials.
+func (a *Archiver) SetRemote(c *remote.Client) {
+	a.remote = c
+}

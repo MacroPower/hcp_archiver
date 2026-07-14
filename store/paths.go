@@ -11,6 +11,19 @@ import (
 // with a literal "Z", denotes UTC.
 const timeLayout = "20060102T150405"
 
+// Directory-name segments shared with the sweeps that classify archive files
+// by path shape, so the names have one owner.
+const (
+	// BundlesDirName is the workspace subdirectory holding sealed cold
+	// bundles and their sidecar indexes (see [Store.BundleDir]).
+	BundlesDirName = "bundles"
+
+	// ConfigVersionsDirName is the org-level directory holding the
+	// deduplicated configuration-version tarballs (see
+	// [Store.ConfigVersionTarball]).
+	ConfigVersionsDirName = "config-versions"
+)
+
 // Join composes archive-relative segments into a single clean forward-slash
 // path, confining the result to the root so no ".." can escape.
 //
@@ -194,7 +207,7 @@ func (s *Store) RegistryGPGKey(namespace, keyID string) string {
 // tarball in the org-wide deduplicated directory, keyed on its globally-unique
 // id.
 func (s *Store) ConfigVersionTarball(cvID string) string {
-	return cleanJoin("config-versions", seg(cvID)+".tar.gz")
+	return cleanJoin(ConfigVersionsDirName, seg(cvID)+".tar.gz")
 }
 
 // ProjectDir returns the directory that holds a project's archived objects and
@@ -224,7 +237,7 @@ func (s *Store) WorkspaceFile(project, ws, name string) string {
 // BundleDir returns the directory that holds a workspace's sealed cold bundles
 // and their sidecar indexes, a sibling of its runs and state-versions.
 func (s *Store) BundleDir(project, ws string) string {
-	return cleanJoin("projects", seg(project), "workspaces", seg(ws), "bundles")
+	return cleanJoin("projects", seg(project), "workspaces", seg(ws), BundlesDirName)
 }
 
 // RollupDir returns the directory that holds a workspace's NDJSON roll-ups, the

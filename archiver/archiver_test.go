@@ -12,8 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.jacobcolvin.com/hcp_archiver/archiver"
+	"go.jacobcolvin.com/hcp_archiver/collect"
 	"go.jacobcolvin.com/hcp_archiver/config"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/remote"
+	"go.jacobcolvin.com/hcp_archiver/remote/remotetest"
+	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
 func TestLogFailures(t *testing.T) {
@@ -220,4 +224,83 @@ func TestProjectNameFor(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// newSyncOrgFixture builds an archiver with an injected fake-backed remote
+// client plus a collect environment over a temp store, so the close sweep can
+// be driven directly.
+func newSyncOrgFixture(t *testing.T, buf *bytes.Buffer) (*archiver.Archiver, *collect.Env, *remotetest.Fake) {
+	t.Helper()
+
+	root := t.TempDir()
+	st := store.New(root)
+
+	ledger, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	fake := remotetest.New("sync-bucket")
+	cfg := remote.Config{Bucket: "sync-bucket", Prefix: "hcp"}
+
+	client, err := remote.New(t.Context(), cfg, remote.WithS3API(fake))
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(buf, nil))
+
+	env := collect.NewEnv(nil, st, ledger,
+		collect.WithRemote(client, cfg, "acme"),
+		collect.WithLogger(logger),
+	)
+
+	_, err = st.WriteBytes("org.json", []byte(`{"org":"acme"}`))
+	require.NoError(t, err)
+
+	a := archiver.New(&config.Config{}, archiver.WithLogger(logger))
+	a.SetRemote(client)
+
+	return a, env, fake
+}
+
+func TestSyncOrgCanceledContextSkipsSweep(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	archiver.SyncOrg(a, ctx, env, "acme")
+
+	assert.Empty(t, fake.Keys(), "an interrupted run uploads nothing; the next run sweeps")
+	assert.NotContains(t, buf.String(), "remote_sync_complete")
+}
+
+func TestSyncOrgFailureWarnsOnly(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+	fake.PutErr = assert.AnError
+
+	archiver.SyncOrg(a, t.Context(), env, "acme")
+
+	out := buf.String()
+	assert.Contains(t, out, "remote_sync_complete")
+	assert.Contains(t, out, "level=WARN")
+	assert.Contains(t, out, "failed=1")
+}
+
+func TestSyncOrgLogsSummary(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+
+	archiver.SyncOrg(a, t.Context(), env, "acme")
+
+	assert.Contains(t, fake.Keys(), "hcp/acme/org.json")
+
+	out := buf.String()
+	assert.Contains(t, out, "remote_sync_complete")
+	assert.Contains(t, out, "uploaded=1")
 }

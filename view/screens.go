@@ -259,7 +259,7 @@ func newAllWorkspacesScreen(org *Org) (screen, error) {
 // newWorkspaceScreen is one workspace's home: its sections, mirroring the HCP
 // workspace tabs.
 func newWorkspaceScreen(ws *Workspace) (screen, error) {
-	runCount, err := subdirNames(ws.org.AbsPath(path.Join(ws.Dir(), "runs")))
+	runIDs, err := ws.runIDs()
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +279,7 @@ func newWorkspaceScreen(ws *Workspace) (screen, error) {
 		},
 		{
 			title: "Runs",
-			desc:  countNoun(len(runCount), "run", "runs"),
+			desc:  countNoun(len(runIDs), "run", "runs"),
 			open: func() (screen, error) {
 				return newRunsScreen(ws)
 			},

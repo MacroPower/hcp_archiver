@@ -146,6 +146,12 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 		a.logFailures(ctx, orgName, ledger)
 		a.logDroppedSurfaces(ctx, orgName, ledger)
 
+		// The close sweep runs after the final flush above, so every touched
+		// shard is compacted (its durable form is the snapshot the sweep
+		// mirrors), and before Close below, so the cross-process flock still
+		// guards the tree. An interrupted run skips it; the next run sweeps.
+		a.syncOrg(ctx, env, orgName)
+
 		serr := reporter.Summary()
 		if serr != nil {
 			a.logger.LogAttrs(ctx, slog.LevelWarn, "progress_summary_error",

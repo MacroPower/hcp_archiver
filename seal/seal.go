@@ -19,8 +19,10 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 )
 
-// sidecarSuffix is appended to a bundle path to name its sidecar index.
-const sidecarSuffix = ".sidecar.ndjson"
+// SidecarSuffix is appended to a bundle path to name its sidecar index; it is
+// exported so the sweeps that classify bundle files compose the sidecar path
+// from one owner instead of hardcoding the convention.
+const SidecarSuffix = ".sidecar.ndjson"
 
 // Method names recorded in a sidecar entry, matching the zip compression method
 // a member was packed with.
@@ -172,7 +174,7 @@ func Seal(bundlePath string, members []Member) ([]Entry, error) {
 		return nil, err
 	}
 
-	err = writeSidecar(bundlePath+sidecarSuffix, entries)
+	err = writeSidecar(bundlePath+SidecarSuffix, entries)
 	if err != nil {
 		return nil, err
 	}
@@ -334,12 +336,14 @@ type rollupLine struct {
 // and flushed, the appended tail is read back and byte-compared, and only then
 // are the sources removed, so an interrupted roll-up loses nothing and re-runs.
 //
-// A roll-up only grows: immutable metadata folds into it exactly once, so no line
-// is ever rewritten. A crash between the flushed append and a source's removal
-// re-folds that member next run, appending an identical line a reader dedupes by
-// path. An empty member set appends nothing. A source whose bytes are not valid
-// UTF-8 cannot be carried losslessly as a JSON string and is refused with
-// [ErrContentNotUTF8] rather than mangled.
+// A roll-up only grows: no line is ever rewritten. A crash between the flushed
+// append and a source's removal re-folds that member next run, appending an
+// identical line, and a member whose content legitimately changed between
+// seals (a terminal run.json re-frozen after an update) appends a newer,
+// different line under the same path; readers keep the newest line per path
+// either way. An empty member set appends nothing. A source whose bytes are
+// not valid UTF-8 cannot be carried losslessly as a JSON string and is refused
+// with [ErrContentNotUTF8] rather than mangled.
 func Rollup(rollupPath string, members []Member) error {
 	if len(members) == 0 {
 		return nil

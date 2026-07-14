@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -31,9 +32,9 @@ var (
 )
 
 // S3API is the slice of the S3 service a [Client] calls: the transfer
-// manager's upload operations plus the head and ranged-get reads. The real
-// [*s3.Client] implements it; tests inject an in-memory fake through
-// [WithS3API].
+// manager's upload operations plus the head and ranged-get reads, the
+// prefix listing, and the batch delete. The real [*s3.Client] implements it;
+// tests inject an in-memory fake through [WithS3API].
 type S3API interface {
 	manager.UploadAPIClient
 
@@ -41,9 +42,24 @@ type S3API interface {
 	HeadObject(ctx context.Context, in *s3.HeadObjectInput, opts ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
 	// GetObject reads an object, honoring a byte-range request.
 	GetObject(ctx context.Context, in *s3.GetObjectInput, opts ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+	// ListObjectsV2 lists objects under a prefix, one page per call.
+	ListObjectsV2(
+		ctx context.Context,
+		in *s3.ListObjectsV2Input,
+		opts ...func(*s3.Options),
+	) (*s3.ListObjectsV2Output, error)
+	// DeleteObjects removes a batch of objects in one request.
+	DeleteObjects(
+		ctx context.Context,
+		in *s3.DeleteObjectsInput,
+		opts ...func(*s3.Options),
+	) (*s3.DeleteObjectsOutput, error)
 }
 
-// Client reads and writes sealed bundles in one S3-compatible bucket.
+// Client reads and writes an organization's mirrored archive objects in one
+// S3-compatible bucket: evicted cold surfaces through [Client.Upload] and the
+// synced search layer through [Client.Put], with [Client.List] and
+// [Client.Delete] serving the sync sweep's inventory and prune.
 //
 // A Client is safe for concurrent use; the archiver shares one across every
 // organization it archives. Create instances with [New].
@@ -149,6 +165,12 @@ type ObjectInfo struct {
 	// StorageClass is the class the object is stored in, empty when the
 	// store reports none (AWS omits it for STANDARD).
 	StorageClass string
+	// SHA256 is the store's recorded full-object SHA-256 checksum in S3 wire
+	// form (base64). It is empty when the store recorded none or when the
+	// recorded checksum is a composite (a multipart "<base64>-N"), which
+	// digests the parts' digests rather than the object and so compares
+	// against nothing computable from the local bytes.
+	SHA256 string
 	// Size is the object's length in bytes.
 	Size int64
 	// Archived reports an archival storage class (GLACIER, DEEP_ARCHIVE)
@@ -165,6 +187,9 @@ func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
 	out, err := c.api.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(c.cfg.Bucket),
 		Key:    aws.String(key),
+		// Without this the store omits the checksum fields entirely, so the
+		// sync gate could never compare content; requesting it is free.
+		ChecksumMode: types.ChecksumModeEnabled,
 	})
 	if err != nil {
 		if isNotFound(err) {
@@ -176,6 +201,7 @@ func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
 
 	info := ObjectInfo{
 		StorageClass: string(out.StorageClass),
+		SHA256:       fullObjectChecksum(out.ChecksumSHA256),
 		Archived:     archivalClass(out.StorageClass),
 		Restored:     restoreComplete(out.Restore),
 	}
@@ -185,6 +211,18 @@ func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
 	}
 
 	return info, nil
+}
+
+// fullObjectChecksum returns a store-reported SHA-256 checksum only when it
+// digests the whole object: an absent checksum or a multipart composite
+// ("<base64>-N") yields empty, so a caller never compares a composite against
+// a locally computed digest.
+func fullObjectChecksum(checksum *string) string {
+	if checksum == nil || strings.Contains(*checksum, "-") {
+		return ""
+	}
+
+	return *checksum
 }
 
 // Exists reports whether an object is present at key, returning its metadata
@@ -237,6 +275,121 @@ func (c *Client) Upload(ctx context.Context, key string, r io.Reader, size int64
 	})
 	if err != nil {
 		return fmt.Errorf("upload %q: %w", key, err)
+	}
+
+	return nil
+}
+
+// Put writes r to the object at key in one PutObject request, applying the
+// configured sync storage class and, unless checksums are disabled, a
+// SHA-256 checksum the server validates and records.
+//
+// Unlike [Client.Upload] it never goes multipart, which is what makes the
+// stored checksum a full-object digest a later [Client.Head] can compare
+// against local bytes; a multipart upload records only a composite. A single
+// request is valid to 5 GiB, far above any synced search-layer file. Callers
+// should pass a seekable reader (an [*os.File]) so the SDK can rewind the
+// body on a retry.
+func (c *Client) Put(ctx context.Context, key string, r io.Reader) error {
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(c.cfg.Bucket),
+		Key:    aws.String(key),
+		Body:   r,
+	}
+
+	if c.cfg.SyncStorageClass != "" {
+		input.StorageClass = types.StorageClass(c.cfg.SyncStorageClass)
+	}
+
+	if !c.cfg.DisableChecksums {
+		input.ChecksumAlgorithm = types.ChecksumAlgorithmSha256
+	}
+
+	_, err := c.api.PutObject(ctx, input)
+	if err != nil {
+		return fmt.Errorf("put %q: %w", key, err)
+	}
+
+	return nil
+}
+
+// ListedObject describes one stored object as observed by [Client.List].
+type ListedObject struct {
+	// ETag is the object's entity tag with any surrounding quotes stripped.
+	// For a single-request, non-KMS write it is the plain MD5 of the bytes;
+	// a multipart or encrypted write yields an opaque value.
+	ETag string
+	// Size is the object's length in bytes.
+	Size int64
+}
+
+// List enumerates every object under prefix, keyed by full object key, at
+// roughly one request per thousand keys. It is the bulk inventory the sync
+// sweep gates uploads and prunes stale keys from, replacing a HeadObject per
+// file.
+func (c *Client) List(ctx context.Context, prefix string) (map[string]ListedObject, error) {
+	out := make(map[string]ListedObject)
+
+	var token *string
+
+	for {
+		page, err := c.api.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(c.cfg.Bucket),
+			Prefix:            aws.String(prefix),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list %q: %w", prefix, err)
+		}
+
+		for _, obj := range page.Contents {
+			if obj.Key == nil {
+				continue
+			}
+
+			lo := ListedObject{ETag: strings.Trim(aws.ToString(obj.ETag), `"`)}
+			if obj.Size != nil {
+				lo.Size = *obj.Size
+			}
+
+			out[*obj.Key] = lo
+		}
+
+		if page.IsTruncated == nil || !*page.IsTruncated {
+			return out, nil
+		}
+
+		token = page.NextContinuationToken
+	}
+}
+
+// deleteBatchSize is the most keys one DeleteObjects request accepts.
+const deleteBatchSize = 1000
+
+// Delete removes the objects at keys, batched a thousand per request. A key
+// that does not exist deletes as a no-op, per S3 semantics; a per-key error
+// the store reports fails the call.
+func (c *Client) Delete(ctx context.Context, keys []string) error {
+	for batch := range slices.Chunk(keys, deleteBatchSize) {
+		ids := make([]types.ObjectIdentifier, 0, len(batch))
+		for _, key := range batch {
+			ids = append(ids, types.ObjectIdentifier{Key: aws.String(key)})
+		}
+
+		out, err := c.api.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(c.cfg.Bucket),
+			Delete: &types.Delete{Objects: ids, Quiet: aws.Bool(true)},
+		})
+		if err != nil {
+			return fmt.Errorf("delete %d keys: %w", len(batch), err)
+		}
+
+		if len(out.Errors) > 0 {
+			first := out.Errors[0]
+
+			return fmt.Errorf("delete %d of %d keys (first: %s: %s)",
+				len(out.Errors), len(batch), aws.ToString(first.Key), aws.ToString(first.Message))
+		}
 	}
 
 	return nil

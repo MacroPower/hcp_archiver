@@ -211,8 +211,8 @@ func (a *Archiver) Run(ctx context.Context) error {
 		return fmt.Errorf("build client: %w", err)
 	}
 
-	// One remote client serves every organization: sealed bundles from all of
-	// them land in the same bucket, keyed under each org's subtree.
+	// One remote client serves every organization: each organization's
+	// mirror lands in the same bucket, keyed under its own subtree.
 	if a.cfg.Remote != nil {
 		a.remote, err = remote.New(ctx, remoteConfig(a.cfg.Remote))
 		if err != nil {

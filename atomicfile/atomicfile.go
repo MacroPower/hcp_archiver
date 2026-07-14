@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Default permissions applied when an [Option] leaves a mode unset. They are
@@ -26,6 +27,13 @@ const (
 // dot keeps the transient file out of ordinary directory listings, and the
 // suffix marks it as a partial write that a crash may leave behind.
 const tmpPattern = ".atomicfile-*.tmp"
+
+// IsTemp reports whether a file's base name matches this package's staging
+// pattern: a partial write a crash left behind, never part of the archive.
+// Sweeps over the tree consult it rather than hardcoding the pattern.
+func IsTemp(name string) bool {
+	return strings.HasPrefix(name, ".atomicfile-") && strings.HasSuffix(name, ".tmp")
+}
 
 // config holds the resolved settings for a single write.
 type config struct {

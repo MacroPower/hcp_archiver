@@ -12,15 +12,15 @@ import (
 	"time"
 )
 
-// ledgerDirName is the directory, co-located with the subtree it indexes, that
+// LedgerDirName is the directory, co-located with the subtree it indexes, that
 // holds a shard's snapshot and log.
-const ledgerDirName = ".ledger"
+const LedgerDirName = ".ledger"
 
 // snapshotFileName is a shard's compacted state.
 const snapshotFileName = "snapshot.json"
 
-// logFileName is a shard's append-only log of changes since its snapshot.
-const logFileName = "log.ndjson"
+// LogFileName is a shard's append-only log of changes since its snapshot.
+const LogFileName = "log.ndjson"
 
 // configVersionsSegment is the archive path segment, and the shard key, for the
 // org-wide configuration-version objects, which key to their own shard.
@@ -49,7 +49,7 @@ func shardKey(key string) string {
 
 // shard is one slice of the ledger (a workspace, a stack, the org-wide
 // configuration versions, or the org root) persisted as a compacted snapshot
-// plus an append-only log in a co-located [ledgerDirName] directory.
+// plus an append-only log in a co-located [LedgerDirName] directory.
 //
 // It holds the entries, watermarks, and completion flags whose keys route to it
 // (see [shardKey]); the org-root shard additionally carries the run-level
@@ -96,7 +96,7 @@ func (s *shard) snapshotPath() string {
 
 // logPath returns the path of the shard's append-only log.
 func (s *shard) logPath() string {
-	return filepath.Join(s.dir, logFileName)
+	return filepath.Join(s.dir, LogFileName)
 }
 
 // load reads the shard's snapshot and replays its log on top, populating its
