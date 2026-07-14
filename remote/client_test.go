@@ -3,6 +3,8 @@ package remote_test
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"testing"
@@ -211,21 +213,25 @@ func TestPutDisableChecksums(t *testing.T) {
 func TestHeadChecksum(t *testing.T) {
 	t.Parallel()
 
+	digest := []byte("full object digest bytes")
+	wire := base64.StdEncoding.EncodeToString(digest)
+
 	tests := map[string]struct {
 		obj  remotetest.Object
-		want string
+		want []byte
 	}{
-		"full-object checksum passes through": {
-			obj:  remotetest.Object{Data: []byte("ab"), ChecksumSHA256: "abc123="},
-			want: "abc123=",
+		"full-object checksum decodes to raw digest bytes": {
+			obj:  remotetest.Object{Data: []byte("ab"), ChecksumSHA256: wire},
+			want: digest,
 		},
 		"composite checksum is blanked": {
-			obj:  remotetest.Object{Data: []byte("ab"), ChecksumSHA256: "abc123=-3"},
-			want: "",
+			obj: remotetest.Object{Data: []byte("ab"), ChecksumSHA256: wire + "-3"},
 		},
-		"absent checksum stays empty": {
-			obj:  remotetest.Object{Data: []byte("ab")},
-			want: "",
+		"absent checksum stays nil": {
+			obj: remotetest.Object{Data: []byte("ab")},
+		},
+		"undecodable checksum is blanked": {
+			obj: remotetest.Object{Data: []byte("ab"), ChecksumSHA256: "not base64!"},
 		},
 	}
 
@@ -248,18 +254,25 @@ func TestHeadChecksum(t *testing.T) {
 func TestList(t *testing.T) {
 	t.Parallel()
 
+	plainETag := remotetest.MD5Hex([]byte("abcd"))
+
+	md5Sum, err := hex.DecodeString(plainETag)
+	require.NoError(t, err)
+
 	client, fake := newClient(t, remote.Config{})
-	fake.SetObject("hcp/acme/org.json", remotetest.Object{Data: []byte("abcd"), ETag: "etag-a"})
-	fake.SetObject("hcp/acme/users/u1.json", remotetest.Object{Data: []byte("ab"), ETag: "etag-b"})
+	fake.SetObject("hcp/acme/org.json", remotetest.Object{Data: []byte("abcd"), ETag: plainETag})
+	fake.SetObject("hcp/acme/users/u1.json", remotetest.Object{Data: []byte("ab"), ETag: plainETag + "-2"})
+	fake.SetObject("hcp/acme/rollups/r.json", remotetest.Object{Data: []byte("abc"), ETag: "opaque-etag"})
 	fake.SetObject("hcp/other/org.json", remotetest.Object{Data: []byte("x")})
 
 	got, err := client.List(t.Context(), "hcp/acme/")
 	require.NoError(t, err)
 
 	assert.Equal(t, map[string]remote.ListedObject{
-		"hcp/acme/org.json":      {Size: 4, ETag: "etag-a"},
-		"hcp/acme/users/u1.json": {Size: 2, ETag: "etag-b"},
-	}, got, "only keys under the prefix list, with quotes stripped from ETags")
+		"hcp/acme/org.json":       {Size: 4, MD5: md5Sum},
+		"hcp/acme/users/u1.json":  {Size: 2},
+		"hcp/acme/rollups/r.json": {Size: 3},
+	}, got, "only keys under the prefix list; only a plain single-part MD5 ETag yields a digest")
 }
 
 func TestListPaginates(t *testing.T) {

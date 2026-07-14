@@ -1,11 +1,10 @@
 package collect
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5" //nolint:gosec // Only reproduces the S3 ETag algorithm, not a security control.
 	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"hash"
 	"io"
@@ -201,9 +200,9 @@ const (
 // replayed onto a restored tree could resurrect old ledger state; the
 // post-compaction snapshot.json is the durable record. Everything else syncs
 // incrementally, gated by one upfront LIST inventory: an absent key or a size
-// change uploads; a size match compares the inventory ETag against the local
-// MD5 when the ETag is a plain single-part MD5; an uncomparable ETag falls
-// back to one HeadObject and the store's full-object SHA-256; with neither
+// change uploads; a size match compares the local MD5 against the digest the
+// inventory records when its ETag carries one; an opaque ETag falls back to
+// one HeadObject and the store's full-object SHA-256; with neither
 // comparable (checksums disabled) a size match is trusted.
 //
 // After the uploads, remote keys nothing local backs anymore are pruned, so
@@ -513,8 +512,8 @@ func (e *Env) putFile(ctx context.Context, relPath string) error {
 
 // uploadNeeded is the incremental gate: it reports whether the file's remote
 // copy is absent or differs, and the local size. The comparison degrades in
-// order — size, then the inventory ETag against the local MD5 when the ETag
-// is a plain single-part MD5, then one HeadObject for the store's recorded
+// order — size, then the local MD5 against the digest the inventory ETag
+// records when it records one, then one HeadObject for the store's recorded
 // full-object SHA-256, then size alone when nothing else is comparable.
 func (e *Env) uploadNeeded(
 	ctx context.Context,
@@ -531,15 +530,13 @@ func (e *Env) uploadNeeded(
 		return true, info.Size(), nil
 	}
 
-	if isPlainMD5(listed.ETag) {
+	if listed.MD5 != nil {
 		local, hashErr := e.hashFile(relPath, md5.New()) //nolint:gosec // ETag comparison only.
 		if hashErr != nil {
 			return false, 0, hashErr
 		}
 
-		// Fold case: isPlainMD5 admits uppercase hex, and a store serving it
-		// must not mismatch every run and re-upload forever.
-		return !strings.EqualFold(hex.EncodeToString(local), listed.ETag), info.Size(), nil
+		return !bytes.Equal(local, listed.MD5), info.Size(), nil
 	}
 
 	remoteInfo, err := e.remote.Head(ctx, e.RemoteKey(relPath))
@@ -547,16 +544,16 @@ func (e *Env) uploadNeeded(
 		return false, 0, fmt.Errorf("head sync target: %w", err)
 	}
 
-	if remoteInfo.SHA256 != "" {
+	if remoteInfo.SHA256 != nil {
 		local, hashErr := e.hashFile(relPath, sha256.New())
 		if hashErr != nil {
 			return false, 0, hashErr
 		}
 
-		return base64.StdEncoding.EncodeToString(local) != remoteInfo.SHA256, info.Size(), nil
+		return !bytes.Equal(local, remoteInfo.SHA256), info.Size(), nil
 	}
 
-	// Neither integrity field is comparable (checksums disabled on a store
+	// Neither integrity digest is comparable (checksums disabled on a store
 	// with opaque ETags): an equal size is the whole gate, the documented
 	// trade-off of turning checksums off.
 	return false, info.Size(), nil
@@ -581,25 +578,6 @@ func (e *Env) hashFile(relPath string, h hash.Hash) ([]byte, error) {
 	}
 
 	return h.Sum(nil), nil
-}
-
-// isPlainMD5 reports whether an ETag is a single-part MD5 — 32 hex characters
-// with no multipart "-N" suffix — the only shape comparable against a locally
-// computed digest. Multipart uploads, SSE-KMS encryption, and some compatible
-// stores produce opaque ETags this rejects.
-func isPlainMD5(etag string) bool {
-	if len(etag) != 32 {
-		return false
-	}
-
-	for _, r := range etag {
-		hexDigit := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
-		if !hexDigit {
-			return false
-		}
-	}
-
-	return true
 }
 
 // pruneRemote deletes the inventory keys the sweep saw no local file for, so

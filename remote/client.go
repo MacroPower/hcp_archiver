@@ -2,6 +2,9 @@ package remote
 
 import (
 	"context"
+	"crypto/md5" //nolint:gosec // Only sizes the S3 ETag algorithm's digest, not a security control.
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -165,12 +168,12 @@ type ObjectInfo struct {
 	// StorageClass is the class the object is stored in, empty when the
 	// store reports none (AWS omits it for STANDARD).
 	StorageClass string
-	// SHA256 is the store's recorded full-object SHA-256 checksum in S3 wire
-	// form (base64). It is empty when the store recorded none or when the
-	// recorded checksum is a composite (a multipart "<base64>-N"), which
-	// digests the parts' digests rather than the object and so compares
-	// against nothing computable from the local bytes.
-	SHA256 string
+	// SHA256 is the store's recorded full-object SHA-256 digest as raw
+	// bytes, comparable against a locally computed sum. It is nil when the
+	// store recorded none or when the record is a multipart composite (a
+	// "<base64>-N"), which digests the parts' digests rather than the object
+	// and so compares against nothing computable from the local bytes.
+	SHA256 []byte
 	// Size is the object's length in bytes.
 	Size int64
 	// Archived reports an archival storage class (GLACIER, DEEP_ARCHIVE)
@@ -213,16 +216,22 @@ func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
 	return info, nil
 }
 
-// fullObjectChecksum returns a store-reported SHA-256 checksum only when it
-// digests the whole object: an absent checksum or a multipart composite
-// ("<base64>-N") yields empty, so a caller never compares a composite against
-// a locally computed digest.
-func fullObjectChecksum(checksum *string) string {
+// fullObjectChecksum decodes a store-reported SHA-256 checksum (S3 wire form,
+// base64) into raw digest bytes, only when it digests the whole object: an
+// absent checksum, a multipart composite ("<base64>-N"), or an undecodable
+// value yields nil, so a caller never compares one against a locally
+// computed digest.
+func fullObjectChecksum(checksum *string) []byte {
 	if checksum == nil || strings.Contains(*checksum, "-") {
-		return ""
+		return nil
 	}
 
-	return *checksum
+	sum, err := base64.StdEncoding.DecodeString(*checksum)
+	if err != nil {
+		return nil
+	}
+
+	return sum
 }
 
 // Exists reports whether an object is present at key, returning its metadata
@@ -315,10 +324,11 @@ func (c *Client) Put(ctx context.Context, key string, r io.ReadSeeker, class str
 
 // ListedObject describes one stored object as observed by [Client.List].
 type ListedObject struct {
-	// ETag is the object's entity tag with any surrounding quotes stripped.
-	// For a single-request, non-KMS write it is the plain MD5 of the bytes;
-	// a multipart or encrypted write yields an opaque value.
-	ETag string
+	// MD5 is the object's MD5 digest as raw bytes, parsed from its ETag when
+	// that is a plain single-part MD5 — the shape a single-request, non-KMS
+	// write records, and the only one comparable against a locally computed
+	// sum. It is nil for the opaque ETags of multipart or encrypted writes.
+	MD5 []byte
 	// Size is the object's length in bytes.
 	Size int64
 }
@@ -347,7 +357,7 @@ func (c *Client) List(ctx context.Context, prefix string) (map[string]ListedObje
 				continue
 			}
 
-			lo := ListedObject{ETag: strings.Trim(aws.ToString(obj.ETag), `"`)}
+			lo := ListedObject{MD5: etagMD5(aws.ToString(obj.ETag))}
 			if obj.Size != nil {
 				lo.Size = *obj.Size
 			}
@@ -393,6 +403,27 @@ func (c *Client) Delete(ctx context.Context, keys []string) error {
 	}
 
 	return nil
+}
+
+// etagMD5 parses an ETag into the raw MD5 digest it records for a
+// single-request, non-KMS write: 32 hex characters, optionally quoted, with
+// no multipart "-N" suffix. Any other shape — a composite, an SSE-KMS or
+// otherwise opaque value — yields nil.
+func etagMD5(etag string) []byte {
+	etag = strings.Trim(etag, `"`)
+
+	// Hex-decoding enforces the character set; the length check alone rules
+	// out composites and truncations.
+	if len(etag) != 2*md5.Size {
+		return nil
+	}
+
+	sum, err := hex.DecodeString(etag)
+	if err != nil {
+		return nil
+	}
+
+	return sum
 }
 
 // partSizeFor returns the smallest part size that fits a body of size bytes
