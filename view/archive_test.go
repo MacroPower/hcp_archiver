@@ -3,8 +3,10 @@ package view_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"go.jacobcolvin.com/hcp_archiver/seal"
@@ -106,6 +108,38 @@ func buildArchive(t *testing.T) string {
 	require.NoError(t, err)
 
 	return root
+}
+
+func TestOpenArchiveToleratesOversizedSidecarLine(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+
+	// Corrupt a bundle sidecar with a merged/garbage run far larger than a
+	// size-capped scanner's line limit (bit rot, a partial restore). The index
+	// must skip it, not dead-end the whole workspace on bufio.ErrTooLong.
+	sidecars, err := filepath.Glob(
+		filepath.Join(root, "my-org", filepath.FromSlash(wsDir), "bundles", "*.sidecar.ndjson"))
+	require.NoError(t, err)
+	require.NotEmpty(t, sidecars, "the fixture bundles carry sidecars")
+
+	f, err := os.OpenFile(sidecars[0], os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+
+	_, err = f.WriteString(strings.Repeat("x", (1<<20)+1) + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	orgs, err := view.OpenArchive(root)
+	require.NoError(t, err)
+	require.Len(t, orgs, 1)
+
+	ws := orgs[0].Workspace("default", "app")
+
+	// The valid sidecar entry indexed alongside the garbage still resolves.
+	data, err := ws.Open(wsDir + "/runs/run-new/plan.log")
+	require.NoError(t, err, "an oversized sidecar line must not fail the whole index")
+	assert.Equal(t, "plan output line\n", string(data))
 }
 
 // openWorkspace opens the fixture archive and returns its one workspace.

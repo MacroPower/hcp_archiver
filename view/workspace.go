@@ -307,33 +307,33 @@ func indexSidecarFile(file, relBundles string, idx map[string]sealedRef) error {
 		_ = f.Close()
 	}()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(nil, 1<<20)
+	r := bufio.NewReader(f)
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
+	for {
+		line, readErr := r.ReadBytes('\n')
+		if readErr == nil {
+			var rec sidecarLine
+
+			// Skip a corrupt line rather than dead-ending the workspace screen,
+			// matching indexRollupFile and the loose-file browser's per-file
+			// resilience. Reading with a bufio.Reader rather than a size-capped
+			// bufio.Scanner keeps a merged or oversized garbage run (bit rot, a
+			// partial restore) from raising a hard ErrTooLong that would fail the
+			// whole index; it simply fails to unmarshal and is skipped.
+			err = json.Unmarshal(line, &rec)
+			if err == nil {
+				idx[rec.Name] = sealedRef{bundle: path.Join(relBundles, rec.Bundle)}
+			}
+
 			continue
 		}
 
-		var rec sidecarLine
-
-		// Skip a corrupt line rather than dead-ending the workspace screen,
-		// matching indexRollupFile and the loose-file browser's per-file resilience.
-		err = json.Unmarshal(line, &rec)
-		if err != nil {
-			continue
+		if errors.Is(readErr, io.EOF) {
+			return nil
 		}
 
-		idx[rec.Name] = sealedRef{bundle: path.Join(relBundles, rec.Bundle)}
+		return fmt.Errorf("read sidecar %q: %w", file, readErr)
 	}
-
-	err = scanner.Err()
-	if err != nil {
-		return fmt.Errorf("read sidecar %q: %w", file, err)
-	}
-
-	return nil
 }
 
 // readRollupLine re-reads one roll-up line at its recorded offset and returns
