@@ -14,10 +14,6 @@ func configTerminal(status tfe.StackConfigurationStatus) bool {
 	switch status {
 	case tfe.StackConfigurationStatusCompleted, tfe.StackConfigurationStatusFailed:
 		return true
-	case tfe.StackConfigurationStatusPending,
-		tfe.StackConfigurationStatusQueued,
-		tfe.StackConfigurationStatusPreparing:
-		return false
 	default:
 		return false
 	}
@@ -31,13 +27,6 @@ func runTerminal(status tfe.DeploymentRunStatus) bool {
 		tfe.DeploymentRunStatusFailed,
 		tfe.DeploymentRunStatusAbandoned:
 		return true
-	case tfe.DeploymentRunStatusPending,
-		tfe.DeploymentRunStatusPreDeploying,
-		tfe.DeploymentRunStatusPreDeployingPendingOperator,
-		tfe.DeploymentRunStatusAcquiringLock,
-		tfe.DeploymentRunStatusDeploying,
-		tfe.DeploymentRunStatusDeployingPendingOperator:
-		return false
 	default:
 		return false
 	}
