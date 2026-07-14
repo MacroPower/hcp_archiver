@@ -148,7 +148,7 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 			// it.
 			settled := c.pageShortCircuited(relPath)
 
-			halt, err := c.archiveTrailPage(ctx, since, page, fresh, listErr)
+			halt, err := c.archiveTrailPage(ctx, relPath, fresh, listErr)
 			if err != nil {
 				return err
 			}
@@ -206,13 +206,10 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 // events is skipped by the caller.
 func (c *Collector) archiveTrailPage(
 	ctx context.Context,
-	since time.Time,
-	page int,
+	relPath string,
 	fresh []*tfe.AuditTrail,
 	listErr error,
 ) (bool, error) {
-	relPath := c.env.Store().AuditTrailFile(pageName(since, page))
-
 	err := c.env.Object(ctx, relPath, func(context.Context) (any, error) {
 		if listErr != nil {
 			return nil, listErr
