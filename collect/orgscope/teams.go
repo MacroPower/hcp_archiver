@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/go-tfe"
-	"golang.org/x/sync/errgroup"
 )
 
 // collectOrganization archives the organization record itself.
@@ -151,17 +150,9 @@ func (c *Collector) collectMemberships(ctx context.Context) error {
 	}
 
 	// Roster members not on any team are archived here rather than by the
-	// concurrent team pass, so fan them across the concurrency budget the same
-	// way enumerate does; archiveUser is seenMu-guarded and safe to run in
-	// parallel.
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(c.env.Concurrency())
-
-	for _, m := range memberships {
-		g.Go(func() error {
-			return c.archiveUser(gctx, m.User)
-		})
-	}
-
-	return g.Wait() //nolint:wrapcheck // archiveUser already returns contextual errors.
+	// concurrent team pass, so fan them across the concurrency budget the same way
+	// enumerate does; archiveUser is seenMu-guarded and safe to run in parallel.
+	return fanOut(ctx, c, memberships, func(ctx context.Context, m *tfe.OrganizationMembership) error {
+		return c.archiveUser(ctx, m.User)
+	})
 }
