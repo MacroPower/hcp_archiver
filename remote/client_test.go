@@ -308,6 +308,21 @@ func TestHeadChecksum(t *testing.T) {
 	}
 }
 
+func TestHeadDisableChecksums(t *testing.T) {
+	t.Parallel()
+
+	// A store told to disable checksums rejects the checksum-mode header, so Head
+	// must omit it there just as Upload and Put omit the checksum algorithm.
+	client, fake := newClient(t, remote.Config{DisableChecksums: true})
+	fake.SetObject("k", remotetest.Object{Data: []byte("ab")})
+
+	_, err := client.Head(t.Context(), "k")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{""}, fake.HeadChecksumModes(),
+		"checksums off should omit the checksum-mode header the store rejects")
+}
+
 func TestList(t *testing.T) {
 	t.Parallel()
 

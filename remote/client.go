@@ -190,13 +190,20 @@ type ObjectInfo struct {
 // Head reads the object's metadata at key. An absent object returns
 // [ErrNotFound].
 func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
-	out, err := c.api.HeadObject(ctx, &s3.HeadObjectInput{
+	input := &s3.HeadObjectInput{
 		Bucket: aws.String(c.cfg.Bucket),
 		Key:    aws.String(key),
-		// Without this the store omits the checksum fields entirely, so the
-		// sync gate could never compare content; requesting it is free.
-		ChecksumMode: types.ChecksumModeEnabled,
-	})
+	}
+
+	// Requesting the checksum makes the store report the fields the sync gate
+	// compares content by; it is free where supported. A store told to disable
+	// checksums rejects the checksum-mode header (the reason the flag exists), so
+	// omit it there, mirroring how Upload and Put gate ChecksumAlgorithm.
+	if !c.cfg.DisableChecksums {
+		input.ChecksumMode = types.ChecksumModeEnabled
+	}
+
+	out, err := c.api.HeadObject(ctx, input)
 	if err != nil {
 		if isNotFound(err) {
 			return ObjectInfo{}, fmt.Errorf("%w: %s", ErrNotFound, key)
