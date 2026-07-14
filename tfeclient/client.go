@@ -48,6 +48,14 @@ const (
 	// call fetches at once. It sits below the client's in-flight gate, which
 	// binds first, so it only keeps one listing from monopolizing the gate.
 	DefaultPageConcurrency = 8
+
+	// The maxConcurrentPages ceiling caps the per-page slot array [Paginate]
+	// pre-sizes from the server-reported TotalPages. A value past it -- a garbage
+	// or overflowing count from a misbehaving or hostile endpoint -- would drive
+	// an unbounded (or, at [math.MaxInt], negative-length) allocation, so the walk
+	// falls back to the serial NextPage path instead. It sits far above any real
+	// listing's page count.
+	maxConcurrentPages = 100_000
 )
 
 // DefaultResponseHeaderTimeout bounds the time [New]'s own HTTP client waits for
@@ -526,6 +534,15 @@ func Paginate[T any](ctx context.Context, c *Client, fetch pageFetch[T]) ([]T, e
 	}
 
 	if pg.TotalPages <= 1 {
+		return paginateFrom(ctx, c, fetch, first, 1, pg.NextPage)
+	}
+
+	// TotalPages is server-reported and otherwise unbounded, so a garbage-large or
+	// overflowing count would size the per-page slot allocation below into an OOM
+	// (or a make panic on a negative length at math.MaxInt). Above a sane ceiling,
+	// fall back to the serial NextPage walk, which fetches the same pages without
+	// trusting the advertised count for an allocation size.
+	if pg.TotalPages > maxConcurrentPages {
 		return paginateFrom(ctx, c, fetch, first, 1, pg.NextPage)
 	}
 

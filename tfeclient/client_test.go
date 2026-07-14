@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -420,6 +421,37 @@ func TestPaginate(t *testing.T) {
 		for _, size := range seenSize {
 			assert.Equal(t, tfeclient.MaxPageSize, size, "every page is requested at the maximum size")
 		}
+	})
+
+	t.Run("a garbage-large TotalPages falls back to the serial walk", func(t *testing.T) {
+		t.Parallel()
+
+		// A misbehaving endpoint advertises an absurd total-pages count. Sizing the
+		// per-page slot array from it would OOM (or panic on a negative length at
+		// math.MaxInt), so the walk must follow NextPage serially to the real end
+		// instead.
+		fetch := func(
+			_ context.Context,
+			_ *tfe.Client,
+			opts tfe.ListOptions,
+		) ([]int, *tfe.Pagination, error) {
+			p := opts.PageNumber
+			next := p + 1
+			if p == 3 {
+				next = 0
+			}
+
+			return []int{p}, &tfe.Pagination{
+				CurrentPage: p,
+				NextPage:    next,
+				TotalPages:  math.MaxInt,
+			}, nil
+		}
+
+		got, err := tfeclient.Paginate(t.Context(), c, fetch)
+
+		require.NoError(t, err)
+		assert.Equal(t, []int{1, 2, 3}, got, "the serial walk reaches the real end without a huge allocation")
 	})
 
 	t.Run("a listing that grew during the batch is walked to its new end", func(t *testing.T) {
