@@ -382,6 +382,32 @@ func TestSyncArchivePruneExemptsEvictedSurfaces(t *testing.T) {
 	assert.Empty(t, f.fake.Deleted())
 }
 
+func TestSyncArchivePruneSurvivesLocalMetadataLoss(t *testing.T) {
+	t.Parallel()
+
+	const (
+		zip     = "projects/prod/workspaces/api/bundles/logs.gen0001.zip"
+		tarball = "config-versions/cv-1.tar.gz"
+	)
+
+	f := newSyncFixture(t, remote.Config{})
+
+	// The evicted surfaces' local proof is gone — the sidecar lost with a
+	// deleted subtree, the ledger wiped to reset state. The remote copies are
+	// the archive's only bytes, so the eviction shape alone must exempt them.
+	f.fake.SetObject(f.key(zip), remotetest.Object{Data: []byte("zip bytes")})
+	f.fake.SetObject(f.key(tarball), remotetest.Object{Data: []byte("tar bytes")})
+
+	// An unrelated local file keeps the walk non-empty, so the prune step
+	// itself still runs.
+	f.write(t, "org.json", []byte(`{"org":"acme"}`))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Pruned)
+	assert.Empty(t, f.fake.Deleted())
+}
+
 func TestSyncArchiveEmptyWalkPrunesNothing(t *testing.T) {
 	t.Parallel()
 

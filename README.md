@@ -204,9 +204,13 @@ identity needs `s3:PutObject`, `s3:GetObject` (Head), `s3:ListBucket`,
 is the recommended split.
 
 Storage classes split by motion: `storageClass` applies to the evicted cold
-surfaces and `syncStorageClass` to the synced search layer. Two choices are
+surfaces and `syncStorageClass` to the synced search layer. Three choices are
 worth making deliberately:
 
+- **Enable bucket versioning** (or Object Lock) on the archive bucket. The
+  mirror prunes remote copies of files that no longer exist locally, and the
+  evicted bundles exist nowhere else; versioning turns any surprising delete
+  or overwrite into a recoverable event instead of a permanent one.
 - **Abort incomplete multipart uploads** after a few days (a lifecycle rule):
   an upload killed mid-flight is re-run safely by the next sweep, but its
   already-uploaded parts otherwise linger as billable storage.

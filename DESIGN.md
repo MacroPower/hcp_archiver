@@ -627,13 +627,21 @@ exit code.
 
 After the uploads, a **prune** step makes the mirror true: every inventory key
 the walk saw no local file for is batch-deleted, except the evicted surfaces
-(a bundle zip whose sidecar is still local, a tarball whose ledger entry is
-done), which are remote-only by design. Without it the mirror would accumulate
-stale loose copies of files later sealed into other forms: a restored stale
-`runs/<id>/run.json` would shadow its newer roll-up line, since reads prefer
-loose. The consequence is deliberate and mirrors the ledger's stance: deleting
-a subtree locally forgets it remotely on the next run. As a guard against a
-wrong or empty root, nothing is pruned when the walk saw no local file at all.
+(bundle zips, config-version tarballs), which are remote-only by design and
+exempt **by key shape alone** — not by checking the local sidecar or ledger
+entry that proved the eviction. After eviction the remote copy is the only
+copy, so its survival must never hinge on local state: a wiped `.ledger` or a
+subtree deletion that takes sidecars with it must not cascade into deleting
+the archive's only bytes. The cost is that a deliberately deleted workspace
+leaves its bundles in the bucket, to be cleaned up by hand. Without the prune
+the mirror would accumulate stale loose copies of files later sealed into
+other forms: a restored stale `runs/<id>/run.json` would shadow its newer
+roll-up line, since reads prefer loose. For the search layer the consequence
+is deliberate and mirrors the ledger's stance: deleting a subtree locally
+forgets it remotely on the next run. As a guard against a wrong or empty
+root, nothing is pruned when the walk saw no local file at all. Bucket
+versioning (or Object Lock) is the recommended backstop either way: it turns
+any surprising prune or overwrite into a recoverable event.
 
 Bundle eviction extends verify-before-delete one hop without any cross-run
 state: every step is derived from three observable facts — is the local zip

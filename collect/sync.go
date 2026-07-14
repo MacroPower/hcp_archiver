@@ -129,8 +129,12 @@ func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 	}
 
 	if info.Size != local.Size() {
+		// A mismatch never resolves on its own: the sweep refuses to overwrite
+		// remote history at the key, so every run re-reports it until the
+		// remote object is inspected and removed by hand.
 		return fmt.Errorf(
-			"remote copy of %q is %d bytes, local is %d; keeping the local file",
+			"remote copy of %q is %d bytes, local is %d; keeping the local file"+
+				" (needs manual inspection of the remote object)",
 			key, info.Size, local.Size(),
 		)
 	}
@@ -204,8 +208,8 @@ const (
 //
 // After the uploads, remote keys nothing local backs anymore are pruned, so
 // the mirror tracks local deletions and files later sealed into other forms;
-// evicted surfaces (a bundle whose sidecar is still local, a tarball whose
-// ledger entry is done) are exempt, being remote-only by design. Per-file
+// evicted surfaces (bundle zips, configuration-version tarballs) are exempt
+// by shape, being remote-only by design. Per-file
 // failures are logged and counted, never fatal: local disk stays canonical
 // and the next run re-sweeps. A context cancellation stops the sweep early,
 // leaving the rest to the next run.
@@ -604,10 +608,10 @@ func isPlainMD5(etag string) bool {
 // line) and a locally deleted subtree is forgotten remotely, consistent with
 // the ledger's "deleting .ledger forgets" stance.
 //
-// Evicted surfaces are exempt: a bundle zip whose sidecar is still local and
-// a configuration-version tarball whose ledger entry is done are remote-only
-// by design. As a guard against a wrong or empty root, nothing is pruned when
-// the walk saw no local file at all.
+// Evicted surfaces are exempt by shape (see [evictedSurface]): after
+// eviction the remote copy is the only copy, so its survival must not hinge
+// on local state. As a guard against a wrong or empty root, nothing is
+// pruned when the walk saw no local file at all.
 func (e *Env) pruneRemote(
 	ctx context.Context,
 	orgPrefix string,
@@ -627,7 +631,7 @@ func (e *Env) pruneRemote(
 		}
 
 		relPath, ok := strings.CutPrefix(key, orgPrefix)
-		if !ok || e.evictedSurface(relPath) {
+		if !ok || evictedSurface(relPath) {
 			continue
 		}
 
@@ -654,21 +658,16 @@ func (e *Env) pruneRemote(
 	counters.pruned.Add(int64(len(stale)))
 }
 
-// evictedSurface reports whether a remote-only key is one the sweep itself
-// moved off local disk: a sealed bundle still proven by its local sidecar, or
-// a configuration-version tarball the ledger records done.
-func (e *Env) evictedSurface(relPath string) bool {
-	if isBundleZip(relPath) {
-		return e.bundleSealed(relPath)
-	}
-
-	if isConfigTarball(relPath) {
-		entry, ok := e.ledger.Entry(relPath)
-
-		return ok && entry.Status == manifest.StatusDone
-	}
-
-	return false
+// evictedSurface reports whether a remote-only key has an eviction shape: a
+// sealed-bundle zip or a configuration-version tarball. The shape alone
+// exempts it from pruning, with no look at the local sidecar or ledger entry
+// that proved the eviction — after eviction the remote copy is the only copy,
+// and gating its survival on local metadata would let a local loss (a wiped
+// .ledger, a deleted workspace subtree taking its sidecars with it) cascade
+// into deleting the archive's only bytes. The cost is that a deliberately
+// deleted workspace leaves its bundles in the bucket, cleaned up by hand.
+func evictedSurface(relPath string) bool {
+	return isBundleZip(relPath) || isConfigTarball(relPath)
 }
 
 // syncProgressInterval is how many settled files pass between progress lines.
