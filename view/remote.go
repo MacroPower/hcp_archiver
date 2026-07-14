@@ -41,6 +41,7 @@ type orgRemote struct {
 	ctx        context.Context //nolint:containedctx // Reads run inside io.ReaderAt calls, which take none.
 	newClient  remoteClientFactory
 	client     *remote.Client
+	clientErr  error
 	bundles    map[string]*remoteBundle
 	orgName    string
 	cfg        remote.Config
@@ -154,35 +155,33 @@ func (r *orgRemote) bundle(relBundle string) (*remoteBundle, error) {
 
 // clientLocked returns the lazily-built remote client. The build is
 // attempted once per session: a failure (a bad marker, no credentials) is
-// remembered and surfaced on every read rather than re-probing the
-// credential chain per keypress.
+// remembered and returned on every subsequent read rather than re-probing
+// the credential chain per keypress.
 //
 // The stored browse context is the intended parent for the build: callers
 // sit behind [io.ReaderAt]-shaped interfaces that carry no context.
 //
 //nolint:contextcheck // See above; there is no caller context to pass.
 func (r *orgRemote) clientLocked() (*remote.Client, error) {
-	if r.clientOnce {
-		if r.client == nil {
-			return nil, errors.New("remote client unavailable; see the first error")
+	if !r.clientOnce {
+		r.clientOnce = true
+
+		ctx, cancel := context.WithTimeout(r.ctx, remoteReadTimeout)
+		defer cancel()
+
+		client, err := r.newClient(ctx, r.cfg)
+		if err != nil {
+			r.clientErr = fmt.Errorf("build remote client: %w", err)
+		} else {
+			r.client = client
 		}
-
-		return r.client, nil
 	}
 
-	r.clientOnce = true
-
-	ctx, cancel := context.WithTimeout(r.ctx, remoteReadTimeout)
-	defer cancel()
-
-	client, err := r.newClient(ctx, r.cfg)
-	if err != nil {
-		return nil, fmt.Errorf("build remote client: %w", err)
+	if r.clientErr != nil {
+		return nil, r.clientErr
 	}
 
-	r.client = client
-
-	return client, nil
+	return r.client, nil
 }
 
 // extractMember reads one member's compressed span in a single ranged GET

@@ -159,6 +159,36 @@ func TestWorkspaceOpen_RemoteRestoredObjectReads(t *testing.T) {
 	assert.Equal(t, "plan output line\n", string(data))
 }
 
+func TestWorkspaceOpen_RemoteClientFailureIsRemembered(t *testing.T) {
+	t.Parallel()
+
+	root, _ := buildRemoteArchive(t, "")
+
+	builds := 0
+
+	orgs, err := view.OpenArchive(root,
+		view.WithContext(t.Context()),
+		view.WithRemoteFactory(func(context.Context, remote.Config) (*remote.Client, error) {
+			builds++
+
+			return nil, errors.New("no credential chain")
+		}),
+	)
+	require.NoError(t, err)
+
+	ws := orgs[0].Workspace("default", "app")
+
+	// Every read surfaces the original cause, not a placeholder pointing at a
+	// message that scrolled away with the first keypress.
+	_, err = ws.Open(wsDir + "/runs/run-new/plan.log")
+	require.ErrorContains(t, err, "no credential chain")
+
+	_, err = ws.Open(wsDir + "/runs/run-new/plan.log")
+	require.ErrorContains(t, err, "no credential chain")
+
+	assert.Equal(t, 1, builds, "the client build is attempted once per session")
+}
+
 func TestWorkspaceOpen_LocalBundleNeverTouchesRemote(t *testing.T) {
 	t.Parallel()
 
