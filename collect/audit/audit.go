@@ -196,45 +196,47 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 	return nil
 }
 
-// archiveTrailPage records one audit-trail page -- its fresh events, or the list
-// error -- and reports whether the walk must halt without advancing the
-// watermark. A fetch error the walk cannot page past, and a write that did not
-// settle, both halt so the next run retries the page from the same cursor; a
-// halt also records the trail as a dropped surface, since the pages past it were
-// never reached and nothing else marks the gap. It is called only for a page
-// carrying fresh events or a list error; a clean page of only already-archived
-// events is skipped by the caller.
+// archiveTrailPage records one audit-trail page's fresh events and reports
+// whether the walk must halt without advancing the watermark. A list error the
+// walk cannot page past, and a write that did not settle, both halt so the next
+// run retries the page from the same cursor; a halt also records the trail as a
+// dropped surface, since the pages past it were never reached and nothing else
+// marks the gap. It is called only for a page carrying fresh events or a list
+// error; a clean page of only already-archived events is skipped by the caller.
 func (c *Collector) archiveTrailPage(
 	ctx context.Context,
 	relPath string,
 	fresh []*tfe.AuditTrail,
 	listErr error,
 ) (bool, error) {
-	err := c.env.Object(ctx, relPath, func(context.Context) (any, error) {
-		if listErr != nil {
-			return nil, listErr
-		}
-
-		return fresh, nil
-	})
-	if err != nil {
-		return false, fmt.Errorf("archive audit trail page: %w", err)
-	}
-
+	// A page-enumeration failure is not the page object's absence. The page is a
+	// synthetic slot keyed on the walk's cursor, not a resource that can 404, so
+	// routing a list error through Object would let a terminal one (an infra 404,
+	// or org auditing toggled off then on) settle the slot absent. Object then
+	// short-circuits that slot on every later run, so the real events a later list
+	// returns for it are never written and the walk wedges on the never-created
+	// file. Record the fetch failure as a dropped surface and halt with the slot
+	// left unsettled, so the next run re-lists and writes it.
 	if listErr != nil {
-		// A cancellation must propagate even when Object short-circuited on an
-		// already-settled page and so never observed it, or the walk returns nil on
-		// a real cancellation and the run logs a canceled org as a clean finish.
+		// A cancellation must propagate, or the walk returns nil on a real
+		// cancellation and the run logs a canceled org as a clean finish.
 		ctxErr := ctx.Err()
 		if ctxErr != nil {
 			return false, fmt.Errorf("archive audit trail page: %w", ctxErr)
 		}
 
-		// The page fetch is recorded by Object; the walk cannot paginate past an
-		// unreadable page, so halt without advancing the watermark.
+		// The walk cannot paginate past an unreadable page, so halt without
+		// advancing the watermark; the next run retries from the same cursor.
 		c.env.MarkSurfaceDropped(c.env.Store().AuditTrailDir(), listErr)
 
 		return true, nil
+	}
+
+	err := c.env.Object(ctx, relPath, func(context.Context) (any, error) {
+		return fresh, nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("archive audit trail page: %w", err)
 	}
 
 	// A page whose write failed is recorded errored rather than settled, and its
@@ -259,13 +261,12 @@ func (c *Collector) archiveTrailPage(
 // set was never written), so its newest is read back from the stored file; a
 // freshly written page persisted its fresh events, so those are the source.
 // Sourcing from the raw re-listed items instead would step the cursor past an
-// event the short-circuited write never persisted, dropping it -- including the
-// case of an Absent page (a prior terminal error) that a later run re-lists real
-// events for, whose stored file does not exist, forcing the halt below rather
-// than an advance past events no file holds. A Done page is search-layer JSON
-// that is never evicted, so a read-back failure is not expected; if it happens,
-// the page contributes nothing to the watermark and the walk halts, so a
-// transient read error cannot advance the cursor.
+// event the short-circuited write never persisted, dropping it. A short-circuited
+// page is Done (a list error no longer settles a page absent; see
+// archiveTrailPage), search-layer JSON that is never evicted, so a read-back
+// failure is not expected; if it happens, the page contributes nothing to the
+// watermark and the walk halts, so a transient read error cannot advance the
+// cursor.
 func (c *Collector) persistedNewest(
 	key, relPath string,
 	fresh []*tfe.AuditTrail,

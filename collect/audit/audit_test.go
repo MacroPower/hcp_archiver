@@ -185,9 +185,42 @@ func TestCollectTrailsHoldsWatermarkOnListError(t *testing.T) {
 	assert.True(t, f.watermark().IsZero(),
 		"the cursor must hold so the next run retries the unread pages")
 
-	entry, ok := f.ledger.Entry(f.store.AuditTrailFile(audit.PageName(time.Time{}, 1)))
-	require.True(t, ok, "the failed page is recorded")
-	assert.Equal(t, manifest.StatusErrored, entry.Status)
+	// A list error is a dropped surface, not a per-page outcome: the page slot is
+	// a synthetic cursor position, not a resource, so it must be left unsettled
+	// rather than recorded through Object.
+	relPath := f.store.AuditTrailFile(audit.PageName(time.Time{}, 1))
+	_, ok := f.ledger.Entry(relPath)
+	assert.False(t, ok, "a list error must not settle the page slot")
+	assert.True(t, f.ledger.ShouldFetch(relPath),
+		"the slot stays fetchable so the next run re-lists and writes it")
+
+	assert.Equal(t, 1, f.ledger.Tally().SurfacesDropped,
+		"the unreached tail of the trail is a dropped surface")
+}
+
+func TestCollectTrailsDoesNotSettlePageOnTerminalListError(t *testing.T) {
+	t.Parallel()
+
+	// A 404 classifies terminal. Were the list error routed through Object it
+	// would settle the page slot absent and short-circuit it on every later run,
+	// so the real events a later list returns for the slot would never be written
+	// and the walk would wedge on the never-created file. The slot must be left
+	// unsettled instead.
+	f := newAuditFixture(t, map[int]trailPage{
+		1: {status: http.StatusNotFound},
+	})
+
+	require.NoError(t, f.collector.CollectTrails(t.Context()),
+		"a list failure is best-effort, not a collector error")
+
+	assert.True(t, f.watermark().IsZero(),
+		"the cursor must hold so the next run retries the unread pages")
+
+	relPath := f.store.AuditTrailFile(audit.PageName(time.Time{}, 1))
+	_, ok := f.ledger.Entry(relPath)
+	assert.False(t, ok, "a terminal list error must not settle the page slot absent")
+	assert.True(t, f.ledger.ShouldFetch(relPath),
+		"the slot stays fetchable so the next run re-lists and writes it")
 
 	assert.Equal(t, 1, f.ledger.Tally().SurfacesDropped,
 		"the unreached tail of the trail is a dropped surface")
