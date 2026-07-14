@@ -168,10 +168,12 @@ func (c *Collector) archiveModuleDetail(ctx context.Context, mod *tfe.RegistryMo
 	g.SetLimit(c.env.Concurrency())
 
 	for _, vs := range mod.VersionStatuses {
-		// A non-concrete or empty version cannot address a per-version read and
-		// would only record a permanent error; skip it, matching how the no-code
-		// path resolves a concrete version before reading.
-		if !isConcreteVersion(vs.Version) {
+		// A non-concrete or empty version cannot address a per-version read, and a
+		// version still ingressing (status not ok) would be frozen half-formed or
+		// recorded permanently absent by the immutable Object path; skip both so a
+		// later run captures the version once it settles ok, matching how the
+		// no-code path resolves a concrete version before reading.
+		if !isConcreteVersion(vs.Version) || vs.Status != tfe.RegistryModuleVersionStatusOk {
 			continue
 		}
 
