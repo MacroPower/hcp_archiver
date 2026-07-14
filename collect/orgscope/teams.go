@@ -126,7 +126,6 @@ func (c *Collector) collectMemberships(ctx context.Context) error {
 				ListOptions: o,
 				Include: []tfe.OrgMembershipIncludeOpt{
 					tfe.OrgMembershipUser,
-					tfe.OrgMembershipTeam,
 				},
 			})
 			if e != nil {
