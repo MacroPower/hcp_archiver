@@ -443,10 +443,12 @@ func Rollup(rollupPath string, members []Member) error {
 	}
 
 	for i := range members {
-		err = os.Remove(members[i].Source)
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("remove rolled-up source %q: %w", members[i].Source, err)
-		}
+		// Best-effort, mirroring Seal: the roll-up is already appended, flushed,
+		// and byte-verified, so it is durable. A source that will not remove is
+		// re-folded on the next run (readers keep the newest line per path), which
+		// is far better than returning an error that strands an already-committed
+		// roll-up.
+		_ = os.Remove(members[i].Source) //nolint:errcheck // Re-folded next run.
 	}
 
 	return nil

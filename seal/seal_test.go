@@ -446,3 +446,42 @@ func TestRollup_EmptyWritesNothing(t *testing.T) {
 	_, statErr := os.Stat(rollupPath)
 	assert.True(t, os.IsNotExist(statErr), "no roll-up is written for an empty fold")
 }
+
+func TestRollup_BestEffortRemovalToleratesUnremovableSource(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions, so the source removal cannot be made to fail")
+	}
+
+	dir := t.TempDir()
+
+	// The source sits in a directory the process can search but not write, so
+	// removing the file inside it fails with EACCES rather than ENOENT.
+	locked := filepath.Join(dir, "locked")
+	require.NoError(t, os.Mkdir(locked, 0o700))
+
+	src := writeSource(t, locked, "run.json", []byte(`{"id":"run-1"}`))
+	require.NoError(t, os.Chmod(locked, 0o500))
+	t.Cleanup(func() {
+		//nolint:errcheck,gosec // Restore so t.TempDir cleanup can remove the tree.
+		os.Chmod(locked, 0o700)
+	})
+
+	rollupPath := filepath.Join(dir, "rollups", "runs.ndjson")
+
+	require.NoError(t, seal.Rollup(rollupPath, []seal.Member{
+		{Name: "runs/r1/run.json", Source: src},
+	}), "a removal failure does not fail the roll-up")
+
+	// The durable roll-up carries the member even though its source could not be
+	// removed.
+	lines := readRollup(t, rollupPath)
+	require.Len(t, lines, 1)
+	assert.Equal(t, "runs/r1/run.json", lines[0].Path)
+
+	// The unremovable source survives in place, left for the next run to re-fold
+	// against the now-committed roll-up.
+	_, statErr := os.Stat(src)
+	require.NoError(t, statErr, "the source that could not be removed is kept")
+}
