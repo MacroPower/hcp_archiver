@@ -355,6 +355,13 @@ func (c *Client) List(ctx context.Context, prefix string) (map[string]ListedObje
 			return out, nil
 		}
 
+		// A store that reports a truncated page but omits the continuation token
+		// would send the loop back to the first page forever. Surface the
+		// non-compliant response instead of hanging the sweep.
+		if aws.ToString(page.NextContinuationToken) == "" {
+			return nil, fmt.Errorf("list %q: truncated page carries no continuation token", prefix)
+		}
+
 		token = page.NextContinuationToken
 	}
 }
