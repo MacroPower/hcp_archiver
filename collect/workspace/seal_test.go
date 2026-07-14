@@ -246,6 +246,66 @@ func TestSealWorkspace_GenerationsAppend(t *testing.T) {
 		"the newly frozen artifact is sealed")
 }
 
+func TestSealWorkspace_ResealAfterStrandedSourcesIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	f := newSealFixture(t)
+	st := f.store
+	project, ws := "prod", "api"
+
+	planLog := st.RunFile(project, ws, "run-1", "plan.log")
+	stateBlob := st.Join(st.StateVersionDir(project, ws), "20260101T000000Z-sv-1.tfstate.json")
+
+	f.writeDone(t, planLog, []byte("plan output"))
+	f.writeDone(t, stateBlob, []byte(`{"serial":1}`))
+	f.markComplete(project, ws)
+
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+	require.True(t, f.exists(st.Join(st.BundleDir(project, ws), "logs.gen0001.zip")))
+	require.True(t, f.exists(st.Join(st.BundleDir(project, ws), "state.gen0001.zip")))
+	require.False(t, f.exists(planLog), "the first seal removed the loose source")
+
+	// Model a crash between the sidecar commit and the source removal: the bundle
+	// and its sidecar are durable, yet the identical loose sources are still on
+	// disk and still recorded done.
+	f.writeDone(t, planLog, []byte("plan output"))
+	f.writeDone(t, stateBlob, []byte(`{"serial":1}`))
+
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	assert.False(t, f.exists(st.Join(st.BundleDir(project, ws), "logs.gen0002.zip")),
+		"a stranded source already in a verified bundle is not re-sealed into a new generation")
+	assert.False(t, f.exists(st.Join(st.BundleDir(project, ws), "state.gen0002.zip")),
+		"the same holds for the state bundle")
+	assert.False(t, f.exists(planLog), "the reconciled stranded source is removed")
+	assert.False(t, f.exists(stateBlob), "the reconciled stranded state blob is removed")
+}
+
+func TestSealWorkspace_ResealWithChangedContentSealsNewGeneration(t *testing.T) {
+	t.Parallel()
+
+	f := newSealFixture(t)
+	st := f.store
+	project, ws := "prod", "api"
+
+	planLog := st.RunFile(project, ws, "run-1", "plan.log")
+
+	f.writeDone(t, planLog, []byte("first output"))
+	f.markComplete(project, ws)
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+	require.True(t, f.exists(st.Join(st.BundleDir(project, ws), "logs.gen0001.zip")))
+
+	// A stranded source whose bytes diverge from what the sidecar sealed must
+	// never be dropped as already-sealed: seal it as a new generation so the
+	// changed content survives.
+	f.writeDone(t, planLog, []byte("second output, different bytes"))
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	assert.True(t, f.exists(st.Join(st.BundleDir(project, ws), "logs.gen0002.zip")),
+		"divergent content is sealed into a new generation, not dropped")
+	assert.False(t, f.exists(planLog), "the newly sealed source is removed")
+}
+
 // runJSON renders a minimal archived run document recording status, the shape
 // terminalRunFile reads.
 func runJSON(status string) []byte {

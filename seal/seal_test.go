@@ -259,6 +259,75 @@ func TestSeal_SidecarRecordsEveryMember(t *testing.T) {
 	}
 }
 
+func TestReadSidecar_RoundTrips(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	planLog := writeSource(t, dir, "plan.log", []byte("plan output\n"))
+	state := writeSource(t, dir, "state.json", []byte(`{"version":4}`))
+
+	bundlePath := filepath.Join(dir, "bundles", "logs.gen0001.zip")
+
+	entries, err := seal.Seal(bundlePath, []seal.Member{
+		{Name: "runs/r1/plan.log", Source: planLog, Compress: true},
+		{Name: "state-versions/s1.json", Source: state, Compress: false},
+	})
+	require.NoError(t, err)
+
+	got, err := seal.ReadSidecar(bundlePath + seal.SidecarSuffix)
+	require.NoError(t, err)
+	assert.Equal(t, entries, got, "ReadSidecar decodes exactly what Seal wrote")
+
+	// A missing sidecar reads as no entries and no error, so a caller can probe
+	// for one without a separate stat.
+	absent, err := seal.ReadSidecar(filepath.Join(dir, "nope.sidecar.ndjson"))
+	require.NoError(t, err)
+	assert.Nil(t, absent)
+}
+
+func TestSeal_BestEffortRemovalToleratesUnremovableSource(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions, so the source removal cannot be made to fail")
+	}
+
+	dir := t.TempDir()
+
+	// The source sits in a directory the process can search but not write, so
+	// removing the file inside it fails with EACCES rather than ENOENT.
+	locked := filepath.Join(dir, "locked")
+	require.NoError(t, os.Mkdir(locked, 0o700))
+
+	src := writeSource(t, locked, "state.json", []byte(`{"version":4}`))
+	require.NoError(t, os.Chmod(locked, 0o500))
+	t.Cleanup(func() {
+		//nolint:errcheck,gosec // Restore so t.TempDir cleanup can remove the tree.
+		os.Chmod(locked, 0o700)
+	})
+
+	bundlePath := filepath.Join(dir, "bundles", "logs.gen0001.zip")
+
+	entries, err := seal.Seal(bundlePath, []seal.Member{
+		{Name: "state-versions/s1.json", Source: src, Compress: false},
+	})
+	require.NoError(t, err, "a removal failure does not fail the seal")
+	require.Len(t, entries, 1)
+
+	// The durable bundle and sidecar exist even though the source could not be
+	// removed.
+	_, statErr := os.Stat(bundlePath)
+	require.NoError(t, statErr)
+
+	_, statErr = os.Stat(bundlePath + seal.SidecarSuffix)
+	require.NoError(t, statErr)
+
+	// The unremovable source survives in place, left for the next run to
+	// reconcile against the now-committed sidecar.
+	_, statErr = os.Stat(src)
+	require.NoError(t, statErr, "the source that could not be removed is kept")
+}
+
 // rollupRecord mirrors the roll-up line shape for reading back a roll-up in tests.
 type rollupRecord struct {
 	Path    string `json:"path"`

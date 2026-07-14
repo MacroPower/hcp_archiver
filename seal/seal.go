@@ -133,6 +133,14 @@ func checkMemberNames(members []Member) error {
 // canonical copy and the next run re-seals. An empty member set writes nothing
 // and returns no entries. A member whose name is not a clean archive-relative
 // path is rejected with [ErrMemberName].
+//
+// Removing the loose sources is best-effort: the bundle and its sidecar are
+// already durable and verified before any removal, so a source that cannot be
+// removed (a read-only parent, a transient error) is a recognizable survivor,
+// not a loss. The caller reconciles it on the next run -- a survivor whose bytes
+// still hash to the sidecar entry is already sealed and dropped, one whose bytes
+// diverge is sealed afresh -- so a removal failure is skipped rather than
+// returned, which would strand the seal with the bundle already committed.
 func Seal(bundlePath string, members []Member) ([]Entry, error) {
 	if len(members) == 0 {
 		return nil, nil
@@ -180,13 +188,78 @@ func Seal(bundlePath string, members []Member) ([]Entry, error) {
 	}
 
 	for i := range members {
-		err = os.Remove(members[i].Source)
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("remove sealed source %q: %w", members[i].Source, err)
-		}
+		//nolint:errcheck // Best-effort; a survivor is reconciled on the next run.
+		_ = os.Remove(members[i].Source)
 	}
 
 	return entries, nil
+}
+
+// ReadSidecar reads a bundle's sidecar index, decoding the newline-delimited
+// JSON entries [Seal] wrote. A sidecar that does not exist yields no entries and
+// no error, so a caller can probe for one without a separate stat.
+func ReadSidecar(path string) ([]Entry, error) {
+	//nolint:gosec // The sidecar path is composed by the caller from its archive root.
+	f, err := os.Open(path)
+
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("open sidecar %q: %w", path, err)
+	}
+
+	defer func() {
+		//nolint:errcheck // Read-only handle; a close failure cannot lose data.
+		_ = f.Close()
+	}()
+
+	var entries []Entry
+
+	dec := json.NewDecoder(f)
+
+	for {
+		var entry Entry
+
+		decErr := dec.Decode(&entry)
+		if errors.Is(decErr, io.EOF) {
+			break
+		}
+
+		if decErr != nil {
+			return nil, fmt.Errorf("decode sidecar %q: %w", path, decErr)
+		}
+
+		entries = append(entries, entry)
+	}
+
+	return entries, nil
+}
+
+// SourceDigest returns the lowercase hex SHA-256 of the file at path, streaming
+// it through the hash the same way [writeMember] does. It lets a caller prove a
+// loose source still matches a sidecar entry's recorded content before treating
+// it as already sealed.
+func SourceDigest(path string) (string, error) {
+	//nolint:gosec // The source path is composed by the caller from its archive root.
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open source %q: %w", path, err)
+	}
+
+	sha := sha256.New()
+
+	_, copyErr := io.Copy(sha, f)
+	closeErr := f.Close()
+
+	switch {
+	case copyErr != nil:
+		return "", fmt.Errorf("hash source %q: %w", path, copyErr)
+	case closeErr != nil:
+		return "", fmt.Errorf("close source %q: %w", path, closeErr)
+	}
+
+	return hex.EncodeToString(sha.Sum(nil)), nil
 }
 
 // writeMember packs one source file into the zip, hashing it as it copies, and

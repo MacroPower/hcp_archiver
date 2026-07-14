@@ -368,6 +368,12 @@ func (c *Collector) settled(relPath string) bool {
 
 // sealBundle seals members into the next-generation bundle named by prefix, a
 // no-op when nothing is frozen to seal.
+//
+// The members are first reconciled against the already-sealed sidecars, so a
+// loose source a prior seal committed to a bundle but did not remove (a crash,
+// or a best-effort removal failure) is not swept into a fresh generation, which
+// would duplicate its archive-relative name across two bundles. When nothing
+// fresh remains after reconciliation, no generation is allocated.
 func (c *Collector) sealBundle(ctx context.Context, project, ws, prefix string, members []seal.Member) error {
 	if len(members) == 0 {
 		return nil
@@ -379,6 +385,15 @@ func (c *Collector) sealBundle(ctx context.Context, project, ws, prefix string, 
 
 	bundlesDir := c.env.Store().AbsPath(c.env.Store().BundleDir(project, ws))
 
+	fresh, err := c.reconcileSealed(ctx, bundlesDir, prefix, members)
+	if err != nil {
+		return fmt.Errorf("reconcile %s bundle: %w", prefix, err)
+	}
+
+	if len(fresh) == 0 {
+		return nil
+	}
+
 	gen, err := nextGeneration(bundlesDir, prefix)
 	if err != nil {
 		return err
@@ -386,12 +401,109 @@ func (c *Collector) sealBundle(ctx context.Context, project, ws, prefix string, 
 
 	bundlePath := filepath.Join(bundlesDir, fmt.Sprintf("%s.gen%04d.zip", prefix, gen))
 
-	_, err = seal.Seal(bundlePath, members)
+	_, err = seal.Seal(bundlePath, fresh)
 	if err != nil {
 		return fmt.Errorf("seal %s bundle: %w", prefix, err)
 	}
 
 	return nil
+}
+
+// reconcileSealed splits members into those still to seal and those a prior,
+// possibly crash-interrupted, run already sealed durably.
+//
+// Sealing commits the bundle and its sidecar before removing the loose
+// sources, so a crash -- or a best-effort removal failure -- between the two
+// leaves a settled source on disk whose name a sidecar already records. Left
+// alone, the next seal would sweep that survivor into a fresh generation,
+// writing the same archive-relative name into two bundles that the remote sweep
+// would both upload. A member whose name no sidecar records is fresh; a member
+// whose name is recorded and whose current bytes hash to the recorded digest is
+// already sealed -- its loose source is removed best-effort and dropped; a
+// member whose bytes diverge from the recorded digest is fresh, sealed into a
+// new generation rather than dropped, so changed content is never lost. When no
+// sidecar records any name, the members pass through untouched, the common case.
+func (c *Collector) reconcileSealed(
+	ctx context.Context,
+	bundlesDir, prefix string,
+	members []seal.Member,
+) ([]seal.Member, error) {
+	sealed, err := c.sealedDigests(bundlesDir, prefix)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(sealed) == 0 {
+		return members, nil
+	}
+
+	fresh := make([]seal.Member, 0, len(members))
+
+	for i := range members {
+		digest, recorded := sealed[members[i].Name]
+		if !recorded {
+			fresh = append(fresh, members[i])
+
+			continue
+		}
+
+		got, digestErr := seal.SourceDigest(members[i].Source)
+		if digestErr != nil {
+			return nil, fmt.Errorf("digest %s source %q: %w", prefix, members[i].Name, digestErr)
+		}
+
+		// Only bytes that still hash to the sidecar's record are proven already
+		// sealed; divergent content is sealed afresh, never dropped unproven.
+		if got != digest {
+			fresh = append(fresh, members[i])
+
+			continue
+		}
+
+		c.env.Log().LogAttrs(ctx, slog.LevelWarn, "seal_reconcile_stranded_source",
+			slog.String("prefix", prefix),
+			slog.String("name", members[i].Name),
+		)
+
+		//nolint:errcheck // Best-effort; a survivor is reconciled again next run.
+		_ = os.Remove(members[i].Source)
+	}
+
+	return fresh, nil
+}
+
+// sealedDigests maps the archive-relative name of every member already durably
+// sealed under prefix to the SHA-256 its sidecar recorded. It reads only the
+// generation-numbered sidecars, the marker seal.Seal writes after a bundle's
+// read-back verifies, so a name in the map is proven to live in a verified
+// bundle. Sidecars are read in generation order, so a later generation's entry
+// wins for a name that recurs, though names are not expected to recur.
+func (c *Collector) sealedDigests(bundlesDir, prefix string) (map[string]string, error) {
+	names, err := listNames(bundlesDir, func(e fs.DirEntry) bool {
+		return !e.IsDir() &&
+			strings.HasSuffix(e.Name(), seal.SidecarSuffix) &&
+			parseGeneration(e.Name(), prefix) > 0
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list %s sidecars: %w", prefix, err)
+	}
+
+	slices.Sort(names)
+
+	out := make(map[string]string)
+
+	for _, name := range names {
+		entries, readErr := seal.ReadSidecar(filepath.Join(bundlesDir, name))
+		if readErr != nil {
+			return nil, fmt.Errorf("read %s sidecar %q: %w", prefix, name, readErr)
+		}
+
+		for i := range entries {
+			out[entries[i].Name] = entries[i].SHA256
+		}
+	}
+
+	return out, nil
 }
 
 // coalesce folds each roll-up's frozen members into its NDJSON file, a no-op when
