@@ -121,8 +121,15 @@ func (e *Env) claimDirLocked(dir, id string) (string, error) {
 
 	// A fresh directory: the object is new under this parent, or was renamed
 	// from a sibling. One scan of the siblings (cached per parent per run)
-	// tells which.
-	prior := e.ownersUnderLocked(path.Dir(dir))[id]
+	// tells which. A scan fault fails the claim closed rather than proceeding as
+	// if the parent had no siblings, which would miss the rename and commit the
+	// directory so no later run ever re-scans it.
+	owners, scanErr := e.ownersUnderLocked(path.Dir(dir))
+	if scanErr != nil {
+		return "", scanErr
+	}
+
+	prior := owners[id]
 	if prior != "" && prior != path.Base(dir) {
 		renameErr := e.markRenamed(path.Dir(dir), prior, path.Base(dir))
 		if renameErr != nil {
@@ -210,13 +217,16 @@ func (e *Env) writeIdentity(relPath string, ident *Identity) error {
 
 // ownersUnderLocked maps each owner id recorded by the children of parent to
 // the child directory's name, scanning the disk once per parent per run and
-// serving later claims from the cache. The scan is best-effort: a child with
-// no identity or an unreadable one is skipped, since its own claim fails
-// closed when it is visited. A directory that does not yet exist caches an
-// empty map, but a real read fault is left uncached so a later claim retries.
-func (e *Env) ownersUnderLocked(parent string) map[string]string {
+// serving later claims from the cache. The scan is best-effort about its
+// children: a child with no identity or an unreadable one is skipped, since its
+// own claim fails closed when it is visited. A directory that does not yet
+// exist caches an empty map. A real read fault on the parent itself is neither
+// cached nor masked as an empty map -- it returns an error, so the caller fails
+// its claim closed rather than proceeding as if the parent had no siblings and
+// missing a rename.
+func (e *Env) ownersUnderLocked(parent string) (map[string]string, error) {
 	if owners, ok := e.idOwners[parent]; ok {
-		return owners
+		return owners, nil
 	}
 
 	owners := make(map[string]string)
@@ -239,13 +249,14 @@ func (e *Env) ownersUnderLocked(parent string) map[string]string {
 
 	case !errors.Is(err, fs.ErrNotExist):
 		// A real read fault (a permission or I/O error, not a fresh parent that
-		// has no siblings yet) must not be cached: an empty map served for the
-		// whole run would silently disable rename detection under this parent.
-		// Leave the cache unset so a later claim retries the scan.
-		return owners
+		// has no siblings yet) must not be cached, nor served as an empty map: an
+		// empty map would silently disable rename detection under this parent and
+		// commit the directory, so no later run re-scans it. Report it so the
+		// claim fails closed and a later run re-scans before committing.
+		return nil, fmt.Errorf("scan owners under %q: %w", parent, err)
 	}
 
 	e.idOwners[parent] = owners
 
-	return owners
+	return owners, nil
 }
