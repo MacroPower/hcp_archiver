@@ -45,6 +45,7 @@ func TestStatus_ValidAndSettled(t *testing.T) {
 		status      manifest.Status
 		wantValid   bool
 		wantSettled bool
+		wantGate    bool
 	}{
 		"done":      {status: manifest.StatusDone, wantValid: true, wantSettled: true},
 		"absent":    {status: manifest.StatusAbsent, wantValid: true, wantSettled: true},
@@ -52,8 +53,8 @@ func TestStatus_ValidAndSettled(t *testing.T) {
 		"na":        {status: manifest.StatusNotApplicable, wantValid: true, wantSettled: true},
 		"errored":   {status: manifest.StatusErrored, wantValid: true, wantSettled: false},
 		"forbidden": {status: manifest.StatusForbidden, wantValid: true, wantSettled: false},
-		"pending":   {status: manifest.StatusPending, wantValid: true, wantSettled: false},
-		"cleared":   {status: manifest.StatusReferenceCleared, wantValid: true, wantSettled: true},
+		"pending":   {status: manifest.StatusPending, wantValid: true, wantSettled: false, wantGate: true},
+		"cleared":   {status: manifest.StatusReferenceCleared, wantValid: true, wantSettled: true, wantGate: true},
 		"unknown":   {status: manifest.Status("nonsense"), wantValid: false, wantSettled: false},
 	}
 
@@ -63,6 +64,7 @@ func TestStatus_ValidAndSettled(t *testing.T) {
 
 			assert.Equal(t, tc.wantValid, tc.status.Valid())
 			assert.Equal(t, tc.wantSettled, tc.status.Settled())
+			assert.Equal(t, tc.wantGate, tc.status.IsGate())
 		})
 	}
 }

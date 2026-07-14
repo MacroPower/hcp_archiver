@@ -48,6 +48,22 @@ const (
 	StatusReferenceCleared Status = "reference-cleared"
 )
 
+// statusProps records, per status, whether a normal re-run leaves it settled
+// and whether it is a run-scoped reference gate rather than an archived object.
+// Membership lives here once so [Status.Valid], [Status.Settled], and
+// [Status.IsGate] cannot drift apart: adding a status is a single row that sets
+// both flags, and Valid recognizes exactly the statuses this table names.
+var statusProps = map[Status]struct{ settled, gate bool }{
+	StatusDone:             {settled: true},
+	StatusAbsent:           {settled: true},
+	StatusSkipped:          {settled: true},
+	StatusNotApplicable:    {settled: true},
+	StatusReferenceCleared: {settled: true, gate: true},
+	StatusErrored:          {},
+	StatusForbidden:        {},
+	StatusPending:          {gate: true},
+}
+
 // String returns the on-disk spelling of the status.
 func (s Status) String() string {
 	return string(s)
@@ -55,14 +71,9 @@ func (s Status) String() string {
 
 // Valid reports whether the status is one of the recognized values.
 func (s Status) Valid() bool {
-	switch s {
-	case StatusDone, StatusAbsent, StatusSkipped,
-		StatusErrored, StatusForbidden, StatusNotApplicable, StatusPending,
-		StatusReferenceCleared:
-		return true
-	default:
-		return false
-	}
+	_, ok := statusProps[s]
+
+	return ok
 }
 
 // IsGate reports whether the status marks a run-scoped reference-gate proxy
@@ -73,7 +84,7 @@ func (s Status) Valid() bool {
 // predicate; a gate status added later joins here once and every counting
 // surface follows.
 func (s Status) IsGate() bool {
-	return s == StatusPending || s == StatusReferenceCleared
+	return statusProps[s].gate
 }
 
 // Settled reports whether a normal re-run leaves the object alone.
@@ -86,13 +97,5 @@ func (s Status) IsGate() bool {
 // walk's retry set until the foreign write it mirrors settles; once it does,
 // [StatusReferenceCleared] settles the gate and the retry stops.
 func (s Status) Settled() bool {
-	switch s {
-	case StatusDone, StatusAbsent, StatusSkipped, StatusNotApplicable,
-		StatusReferenceCleared:
-		return true
-	case StatusErrored, StatusForbidden, StatusPending:
-		return false
-	default:
-		return false
-	}
+	return statusProps[s].settled
 }
