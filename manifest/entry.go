@@ -57,3 +57,13 @@ type RunRecord struct {
 	// BytesDownloaded is the total bytes downloaded during the run.
 	BytesDownloaded int64 `json:"bytesDownloaded"`
 }
+
+// cloneRunRecord returns a detached copy of r with its Totals map copied, so a
+// later mutation of either the copy or the original aliases neither. It is the
+// shared copy the shard drain, the snapshot document, and the run getters make
+// before a run summary leaves the ledger lock.
+func cloneRunRecord(r RunRecord) RunRecord {
+	r.Totals = copyStatusCounts(r.Totals)
+
+	return r
+}

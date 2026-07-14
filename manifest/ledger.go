@@ -956,10 +956,7 @@ func (l *Ledger) FinishRun() RunRecord {
 	l.rootShard.runDirty = true
 	l.compactNext = true
 
-	out := *l.rootShard.lastRun
-	out.Totals = copyStatusCounts(totals)
-
-	return out
+	return cloneRunRecord(*l.rootShard.lastRun)
 }
 
 // RunCount returns the number of runs recorded, including one opened by
@@ -989,10 +986,7 @@ func (l *Ledger) LastRun() (RunRecord, bool) {
 		return RunRecord{}, false
 	}
 
-	out := *l.rootShard.lastRun
-	out.Totals = copyStatusCounts(l.rootShard.lastRun.Totals)
-
-	return out, true
+	return cloneRunRecord(*l.rootShard.lastRun), true
 }
 
 // Flush persists the state recorded since the last flush durably, so a hard kill

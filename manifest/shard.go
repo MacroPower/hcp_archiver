@@ -276,8 +276,7 @@ func (s *shard) drainDirty() drainedState {
 		rec := walRecord{Kind: walRun, LastRunAt: s.lastRunAt, RunCount: s.runCount}
 
 		if s.lastRun != nil {
-			lr := *s.lastRun
-			lr.Totals = copyStatusCounts(s.lastRun.Totals)
+			lr := cloneRunRecord(*s.lastRun)
 			rec.LastRun = &lr
 		}
 
@@ -333,8 +332,7 @@ func (s *shard) document() document {
 	var lastRun *RunRecord
 
 	if s.lastRun != nil {
-		lr := *s.lastRun
-		lr.Totals = copyStatusCounts(s.lastRun.Totals)
+		lr := cloneRunRecord(*s.lastRun)
 		lastRun = &lr
 	}
 
