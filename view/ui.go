@@ -7,6 +7,8 @@ import (
 	"io"
 	"strings"
 
+	"charm.land/lipgloss/v2"
+
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -166,14 +168,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the breadcrumb, the status line, and the active screen in the
 // alternate screen buffer.
+//
+// The breadcrumb and status are each clamped to one physical row -- the
+// breadcrumb to m.width, the status to m.width and one line -- so the chrome
+// occupies exactly [chromeLines] rows: a deep trail or a multi-line error
+// string would otherwise wrap past its row and push the content's bottom off
+// the terminal, whose height is sized as height minus [chromeLines]. MaxWidth
+// truncates without padding and is a no-op at width zero (the first frame,
+// before the terminal size is known), so an unsized breadcrumb still renders.
 func (m *model) View() tea.View {
 	var b strings.Builder
 
-	b.WriteString(m.breadcrumb())
+	b.WriteString(lipgloss.NewStyle().MaxWidth(m.width).Render(m.breadcrumb()))
 	b.WriteByte('\n')
 
 	if m.status != "" {
-		b.WriteString(styleStatusErr.Render(m.status))
+		b.WriteString(styleStatusErr.MaxWidth(m.width).MaxHeight(1).Render(m.status))
 	}
 
 	b.WriteByte('\n')
