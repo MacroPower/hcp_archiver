@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/aws/smithy-go"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // Sentinel errors reported by [New] and the [Client] methods.
@@ -433,22 +435,29 @@ func restoreComplete(restore *string) bool {
 }
 
 // isNotFound classifies the S3 error shapes that mean "no such object": the
-// typed NotFound (HeadObject) and NoSuchKey (GetObject) errors, plus the bare
-// API error codes some compatible stores answer with.
+// typed NotFound (HeadObject) and NoSuchKey (GetObject) errors, the bare API
+// error codes some compatible stores answer with, and — when no error code
+// identifies the response at all (a bodyless reply from a nonconforming
+// store) — a plain HTTP 404 status. A coded error that means something else
+// (NoSuchBucket, AccessDenied) is never a not-found, whatever its status.
 func isNotFound(err error) bool {
 	var (
 		notFound  *types.NotFound
 		noSuchKey *types.NoSuchKey
 		apiErr    smithy.APIError
+		respErr   *smithyhttp.ResponseError
 	)
 
 	switch {
 	case errors.As(err, &notFound), errors.As(err, &noSuchKey):
 		return true
-	case errors.As(err, &apiErr):
+	case errors.As(err, &apiErr) && apiErr.ErrorCode() != "":
 		code := apiErr.ErrorCode()
 
 		return code == "NotFound" || code == "NoSuchKey"
+
+	case errors.As(err, &respErr):
+		return respErr.HTTPStatusCode() == http.StatusNotFound
 
 	default:
 		return false

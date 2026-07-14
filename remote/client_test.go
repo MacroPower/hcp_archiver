@@ -7,11 +7,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/remote/remotetest"
@@ -174,6 +177,50 @@ func TestHead(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestHeadBareHTTPStatus(t *testing.T) {
+	t.Parallel()
+
+	// A nonconforming store may answer with a bodyless HTTP error the SDK
+	// decodes to no error code at all; the status line is the only signal.
+	bareStatus := func(code int) *smithyhttp.ResponseError {
+		return &smithyhttp.ResponseError{
+			Response: &smithyhttp.Response{Response: &http.Response{StatusCode: code}},
+			Err:      errors.New("no error body"),
+		}
+	}
+
+	tests := map[string]struct {
+		status int
+		err    error
+	}{
+		"a bodyless 404 classifies as not found": {
+			status: http.StatusNotFound,
+			err:    remote.ErrNotFound,
+		},
+		"a bodyless 403 stays an opaque error": {
+			status: http.StatusForbidden,
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			client, fake := newClient(t, remote.Config{})
+			fake.HeadErr = bareStatus(tt.status)
+
+			_, err := client.Head(t.Context(), "k")
+			require.Error(t, err)
+
+			if tt.err != nil {
+				require.ErrorIs(t, err, tt.err)
+			} else {
+				require.NotErrorIs(t, err, remote.ErrNotFound)
+			}
 		})
 	}
 }
