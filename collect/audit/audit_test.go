@@ -248,6 +248,30 @@ func TestCollectTrailsEmptyPageStopsWithoutWriting(t *testing.T) {
 	assert.Zero(t, f.ledger.Tally().SurfacesDropped)
 }
 
+func TestCollectTrailsEmptyPageDoesNotEndTheWalk(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+
+	// An empty middle page must not end the walk. The trail's page order is
+	// unspecified, so a later page can still carry an older event that would be
+	// dropped if the empty page short-circuited the walk.
+	f := newAuditFixture(t, map[int]trailPage{
+		1: {events: []*tfe.AuditTrail{event("ev-new", base.Add(5*time.Second))}, nextPage: 2},
+		2: {events: nil, nextPage: 3},
+		3: {events: []*tfe.AuditTrail{event("ev-old", base.Add(1*time.Second))}, nextPage: 0},
+	})
+
+	require.NoError(t, f.collector.CollectTrails(t.Context()))
+
+	assert.Equal(t, []string{"ev-new"}, f.pageIDs(t, time.Time{}, 1))
+	assert.Equal(t, []string{"ev-old"}, f.pageIDs(t, time.Time{}, 3),
+		"a page past an empty one is still walked and archived")
+	assert.Equal(t, base.Add(5*time.Second), f.watermark(),
+		"the watermark tracks the newest event across every walked page")
+	assert.Zero(t, f.ledger.Tally().SurfacesDropped)
+}
+
 func TestCollectTrailsResumeAppendsOnlyNewerEvents(t *testing.T) {
 	t.Parallel()
 

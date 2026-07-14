@@ -112,15 +112,6 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 	for page := 1; ; {
 		list, listErr := c.listPage(ctx, since, page)
 
-		// A page that lists cleanly but carries no items settles nothing. Its file
-		// name is keyed on the unchanged Since cursor, so writing it would settle
-		// that name; a later run, once events have arrived under the same cursor,
-		// would skip them as already done and lose them. Stop the walk with the
-		// watermark unmoved so the next run re-lists from here.
-		if listErr == nil && len(list.Items) == 0 {
-			break
-		}
-
 		// Keep only events strictly newer than the watermark, dropping the
 		// already-archived events the whole-second wire cursor re-lists when a walk
 		// resumes from a sub-second watermark.
@@ -131,9 +122,12 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 		}
 
 		// Write the page unless it lists cleanly but carries only already-archived
-		// events; skipping such a page avoids duplicating them under a fresh name.
-		// The trail's page order is unspecified, so a later page may still carry new
-		// events -- only the wholly empty page handled above ends the walk.
+		// events -- an empty page among them. Skipping such a page avoids
+		// duplicating events under a fresh name and settling an empty page under
+		// the unchanged cursor (a later run's events would then be skipped as
+		// already done and lost). The trail's page order is unspecified, so an
+		// empty page never ends the walk: only the pagination reporting no next
+		// page does, and a non-empty later page may still follow an empty one.
 		if listErr != nil || len(fresh) > 0 {
 			halt, err := c.archiveTrailPage(ctx, since, page, fresh, listErr)
 			if err != nil {
