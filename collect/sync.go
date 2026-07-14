@@ -223,6 +223,13 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 
 	inventory, err := e.remote.List(ctx, orgPrefix)
 	if err != nil {
+		if ctx.Err() != nil {
+			// A cancellation surfacing from the inventory list is the wind-down,
+			// not a sync failure: return without logging or counting, matching the
+			// evict and sync loops below.
+			return counters.stats()
+		}
+
 		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_inventory_error",
 			slog.String("prefix", orgPrefix),
 			slog.String("error", err.Error()),
@@ -235,6 +242,12 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 
 	sweep, err := e.classifyTree(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			// As above: a cancellation surfacing from the tree walk is the
+			// wind-down, not a sync failure.
+			return counters.stats()
+		}
+
 		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_walk_error",
 			slog.String("error", err.Error()),
 		)
