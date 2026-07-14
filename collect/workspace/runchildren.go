@@ -326,16 +326,19 @@ func (c *Collector) archiveRunEvents(ctx context.Context, project, ws string, ru
 func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string, run *tfe.Run) error {
 	st := c.env.Store()
 	relPath := st.RunFile(project, ws, run.ID, "policy-checks.json")
+	logsGate := st.RunFile(project, ws, run.ID, "policy-check-logs.ref")
 	runID := run.ID
 
-	// Skip the metered PolicyChecks.List once this run's checks and their logs
-	// have settled, so a long-running sibling that keeps the runs walk re-running
-	// does not re-list every already-archived run each pass. The logs share this
-	// run's own shard, so an errored log leaves policy-checks.json unsettled (it
-	// settles Done only after every log below) and ShouldFetch re-lists to
-	// recover it -- the same reason run-events.json needs no gate for its own
-	// errored state.
-	if !c.env.ShouldFetch(relPath) {
+	// Skip the metered PolicyChecks.List once this run's checks and every log have
+	// settled, so a long-running sibling that keeps the runs walk re-running does
+	// not re-list every already-archived run each pass. The checks file settles
+	// Done even with a log still errored, because logBlob records the failure and
+	// returns nil, so ShouldFetch(policy-checks.json) alone would skip the list and
+	// strand the errored log forever. Gate the skip on a run-scoped reference over
+	// the log paths too: while any log is unsettled the gate stays open and this
+	// re-lists to retry it, and once every log settles Done or Absent the gate
+	// clears and the list is skipped.
+	if !c.env.ShouldFetch(relPath) && !c.env.ReferencePending(logsGate) {
 		return nil
 	}
 
@@ -356,10 +359,14 @@ func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string,
 		return c.recordErrored(ctx, relPath, err)
 	}
 
+	logPaths := make([]string, 0, len(checks))
+
 	for _, pc := range checks {
 		checkID := pc.ID
+		logPath := st.RunFile(project, ws, run.ID, "policy-check-"+pc.ID+".log")
+		logPaths = append(logPaths, logPath)
 
-		logErr := c.logBlob(ctx, st.RunFile(project, ws, run.ID, "policy-check-"+pc.ID+".log"),
+		logErr := c.logBlob(ctx, logPath,
 			func(ctx context.Context, tc *tfe.Client) (io.Reader, error) {
 				return tc.PolicyChecks.Logs(ctx, checkID)
 			})
@@ -368,8 +375,14 @@ func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string,
 		}
 	}
 
-	// Settle policy-checks.json Done last, after every log, so the skip signal
-	// above never lands ahead of the logs it stands for.
+	// Mirror the per-check log settlement into the run-scoped gate before
+	// policy-checks.json settles Done: an errored log keeps the gate open so a
+	// later run re-lists and re-fetches it, while zero checks leaves no paths so
+	// the gate clears.
+	c.env.Reference(logsGate, logPaths...)
+
+	// Settle policy-checks.json Done last, after every log and the gate, so the
+	// skip signal above never lands ahead of the logs it stands for.
 	return c.object(ctx, relPath, checks)
 }
 

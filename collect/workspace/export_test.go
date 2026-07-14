@@ -47,6 +47,11 @@ func (c *Collector) ArchiveRunChildren(ctx context.Context, project, ws string, 
 	return c.archiveRunChildren(ctx, project, ws, run)
 }
 
+// ArchivePolicyChecks exposes archivePolicyChecks to the external test package.
+func (c *Collector) ArchivePolicyChecks(ctx context.Context, project, ws string, run *tfe.Run) error {
+	return c.archivePolicyChecks(ctx, project, ws, run)
+}
+
 // ArchiveStateVersion exposes archiveStateVersion to the external test package.
 func (c *Collector) ArchiveStateVersion(
 	ctx context.Context,

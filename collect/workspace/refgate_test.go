@@ -106,6 +106,94 @@ func TestArchiveRunEventsCleanRunLeavesNoGate(t *testing.T) {
 	assert.False(t, ok, "a clean run leaves no actors reference gate")
 }
 
+func TestArchivePolicyChecksReReadsLogsWhileGateOpen(t *testing.T) {
+	t.Parallel()
+
+	// A single policy check whose log did not settle on an earlier pass. The
+	// checks file is already settled Done -- logBlob records a log failure and
+	// returns nil, so the list settles regardless -- yet the log must still be
+	// retried. The union gate forces the metered list again so the log re-fetches,
+	// where ShouldFetch(policy-checks.json) alone would have stranded it.
+	var listHits, logHits int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/runs/run-1/policy-checks", func(w http.ResponseWriter, _ *http.Request) {
+		listHits++
+
+		writeJSONAPI(t, w, marshalJSONAPI(t, []*tfe.PolicyCheck{{ID: "pc1", Status: tfe.PolicyPasses}}))
+	})
+	// PolicyChecks.Logs re-reads the check for its status before fetching output.
+	mux.HandleFunc("/api/v2/policy-checks/pc1", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONAPI(t, w, marshalJSONAPI(t, &tfe.PolicyCheck{ID: "pc1", Status: tfe.PolicyPasses}))
+	})
+	mux.HandleFunc("/api/v2/policy-checks/pc1/output", func(w http.ResponseWriter, _ *http.Request) {
+		logHits++
+
+		_, werr := io.WriteString(w, "policy log bytes")
+		if werr != nil {
+			return
+		}
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+
+	checksPath := st.RunFile("proj", "ws", "run-1", "policy-checks.json")
+	logsGate := st.RunFile("proj", "ws", "run-1", "policy-check-logs.ref")
+	logPath := st.RunFile("proj", "ws", "run-1", "policy-check-pc1.log")
+
+	f.preSettle(checksPath)
+	f.ledger.MirrorReference(logsGate, false)
+	require.Equal(t, manifest.StatusPending, f.status(logsGate))
+
+	require.NoError(t, f.collector.ArchivePolicyChecks(t.Context(), "proj", "ws", &tfe.Run{ID: "run-1"}))
+
+	assert.Equal(t, 1, listHits, "a pending gate forces the list even when policy-checks.json is settled")
+	assert.Equal(t, 1, logHits, "the stranded log is re-fetched")
+	assert.Equal(t, manifest.StatusDone, f.status(logPath), "the recovered log is captured")
+	assert.Equal(t, manifest.StatusReferenceCleared, f.status(logsGate), "the gate clears once the log settles")
+	assert.Equal(t, manifest.StatusDone, f.status(checksPath), "the settled checks file is not regressed")
+}
+
+func TestArchivePolicyChecksCleanRunLeavesNoGate(t *testing.T) {
+	t.Parallel()
+
+	// On a clean run the check's log write succeeds, so mirroring a settled
+	// reference against an absent gate is a no-op: no *.ref entry is created, and a
+	// re-run skips the metered list rather than re-listing forever.
+	var listHits int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/runs/run-1/policy-checks", func(w http.ResponseWriter, _ *http.Request) {
+		listHits++
+
+		writeJSONAPI(t, w, marshalJSONAPI(t, []*tfe.PolicyCheck{{ID: "pc1", Status: tfe.PolicyPasses}}))
+	})
+	mux.HandleFunc("/api/v2/policy-checks/pc1", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONAPI(t, w, marshalJSONAPI(t, &tfe.PolicyCheck{ID: "pc1", Status: tfe.PolicyPasses}))
+	})
+	mux.HandleFunc("/api/v2/policy-checks/pc1/output", func(w http.ResponseWriter, _ *http.Request) {
+		_, werr := io.WriteString(w, "policy log bytes")
+		if werr != nil {
+			return
+		}
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+	run := &tfe.Run{ID: "run-1"}
+
+	require.NoError(t, f.collector.ArchivePolicyChecks(t.Context(), "proj", "ws", run))
+
+	assert.Equal(t, manifest.StatusDone, f.status(st.RunFile("proj", "ws", "run-1", "policy-check-pc1.log")))
+
+	_, ok := f.ledger.Entry(st.RunFile("proj", "ws", "run-1", "policy-check-logs.ref"))
+	assert.False(t, ok, "a clean run leaves no policy-check logs reference gate")
+
+	require.NoError(t, f.collector.ArchivePolicyChecks(t.Context(), "proj", "ws", run))
+	assert.Equal(t, 1, listHits, "a settled run with no open gate is not re-listed")
+}
+
 func TestArchiveConfigurationVersionTarballStrandsAndRecovers(t *testing.T) {
 	t.Parallel()
 
