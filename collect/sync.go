@@ -58,6 +58,11 @@ type syncCounters struct {
 	evicted       atomic.Int64
 	pruned        atomic.Int64
 	failed        atomic.Int64
+	// The monotonic count of files that reached an outcome (uploaded, skipped,
+	// evicted, or failed), driving the progress line: each Add returns a unique
+	// value, so a decade marker fires exactly once, unlike a sum of the
+	// per-category loads that could step over the interval.
+	settled atomic.Int64
 }
 
 // stats converts the accumulator into the returned [SyncStats].
@@ -70,12 +75,6 @@ func (c *syncCounters) stats() SyncStats {
 		Pruned:        int(c.pruned.Load()),
 		Failed:        int(c.failed.Load()),
 	}
-}
-
-// processed returns how many files reached an outcome, the progress-line
-// counter.
-func (c *syncCounters) processed() int64 {
-	return c.uploaded.Load() + c.skipped.Load() + c.evicted.Load() + c.failed.Load()
 }
 
 // OffloadFile moves the local file at relPath to the remote store: it uploads
@@ -264,7 +263,7 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 			counters.evicted.Add(1)
 		}
 
-		e.logSyncProgress(ctx, counters)
+		e.recordSyncProgress(ctx, counters)
 	}
 
 	e.syncFiles(ctx, sweep.sync, inventory, counters)
@@ -449,7 +448,7 @@ func (e *Env) syncFiles(
 			}
 
 			e.syncFile(ctx, relPath, inventory, counters)
-			e.logSyncProgress(ctx, counters)
+			e.recordSyncProgress(ctx, counters)
 
 			return nil
 		})
@@ -658,12 +657,14 @@ func evictedSurface(relPath string) bool {
 // syncProgressInterval is how many settled files pass between progress lines.
 const syncProgressInterval = 1000
 
-// logSyncProgress emits a progress line every [syncProgressInterval] settled
-// files; the close sweep runs after the live progress reporter has stopped,
-// so slog lines are its only visibility.
-func (e *Env) logSyncProgress(ctx context.Context, counters *syncCounters) {
-	n := counters.processed()
-	if n == 0 || n%syncProgressInterval != 0 {
+// recordSyncProgress counts one settled file and emits a progress line every
+// [syncProgressInterval]th one. It is called exactly once per settled file, so
+// the monotonic settled counter it advances lands each decade marker exactly
+// once. The close sweep runs after the live progress reporter has stopped, so
+// slog lines are its only visibility.
+func (e *Env) recordSyncProgress(ctx context.Context, counters *syncCounters) {
+	n := counters.settled.Add(1)
+	if n%syncProgressInterval != 0 {
 		return
 	}
 
