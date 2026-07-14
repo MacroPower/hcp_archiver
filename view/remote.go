@@ -36,7 +36,10 @@ type remoteClientFactory func(ctx context.Context, cfg remote.Config) (*remote.C
 // a local-only archive never touches a client or a credential chain. The
 // client and each bundle's parsed central directory are built lazily on first
 // use and cached for the session; reads run on Bubble Tea command goroutines,
-// so the cache is mutex-guarded.
+// so the cache is mutex-guarded. A bundle build (a Head and a central-directory
+// parse over ranged GETs) runs outside the mutex behind a per-key readiness
+// signal, so a read of one cached bundle never waits on another's in-flight
+// build and one key is built at most once.
 type orgRemote struct {
 	ctx        context.Context //nolint:containedctx // Reads run inside io.ReaderAt calls, which take none.
 	newClient  remoteClientFactory
@@ -46,14 +49,21 @@ type orgRemote struct {
 	orgName    string
 	cfg        remote.Config
 	mu         sync.Mutex
-	clientOnce bool
+	clientOnce sync.Once
 }
 
 // remoteBundle is one evicted bundle's cached read state: its parsed central
 // directory and the ranged reader its member spans are fetched through.
+//
+// The ready channel is closed once the build settles; a caller finding an entry
+// in the map waits on it, then reads err (a failed build) or zr and ra (a proven
+// one). A failed build's entry is removed from the map after ready closes, so a
+// waiter that captured it still sees err while the next caller rebuilds.
 type remoteBundle struct {
-	zr *zip.Reader
-	ra io.ReaderAt
+	zr    *zip.Reader
+	ra    io.ReaderAt
+	ready chan struct{}
+	err   error
 }
 
 // loadOrgRemote reads the organization root's remote marker into an
@@ -108,23 +118,65 @@ func (r *orgRemote) readMember(relBundle, relPath string) ([]byte, error) {
 }
 
 // bundle returns the cached read state for an evicted bundle, building it on
-// first use: one Head for size and storage class, then a central-directory
-// parse over a handful of ranged GETs. An object parked unrestored in an
-// archival storage class surfaces [remote.ErrRestoreRequired] rather than a
-// read that can never succeed.
-//
-//nolint:contextcheck // Only the stored browse context exists behind ReaderAt.
+// first use. A cached or in-flight entry is served from the map; an absent one
+// is claimed with a placeholder and built outside the mutex, so a read of a
+// different cached bundle never waits on this build and every key is built at
+// most once. On a build error the placeholder is dropped so the next caller
+// retries: failures are not cached.
 func (r *orgRemote) bundle(relBundle string) (*remoteBundle, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	if b, ok := r.bundles[relBundle]; ok {
+		r.mu.Unlock()
+
+		// An in-flight build's ready is still open; a completed one's is closed,
+		// so this returns at once. Either way the fields are safe to read after.
+		<-b.ready
+
+		if b.err != nil {
+			return nil, b.err
+		}
+
 		return b, nil
 	}
 
-	client, err := r.clientLocked()
+	b := &remoteBundle{ready: make(chan struct{})}
+	r.bundles[relBundle] = b
+	r.mu.Unlock()
+
+	zr, ra, err := r.buildBundle(relBundle)
 	if err != nil {
+		// Wake any same-key waiter that captured this entry, then drop it so the
+		// next caller rebuilds. The order matters: closing ready before the delete
+		// is what lets a waiter read err rather than block forever.
+		b.err = err
+		close(b.ready)
+
+		r.mu.Lock()
+		delete(r.bundles, relBundle)
+		r.mu.Unlock()
+
 		return nil, err
+	}
+
+	b.zr = zr
+	b.ra = ra
+	close(b.ready)
+
+	return b, nil
+}
+
+// buildBundle probes and parses one evicted bundle: one Head for size and
+// storage class, then a central-directory parse over a handful of ranged GETs.
+// An object parked unrestored in an archival storage class surfaces
+// [remote.ErrRestoreRequired] rather than a read that can never succeed. It runs
+// outside [orgRemote.mu] so distinct bundles build in parallel.
+//
+//nolint:contextcheck // Only the stored browse context exists behind ReaderAt.
+func (r *orgRemote) buildBundle(relBundle string) (*zip.Reader, io.ReaderAt, error) {
+	client, err := r.clientBuild()
+	if err != nil {
+		return nil, nil, err
 	}
 
 	key := r.cfg.Key(r.orgName, relBundle)
@@ -134,11 +186,11 @@ func (r *orgRemote) bundle(relBundle string) (*remoteBundle, error) {
 
 	info, err := client.Head(headCtx, key)
 	if err != nil {
-		return nil, fmt.Errorf("probe remote bundle: %w", err)
+		return nil, nil, fmt.Errorf("probe remote bundle: %w", err)
 	}
 
 	if info.Archived && !info.Restored {
-		return nil, fmt.Errorf("%w: %s (storage class %s); request a restore, wait for it to complete, and retry",
+		return nil, nil, fmt.Errorf("%w: %s (storage class %s); request a restore, wait for it to complete, and retry",
 			remote.ErrRestoreRequired, key, info.StorageClass)
 	}
 
@@ -149,28 +201,23 @@ func (r *orgRemote) bundle(relBundle string) (*remoteBundle, error) {
 
 	zr, err := zip.NewReader(ra, info.Size)
 	if err != nil {
-		return nil, fmt.Errorf("parse remote bundle %q: %w", key, err)
+		return nil, nil, fmt.Errorf("parse remote bundle %q: %w", key, err)
 	}
 
-	b := &remoteBundle{zr: zr, ra: ra}
-	r.bundles[relBundle] = b
-
-	return b, nil
+	return zr, ra, nil
 }
 
-// clientLocked returns the lazily-built remote client. The build is
-// attempted once per session: a failure (a bad marker, no credentials) is
-// remembered and returned on every subsequent read rather than re-probing
-// the credential chain per keypress.
+// clientBuild returns the lazily-built remote client. The build runs once per
+// session behind a [sync.Once], so it needs no external lock and never
+// re-probes the credential chain per read: a failure (a bad marker, no
+// credentials) is remembered and returned on every subsequent read.
 //
 // The stored browse context is the intended parent for the build: callers
 // sit behind [io.ReaderAt]-shaped interfaces that carry no context.
 //
 //nolint:contextcheck // See above; there is no caller context to pass.
-func (r *orgRemote) clientLocked() (*remote.Client, error) {
-	if !r.clientOnce {
-		r.clientOnce = true
-
+func (r *orgRemote) clientBuild() (*remote.Client, error) {
+	r.clientOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(r.ctx, remoteReadTimeout)
 		defer cancel()
 
@@ -180,7 +227,7 @@ func (r *orgRemote) clientLocked() (*remote.Client, error) {
 		} else {
 			r.client = client
 		}
-	}
+	})
 
 	if r.clientErr != nil {
 		return nil, r.clientErr
