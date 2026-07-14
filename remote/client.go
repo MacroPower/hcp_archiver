@@ -369,10 +369,14 @@ func (c *Client) List(ctx context.Context, prefix string) (map[string]ListedObje
 // deleteBatchSize is the most keys one DeleteObjects request accepts.
 const deleteBatchSize = 1000
 
-// Delete removes the objects at keys, batched a thousand per request. A key
-// that does not exist deletes as a no-op, per S3 semantics; a per-key error
-// the store reports fails the call.
-func (c *Client) Delete(ctx context.Context, keys []string) error {
+// Delete removes the objects at keys, batched a thousand per request, and
+// returns how many keys it durably removed. A key that does not exist deletes
+// as a no-op, per S3 semantics; a per-key error the store reports stops the
+// call, and the count reflects only the keys acknowledged removed before it, so
+// a caller's tally stays truthful across a partial delete.
+func (c *Client) Delete(ctx context.Context, keys []string) (int, error) {
+	deleted := 0
+
 	for batch := range slices.Chunk(keys, deleteBatchSize) {
 		ids := make([]types.ObjectIdentifier, 0, len(batch))
 		for _, key := range batch {
@@ -384,18 +388,20 @@ func (c *Client) Delete(ctx context.Context, keys []string) error {
 			Delete: &types.Delete{Objects: ids, Quiet: aws.Bool(true)},
 		})
 		if err != nil {
-			return fmt.Errorf("delete %d keys: %w", len(batch), err)
+			return deleted, fmt.Errorf("delete %d keys: %w", len(batch), err)
 		}
 
 		if len(out.Errors) > 0 {
 			first := out.Errors[0]
 
-			return fmt.Errorf("delete %d of %d keys (first: %s: %s)",
+			return deleted + len(batch) - len(out.Errors), fmt.Errorf("delete %d of %d keys (first: %s: %s)",
 				len(out.Errors), len(batch), aws.ToString(first.Key), aws.ToString(first.Message))
 		}
+
+		deleted += len(batch)
 	}
 
-	return nil
+	return deleted, nil
 }
 
 // etagMD5 parses an ETag into the raw MD5 digest it records for a

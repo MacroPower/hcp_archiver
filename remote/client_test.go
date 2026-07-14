@@ -346,7 +346,9 @@ func TestDelete(t *testing.T) {
 	fake.SetObject("a", remotetest.Object{Data: []byte("x")})
 	fake.SetObject("b", remotetest.Object{Data: []byte("y")})
 
-	require.NoError(t, client.Delete(t.Context(), []string{"a", "b", "absent"}))
+	deleted, err := client.Delete(t.Context(), []string{"a", "b", "absent"})
+	require.NoError(t, err)
+	assert.Equal(t, 3, deleted, "every acknowledged key counts, including the no-op absent one")
 
 	assert.Empty(t, fake.Keys(), "named keys should be removed")
 	assert.Equal(t, []string{"a", "b", "absent"}, fake.Deleted(),
@@ -365,7 +367,9 @@ func TestDeleteBatches(t *testing.T) {
 		fake.SetObject(keys[i], remotetest.Object{Data: []byte("x")})
 	}
 
-	require.NoError(t, client.Delete(t.Context(), keys))
+	deleted, err := client.Delete(t.Context(), keys)
+	require.NoError(t, err)
+	assert.Equal(t, 1001, deleted, "the count spans both batches")
 
 	assert.Empty(t, fake.Keys(), "every key should be removed across batches")
 	assert.Equal(t, 2, fake.DeleteCalls())
@@ -377,5 +381,7 @@ func TestDeleteEmpty(t *testing.T) {
 	client, fake := newClient(t, remote.Config{})
 	fake.DeleteErr = errors.New("must not be called")
 
-	require.NoError(t, client.Delete(t.Context(), nil), "no keys means no requests")
+	deleted, err := client.Delete(t.Context(), nil)
+	require.NoError(t, err, "no keys means no requests")
+	assert.Zero(t, deleted)
 }

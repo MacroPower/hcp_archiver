@@ -624,18 +624,23 @@ func (e *Env) pruneRemote(
 
 	slices.Sort(stale)
 
-	err := e.remote.Delete(ctx, stale)
+	deleted, err := e.remote.Delete(ctx, stale)
+
+	// Count what was actually removed before crediting failure, so a partial
+	// delete (early batches succeed, a later one errors) still reports the keys
+	// it pruned rather than zero.
+	counters.pruned.Add(int64(deleted))
+
 	if err != nil {
 		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_prune_error",
 			slog.Int("keys", len(stale)),
+			slog.Int("deleted", deleted),
 			slog.String("error", err.Error()),
 		)
 		counters.failed.Add(1)
 
 		return
 	}
-
-	counters.pruned.Add(int64(len(stale)))
 }
 
 // evictedSurface reports whether a remote-only key has an eviction shape: a
