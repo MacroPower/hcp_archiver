@@ -343,8 +343,10 @@ func New(opts ...Option) (*Config, error) {
 //
 // It returns [ErrMissingToken], [ErrMissingOutputDir],
 // [ErrInvalidRunHistoryCount], [ErrInvalidRunHistoryAge],
-// [ErrInvalidProgressMode], or [ErrInvalidProgressInterval] wrapped with
-// context on the first problem found.
+// [ErrInvalidProgressMode], [ErrInvalidProgressInterval], or, when a remote
+// section is configured, [ErrMissingRemoteBucket], [ErrInvalidRemotePartSize],
+// or [ErrInvalidRemoteConcurrency], wrapped with context on the first problem
+// found.
 func (c *Config) Validate() error {
 	if c.Token == "" {
 		return ErrMissingToken
