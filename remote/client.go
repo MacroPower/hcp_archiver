@@ -2,7 +2,8 @@ package remote
 
 import (
 	"context"
-	"crypto/md5" //nolint:gosec // Only sizes the S3 ETag algorithm's digest, not a security control.
+	"crypto/md5"    //nolint:gosec // Only sizes the S3 ETag algorithm's digest, not a security control.
+	"crypto/sha256" //nolint:gosec // Only sizes the checksum digest, not a security control.
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -220,16 +221,16 @@ func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
 
 // fullObjectChecksum decodes a store-reported SHA-256 checksum (S3 wire form,
 // base64) into raw digest bytes, only when it digests the whole object: an
-// absent checksum, a multipart composite ("<base64>-N"), or an undecodable
-// value yields nil, so a caller never compares one against a locally
-// computed digest.
+// absent checksum, a multipart composite ("<base64>-N"), an undecodable value,
+// or one that does not decode to a full 32-byte digest yields nil, so a caller
+// never compares an uninterpretable checksum against a locally computed digest.
 func fullObjectChecksum(checksum *string) []byte {
 	if checksum == nil || strings.Contains(*checksum, "-") {
 		return nil
 	}
 
 	sum, err := base64.StdEncoding.DecodeString(*checksum)
-	if err != nil {
+	if err != nil || len(sum) != sha256.Size {
 		return nil
 	}
 

@@ -31,9 +31,9 @@ func MD5Hex(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// sha256Base64 returns the base64 SHA-256 of data, the S3 wire form of a
-// full-object checksum.
-func sha256Base64(data []byte) string {
+// SHA256Base64 returns the base64 SHA-256 of data, the S3 wire form of a
+// full-object checksum; tests compose expected Head checksums with it.
+func SHA256Base64(data []byte) string {
 	sum := sha256.Sum256(data)
 
 	return base64.StdEncoding.EncodeToString(sum[:])
@@ -293,7 +293,7 @@ func (f *Fake) PutObject(
 	// A single-request write records a full-object checksum, the property the
 	// sync gate's Head comparison rests on.
 	if in.ChecksumAlgorithm == types.ChecksumAlgorithmSha256 {
-		obj.ChecksumSHA256 = sha256Base64(data)
+		obj.ChecksumSHA256 = SHA256Base64(data)
 	}
 
 	f.objects[*in.Key] = obj
@@ -393,7 +393,7 @@ func (f *Fake) CompleteMultipartUpload(
 	}
 
 	if up.checksum == string(types.ChecksumAlgorithmSha256) {
-		obj.ChecksumSHA256 = fmt.Sprintf("%s-%d", sha256Base64(data), len(up.parts))
+		obj.ChecksumSHA256 = fmt.Sprintf("%s-%d", SHA256Base64(data), len(up.parts))
 	}
 
 	f.objects[up.key] = obj

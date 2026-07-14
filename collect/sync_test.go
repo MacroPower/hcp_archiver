@@ -247,11 +247,12 @@ func TestSyncArchiveIncrementalGate(t *testing.T) {
 		},
 		"an uncomparable ETag falls back to the Head checksum": {
 			// A composite ETag with a stale same-length body: only the store's
-			// recorded SHA-256 can tell them apart.
+			// recorded SHA-256 can tell them apart, so it must be a real 32-byte
+			// digest of the stale remote body, not a placeholder.
 			remoteObj: &remotetest.Object{
 				Data:           []byte(`{"org":"evil"}`),
 				ETag:           "0123456789abcdef0123456789abcdef-2",
-				ChecksumSHA256: "c3RhbGU=",
+				ChecksumSHA256: remotetest.SHA256Base64([]byte(`{"org":"evil"}`)),
 			},
 			wantUpload: true,
 			wantHeads:  1,

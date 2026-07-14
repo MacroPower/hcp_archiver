@@ -260,7 +260,8 @@ func TestPutDisableChecksums(t *testing.T) {
 func TestHeadChecksum(t *testing.T) {
 	t.Parallel()
 
-	digest := []byte("full object digest bytes")
+	// A full-object SHA-256 checksum decodes to exactly 32 raw bytes.
+	digest := []byte("0123456789abcdef0123456789abcdef")
 	wire := base64.StdEncoding.EncodeToString(digest)
 
 	tests := map[string]struct {
@@ -279,6 +280,15 @@ func TestHeadChecksum(t *testing.T) {
 		},
 		"undecodable checksum is blanked": {
 			obj: remotetest.Object{Data: []byte("ab"), ChecksumSHA256: "not base64!"},
+		},
+		"decodable but wrong-length checksum is blanked": {
+			// A value that base64-decodes cleanly but not to a 32-byte digest is
+			// uninterpretable as a SHA-256, so it must not reach a caller that
+			// would compare it against a locally computed digest.
+			obj: remotetest.Object{
+				Data:           []byte("ab"),
+				ChecksumSHA256: base64.StdEncoding.EncodeToString([]byte("too short")),
+			},
 		},
 	}
 
