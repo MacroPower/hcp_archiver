@@ -2,11 +2,13 @@ package collect
 
 import (
 	"context"
+	"log/slog"
 	"slices"
 	"sync"
 	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/store"
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
@@ -52,7 +54,11 @@ type Env struct {
 	client             *tfeclient.Client
 	store              *store.Store
 	ledger             *manifest.Ledger
+	remote             *remote.Client
+	logger             *slog.Logger
 	idOwners           map[string]map[string]string
+	remoteOrg          string
+	remoteCfg          remote.Config
 	idMu               sync.Mutex
 	blobRetries        int
 	blobRetryDelay     time.Duration
@@ -64,6 +70,8 @@ type Env struct {
 // Options of this type:
 //   - [WithAbsentConfirm]
 //   - [WithBlobRetry]
+//   - [WithLogger]
+//   - [WithRemote]
 //   - [WithTarget]
 type Option func(*Env)
 
@@ -100,6 +108,30 @@ func WithTarget(target string) Option {
 	}
 }
 
+// WithRemote enables offloading of sealed cold bundles: client reaches the
+// S3-compatible store, and cfg with orgName compose the object keys through
+// [Env.RemoteKey]. A nil client leaves offloading disabled. It returns an
+// [Option].
+func WithRemote(client *remote.Client, cfg remote.Config, orgName string) Option {
+	return func(e *Env) {
+		e.remote = client
+		e.remoteCfg = cfg
+		e.remoteOrg = orgName
+	}
+}
+
+// WithLogger sets the structured logger collectors report non-fatal,
+// per-object conditions through (a bundle upload, an eviction warning),
+// overriding [slog.Default]. A nil logger keeps the default. It returns an
+// [Option].
+func WithLogger(logger *slog.Logger) Option {
+	return func(e *Env) {
+		if logger != nil {
+			e.logger = logger
+		}
+	}
+}
+
 // NewEnv creates a new [Env] binding client, st, and ledger.
 //
 // The archiver builds one Env per organization from that org's client, store,
@@ -119,6 +151,10 @@ func NewEnv(client *tfeclient.Client, st *store.Store, ledger *manifest.Ledger, 
 		opt(e)
 	}
 
+	if e.logger == nil {
+		e.logger = slog.Default()
+	}
+
 	return e
 }
 
@@ -135,6 +171,26 @@ func (e *Env) Client() *tfeclient.Client {
 // so every write also records a ledger entry.
 func (e *Env) Store() *store.Store {
 	return e.store
+}
+
+// Remote returns the client for the S3-compatible store sealed bundles are
+// offloaded to, or nil when offloading is disabled; the nil return is the
+// gate every remote code path checks first.
+func (e *Env) Remote() *remote.Client {
+	return e.remote
+}
+
+// RemoteKey composes the object key for an archive-relative path, delegating
+// to [remote.Config.Key] over the environment's organization so the key
+// scheme has exactly one owner.
+func (e *Env) RemoteKey(relPath string) string {
+	return e.remoteCfg.Key(e.remoteOrg, relPath)
+}
+
+// Log returns the structured logger collectors report non-fatal conditions
+// through, never nil.
+func (e *Env) Log() *slog.Logger {
+	return e.logger
 }
 
 // SetTarget updates the current progress target (org, project, or workspace) so

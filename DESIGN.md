@@ -84,6 +84,9 @@ archive/<org>/
   .ledger/                          # sharded per-object ledger + run records &
                                      #   watermarks driving resume / re-run
                                      #   (see Behavior decisions)
+  .remote.json                      # only with remote offload configured: the
+                                     #   read-relevant backend settings (bucket,
+                                     #   prefix, endpoint, region, path style)
 
   # --- org-level objects (not scoped to a single project) ---
   teams/<id>/
@@ -542,6 +545,70 @@ matches the ledger signature) and the sidecar is written, so the loose copy stay
 canonical until the bundle is durable and verified; an interrupted seal leaves the
 loose files canonical and simply re-runs.
 
+### Remote offload of sealed bundles (optional)
+
+With a `remote:` block configured, sealed bundles do not stay on disk: as each
+workspace seals, an eviction sweep uploads every verified local bundle to an
+S3-compatible object store (AWS S3, MinIO, R2, Ceph RGW via endpoint +
+path-style settings) and deletes the local zip once the remote copy is
+confirmed. Peak local disk is then bounded to the search layer plus in-flight
+unsealed work, which is what lets a 5k+ workspace org's archive run on a
+machine that could never hold the whole thing at once. Only the cold bundles
+move; the search layer — loose files, roll-ups, ledger shards, and **every
+sidecar index** — stays local, so browsing and grep remain offline
+operations.
+
+Object keys mirror the local tree: `<prefix>/<org>/<archive-relative path>`,
+so a bucket listing reads like the archive and the sidecar's `bundle` field
+still names the object. Credentials come only from the AWS SDK default chain;
+the YAML carries endpoint/bucket/class tuning, never a secret. Uploads stream
+with a server-validated SHA-256 checksum (multipart for large state bundles),
+and the configured storage class is set on first write, so a bundle can land
+directly in an archival class without a transition charge.
+
+The sweep extends verify-before-delete one hop without any cross-run state:
+every step is derived from three observable facts — is the local zip present,
+is its sidecar present, does `HeadObject` answer — so each crash point
+self-heals on the next run:
+
+- **zip, no sidecar** (died mid-`seal.Seal`): the zip is unverified and the
+  loose files are still canonical. The sweep never uploads it; the next seal
+  writes a fresh generation and the orphan leaks one number, as today.
+- **zip + sidecar, no remote object** (sealed, upload never ran or died
+  midway; an incomplete multipart upload is not an object): upload, confirm
+  with a Head, size-check, then delete the local zip. A bucket lifecycle rule
+  aborting incomplete multipart uploads mops up parts a crash strands.
+- **zip + sidecar + remote object** (died after upload, before the local
+  delete): the Head finds the copy, the size matches, and the zip is deleted
+  without re-uploading.
+- **sidecar only** (eviction finished): nothing local to sweep; done.
+
+The bundle's bytes were already read back and hash-verified locally by the
+seal, and the upload's checksum is validated server-side on write, so
+Head-existence plus size is the egress-free verify gate (stores that reject
+flexible checksums can set `checksums: false`, which reduces the gate to
+existence + size). Failure to evict one bundle is a warning, never an abort:
+the local zip simply stays canonical, exactly as if no remote were
+configured. Because eviction removes zips but never sidecars, generation
+numbering takes its maximum over both the `*.zip` and `*.zip.sidecar.ndjson`
+names — a zip-only scan would restart at gen0001 once bundles left disk and
+overwrite remote history at the same key.
+
+Migration needs no special mode: pointing a `remote:` block at an existing
+all-local archive makes the next run's sweep upload and evict every
+pre-existing bundle that has a sidecar.
+
+Each org's root gains a small `.remote.json` marker recording the
+read-relevant backend settings (bucket, prefix, endpoint, region, path
+style). `view` reads it to serve a sealed member whose zip is no longer on
+disk: it Heads the object, parses the zip central directory over a handful of
+ranged GETs (cached per session), then fetches the member's compressed span
+in **one** ranged GET and decompresses locally — never the whole bundle. An
+object tiered into GLACIER or DEEP_ARCHIVE and not currently restored
+surfaces a clear "restore required" status message rather than a hang; after
+an operator-requested restore completes, the same member read works
+unchanged. A local-only archive has no marker and never constructs a client.
+
 ### Container format and compression
 
 Bundles are `zip` (Zip64), not `.tar.gz`. A zip's central directory is a member
@@ -564,9 +631,11 @@ irreplaceable state raw costs pennies a month.
 
 ### Mapping onto object-store storage classes
 
-The tool writes only local files; it performs no object-store uploads and sets no
-storage class. But the layout is deliberately split so an operator who backs the
-archive up to an object store can point one lifecycle rule at each kind of file,
+By default the tool writes only local files; with a `remote:` block it also
+uploads the sealed cold bundles itself (Remote offload above), setting the
+configured storage class on first write. Either way the layout is
+deliberately split so that one lifecycle rule covers each kind of file —
+whether the tool's own offload or an operator's backup performs the upload —
 and so that an audit proceeds the same way on disk: narrow first, then read one
 thing. The **search layer** (the loose mutable workspace files, `run.json`, the
 NDJSON roll-ups, every sidecar index, and the ledger shards) is small, listable,
@@ -589,8 +658,10 @@ that are rarely read.
 ### What stays loose vs. what seals
 
 The tool writes every row below as local files; the "Backup tier" column is the
-object-store storage class an operator's own backup lifecycle would map each kind
-onto, not something the tool sets.
+object-store storage class each kind maps onto. For the cold-bundle row the
+tool applies it itself when a `remote:` block sets `storageClass`; the other
+rows stay local, and their tier is what an operator's own backup lifecycle
+would set.
 
 | Tier                      | Objects                                                                                                                                                           | Backup tier  | Form                                                              |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------- |
@@ -652,9 +723,14 @@ generated from the Go type and embedded in the binary.
   empty, and with both set a workspace must satisfy both), a `runHistory`
   block bounding each workspace's archived run history
   (`count` / `age`; whichever admits more history wins; unlimited by
-  default), and a `scope`
+  default), a `scope`
   block of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
-  `registryDetail`, `auditTrail`), each off by default.
+  `registryDetail`, `auditTrail`), each off by default, and a `remote`
+  block enabling offload of sealed cold bundles to an S3-compatible store
+  (`bucket` required; optional `prefix`, `endpoint`, `region`,
+  `forcePathStyle`, `storageClass`, `partSize`, `concurrency`, and
+  `checksums: false` for stores that reject flexible-checksum headers).
+  Credentials are never in the file; the AWS SDK default chain supplies them.
 
 ## Packaging
 

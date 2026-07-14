@@ -60,6 +60,9 @@ type File struct {
 	// Workspaces limits the run to the named workspaces within each archived
 	// organization. An empty list archives every workspace.
 	Workspaces []string `json:"workspaces,omitempty" jsonschema:"title=Workspaces"`
+	// Remote offloads sealed cold bundles to an S3-compatible object store;
+	// unset keeps the whole archive on local disk.
+	Remote FileRemote `json:"remote,omitzero" jsonschema:"title=Remote"`
 	// RunHistory bounds how much of each workspace's run history is archived;
 	// unset archives every run.
 	RunHistory FileRunHistory `json:"runHistory,omitzero" jsonschema:"title=Run History"`
@@ -101,6 +104,66 @@ type FileScope struct {
 	RegistryDetail bool `json:"registryDetail,omitempty" jsonschema:"title=Registry Detail"`
 	// AuditTrail enables archiving of the audit trail.
 	AuditTrail bool `json:"auditTrail,omitempty" jsonschema:"title=Audit Trail"`
+}
+
+// FileRemote offloads sealed cold bundles (a workspace's logs and state
+// zips) to an S3-compatible object store as each workspace seals, bounding
+// local disk to the search layer plus in-flight work. Setting any field
+// requires Bucket; leaving the whole section unset keeps the archive
+// entirely local. Credentials are never configured here: the client
+// authenticates through the AWS SDK default chain (environment variables,
+// shared configuration, an instance or task role).
+type FileRemote struct {
+	// Bucket names the bucket sealed bundles are uploaded to; required when
+	// any other remote field is set.
+	Bucket string `json:"bucket,omitempty" jsonschema:"title=Bucket"`
+	// Prefix is an optional key prefix bundles are stored under.
+	Prefix string `json:"prefix,omitempty" jsonschema:"title=Prefix"`
+	// Endpoint overrides the S3 endpoint URL for compatible stores (MinIO,
+	// R2, Ceph RGW); empty resolves the AWS default for the region.
+	Endpoint string `json:"endpoint,omitempty" jsonschema:"title=Endpoint"`
+	// Region is the bucket's region; empty defers to the SDK default chain.
+	Region string `json:"region,omitempty" jsonschema:"title=Region"`
+	// Checksums toggles the flexible-checksum headers the server validates
+	// uploads with, on by default. Turn them off only for a compatible store
+	// that rejects them; without checksums the remote verify gate is
+	// existence and size alone.
+	Checksums *bool `json:"checksums,omitempty" jsonschema:"title=Checksums,default=true"`
+	// StorageClass is the storage class bundles are written with; empty
+	// takes the store's default. Any class the store accepts is allowed, so
+	// compatible stores' custom classes work; the examples are the AWS ones.
+	StorageClass string `json:"storageClass,omitempty" jsonschema:"title=Storage Class,examples=STANDARD|STANDARD_IA|GLACIER_IR|GLACIER|DEEP_ARCHIVE"`
+	// PartSize is the multipart upload part size in bytes; zero takes the
+	// transfer manager's default.
+	PartSize int64 `json:"partSize,omitempty" jsonschema:"title=Part Size,minimum=0"`
+	// Concurrency is the number of upload parts in flight per bundle; zero
+	// takes the transfer manager's default.
+	Concurrency int `json:"concurrency,omitempty" jsonschema:"title=Concurrency,minimum=0"`
+	// ForcePathStyle addresses the bucket as a path segment rather than a
+	// virtual host, the shape MinIO and Ceph RGW expect.
+	ForcePathStyle bool `json:"forcePathStyle,omitempty" jsonschema:"title=Force Path Style"`
+}
+
+// IsZero reports whether the whole remote section was left unset, which
+// disables offloading.
+func (fr FileRemote) IsZero() bool {
+	return fr == FileRemote{}
+}
+
+// RemoteConfig resolves the section into the [RemoteConfig] passed to
+// [WithRemote], defaulting checksums on when the field is omitted.
+func (fr FileRemote) RemoteConfig() RemoteConfig {
+	return RemoteConfig{
+		Bucket:           fr.Bucket,
+		Prefix:           fr.Prefix,
+		Endpoint:         fr.Endpoint,
+		Region:           fr.Region,
+		StorageClass:     fr.StorageClass,
+		PartSize:         fr.PartSize,
+		Concurrency:      fr.Concurrency,
+		ForcePathStyle:   fr.ForcePathStyle,
+		DisableChecksums: fr.Checksums != nil && !*fr.Checksums,
+	}
 }
 
 // DefaultFile returns a [*File] populated with the package defaults, used when
@@ -202,6 +265,12 @@ func (f File) Validate() error {
 		if err != nil {
 			return err
 		}
+	}
+
+	if !f.Remote.IsZero() && f.Remote.Bucket == "" {
+		return niceyaml.NewError("remote bucket is required when any remote field is set",
+			niceyaml.WithPath(paths.Root().Child("remote").Value()),
+		)
 	}
 
 	return nil

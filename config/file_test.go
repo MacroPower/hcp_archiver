@@ -105,6 +105,55 @@ func TestLoadFile(t *testing.T) {
 				assert.Zero(t, file.RunHistory.Age)
 			},
 		},
+		"remote section decodes": {
+			yaml: "remote:\n" +
+				"  bucket: my-archive\n" +
+				"  prefix: hcp\n" +
+				"  endpoint: https://s3.example.com\n" +
+				"  region: us-east-1\n" +
+				"  forcePathStyle: true\n" +
+				"  storageClass: DEEP_ARCHIVE\n" +
+				"  checksums: false\n" +
+				"  partSize: 67108864\n" +
+				"  concurrency: 4\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.False(t, file.Remote.IsZero())
+				assert.Equal(t, config.RemoteConfig{
+					Bucket:           "my-archive",
+					Prefix:           "hcp",
+					Endpoint:         "https://s3.example.com",
+					Region:           "us-east-1",
+					StorageClass:     "DEEP_ARCHIVE",
+					PartSize:         67108864,
+					Concurrency:      4,
+					ForcePathStyle:   true,
+					DisableChecksums: true,
+				}, file.Remote.RemoteConfig())
+			},
+		},
+		"remote checksums default on when omitted": {
+			yaml: "remote:\n  bucket: my-archive\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.False(t, file.Remote.RemoteConfig().DisableChecksums)
+			},
+		},
+		"remote storage class is a soft enum": {
+			yaml: "remote:\n  bucket: my-archive\n  storageClass: CUSTOM_TIER\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.Equal(t, "CUSTOM_TIER", file.Remote.StorageClass,
+					"compatible stores accept arbitrary classes, so the schema must not reject one")
+			},
+		},
+		"remote left unset disables offloading": {
+			yaml: "organizations:\n  - acme\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.True(t, file.Remote.IsZero())
+			},
+		},
 	}
 
 	for name, tc := range tests {
@@ -165,6 +214,15 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 		},
 		"run history age must not be negative": {
 			yaml: "runHistory:\n  age: -24h\n",
+		},
+		"remote without a bucket": {
+			yaml: "remote:\n  prefix: hcp\n",
+		},
+		"negative remote part size": {
+			yaml: "remote:\n  bucket: b\n  partSize: -1\n",
+		},
+		"negative remote concurrency": {
+			yaml: "remote:\n  bucket: b\n  concurrency: -1\n",
 		},
 	}
 

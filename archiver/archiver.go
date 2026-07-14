@@ -15,6 +15,7 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/collect"
 	"go.jacobcolvin.com/hcp_archiver/config"
 	"go.jacobcolvin.com/hcp_archiver/progress"
+	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
@@ -67,6 +68,7 @@ var (
 type Archiver struct {
 	cfg           *config.Config
 	client        *tfeclient.Client
+	remote        *remote.Client
 	logger        *slog.Logger
 	w             io.Writer
 	logSink       progress.LogSink
@@ -207,6 +209,15 @@ func (a *Archiver) Run(ctx context.Context) error {
 	)
 	if err != nil {
 		return fmt.Errorf("build client: %w", err)
+	}
+
+	// One remote client serves every organization: sealed bundles from all of
+	// them land in the same bucket, keyed under each org's subtree.
+	if a.cfg.Remote != nil {
+		a.remote, err = remote.New(ctx, remoteConfig(a.cfg.Remote))
+		if err != nil {
+			return fmt.Errorf("build remote client: %w", err)
+		}
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)

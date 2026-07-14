@@ -239,6 +239,30 @@ func TestNew_ValidationErrors(t *testing.T) {
 			},
 			wantErr: config.ErrInvalidProgressMode,
 		},
+		"remote without a bucket": {
+			opts: []config.Option{
+				config.WithToken("tok"),
+				config.WithOutputDir("/tmp/archive"),
+				config.WithRemote(config.RemoteConfig{Prefix: "hcp"}),
+			},
+			wantErr: config.ErrMissingRemoteBucket,
+		},
+		"negative remote part size": {
+			opts: []config.Option{
+				config.WithToken("tok"),
+				config.WithOutputDir("/tmp/archive"),
+				config.WithRemote(config.RemoteConfig{Bucket: "b", PartSize: -1}),
+			},
+			wantErr: config.ErrInvalidRemotePartSize,
+		},
+		"negative remote concurrency": {
+			opts: []config.Option{
+				config.WithToken("tok"),
+				config.WithOutputDir("/tmp/archive"),
+				config.WithRemote(config.RemoteConfig{Bucket: "b", Concurrency: -1}),
+			},
+			wantErr: config.ErrInvalidRemoteConcurrency,
+		},
 	}
 
 	for name, tc := range tests {

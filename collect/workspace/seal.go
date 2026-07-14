@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/seal"
@@ -87,7 +89,172 @@ func (c *Collector) SealWorkspace(ctx context.Context, project, ws string) error
 		return err
 	}
 
-	return c.coalesce(ctx, project, ws, metadata)
+	err = c.coalesce(ctx, project, ws, metadata)
+	if err != nil {
+		return err
+	}
+
+	// With a remote store configured, sweep every sealed local bundle out to
+	// it — the ones sealed just above and any survivor of an earlier run —
+	// so peak local disk stays bounded to the search layer plus in-flight
+	// work, and pointing a remote at an existing all-local archive migrates
+	// it one re-run later.
+	if c.env.Remote() != nil {
+		return c.evictBundles(ctx, project, ws)
+	}
+
+	return nil
+}
+
+// evictBundles offloads each of the workspace's sealed local bundles to the
+// remote store and removes the local zip once the remote copy is confirmed.
+//
+// Only a zip with its sidecar beside it is swept: seal.Seal writes the
+// sidecar after the bundle read-back verifies, so the sidecar is the "sealed
+// and verified" marker, and an orphan zip without one (a crash mid-seal) is
+// unverified with its loose sources still canonical — it must never be
+// uploaded. The sidecar itself always stays local; it is part of the search
+// layer and, listed by nextGeneration, is what keeps an evicted generation's
+// number from being reused.
+//
+// A failure to evict one bundle is logged and does not abort the pass or the
+// workspace: the local zip simply stays canonical, exactly as if the remote
+// were never configured, and the next run re-sweeps it.
+func (c *Collector) evictBundles(ctx context.Context, project, ws string) error {
+	st := c.env.Store()
+	bundlesRel := st.BundleDir(project, ws)
+	bundlesDir := st.AbsPath(bundlesRel)
+
+	names, err := listNames(bundlesDir, func(e fs.DirEntry) bool {
+		return !e.IsDir() && strings.HasSuffix(e.Name(), ".zip")
+	})
+	if err != nil {
+		return fmt.Errorf("list bundles to evict: %w", err)
+	}
+
+	slices.Sort(names)
+
+	for _, name := range names {
+		if ctx.Err() != nil {
+			return fmt.Errorf("evict bundles: %w", ctx.Err())
+		}
+
+		sidecar := filepath.Join(bundlesDir, name+".sidecar.ndjson")
+
+		_, statErr := os.Stat(sidecar)
+		if statErr != nil {
+			if errors.Is(statErr, fs.ErrNotExist) {
+				// An orphan zip from a crash mid-seal: unverified, loose
+				// sources still canonical. Leave it; the next seal writes a
+				// fresh generation.
+				continue
+			}
+
+			return fmt.Errorf("stat sidecar %q: %w", sidecar, statErr)
+		}
+
+		relPath := st.Join(bundlesRel, name)
+
+		evictErr := c.evictBundle(ctx, relPath)
+		if evictErr != nil {
+			c.env.Log().LogAttrs(ctx, slog.LevelWarn, "bundle_evict_error",
+				slog.String("path", relPath),
+				slog.String("error", evictErr.Error()),
+			)
+		}
+	}
+
+	return nil
+}
+
+// evictBundle uploads one sealed bundle if the remote store does not already
+// hold it, re-confirms the remote copy, and only then removes the local zip.
+//
+// Every state is derived from what is observable — the local zip, its
+// sidecar, and a HeadObject probe — so any crash point self-heals on the
+// next sweep with no persisted flags: an interrupted upload re-uploads (an
+// incomplete multipart upload is not an object), an upload that finished
+// before the local delete is found by the probe and evicted without
+// re-uploading, and a finished eviction is a no-op. The write itself is
+// verified by the server-side checksum on upload plus the size check here;
+// the bundle's bytes were already read back and hash-verified locally by
+// seal.Seal, so existence and size are the verify-before-delete gate.
+func (c *Collector) evictBundle(ctx context.Context, relPath string) error {
+	rc := c.env.Remote()
+	st := c.env.Store()
+	key := c.env.RemoteKey(relPath)
+	absPath := st.AbsPath(relPath)
+
+	local, err := os.Stat(absPath)
+	if err != nil {
+		return fmt.Errorf("stat bundle: %w", err)
+	}
+
+	present, info, err := rc.Exists(ctx, key)
+	if err != nil {
+		return fmt.Errorf("probe remote copy: %w", err)
+	}
+
+	if !present {
+		start := time.Now()
+
+		uploadErr := c.uploadBundle(ctx, absPath, key, local.Size())
+		if uploadErr != nil {
+			return uploadErr
+		}
+
+		info, err = rc.Head(ctx, key)
+		if err != nil {
+			return fmt.Errorf("confirm remote copy: %w", err)
+		}
+
+		c.env.Log().LogAttrs(ctx, slog.LevelInfo, "bundle_uploaded",
+			slog.String("key", key),
+			slog.Int64("bytes", local.Size()),
+			slog.String("storage_class", info.StorageClass),
+			slog.Duration("duration", time.Since(start)),
+		)
+	}
+
+	if info.Size != local.Size() {
+		return fmt.Errorf(
+			"remote copy of %q is %d bytes, local is %d; keeping the local bundle",
+			key, info.Size, local.Size(),
+		)
+	}
+
+	err = os.Remove(absPath)
+	if err != nil {
+		return fmt.Errorf("remove evicted bundle: %w", err)
+	}
+
+	c.env.Log().LogAttrs(ctx, slog.LevelInfo, "bundle_evicted",
+		slog.String("path", relPath),
+		slog.String("key", key),
+	)
+
+	return nil
+}
+
+// uploadBundle streams one local zip to the remote store at key.
+func (c *Collector) uploadBundle(ctx context.Context, absPath, key string, size int64) error {
+	//nolint:gosec // The path is composed by the store from its archive root.
+	f, err := os.Open(absPath)
+	if err != nil {
+		return fmt.Errorf("open bundle: %w", err)
+	}
+
+	uploadErr := c.env.Remote().Upload(ctx, key, f, size)
+	closeErr := f.Close()
+
+	switch {
+	case uploadErr != nil:
+		return fmt.Errorf("upload bundle: %w", uploadErr)
+	case closeErr != nil:
+		return fmt.Errorf("close bundle after upload: %w", closeErr)
+	}
+
+	return nil
 }
 
 // frozenRunArtifacts returns the workspace's loose, settled heavy run artifacts,
@@ -377,6 +544,14 @@ func isStateBlob(name string) bool {
 // nothing, restart numbering at 1, and overwrite the prior generation's sealed
 // bundles. [os.ReadDir] treats the whole path as a literal, and parseGeneration
 // ignores any name that is not a bundle leaf.
+//
+// The highest generation is taken over both the zips and their sidecar
+// indexes. Remote eviction removes a verified zip but always leaves its
+// sidecar, so counting sidecars is what keeps numbering monotonic once
+// bundles move off disk — a zip-only scan would restart at gen0001 and
+// overwrite remote history at the same key. Counting the zips as well means
+// a surviving zip whose sidecar was lost (a partial restore, a damaged file)
+// still blocks its generation from reuse.
 func nextGeneration(bundlesDir, prefix string) (int, error) {
 	names, err := listNames(bundlesDir, func(e fs.DirEntry) bool {
 		return !e.IsDir()
@@ -398,16 +573,20 @@ func nextGeneration(bundlesDir, prefix string) (int, error) {
 }
 
 // parseGeneration extracts the generation number from a bundle filename shaped
-// "<prefix>.gen<NNNN>.zip", or 0 when it does not match.
+// "<prefix>.gen<NNNN>.zip" or its sidecar "<prefix>.gen<NNNN>.zip.sidecar.ndjson",
+// or 0 when it matches neither.
 func parseGeneration(name, prefix string) int {
 	rest, ok := strings.CutPrefix(name, prefix+".gen")
 	if !ok {
 		return 0
 	}
 
-	digits, ok := strings.CutSuffix(rest, ".zip")
+	digits, ok := strings.CutSuffix(rest, ".zip.sidecar.ndjson")
 	if !ok {
-		return 0
+		digits, ok = strings.CutSuffix(rest, ".zip")
+		if !ok {
+			return 0
+		}
 	}
 
 	gen, err := strconv.Atoi(digits)

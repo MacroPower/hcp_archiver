@@ -99,7 +99,7 @@ func (af *archiveFlags) config() (*config.Config, error) {
 		return nil, err
 	}
 
-	return config.New(
+	opts := []config.Option{
 		config.WithAddress(file.Address),
 		config.WithRateLimit(file.RateLimit),
 		config.WithOrganizations(file.Organizations),
@@ -115,7 +115,15 @@ func (af *archiveFlags) config() (*config.Config, error) {
 		config.WithProgressMode(mode),
 		config.WithProgressInterval(af.progressInterval),
 		config.WithRetryAbsent(af.retryAbsent),
-	)
+	}
+
+	// An untouched remote section leaves offloading disabled rather than
+	// enabling it over an empty bucket name.
+	if !file.Remote.IsZero() {
+		opts = append(opts, config.WithRemote(file.Remote.RemoteConfig()))
+	}
+
+	return config.New(opts...)
 }
 
 // loadFile resolves the configuration file path from the --config flag, then

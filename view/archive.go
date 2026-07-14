@@ -1,6 +1,7 @@
 package view
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"go.jacobcolvin.com/hcp_archiver/remote"
 )
 
 // ErrNotArchive indicates the given path holds no archive: neither it nor any
@@ -22,11 +25,50 @@ const orgFile = "org.json"
 //
 // Instances are produced by [OpenArchive].
 type Org struct {
+	remote *orgRemote
+
 	// Name is the organization's directory name, which the archiver keys on the
 	// organization name.
 	Name string
 
 	root string
+}
+
+// ArchiveOption configures [OpenArchive].
+//
+// Options of this type:
+//   - [WithContext]
+//   - [WithRemoteFactory]
+type ArchiveOption func(*archiveOptions)
+
+// archiveOptions carries the resolved [OpenArchive] settings.
+type archiveOptions struct {
+	ctx       context.Context //nolint:containedctx // Plumbed into readers whose interfaces take none.
+	newClient remoteClientFactory
+}
+
+// WithContext sets the context every remote bundle read of the opened
+// archive runs under, so canceling it (the browser quitting) retires any
+// in-flight request. It defaults to [context.Background]. It returns an
+// [ArchiveOption].
+func WithContext(ctx context.Context) ArchiveOption {
+	return func(o *archiveOptions) {
+		if ctx != nil {
+			o.ctx = ctx
+		}
+	}
+}
+
+// WithRemoteFactory overrides how an organization's remote client is built
+// from its marker, defaulting to [remote.New] over the SDK credential chain;
+// tests inject a fake-backed builder through it. A nil factory keeps the
+// default. It returns an [ArchiveOption].
+func WithRemoteFactory(factory func(ctx context.Context, cfg remote.Config) (*remote.Client, error)) ArchiveOption {
+	return func(o *archiveOptions) {
+		if factory != nil {
+			o.newClient = factory
+		}
+	}
 }
 
 // OpenArchive opens the archive at dir and returns its organizations, sorted by
@@ -35,7 +77,23 @@ type Org struct {
 // The path may name the archive root (whose subdirectories are organizations)
 // or a single organization's directory; either way each returned [*Org] reads
 // one organization tree. A path holding neither shape returns [ErrNotArchive].
-func OpenArchive(dir string) ([]*Org, error) {
+//
+// An organization whose root carries a remote marker (its sealed bundles were
+// offloaded) reads those bundles on demand from its remote store; without the
+// marker every read is local and no client is ever constructed.
+func OpenArchive(dir string, opts ...ArchiveOption) ([]*Org, error) {
+	options := archiveOptions{
+		ctx: context.Background(),
+		newClient: func(ctx context.Context, cfg remote.Config) (*remote.Client, error) {
+			//nolint:wrapcheck // A transparent default factory; callers wrap.
+			return remote.New(ctx, cfg)
+		},
+	}
+
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %q: %w", dir, err)
@@ -47,7 +105,12 @@ func OpenArchive(dir string) ([]*Org, error) {
 	}
 
 	if ok {
-		return []*Org{{Name: filepath.Base(abs), root: abs}}, nil
+		org, orgErr := newOrg(filepath.Base(abs), abs, options)
+		if orgErr != nil {
+			return nil, orgErr
+		}
+
+		return []*Org{org}, nil
 	}
 
 	entries, err := os.ReadDir(abs)
@@ -70,7 +133,12 @@ func OpenArchive(dir string) ([]*Org, error) {
 		}
 
 		if ok {
-			orgs = append(orgs, &Org{Name: e.Name(), root: sub})
+			org, orgErr := newOrg(e.Name(), sub, options)
+			if orgErr != nil {
+				return nil, orgErr
+			}
+
+			orgs = append(orgs, org)
 		}
 	}
 
@@ -83,6 +151,17 @@ func OpenArchive(dir string) ([]*Org, error) {
 	})
 
 	return orgs, nil
+}
+
+// newOrg builds one organization handle, loading its remote marker when one
+// is present.
+func newOrg(name, root string, opts archiveOptions) (*Org, error) {
+	rem, err := loadOrgRemote(root, name, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Org{Name: name, root: root, remote: rem}, nil
 }
 
 // isOrgRoot reports whether dir is one organization's archive root, marked by

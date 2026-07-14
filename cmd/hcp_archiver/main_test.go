@@ -103,6 +103,26 @@ func TestConfigFromArgs(t *testing.T) {
 				assert.Equal(t, []string{"acme", "globex"}, cfg.Organizations)
 			},
 		},
+		"remote section maps onto the config": {
+			token:      "secret",
+			args:       []string{"--output", "/tmp/a"},
+			configYAML: "remote:\n  bucket: my-archive\n  prefix: hcp\n  checksums: false\n",
+			want: func(t *testing.T, cfg *config.Config) {
+				t.Helper()
+				require.NotNil(t, cfg.Remote)
+				assert.Equal(t, "my-archive", cfg.Remote.Bucket)
+				assert.Equal(t, "hcp", cfg.Remote.Prefix)
+				assert.True(t, cfg.Remote.DisableChecksums)
+			},
+		},
+		"no remote section leaves offloading disabled": {
+			token: "secret",
+			args:  []string{"--output", "/tmp/a"},
+			want: func(t *testing.T, cfg *config.Config) {
+				t.Helper()
+				assert.Nil(t, cfg.Remote)
+			},
+		},
 		"missing output": {
 			token: "secret",
 			args:  []string{},

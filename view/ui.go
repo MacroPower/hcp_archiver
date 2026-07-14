@@ -28,9 +28,10 @@ const (
 // given terminal streams until the user quits or ctx is canceled.
 //
 // A ctx cancellation (an external SIGINT) is returned as [context.Canceled]
-// wrapped so the command can map it to a graceful exit.
+// wrapped so the command can map it to a graceful exit. The same ctx bounds
+// any remote bundle reads of an archive whose bundles were offloaded.
 func Browse(ctx context.Context, dir string, in io.Reader, out io.Writer) error {
-	orgs, err := OpenArchive(dir)
+	orgs, err := OpenArchive(dir, WithContext(ctx))
 	if err != nil {
 		return err
 	}

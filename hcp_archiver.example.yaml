@@ -45,3 +45,18 @@ scope:
   hyok: false
   registryDetail: false
   auditTrail: false
+
+# Offload sealed cold bundles (per-workspace logs and state zips) to an
+# S3-compatible object store as each workspace seals, keeping local disk
+# bounded to the grep-able search layer. Omit to keep everything local.
+# Credentials come from the AWS SDK default chain, never from this file.
+# remote:
+#   bucket: my-archive-bucket # required to enable offloading
+#   prefix: hcp-archive
+#   region: us-east-1
+#   storageClass: DEEP_ARCHIVE # applied on first write
+#   endpoint: https://s3.example.com # S3-compatible stores (MinIO, R2, Ceph)
+#   forcePathStyle: true # the addressing shape MinIO/Ceph expect
+#   checksums: false # only for stores that reject checksum headers
+#   partSize: 67108864
+#   concurrency: 4

@@ -86,6 +86,22 @@ scope:
   hyok: true
   registryDetail: true
   auditTrail: true
+
+# Offload sealed cold bundles (per-workspace logs and state zips) to an
+# S3-compatible object store as each workspace seals, bounding local disk to
+# the grep-able search layer plus in-flight work. Omit the block to keep the
+# whole archive on local disk. Credentials come from the AWS SDK default
+# chain (environment, shared config, instance/task role), never from here.
+remote:
+  bucket: my-archive-bucket # required to enable offloading
+  prefix: hcp-archive # optional key prefix
+  region: us-east-1
+  storageClass: DEEP_ARCHIVE # applied on first write; any class the store accepts
+  # endpoint: https://s3.example.com # S3-compatible stores (MinIO, R2, Ceph)
+  # forcePathStyle: true             # the addressing shape MinIO/Ceph expect
+  # checksums: false                 # only for stores that reject checksum headers
+  # partSize: 67108864               # multipart tuning; defaults are fine
+  # concurrency: 4
 ```
 
 Every key is optional and defaults as shown. The `yaml-language-server`
@@ -118,7 +134,8 @@ hcp_archiver --output ./archive
 interface: an organization opens into its projects, a project into its
 workspaces, and a workspace into its runs, state versions, and variables, with
 any archived document (run summaries, plan and apply logs, raw state, the whole
-file tree) readable in a scrolling viewer. It needs no token and no network.
+file tree) readable in a scrolling viewer. It needs no HCP token and, for a
+fully local archive, no network.
 
 ```bash
 hcp_archiver view ./archive          # the archive root, or one org's directory
@@ -128,6 +145,54 @@ Navigation descends with `enter`, returns with `esc`, filters any list with
 `/`, and quits with `q`. The browser reads the archive's physical forms
 transparently, so an object displays the same whether it is still a loose file
 or has been sealed into an NDJSON roll-up or a zip bundle.
+
+For an archive whose bundles were offloaded (see
+[Offloading sealed bundles](#offloading-sealed-bundles-to-object-storage)),
+browsing and grep stay fully offline — the search layer, including every
+sidecar index, is local — and only opening a sealed member reaches the remote
+store, fetching just that member with ranged reads rather than the whole
+bundle. That read path needs object-store credentials from the AWS SDK
+default chain; a read-only key (`s3:GetObject` on the archive prefix) is the
+right shape. A member whose bundle sits unrestored in an archival class
+(GLACIER, DEEP_ARCHIVE) shows a clear "restore required" message on the
+status line instead of hanging; restore the object and open it again.
+
+### Offloading sealed bundles to object storage
+
+A large organization's archive can outgrow local disk: the byte-heavy part is
+the sealed cold bundles (each workspace's `logs.gen*.zip` and
+`state.gen*.zip`). With a `remote:` block configured, the archiver uploads
+each bundle to an S3-compatible store at the moment its workspace seals and
+deletes the local zip only after the remote copy is confirmed, so peak local
+disk stays bounded to the grep-able search layer plus in-flight work. The
+search layer — loose JSON, roll-ups, sidecar indexes, and the ledger — always
+stays local.
+
+Verification is layered: a bundle is uploaded only after it has sealed and
+read back intact locally, the upload carries a SHA-256 checksum the server
+validates on write, and the local zip is removed only once a follow-up probe
+confirms the object at the expected size. Any failure leaves the local zip in
+place as the canonical copy, and the next run re-sweeps it. Pointing a
+`remote:` block at an existing all-local archive migrates it: the next run
+uploads and evicts every previously sealed bundle.
+
+Credentials are never configured in YAML. The client uses the AWS SDK default
+chain — `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `~/.aws/config`
+profiles (`AWS_PROFILE`), SSO, or an instance/task role. The archiving
+identity needs `s3:PutObject`, `s3:GetObject` (Head), and
+`s3:AbortMultipartUpload` on the archive prefix; `view` needs only
+`s3:GetObject`, and a separate read-only key for browsing is the recommended
+split.
+
+Two bucket lifecycle rules are worth setting:
+
+- **Abort incomplete multipart uploads** after a few days: an upload killed
+  mid-flight is re-run safely by the next sweep, but its already-uploaded
+  parts otherwise linger as billable storage.
+- Prefer `storageClass: DEEP_ARCHIVE` (or another archival class) in the
+  configuration over a class-transition rule: bundles are write-once, so
+  landing them directly in the archival class avoids paying for a transition
+  out of Standard. Compatible stores accept their own class names here.
 
 ### Resuming and re-running
 
@@ -199,9 +264,13 @@ Settings are grouped by how much they vary; see
   a `runHistory` block bounding each workspace's archived run history
   (`count` keeps the newest N runs, `age` keeps runs created within a
   Go-duration window; with both set,
-  whichever admits more history wins; unlimited by default), and a `scope`
+  whichever admits more history wins; unlimited by default), a `scope`
   block of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
-  `registryDetail`, `auditTrail`), each off by default.
+  `registryDetail`, `auditTrail`), each off by default, and a `remote` block
+  ([Offloading sealed bundles](#offloading-sealed-bundles-to-object-storage))
+  naming the S3-compatible store sealed bundles are offloaded to (`bucket`
+  required to enable; optional `prefix`, `endpoint`, `region`,
+  `forcePathStyle`, `storageClass`, `checksums`, `partSize`, `concurrency`).
 
 ## Output layout
 
@@ -211,6 +280,7 @@ Settings are grouped by how much they vary; see
 │   # org root
 ├── 📄 org.json                          # organization metadata
 ├── 📁 .ledger/                          # sharded per-object ledger + run records & watermarks
+├── 📄 .remote.json                      # only with remote offload: where evicted bundles live
 │
 │   # org-level objects (not scoped to a single project)
 ├── 📁 teams/<id>/

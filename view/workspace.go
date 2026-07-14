@@ -34,7 +34,10 @@ type Workspace struct {
 }
 
 // sealedRef locates one sealed object: the roll-up line or bundle member that
-// carries its bytes.
+// carries its bytes. A roll-up is named by its absolute path (roll-ups are
+// always local), while a bundle is named by its archive-relative path, so one
+// value resolves to either the local zip or the remote object it was evicted
+// to.
 type sealedRef struct {
 	rollup string
 	bundle string
@@ -97,7 +100,30 @@ func (w *Workspace) Open(relPath string) ([]byte, error) {
 		return readRollupLine(ref.rollup, ref.offset, relPath)
 	}
 
-	return readBundleMember(ref.bundle, relPath)
+	return w.readBundleMember(ref.bundle, relPath)
+}
+
+// readBundleMember extracts one member from the bundle at an archive-relative
+// path, preferring the local zip; a zip evicted to the remote store is read
+// through ranged GETs instead. The local copy wins when both exist, matching
+// the loose-file rule: until eviction confirms the remote copy, the local
+// bundle is canonical.
+func (w *Workspace) readBundleMember(relBundle, relPath string) ([]byte, error) {
+	data, err := readLocalBundleMember(w.org.AbsPath(relBundle), relPath)
+
+	switch {
+	case err == nil:
+		return data, nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return nil, err
+	}
+
+	if w.org.remote == nil {
+		return nil, fmt.Errorf("%w: %s (bundle %q is not on disk and no remote is configured)",
+			ErrObjectNotFound, relPath, relBundle)
+	}
+
+	return w.org.remote.readMember(relBundle, relPath)
 }
 
 // Exists reports whether the object at an archive-relative path is present in
@@ -245,17 +271,18 @@ func indexRollupFile(file string, idx map[string]sealedRef) error {
 }
 
 // indexBundles records each sidecar entry's member path and bundle, so a lookup
-// opens only the one bundle that holds it.
+// opens only the one bundle that holds it. Sidecars stay local even when their
+// zips are evicted remote, so the index is always built offline.
 func (w *Workspace) indexBundles(idx map[string]sealedRef) error {
-	bundlesDir := w.org.AbsPath(path.Join(w.dir, "bundles"))
+	relBundles := path.Join(w.dir, "bundles")
 
-	files, err := listFiles(bundlesDir, ".sidecar.ndjson")
+	files, err := listFiles(w.org.AbsPath(relBundles), ".sidecar.ndjson")
 	if err != nil {
 		return err
 	}
 
 	for _, file := range files {
-		err = indexSidecarFile(file, bundlesDir, idx)
+		err = indexSidecarFile(file, relBundles, idx)
 		if err != nil {
 			return err
 		}
@@ -265,8 +292,8 @@ func (w *Workspace) indexBundles(idx map[string]sealedRef) error {
 }
 
 // indexSidecarFile scans one sidecar index, recording each member against its
-// bundle's absolute path.
-func indexSidecarFile(file, bundlesDir string, idx map[string]sealedRef) error {
+// bundle's archive-relative path.
+func indexSidecarFile(file, relBundles string, idx map[string]sealedRef) error {
 	//nolint:gosec // The path is composed from the archive root being browsed.
 	f, err := os.Open(file)
 	if err != nil {
@@ -296,7 +323,7 @@ func indexSidecarFile(file, bundlesDir string, idx map[string]sealedRef) error {
 			continue
 		}
 
-		idx[rec.Name] = sealedRef{bundle: filepath.Join(bundlesDir, rec.Bundle)}
+		idx[rec.Name] = sealedRef{bundle: path.Join(relBundles, rec.Bundle)}
 	}
 
 	err = scanner.Err()
@@ -345,9 +372,10 @@ func readRollupLine(file string, offset int64, relPath string) ([]byte, error) {
 	return []byte(rec.Content), nil
 }
 
-// readBundleMember extracts one member from a zip bundle by its
-// archive-relative path.
-func readBundleMember(bundle, relPath string) ([]byte, error) {
+// readLocalBundleMember extracts one member from an on-disk zip bundle by its
+// archive-relative path. A missing zip reports [fs.ErrNotExist] through the
+// wrap, which is what routes the caller to the bundle's remote copy.
+func readLocalBundleMember(bundle, relPath string) ([]byte, error) {
 	zr, err := zip.OpenReader(bundle)
 	if err != nil {
 		return nil, fmt.Errorf("open bundle %q: %w", bundle, err)

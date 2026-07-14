@@ -40,6 +40,11 @@
       "title": "Workspaces",
       "description": "Workspaces limits the run to the named workspaces within each archived\norganization. An empty list archives every workspace."
     },
+    "remote": {
+      "$ref": "#/$defs/FileRemote",
+      "title": "Remote",
+      "description": "Remote offloads sealed cold bundles to an S3-compatible object store;\nunset keeps the whole archive on local disk."
+    },
     "runHistory": {
       "$ref": "#/$defs/FileRunHistory",
       "title": "Run History",
@@ -60,6 +65,76 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
+    "FileRemote": {
+      "type": "object",
+      "properties": {
+        "bucket": {
+          "type": "string",
+          "title": "Bucket",
+          "description": "Bucket names the bucket sealed bundles are uploaded to; required when\nany other remote field is set."
+        },
+        "prefix": {
+          "type": "string",
+          "title": "Prefix",
+          "description": "Prefix is an optional key prefix bundles are stored under."
+        },
+        "endpoint": {
+          "type": "string",
+          "title": "Endpoint",
+          "description": "Endpoint overrides the S3 endpoint URL for compatible stores (MinIO,\nR2, Ceph RGW); empty resolves the AWS default for the region."
+        },
+        "region": {
+          "type": "string",
+          "title": "Region",
+          "description": "Region is the bucket's region; empty defers to the SDK default chain."
+        },
+        "checksums": {
+          "title": "Checksums",
+          "description": "Checksums toggles the flexible-checksum headers the server validates\nuploads with, on by default. Turn them off only for a compatible store\nthat rejects them; without checksums the remote verify gate is\nexistence and size alone.",
+          "default": true,
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "storageClass": {
+          "type": "string",
+          "title": "Storage Class",
+          "description": "StorageClass is the storage class bundles are written with; empty\ntakes the store's default. Any class the store accepts is allowed, so\ncompatible stores' custom classes work; the examples are the AWS ones.",
+          "examples": [
+            "STANDARD",
+            "STANDARD_IA",
+            "GLACIER_IR",
+            "GLACIER",
+            "DEEP_ARCHIVE"
+          ]
+        },
+        "partSize": {
+          "type": "integer",
+          "title": "Part Size",
+          "description": "PartSize is the multipart upload part size in bytes; zero takes the\ntransfer manager's default.",
+          "minimum": 0,
+          "exclusiveMaximum": 9223372036854776000
+        },
+        "concurrency": {
+          "type": "integer",
+          "title": "Concurrency",
+          "description": "Concurrency is the number of upload parts in flight per bundle; zero\ntakes the transfer manager's default.",
+          "minimum": 0
+        },
+        "forcePathStyle": {
+          "type": "boolean",
+          "title": "Force Path Style",
+          "description": "ForcePathStyle addresses the bucket as a path segment rather than a\nvirtual host, the shape MinIO and Ceph RGW expect."
+        }
+      },
+      "description": "FileRemote offloads sealed cold bundles (a workspace's logs and state\nzips) to an S3-compatible object store as each workspace seals, bounding\nlocal disk to the search layer plus in-flight work. Setting any field\nrequires Bucket; leaving the whole section unset keeps the archive\nentirely local. Credentials are never configured here: the client\nauthenticates through the AWS SDK default chain (environment variables,\nshared configuration, an instance or task role).",
+      "additionalProperties": false
+    },
     "FileRunHistory": {
       "type": "object",
       "properties": {

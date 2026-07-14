@@ -74,6 +74,18 @@ func listOrgNames(ctx context.Context, client *tfeclient.Client) ([]string, erro
 // the goroutines, flushes the ledger a final time, and prints the summary.
 func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, error) {
 	st := store.New(filepath.Join(a.cfg.OutputDir, orgName))
+	envOpts := []collect.Option{collect.WithLogger(a.logger)}
+
+	if a.remote != nil {
+		envOpts = append(envOpts, collect.WithRemote(a.remote, remoteConfig(a.cfg.Remote), orgName))
+
+		// The marker is written before any collector runs so even an archive
+		// interrupted mid-run records where its evicted bundles live.
+		err := a.writeRemoteMarker(st)
+		if err != nil {
+			return manifest.Tally{}, err
+		}
+	}
 
 	ledger, err := manifest.Load(
 		st.Root(),
@@ -83,7 +95,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 		return manifest.Tally{}, fmt.Errorf("load manifest: %w", err)
 	}
 
-	env := collect.NewEnv(a.client, st, ledger)
+	env := collect.NewEnv(a.client, st, ledger, envOpts...)
 	reporter := progress.New(a.w, a.cfg.ProgressMode, ledger,
 		progress.WithInterval(a.cfg.ProgressInterval),
 		progress.WithInterrupt(a.cancelRun),
