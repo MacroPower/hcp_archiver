@@ -311,6 +311,8 @@ func (c *Collector) archiveStep(
 	artifacts := map[string]tfe.StackDeploymentStepArtifactType{
 		"plan-description.json":  tfe.StackDeploymentStepArtifactPlanDescription,
 		"apply-description.json": tfe.StackDeploymentStepArtifactApplyDescription,
+		"plan-debug-log.log":     tfe.StackDeploymentStepArtifactPlanDebugLog,
+		"apply-debug-log.log":    tfe.StackDeploymentStepArtifactApplyDebugLog,
 	}
 
 	for file, kind := range artifacts {
