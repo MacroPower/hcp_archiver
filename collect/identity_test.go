@@ -2,8 +2,10 @@ package collect_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -89,6 +91,52 @@ func TestClaimDir(t *testing.T) {
 		_, err := env.ClaimDir(dir, "ws-1")
 		require.Error(t, err, "unverifiable ownership must not be guessed at")
 		assert.Equal(t, 1, ledger.Tally().SurfacesDropped)
+	})
+
+	t.Run("concurrent fresh claims are race-free", func(t *testing.T) {
+		t.Parallel()
+
+		env, st, ledger := newEnv(t)
+
+		// Distinct fresh claims across two parents run at once through the identity
+		// mutex, exercising the shared owner cache (the outer map keyed by parent
+		// and each inner map keyed by id) and the per-directory sidecar writes;
+		// under -race this guards the mutex against a future narrowing.
+		const perParent = 12
+
+		parents := []string{"projects/a/workspaces", "projects/b/workspaces"}
+
+		type claim struct{ dir, id string }
+
+		var claims []claim
+
+		for p, parent := range parents {
+			for i := range perParent {
+				claims = append(claims, claim{
+					dir: fmt.Sprintf("%s/ws-%02d", parent, i),
+					id:  fmt.Sprintf("id-%d-%02d", p, i),
+				})
+			}
+		}
+
+		errs := make([]error, len(claims))
+
+		var wg sync.WaitGroup
+
+		for i, c := range claims {
+			wg.Go(func() {
+				_, errs[i] = env.ClaimDir(c.dir, c.id)
+			})
+		}
+
+		wg.Wait()
+
+		for i, c := range claims {
+			require.NoErrorf(t, errs[i], "claim %s", c.dir)
+			assert.Equalf(t, c.id, readIdentity(t, st.Root(), c.dir).ID, "claim %s", c.dir)
+		}
+
+		assert.Zero(t, ledger.Tally().SurfacesDropped)
 	})
 
 	t.Run("a rename leaves a breadcrumb in the old directory", func(t *testing.T) {
