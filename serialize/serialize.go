@@ -31,12 +31,23 @@ func Marshal(v any) ([]byte, error) {
 		return marshalJSONAPI(v)
 	}
 
-	out, err := json.MarshalIndent(v, "", indent)
+	// Encode with HTML escaping off so &, <, and > in a stored value survive byte
+	// for byte rather than turning into \u escapes -- the byte-faithful contract
+	// this package documents. The default json.MarshalIndent escapes them; a
+	// json.Encoder with SetEscapeHTML(false) does not. Encode appends a trailing
+	// newline that MarshalIndent omits, so trim it to keep the output byte-stable.
+	var buf bytes.Buffer
+
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", indent)
+
+	err := enc.Encode(v)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrMarshal, err)
 	}
 
-	return out, nil
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // addressable returns v unchanged unless it is a non-pointer struct or array
@@ -57,10 +68,31 @@ func addressable(v any) any {
 // marshalJSONAPI renders v through the vendored jsonapi encoder without the
 // sideloaded "included" array, so hydrated relations serialize as id refs, then
 // re-indents the compact output.
+//
+// It builds the payload with [jsonapi.Marshal] and drops the included relations
+// itself rather than calling [jsonapi.MarshalPayloadWithoutIncluded], so the
+// final encode can run with HTML escaping off: the node attributes are native Go
+// values encoded here, so &, <, and > in a stored value survive byte for byte
+// instead of being rewritten to &, <, >.
 func marshalJSONAPI(v any) ([]byte, error) {
+	payload, err := jsonapi.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrMarshal, err)
+	}
+
+	switch p := payload.(type) {
+	case *jsonapi.OnePayload:
+		p.Included = nil
+	case *jsonapi.ManyPayload:
+		p.Included = nil
+	}
+
 	var buf bytes.Buffer
 
-	err := jsonapi.MarshalPayloadWithoutIncluded(&buf, v)
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+
+	err = enc.Encode(payload)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrMarshal, err)
 	}

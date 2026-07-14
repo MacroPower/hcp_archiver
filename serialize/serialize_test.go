@@ -70,6 +70,16 @@ func TestMarshalIsByteFaithful(t *testing.T) {
 			},
 			wantContains: []string{"https://archivist.example/download?token=sig"},
 		},
+		"signed url keeps ampersands and angle brackets verbatim": {
+			// The jsonapi path once ran through an HTML-escaping encoder, which
+			// rewrote &, <, and > in a multi-parameter signed URL into \u escapes a
+			// raw search would then miss. Pin that they survive byte for byte.
+			input: &tfe.StateVersion{
+				ID:          "sv-2",
+				DownloadURL: "https://archivist.example/d?token=a&sig=b&x=<y>",
+			},
+			wantContains: []string{"?token=a&sig=b&x=<y>"},
+		},
 	}
 
 	for name, tc := range tests {
