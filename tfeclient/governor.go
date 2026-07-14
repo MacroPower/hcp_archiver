@@ -183,7 +183,11 @@ func (g *Governor) On429(resetHeader string) {
 	g.mu.Lock()
 
 	now := g.now()
-	g.refillLocked(now)
+
+	// The bucket is drained to zero below, so accruing tokens here would be
+	// discarded; only advance last, so the post-cooldown refill prices just the
+	// time elapsed since this 429.
+	g.last = now
 
 	// Halve at most once per cooldown window. A concurrency-wide burst of 429s
 	// from one blown window is a single signal, so gate the halving on the time
