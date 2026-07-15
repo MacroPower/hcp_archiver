@@ -223,6 +223,15 @@ func (a *Archiver) Run(ctx context.Context) error {
 			return fmt.Errorf("build remote client: %w", err)
 		}
 
+		defer func() {
+			closeErr := a.remote.Close()
+			if closeErr != nil {
+				a.logger.LogAttrs(ctx, slog.LevelWarn, "remote_close_error",
+					slog.String("error", closeErr.Error()),
+				)
+			}
+		}()
+
 		err = a.remote.Preflight(ctx)
 		if err != nil {
 			return fmt.Errorf("verify remote store: %w", err)

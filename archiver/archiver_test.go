@@ -238,10 +238,10 @@ func newSyncOrgFixture(t *testing.T, buf *bytes.Buffer) (*archiver.Archiver, *co
 	ledger, err := manifest.Load(root)
 	require.NoError(t, err)
 
-	fake := remotetest.New("sync-bucket")
-	cfg := remote.Config{Bucket: "sync-bucket", Prefix: "hcp"}
+	fake := remotetest.New()
+	cfg := remote.Config{Prefix: "hcp"}
 
-	client, err := remote.New(t.Context(), cfg, remote.WithS3API(fake))
+	client, err := remote.New(t.Context(), cfg, remote.WithBucket(fake.Bucket()))
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(buf, nil))

@@ -15,36 +15,28 @@ const MarkerName = ".remote.json"
 // a reader rejects a marker whose recorded version is greater than this.
 const MarkerVersion = 1
 
-// Config describes how to reach the S3-compatible backend the archive is
-// mirrored to: transport settings plus transfer tuning, never write policy —
-// the storage class of a write is an argument to [Client.Upload] and
-// [Client.Put], chosen by the caller per motion.
+// Config describes how to reach the object-store backend the archive is
+// mirrored to: the bucket URL plus transfer tuning.
 //
-// It carries no credentials: a [Client] authenticates through the AWS SDK
-// default chain, so nothing secret ever lives in a configuration file.
+// It carries no credentials: the URL selects a backend by scheme, and each
+// backend authenticates through its provider's default chain (the AWS SDK
+// chain for s3://, Azure's environment variables or DefaultAzureCredential
+// for azblob://), so nothing secret ever lives in a configuration file.
 type Config struct {
-	// Bucket names the bucket bundles are stored in.
-	Bucket string
+	// URL locates the bucket in gocloud.dev form, selecting the backend by
+	// scheme: "s3://bucket?region=us-east-1" (AWS S3, or a compatible store
+	// via endpoint and use_path_style query parameters), "azblob://container"
+	// (Azure Blob Storage), or "file:///path" (a local directory tree).
+	URL string
 	// Prefix is an optional key prefix every object key composes under.
 	Prefix string
-	// Endpoint overrides the S3 endpoint URL for compatible stores (MinIO,
-	// R2, Ceph RGW); empty resolves the AWS default for the region.
-	Endpoint string
-	// Region is the bucket's region; empty defers to the SDK default chain.
-	Region string
-	// PartSize is the multipart upload part size in bytes; zero takes the
-	// transfer manager's default.
+	// PartSize is the upload part size in bytes for backends that split a
+	// large body into parts; zero takes the backend's default. Very large
+	// bodies grow it further to fit the backend's part-count ceiling.
 	PartSize int64
 	// Concurrency is the number of upload parts in flight per bundle; zero
-	// takes the transfer manager's default.
+	// takes the backend's default.
 	Concurrency int
-	// ForcePathStyle addresses the bucket as a path segment rather than a
-	// virtual host, the shape MinIO and Ceph RGW expect.
-	ForcePathStyle bool
-	// DisableChecksums turns off the flexible-checksum headers on writes,
-	// for compatible stores that reject them. With checksums off the remote
-	// verify gate is existence and size alone.
-	DisableChecksums bool
 }
 
 // Key composes the object key for an archive-relative path within one
@@ -60,31 +52,21 @@ func (cfg Config) Key(org, relPath string) string {
 // the offloaded bundles without the original archive configuration. Like the
 // [Config] it derives from, it never carries a credential.
 type Marker struct {
-	// Bucket names the bucket the bundles were offloaded to.
-	Bucket string `json:"bucket"`
+	// URL is the gocloud.dev bucket URL the bundles were offloaded to.
+	URL string `json:"url"`
 	// Prefix is the key prefix the bundles were written under.
 	Prefix string `json:"prefix,omitempty"`
-	// Endpoint is the S3 endpoint override the bundles were written through.
-	Endpoint string `json:"endpoint,omitempty"`
-	// Region is the bucket's region.
-	Region string `json:"region,omitempty"`
 	// Version is the marker schema version, [MarkerVersion] when written by
-	// this build; zero in markers from builds that predate versioning, which
-	// read as version-1 shapes.
+	// this build.
 	Version int `json:"version"`
-	// ForcePathStyle records path-style bucket addressing.
-	ForcePathStyle bool `json:"forcePathStyle,omitempty"`
 }
 
 // Marker extracts the read-relevant fields of the [Config].
 func (cfg Config) Marker() Marker {
 	return Marker{
-		Version:        MarkerVersion,
-		Bucket:         cfg.Bucket,
-		Prefix:         cfg.Prefix,
-		Endpoint:       cfg.Endpoint,
-		Region:         cfg.Region,
-		ForcePathStyle: cfg.ForcePathStyle,
+		Version: MarkerVersion,
+		URL:     cfg.URL,
+		Prefix:  cfg.Prefix,
 	}
 }
 
@@ -92,10 +74,7 @@ func (cfg Config) Marker() Marker {
 // built from.
 func (m Marker) Config() Config {
 	return Config{
-		Bucket:         m.Bucket,
-		Prefix:         m.Prefix,
-		Endpoint:       m.Endpoint,
-		Region:         m.Region,
-		ForcePathStyle: m.ForcePathStyle,
+		URL:    m.URL,
+		Prefix: m.Prefix,
 	}
 }

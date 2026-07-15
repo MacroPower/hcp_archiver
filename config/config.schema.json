@@ -43,7 +43,7 @@
     "remote": {
       "$ref": "#/$defs/FileRemote",
       "title": "Remote",
-      "description": "Remote mirrors the archive to an S3-compatible object store, evicting\nsealed cold bundles and settled tarballs and syncing everything else;\nunset keeps the whole archive on local disk."
+      "description": "Remote mirrors the archive to a remote object store, evicting sealed\ncold bundles and settled tarballs and syncing everything else; unset\nkeeps the whole archive on local disk."
     },
     "runHistory": {
       "$ref": "#/$defs/FileRunHistory",
@@ -68,80 +68,36 @@
     "FileRemote": {
       "type": "object",
       "properties": {
-        "bucket": {
+        "url": {
           "type": "string",
-          "title": "Bucket",
-          "description": "Bucket names the bucket archive objects are uploaded to; required when\nany other remote field is set."
+          "title": "URL",
+          "description": "URL locates the bucket in gocloud.dev form, selecting the backend by\nscheme: \"s3://bucket?region=us-east-1\" (AWS S3, or a compatible store\nsuch as MinIO, R2, or Ceph RGW via endpoint and use_path_style query\nparameters), \"azblob://container\" (Azure Blob Storage), or\n\"file:///path\" (a local directory tree). Required when any other\nremote field is set.",
+          "examples": [
+            "s3://bucket?region=us-east-1",
+            "azblob://container",
+            "file:///mnt/archive-mirror"
+          ]
         },
         "prefix": {
           "type": "string",
           "title": "Prefix",
           "description": "Prefix is an optional key prefix objects are stored under."
         },
-        "endpoint": {
-          "type": "string",
-          "title": "Endpoint",
-          "description": "Endpoint overrides the S3 endpoint URL for compatible stores (MinIO,\nR2, Ceph RGW); empty resolves the AWS default for the region."
-        },
-        "region": {
-          "type": "string",
-          "title": "Region",
-          "description": "Region is the bucket's region; empty defers to the SDK default chain."
-        },
-        "checksums": {
-          "title": "Checksums",
-          "description": "Checksums toggles the flexible-checksum headers the server validates\nuploads with, on by default. Turn them off only for a compatible store\nthat rejects them; without checksums the remote verify gate is\nexistence and size alone.",
-          "default": true,
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "storageClass": {
-          "type": "string",
-          "title": "Storage Class",
-          "description": "StorageClass is the storage class evicted cold surfaces (bundles and\nsettled configuration-version tarballs) are written with; empty takes\nthe store's default. Any class the store accepts is allowed, so\ncompatible stores' custom classes work; the examples are the AWS ones.",
-          "examples": [
-            "STANDARD",
-            "STANDARD_IA",
-            "GLACIER_IR",
-            "GLACIER",
-            "DEEP_ARCHIVE"
-          ]
-        },
-        "syncStorageClass": {
-          "type": "string",
-          "title": "Sync Storage Class",
-          "description": "SyncStorageClass is the storage class synced search-layer files are\nwritten with; empty takes the store's default. Keep it a directly\nreadable class (not GLACIER or DEEP_ARCHIVE): synced files change and\nre-upload as the archive evolves, and restoring means downloading\nthem.",
-          "examples": [
-            "STANDARD",
-            "STANDARD_IA"
-          ]
-        },
         "partSize": {
           "type": "integer",
           "title": "Part Size",
-          "description": "PartSize is the multipart upload part size in bytes; zero takes the\ntransfer manager's default.",
+          "description": "PartSize is the upload part size in bytes for backends that split a\nlarge body into parts; zero takes the backend's default.",
           "minimum": 0,
           "exclusiveMaximum": 9223372036854776000
         },
         "concurrency": {
           "type": "integer",
           "title": "Concurrency",
-          "description": "Concurrency is the number of upload parts in flight per bundle; zero\ntakes the transfer manager's default.",
+          "description": "Concurrency is the number of upload parts in flight per bundle; zero\ntakes the backend's default.",
           "minimum": 0
-        },
-        "forcePathStyle": {
-          "type": "boolean",
-          "title": "Force Path Style",
-          "description": "ForcePathStyle addresses the bucket as a path segment rather than a\nvirtual host, the shape MinIO and Ceph RGW expect."
         }
       },
-      "description": "FileRemote mirrors the archive to an S3-compatible object store. With the\nsection set, the store holds a complete copy: sealed cold bundles and\nsettled configuration-version tarballs are evicted to it (uploaded,\nverified, then removed locally), and every other archive file is synced to\nit incrementally at each organization run's close, with local disk staying\nthe canonical searchable copy. Eviction takes StorageClass; the synced\nsearch layer takes SyncStorageClass. Setting any field requires Bucket;\nleaving the whole section unset keeps the archive entirely local.\nCredentials are never configured here: the client authenticates through\nthe AWS SDK default chain (environment variables, shared configuration,\nan instance or task role).",
+      "description": "FileRemote mirrors the archive to a remote object store. With the section\nset, the store holds a complete copy: sealed cold bundles and settled\nconfiguration-version tarballs are evicted to it (uploaded, verified, then\nremoved locally), and every other archive file is synced to it\nincrementally at each organization run's close, with local disk staying\nthe canonical searchable copy. Setting any field requires URL; leaving the\nwhole section unset keeps the archive entirely local. Credentials are\nnever configured here: the URL's scheme selects the backend, and each\nbackend authenticates through its provider's default chain (the AWS SDK\nchain for s3://, Azure's environment variables or DefaultAzureCredential\nfor azblob://).",
       "additionalProperties": false
     },
     "FileRunHistory": {

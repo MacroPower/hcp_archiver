@@ -107,46 +107,19 @@ func TestLoadFile(t *testing.T) {
 		},
 		"remote section decodes": {
 			yaml: "remote:\n" +
-				"  bucket: my-archive\n" +
+				"  url: s3://my-archive?region=us-east-1\n" +
 				"  prefix: hcp\n" +
-				"  endpoint: https://s3.example.com\n" +
-				"  region: us-east-1\n" +
-				"  forcePathStyle: true\n" +
-				"  storageClass: DEEP_ARCHIVE\n" +
-				"  syncStorageClass: STANDARD_IA\n" +
-				"  checksums: false\n" +
 				"  partSize: 67108864\n" +
 				"  concurrency: 4\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.False(t, file.Remote.IsZero())
 				assert.Equal(t, config.RemoteConfig{
-					Bucket:           "my-archive",
-					Prefix:           "hcp",
-					Endpoint:         "https://s3.example.com",
-					Region:           "us-east-1",
-					StorageClass:     "DEEP_ARCHIVE",
-					SyncStorageClass: "STANDARD_IA",
-					PartSize:         67108864,
-					Concurrency:      4,
-					ForcePathStyle:   true,
-					DisableChecksums: true,
+					URL:         "s3://my-archive?region=us-east-1",
+					Prefix:      "hcp",
+					PartSize:    67108864,
+					Concurrency: 4,
 				}, file.Remote.RemoteConfig())
-			},
-		},
-		"remote checksums default on when omitted": {
-			yaml: "remote:\n  bucket: my-archive\n",
-			want: func(t *testing.T, file *config.File) {
-				t.Helper()
-				assert.False(t, file.Remote.RemoteConfig().DisableChecksums)
-			},
-		},
-		"remote storage class is a soft enum": {
-			yaml: "remote:\n  bucket: my-archive\n  storageClass: CUSTOM_TIER\n",
-			want: func(t *testing.T, file *config.File) {
-				t.Helper()
-				assert.Equal(t, "CUSTOM_TIER", file.Remote.StorageClass,
-					"compatible stores accept arbitrary classes, so the schema must not reject one")
 			},
 		},
 		"remote left unset disables offloading": {

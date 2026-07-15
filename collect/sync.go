@@ -3,11 +3,9 @@ package collect
 import (
 	"bytes"
 	"context"
-	"crypto/md5" //nolint:gosec // Only reproduces the S3 ETag algorithm, not a security control.
-	"crypto/sha256"
+	"crypto/md5" //nolint:gosec // Content MD5 is the stores' integrity currency, not a security control.
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -82,15 +80,13 @@ func (c *syncCounters) stats() SyncStats {
 // copy, and only then removes the local file.
 //
 // Every state is derived from what is observable — the local file and a
-// HeadObject probe — so any crash point self-heals on the next sweep with no
-// persisted flags: an interrupted upload re-uploads (an incomplete multipart
+// metadata probe — so any crash point self-heals on the next sweep with no
+// persisted flags: an interrupted upload re-uploads (an aborted parted
 // upload is not an object), an upload that finished before the local delete
 // is found by the probe and evicted without re-uploading, and a finished
-// eviction is a no-op. The write itself is verified by the server-side
-// checksum on upload plus the size check here; callers only hand this method
-// files whose bytes were already verified locally (a sealed bundle's
-// read-back, a tarball's ledger signature), so existence and size are the
-// verify-before-delete gate.
+// eviction is a no-op. Callers only hand this method files whose bytes were
+// already verified locally (a sealed bundle's read-back, a tarball's ledger
+// signature), so existence and size are the verify-before-delete gate.
 func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 	rc := e.remote
 	key := e.RemoteKey(relPath)
@@ -120,7 +116,6 @@ func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 		e.logger.LogAttrs(ctx, slog.LevelInfo, "offload_uploaded",
 			slog.String("key", key),
 			slog.Int64("bytes", local.Size()),
-			slog.String("storage_class", info.StorageClass),
 			slog.Duration("duration", time.Since(start)),
 		)
 
@@ -152,8 +147,8 @@ func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 	return nil
 }
 
-// uploadFile streams one local file to the remote store at key through the
-// transfer manager, applying the cold storage class.
+// uploadFile streams one local file to the remote store at key, letting the
+// client split a large body into a concurrent parted upload.
 func (e *Env) uploadFile(ctx context.Context, absPath, key string, size int64) error {
 	//nolint:gosec // The path is composed by the store from its archive root.
 	f, err := os.Open(absPath)
@@ -161,7 +156,7 @@ func (e *Env) uploadFile(ctx context.Context, absPath, key string, size int64) e
 		return fmt.Errorf("open offload source: %w", err)
 	}
 
-	uploadErr := e.remote.Upload(ctx, key, f, size, e.evictClass)
+	uploadErr := e.remote.Upload(ctx, key, f, size)
 	closeErr := f.Close()
 
 	switch {
@@ -200,11 +195,10 @@ const (
 // target and the per-shard log.ndjson are never uploaded — a stale remote log
 // replayed onto a restored tree could resurrect old ledger state; the
 // post-compaction snapshot.json is the durable record. Everything else syncs
-// incrementally, gated by one upfront LIST inventory: an absent key or a size
-// change uploads; a size match compares the local MD5 against the digest the
-// inventory records when its ETag carries one; an opaque ETag falls back to
-// one HeadObject and the store's full-object SHA-256; with neither
-// comparable (checksums disabled) a size match is trusted.
+// incrementally, gated by one upfront listing inventory: an absent key or a
+// size change uploads; a size match compares the local MD5 against the
+// store's recorded digest (from the listing, or one Head on backends whose
+// listings omit it); with no digest recorded a size match is trusted.
 //
 // After the uploads, remote keys nothing local backs anymore are pruned, so
 // the mirror tracks local deletions and files later sealed into other forms;
@@ -448,7 +442,7 @@ func isConfigTarball(relPath string) bool {
 func (e *Env) syncFiles(
 	ctx context.Context,
 	files []string,
-	inventory map[string]remote.ListedObject,
+	inventory map[string]remote.ObjectInfo,
 	counters *syncCounters,
 ) {
 	var g errgroup.Group
@@ -484,7 +478,7 @@ func (e *Env) syncFiles(
 func (e *Env) syncFile(
 	ctx context.Context,
 	relPath string,
-	inventory map[string]remote.ListedObject,
+	inventory map[string]remote.ObjectInfo,
 	counters *syncCounters,
 ) {
 	needed, size, err := e.uploadNeeded(ctx, relPath, inventory)
@@ -514,24 +508,18 @@ func (e *Env) syncFile(
 	}
 }
 
-// putFile uploads one search-layer file in a single PutObject request, which
-// is what makes the stored checksum a full-object digest later sweeps can
-// compare, applying the sync storage class.
+// putFile uploads one search-layer file through [remote.Client.Put], whose
+// recorded full-object digest is what later sweeps' inventories compare.
 func (e *Env) putFile(ctx context.Context, relPath string) error {
 	//nolint:gosec // The path is composed by the store from its archive root.
-	f, err := os.Open(e.store.AbsPath(relPath))
+	data, err := os.ReadFile(e.store.AbsPath(relPath))
 	if err != nil {
-		return fmt.Errorf("open sync source: %w", err)
+		return fmt.Errorf("read sync source: %w", err)
 	}
 
-	putErr := e.remote.Put(ctx, e.RemoteKey(relPath), f, e.syncClass)
-	closeErr := f.Close()
-
-	switch {
-	case putErr != nil:
-		return fmt.Errorf("put sync source: %w", putErr)
-	case closeErr != nil:
-		return fmt.Errorf("close sync source: %w", closeErr)
+	err = e.remote.Put(ctx, e.RemoteKey(relPath), data)
+	if err != nil {
+		return fmt.Errorf("put sync source: %w", err)
 	}
 
 	return nil
@@ -539,13 +527,14 @@ func (e *Env) putFile(ctx context.Context, relPath string) error {
 
 // uploadNeeded is the incremental gate: it reports whether the file's remote
 // copy is absent or differs, and the local size. The comparison degrades in
-// order — size, then the local MD5 against the digest the inventory ETag
-// records when it records one, then one HeadObject for the store's recorded
-// full-object SHA-256, then size alone when nothing else is comparable.
+// order — size, then the local MD5 against the digest the inventory records
+// when its listing carries one, then one Head for backends whose listings
+// omit a digest the object still carries, then size alone when the store
+// recorded none at all.
 func (e *Env) uploadNeeded(
 	ctx context.Context,
 	relPath string,
-	inventory map[string]remote.ListedObject,
+	inventory map[string]remote.ObjectInfo,
 ) (bool, int64, error) {
 	info, err := os.Stat(e.store.AbsPath(relPath))
 	if err != nil {
@@ -557,37 +546,37 @@ func (e *Env) uploadNeeded(
 		return true, info.Size(), nil
 	}
 
-	if listed.MD5 != nil {
-		local, hashErr := e.hashFile(relPath, md5.New()) //nolint:gosec // ETag comparison only.
+	digest := listed.MD5
+
+	if digest == nil {
+		remoteInfo, headErr := e.remote.Head(ctx, e.RemoteKey(relPath))
+		if headErr != nil {
+			return false, 0, fmt.Errorf("head sync target: %w", headErr)
+		}
+
+		digest = remoteInfo.MD5
+	}
+
+	if digest != nil {
+		local, hashErr := e.md5File(relPath)
 		if hashErr != nil {
 			return false, 0, hashErr
 		}
 
-		return !bytes.Equal(local, listed.MD5), info.Size(), nil
+		return !bytes.Equal(local, digest), info.Size(), nil
 	}
 
-	remoteInfo, err := e.remote.Head(ctx, e.RemoteKey(relPath))
-	if err != nil {
-		return false, 0, fmt.Errorf("head sync target: %w", err)
-	}
-
-	if remoteInfo.SHA256 != nil {
-		local, hashErr := e.hashFile(relPath, sha256.New())
-		if hashErr != nil {
-			return false, 0, hashErr
-		}
-
-		return !bytes.Equal(local, remoteInfo.SHA256), info.Size(), nil
-	}
-
-	// Neither integrity digest is comparable (checksums disabled on a store
-	// with opaque ETags): an equal size is the whole gate, the documented
-	// trade-off of turning checksums off.
+	// No digest is comparable (an object this tool never wrote, on a store
+	// that records none): an equal size is the whole gate.
 	return false, info.Size(), nil
 }
 
-// hashFile streams the file at relPath through h and returns the digest.
-func (e *Env) hashFile(relPath string, h hash.Hash) ([]byte, error) {
+// md5File streams the file at relPath through an MD5 digest, the currency
+// the store's recorded content digests compare in.
+func (e *Env) md5File(relPath string) ([]byte, error) {
+	//nolint:gosec // Content-digest comparison only, not a security control.
+	h := md5.New()
+
 	//nolint:gosec // The path is composed by the store from its archive root.
 	f, err := os.Open(e.store.AbsPath(relPath))
 	if err != nil {
@@ -620,7 +609,7 @@ func (e *Env) hashFile(relPath string, h hash.Hash) ([]byte, error) {
 func (e *Env) pruneRemote(
 	ctx context.Context,
 	orgPrefix string,
-	inventory map[string]remote.ListedObject,
+	inventory map[string]remote.ObjectInfo,
 	sweep *treeSweep,
 	counters *syncCounters,
 ) {

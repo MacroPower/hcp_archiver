@@ -46,7 +46,7 @@ func TestConfigKey(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			cfg := remote.Config{Bucket: "b", Prefix: tt.prefix}
+			cfg := remote.Config{URL: "mem://", Prefix: tt.prefix}
 			assert.Equal(t, tt.want, cfg.Key(tt.org, tt.relPath))
 		})
 	}
@@ -56,11 +56,8 @@ func TestMarkerRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	cfg := remote.Config{
-		Bucket:         "archive",
-		Prefix:         "hcp",
-		Endpoint:       "https://s3.example.com",
-		Region:         "us-east-1",
-		ForcePathStyle: true,
+		URL:    "s3://archive?region=us-east-1",
+		Prefix: "hcp",
 
 		// Write-side tuning a marker intentionally drops.
 		PartSize:    1 << 26,
@@ -72,10 +69,7 @@ func TestMarkerRoundTrip(t *testing.T) {
 		"a written marker should record the current schema version")
 
 	assert.Equal(t, remote.Config{
-		Bucket:         "archive",
-		Prefix:         "hcp",
-		Endpoint:       "https://s3.example.com",
-		Region:         "us-east-1",
-		ForcePathStyle: true,
+		URL:    "s3://archive?region=us-east-1",
+		Prefix: "hcp",
 	}, marker.Config(), "marker should round-trip the read-relevant fields and drop the rest")
 }

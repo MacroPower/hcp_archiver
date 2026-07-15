@@ -25,15 +25,18 @@ const (
 )
 
 const (
-	viewBucket = "view-bucket"
+	viewURL    = "s3://view-bucket?region=us-east-1"
 	viewPrefix = "hcp"
 )
+
+// viewMarker is the org-root marker fixture pointing at [viewURL].
+const viewMarker = `{"version":1,"url":"` + viewURL + `","prefix":"` + viewPrefix + `"}`
 
 // evictBundles moves every zip under the fixture workspace's bundles
 // directory into fake at its archive-relative key and removes the local
 // copy, modeling an archive whose sealed bundles were offloaded. The
 // sidecars stay, as eviction leaves them.
-func evictBundles(t *testing.T, orgRoot string, fake *remotetest.Fake, class string) {
+func evictBundles(t *testing.T, orgRoot string, fake *remotetest.Fake) {
 	t.Helper()
 
 	bundles := filepath.Join(orgRoot, filepath.FromSlash(wsDir), "bundles")
@@ -52,40 +55,39 @@ func evictBundles(t *testing.T, orgRoot string, fake *remotetest.Fake, class str
 		require.NoError(t, readErr)
 
 		key := viewPrefix + "/my-org/" + wsDir + "/bundles/" + e.Name()
-		fake.SetObject(key, remotetest.Object{Data: data, StorageClass: class})
+		fake.SetObject(key, remotetest.Object{Data: data})
 		require.NoError(t, os.Remove(abs))
 	}
 }
 
 // buildRemoteArchive lays out the standard fixture, evicts its bundles into
-// a fake store with the given storage class, and writes the org-root marker.
-func buildRemoteArchive(t *testing.T, class string) (string, *remotetest.Fake) {
+// a fake store, and writes the org-root marker.
+func buildRemoteArchive(t *testing.T) (string, *remotetest.Fake) {
 	t.Helper()
 
 	root := buildArchive(t)
 	orgRoot := filepath.Join(root, "my-org")
-	fake := remotetest.New(viewBucket)
+	fake := remotetest.New()
 
-	evictBundles(t, orgRoot, fake, class)
-	writeFile(t, orgRoot, ".remote.json",
-		`{"bucket":"`+viewBucket+`","prefix":"`+viewPrefix+`"}`)
+	evictBundles(t, orgRoot, fake)
+	writeFile(t, orgRoot, ".remote.json", viewMarker)
 
 	return root, fake
 }
 
 // openRemoteWorkspace opens the evicted fixture with a fake-backed client
 // factory and returns its workspace plus the fake.
-func openRemoteWorkspace(t *testing.T, class string) (*view.Workspace, *remotetest.Fake) {
+func openRemoteWorkspace(t *testing.T) (*view.Workspace, *remotetest.Fake) {
 	t.Helper()
 
-	root, fake := buildRemoteArchive(t, class)
+	root, fake := buildRemoteArchive(t)
 
 	orgs, err := view.OpenArchive(root,
 		view.WithContext(t.Context()),
 		view.WithRemoteFactory(func(ctx context.Context, cfg remote.Config) (*remote.Client, error) {
-			assert.Equal(t, viewBucket, cfg.Bucket, "the marker's bucket drives the client")
+			assert.Equal(t, viewURL, cfg.URL, "the marker's URL drives the client")
 
-			return remote.New(ctx, cfg, remote.WithS3API(fake))
+			return remote.New(ctx, cfg, remote.WithBucket(fake.Bucket()))
 		}),
 	)
 	require.NoError(t, err)
@@ -97,10 +99,10 @@ func openRemoteWorkspace(t *testing.T, class string) (*view.Workspace, *remotete
 func TestWorkspaceOpen_RemoteBundleMember(t *testing.T) {
 	t.Parallel()
 
-	ws, fake := openRemoteWorkspace(t, "")
+	ws, fake := openRemoteWorkspace(t)
 
 	// The deflated log member and the stored state blob both read back
-	// through ranged GETs of the remote zips.
+	// through ranged reads of the remote zips.
 	data, err := ws.Open(wsDir + "/runs/run-new/plan.log")
 	require.NoError(t, err)
 	assert.Equal(t, "plan output line\n", string(data))
@@ -109,18 +111,19 @@ func TestWorkspaceOpen_RemoteBundleMember(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, `{"serial":2}`, string(data))
 
-	ranges := fake.GetRanges()
+	ranges := fake.Ranges()
 	require.NotEmpty(t, ranges)
 
 	for _, r := range ranges {
-		assert.NotEmpty(t, r, "every remote read must be a ranged GET, never a full download")
+		assert.GreaterOrEqual(t, r.Length, int64(0),
+			"every remote read must be a bounded ranged request, never a full download")
 	}
 }
 
 func TestWorkspaceOpen_RemoteCentralDirectoryIsCached(t *testing.T) {
 	t.Parallel()
 
-	ws, fake := openRemoteWorkspace(t, "")
+	ws, fake := openRemoteWorkspace(t)
 
 	_, err := ws.Open(wsDir + "/runs/run-new/plan.log")
 	require.NoError(t, err)
@@ -135,7 +138,7 @@ func TestWorkspaceOpen_RemoteCentralDirectoryIsCached(t *testing.T) {
 func TestWorkspaceOpen_RemoteCachedBundleReadsDuringOtherBuild(t *testing.T) {
 	t.Parallel()
 
-	ws, fake := openRemoteWorkspace(t, "")
+	ws, fake := openRemoteWorkspace(t)
 
 	// Cache the state bundle first, while no Head is blocked.
 	_, err := ws.Open(stateMember)
@@ -179,7 +182,7 @@ func TestWorkspaceOpen_RemoteCachedBundleReadsDuringOtherBuild(t *testing.T) {
 func TestWorkspaceOpen_RemoteConcurrentSameBundleBuildsOnce(t *testing.T) {
 	t.Parallel()
 
-	ws, fake := openRemoteWorkspace(t, "")
+	ws, fake := openRemoteWorkspace(t)
 
 	// Block the first Head until both readers are outstanding, so the two reads
 	// of the same bundle are genuinely concurrent.
@@ -210,48 +213,12 @@ func TestWorkspaceOpen_RemoteConcurrentSameBundleBuildsOnce(t *testing.T) {
 	assert.Equal(t, 1, fake.HeadCalls(), "concurrent reads of one bundle build it exactly once")
 }
 
-func TestWorkspaceOpen_RemoteRestoreRequired(t *testing.T) {
-	t.Parallel()
-
-	ws, _ := openRemoteWorkspace(t, "DEEP_ARCHIVE")
-
-	_, err := ws.Open(wsDir + "/runs/run-new/plan.log")
-	require.ErrorIs(t, err, remote.ErrRestoreRequired,
-		"an unrestored archival object surfaces a clear restore-required error, not a hang")
-}
-
-func TestWorkspaceOpen_RemoteRestoredObjectReads(t *testing.T) {
-	t.Parallel()
-
-	root, fake := buildRemoteArchive(t, "GLACIER")
-
-	// Mark the logs bundle restored; its bytes then read normally.
-	key := viewPrefix + "/my-org/" + wsDir + "/bundles/logs.gen0001.zip"
-	obj, ok := fake.Object(key)
-	require.True(t, ok)
-
-	obj.Restore = `ongoing-request="false", expiry-date="Fri, 21 Dec 2026 00:00:00 GMT"`
-	fake.SetObject(key, obj)
-
-	orgs, err := view.OpenArchive(root,
-		view.WithContext(t.Context()),
-		view.WithRemoteFactory(func(ctx context.Context, cfg remote.Config) (*remote.Client, error) {
-			return remote.New(ctx, cfg, remote.WithS3API(fake))
-		}),
-	)
-	require.NoError(t, err)
-
-	data, err := orgs[0].Workspace("default", "app").Open(wsDir + "/runs/run-new/plan.log")
-	require.NoError(t, err)
-	assert.Equal(t, "plan output line\n", string(data))
-}
-
 func TestOpenArchive_RemoteMarkerFromNewerBuildIsRejected(t *testing.T) {
 	t.Parallel()
 
 	root := buildArchive(t)
 	writeFile(t, filepath.Join(root, "my-org"), ".remote.json",
-		`{"version":99,"bucket":"`+viewBucket+`"}`)
+		`{"version":99,"url":"`+viewURL+`"}`)
 
 	_, err := view.OpenArchive(root, view.WithContext(t.Context()))
 	require.ErrorContains(t, err, "newer than this build reads",
@@ -261,7 +228,7 @@ func TestOpenArchive_RemoteMarkerFromNewerBuildIsRejected(t *testing.T) {
 func TestWorkspaceOpen_RemoteClientFailureIsRemembered(t *testing.T) {
 	t.Parallel()
 
-	root, _ := buildRemoteArchive(t, "")
+	root, _ := buildRemoteArchive(t)
 
 	builds := 0
 
@@ -294,8 +261,7 @@ func TestWorkspaceOpen_LocalBundleNeverTouchesRemote(t *testing.T) {
 	// A marker is present but the zips are still local (eviction not yet
 	// run): the local copies stay canonical and no client is ever built.
 	root := buildArchive(t)
-	writeFile(t, filepath.Join(root, "my-org"), ".remote.json",
-		`{"bucket":"`+viewBucket+`","prefix":"`+viewPrefix+`"}`)
+	writeFile(t, filepath.Join(root, "my-org"), ".remote.json", viewMarker)
 
 	orgs, err := view.OpenArchive(root,
 		view.WithContext(t.Context()),

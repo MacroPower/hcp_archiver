@@ -580,9 +580,8 @@ of the archive, in two motions with different semantics:
   (re-download the prefix to restore).
 
 A run with `remote:` configured proves the store manageable at startup: a
-small probe object is written under the prefix (carrying the same checksum
-settings as real uploads), headed, listed, and deleted before any collection
-work begins, so a wrong bucket, endpoint, credential set, or checksum setting
+small probe object is written under the prefix, headed, listed, and deleted
+before any collection work begins, so a wrong bucket URL or credential set
 fails the run immediately instead of surfacing as per-object failures hours
 into an archive.
 
@@ -590,15 +589,14 @@ Sync is always-on when `remote:` is configured; there is no separate knob:
 remote configured means the bucket converges on a complete archive. Object
 keys mirror the local tree: `<prefix>/<org>/<archive-relative path>`, so a
 bucket listing reads like the archive and the sidecar's `bundle` field still
-names the object. Credentials come only from the AWS SDK default chain; the
-YAML carries endpoint/bucket/class tuning, never a secret. Evicted uploads
-stream with a server-validated SHA-256 checksum (multipart for large state
-bundles) and take `storageClass`, so a bundle can land directly in an archival
-class without a transition charge; synced files take `syncStorageClass`
-(empty takes the store's default) and always upload in a **single** PutObject
-request, which is what makes their stored checksum a full-object digest later
-runs can compare; a multipart upload records only a composite `-N` checksum
-that matches nothing computable locally.
+names the object. The backend is resolved from one gocloud.dev bucket URL
+(`s3://`, `azblob://`, `file://`), and credentials come only from that
+provider's default chain; the YAML carries the URL and transfer tuning,
+never a secret. Evicted uploads stream through the backend's parted-upload
+path (concurrent parts for large state bundles), and a write that dies
+midway aborts rather than committing a truncated object; synced files are
+digested before upload so the store records a full-object MD5 later runs
+can compare. Every write lands in the store's default storage class.
 
 The close sweep walks every regular file under the org root and classifies it
 top-down:
@@ -619,21 +617,21 @@ top-down:
    delete the only proven local bytes);
 7. everything else: sync incrementally.
 
-The incremental gate is driven by one upfront LIST inventory of the org prefix
-(~1 request per 1000 keys, instead of a HEAD per file) and degrades in order:
-key absent → upload; size differs → upload; size equal → compare the inventory
-ETag against the local MD5 when the ETag is a plain single-part MD5 (true for
-this tool's own PutObject writes on S3/MinIO/R2 without SSE-KMS); ETag opaque →
-one HeadObject and compare the store's recorded full-object SHA-256; neither
-comparable (`checksums: false`) → trust the size match, the documented
-trade-off of turning checksums off (a same-length content change is skipped
-until its size changes). Synced files fan out concurrently; evictions run
-sequentially. Per-file failures warn and count, never abort: local stays
-canonical and the next run re-sweeps, and sync failures never affect the run's
-exit code.
+The incremental gate is driven by one upfront listing inventory of the org
+prefix (~1 request per 1000 keys, instead of a metadata probe per file) and
+degrades in order: key absent → upload; size differs → upload; size equal →
+compare the digest the inventory records against the local MD5 (this tool's
+own synced writes always record one); listing carries no digest → one Head
+for the object's recorded digest (fileblob's listings omit the digest
+its attributes carry); no digest recorded at all → trust the size match (a
+same-length content change is skipped until its size changes).
+Synced files fan out concurrently; evictions run sequentially. Per-file
+failures warn and count, never abort: local stays canonical and the next run
+re-sweeps, and sync failures never affect the run's exit code.
 
 After the uploads, a **prune** step makes the mirror true: every inventory key
-the walk saw no local file for is batch-deleted, except the evicted surfaces
+the walk saw no local file for is deleted in a bounded fan-out, except the
+evicted surfaces
 (bundle zips, config-version tarballs), which are remote-only by design and
 exempt **by key shape alone** — not by checking the local sidecar or ledger
 entry that proved the eviction. After eviction the remote copy is the only
@@ -659,21 +657,20 @@ point self-heals on the next run:
   loose files are still canonical. The sweep never uploads it; the next seal
   writes a fresh generation and the orphan leaks one number, as today.
 - **zip + sidecar, no remote object** (sealed, upload never ran or died
-  midway; an incomplete multipart upload is not an object): upload, confirm
-  with a Head, size-check, then delete the local zip. A bucket lifecycle rule
-  aborting incomplete multipart uploads mops up parts a crash strands.
+  midway; an aborted parted upload is not an object): upload, confirm
+  with a Head, size-check, then delete the local zip. On S3, a bucket
+  lifecycle rule aborting incomplete multipart uploads mops up parts a
+  crash strands.
 - **zip + sidecar + remote object** (died after upload, before the local
   delete): the Head finds the copy, the size matches, and the zip is deleted
   without re-uploading.
 - **sidecar only** (eviction finished): nothing local to sweep; done.
 
 The bundle's bytes were already read back and hash-verified locally by the
-seal, and the upload's checksum is validated server-side on write, so
-Head-existence plus size is the egress-free verify gate (stores that reject
-flexible checksums can set `checksums: false`, which reduces the gate to
-existence + size). Failure to evict one bundle is a warning, never an abort:
-the local zip simply stays canonical, exactly as if no remote were
-configured. Because eviction removes zips but never sidecars, generation
+seal, and an interrupted upload aborts instead of committing a partial
+object, so Head-existence plus size is the egress-free verify gate. Failure
+to evict one bundle is a warning, never an abort: the local zip simply stays
+canonical, exactly as if no remote were configured. Because eviction removes zips but never sidecars, generation
 numbering takes its maximum over both the `*.zip` and `*.zip.sidecar.ndjson`
 names — a zip-only scan would restart at gen0001 once bundles left disk and
 overwrite remote history at the same key. Tarball eviction recovers from the
@@ -686,17 +683,18 @@ all-local archive makes the next run's sweep upload the entire search layer
 pre-existing bundle that has a sidecar and every ledger-proven tarball.
 
 Each org's root gains a small `.remote.json` marker recording a schema
-version and the read-relevant backend settings (bucket, prefix, endpoint,
-region, path style); the version lets a future build change the marker's
-shape while old markers keep reading, and a reader refuses a marker newer
-than it understands. `view` reads it to serve a sealed member whose zip is no longer on
-disk: it Heads the object, parses the zip central directory over a handful of
-ranged GETs (cached per session), then fetches the member's compressed span
-in **one** ranged GET and decompresses locally — never the whole bundle. An
-object tiered into GLACIER or DEEP_ARCHIVE and not currently restored
-surfaces a clear "restore required" status message rather than a hang; after
-an operator-requested restore completes, the same member read works
-unchanged. A local-only archive has no marker and never constructs a client.
+version and the read-relevant backend settings (the bucket URL and prefix);
+the version lets a future build change the marker's shape while old markers
+keep reading, and a reader refuses a marker newer than it understands.
+`view` reads it to serve a sealed member whose zip is no longer on disk: it
+Heads the object, parses the zip central directory over a handful of ranged reads
+(cached per session), then fetches the member's compressed span in **one**
+ranged read and decompresses locally — never the whole bundle. There is no
+restore workflow: an object an operator has tiered into a non-readable
+archival class (S3 Glacier, Azure Archive) fails its reads with the
+backend's error until restored by hand, which is why the mirror should not
+be lifecycled into such tiers. A local-only archive has no marker and never
+constructs a client.
 
 ### Container format and compression
 
@@ -718,41 +716,38 @@ stays uncompressed for longevity rather than durability: an uncompressed
 `tfstate.json` is grep-able and tool-independent decades out, and storing the
 irreplaceable state raw costs pennies a month.
 
-### Mapping onto object-store storage classes
+### Mapping onto object-store storage tiers
 
-By default the tool writes only local files; with a `remote:` block it
-mirrors the whole archive itself (Remote offload and full-archive sync
-above), setting `storageClass` on the evicted cold surfaces and
-`syncStorageClass` on the synced search layer at first write. Either way the
-layout is deliberately split so that one class covers each kind of file —
-whether the tool's own mirror or an operator's backup performs the upload —
-and so that an audit proceeds the same way on disk: narrow first, then read
-one thing. The **search layer** (the loose mutable workspace files, in-flight
-`run.json`, the NDJSON roll-ups, every sidecar index, and the ledger shards)
-is small, listable,
-and zero-latency to grep, so it belongs in a hot, always-listable class (S3
-Standard, say). The **cold bundles** are byte-heavy and rarely read, so they map
-onto an archival class (Glacier Deep Archive, say). Two properties make that
-mapping clean: the bundles are write-once, so an operator can set the archival
-class on first upload rather than paying to transition from Standard, and no
-bundle is a sub-128KB object (which an archival class bills as ~168KB, the reason
-the small metadata is not itself bundled). `logs.gen*.zip` and `state.gen*.zip`
-are separate per generation, so one restore answers one audit question and a
-plan-log thaw never drags the state along. An audit greps the search layer on
-disk (free, and tighter than a flat tree, since the roll-ups collapse hundreds of run
-directories), reads the bundle name and member from the sidecar, and `unzip`s
-that one member (thawing the one bundle first if it has been tiered off to an
-archival class). The greppable surface stays live and gets tighter. A cold heavy artifact is no
-longer a directly-`cat`-able file, but that cost falls on audit-only artifacts
-that are rarely read.
+The tool writes every mirrored object in the store's default class and has
+no restore workflow, so the mirror itself belongs in tiers that serve reads
+directly. The layout is still deliberately split so that one tier covers
+each kind of file — for an operator's own lifecycle rules on the mirror or a
+separately managed backup — and so that an audit proceeds the same way on
+disk: narrow first, then read one thing. The **search layer** (the loose
+mutable workspace files, in-flight `run.json`, the NDJSON roll-ups, every
+sidecar index, and the ledger shards) is small, listable, zero-latency to
+grep, and churns as the archive evolves (re-compared, re-uploaded, pruned),
+so it belongs in a hot, always-readable tier (S3 Standard, say). The **cold
+bundles** are byte-heavy, write-once, and rarely read, so a directly-readable
+infrequent-access tier (S3 Standard-IA, Azure Cool) is the safe cost lever;
+tiering them into a non-readable archival class (Glacier Deep Archive, Azure
+Archive) trades away `view`'s remote read path for the deepest discount and
+means a by-hand restore before any read. No bundle is a sub-128KB object
+(which an archival class bills as ~168KB, the reason the small metadata is
+not itself bundled), and `logs.gen*.zip` and `state.gen*.zip` are separate
+per generation, so one retrieval answers one audit question and a plan-log
+fetch never drags the state along. An audit greps the search layer on disk
+(free, and tighter than a flat tree, since the roll-ups collapse hundreds of
+run directories), reads the bundle name and member from the sidecar, and
+`unzip`s that one member. The greppable surface stays live and gets tighter.
+A cold heavy artifact is no longer a directly-`cat`-able file, but that cost
+falls on audit-only artifacts that are rarely read.
 
 ### What stays loose vs. what seals
 
-The tool writes every row below as local files; the "Backup tier" column is the
-object-store storage class each kind maps onto. For the cold-bundle row the
-tool applies it itself when a `remote:` block sets `storageClass`; the other
-rows stay local, and their tier is what an operator's own backup lifecycle
-would set.
+The tool writes every row below as local files; the "Backup tier" column is
+the object-store tier each kind maps onto, as set by an operator's own
+lifecycle rules or backup.
 
 | Tier                      | Objects                                                                                                                                                                     | Backup tier  | Form                                                              |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------- |
@@ -822,11 +817,11 @@ generated from the Go type and embedded in the binary.
   default), a `scope`
   block of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
   `registryDetail`, `auditTrail`), each off by default, and a `remote`
-  block enabling offload of sealed cold bundles to an S3-compatible store
-  (`bucket` required; optional `prefix`, `endpoint`, `region`,
-  `forcePathStyle`, `storageClass`, `partSize`, `concurrency`, and
-  `checksums: false` for stores that reject flexible-checksum headers).
-  Credentials are never in the file; the AWS SDK default chain supplies them.
+  block enabling offload of sealed cold bundles to a remote object store
+  (`url` required, its scheme selecting the backend — `s3://`, `azblob://`,
+  `file://`; optional `prefix`, `partSize`, `concurrency`).
+  Credentials are never in the file; each backend's provider default chain
+  supplies them.
 
 ## Packaging
 

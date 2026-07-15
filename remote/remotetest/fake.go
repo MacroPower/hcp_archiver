@@ -1,139 +1,102 @@
-// Package remotetest provides an in-memory S3-compatible fake implementing
-// [remote.S3API], so tests exercise the remote upload, head, ranged-read,
-// list, and delete paths without a network or a real store.
+// Package remotetest provides an in-memory bucket driver implementing
+// [gocloud.dev/blob/driver.Bucket], so tests exercise the remote upload,
+// head, ranged-read, list, and delete paths without a network or a real
+// store, with fault injection and call recording no real backend offers.
 package remotetest
 
 import (
 	"bytes"
 	"context"
-	"crypto/md5" //nolint:gosec // Only reproduces the S3 ETag algorithm, not a security control.
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
+	"crypto/md5" //nolint:gosec // Content MD5 is the stores' integrity currency, not a security control.
+	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"gocloud.dev/blob"
+	"gocloud.dev/blob/driver"
+	"gocloud.dev/gcerrors"
 )
 
-// MD5Hex returns the hex MD5 of data, the ETag S3 records for a
-// single-request, non-KMS write; tests compose expected ETags with it.
-func MD5Hex(data []byte) string {
-	//nolint:gosec // MD5 is the S3 ETag algorithm being faked, not a security control.
+// MD5Sum returns the raw MD5 digest of data, the form the store records and
+// [remote.ObjectInfo] serves; tests compose expected digests with it.
+func MD5Sum(data []byte) []byte {
+	//nolint:gosec // Content MD5 is the stores' integrity currency, not a security control.
 	sum := md5.Sum(data)
 
-	return hex.EncodeToString(sum[:])
-}
-
-// SHA256Base64 returns the base64 SHA-256 of data, the S3 wire form of a
-// full-object checksum; tests compose expected Head checksums with it.
-func SHA256Base64(data []byte) string {
-	sum := sha256.Sum256(data)
-
-	return base64.StdEncoding.EncodeToString(sum[:])
+	return sum[:]
 }
 
 // Object is one stored object with the metadata the fake serves.
 type Object struct {
-	// StorageClass is the class the object reports; GLACIER and DEEP_ARCHIVE
-	// gate reads behind Restore.
-	StorageClass string
-	// Restore is the raw x-amz-restore header value, empty when no restore
-	// was ever requested.
-	Restore string
-	// ETag is the object's entity tag without quotes: the plain MD5 hex of
-	// the data for a PutObject write, a composite "<md5>-N" for a completed
-	// multipart upload. The fake serves it quoted, as S3 does.
-	ETag string
-	// ChecksumSHA256 is the recorded checksum in S3 wire form: base64 of the
-	// data's SHA-256 for a PutObject write that carried the algorithm, a
-	// composite "<base64>-N" for a multipart upload, empty when the write
-	// carried no checksum.
-	ChecksumSHA256 string
 	// Data is the object's content.
 	Data []byte
+	// MD5 is the recorded full-object digest, nil when the store recorded
+	// none (the shape a parted upload leaves on most backends).
+	MD5 []byte
 }
 
-// archived reports whether the object's bytes are parked behind a restore.
-func (o Object) archived() bool {
-	return o.StorageClass == string(types.StorageClassGlacier) ||
-		o.StorageClass == string(types.StorageClassDeepArchive)
+// Range is one recorded ranged read: a length of -1 reads to the object's
+// end.
+type Range struct {
+	// Offset is the first byte the read requested.
+	Offset int64
+	// Length is how many bytes the read requested.
+	Length int64
 }
 
-// restored reports whether a completed restore currently serves the bytes.
-func (o Object) restored() bool {
-	return strings.Contains(o.Restore, `ongoing-request="false"`)
-}
+// errNotFound is the fake's "no such object" error, classified as
+// [gcerrors.NotFound] by [Fake.ErrorCode].
+var errNotFound = errors.New("object does not exist")
 
-// upload is one in-flight multipart upload.
-type upload struct {
-	parts    map[int32][]byte
-	key      string
-	class    string
-	checksum string
-}
-
-// Fake is an in-memory S3-compatible store implementing [remote.S3API].
+// Fake is an in-memory bucket driver with fault injection and call
+// recording.
 //
-// It records the calls it serves (puts, part uploads, aborts, byte ranges)
-// so tests can assert how the client drove it, and its error fields inject
-// faults. Create instances with [New]. A Fake is safe for concurrent use;
-// the transfer manager uploads parts in parallel.
+// It records the calls it serves so tests can assert how the client drove
+// it, and its error fields inject faults. Wrap it for a client with
+// [Fake.Bucket]. Create instances with [New]. A Fake is safe for concurrent
+// use; the sync sweep settles files in parallel.
 type Fake struct {
 	objects map[string]Object
-	uploads map[string]*upload
 
-	// PutErr fails every PutObject call.
+	// PutErr fails every write at its commit.
 	PutErr error
-	// UploadPartErr fails every UploadPart call, driving the transfer
-	// manager down its abort path.
-	UploadPartErr error
-	// HeadErr fails every HeadObject call.
+	// HeadErr fails every attributes read.
 	HeadErr error
-	// GetErr fails every GetObject call.
-	GetErr error
-	// ListErr fails every ListObjectsV2 call.
+	// ListErr fails every listing page.
 	ListErr error
-	// DeleteErr fails every DeleteObjects call.
+	// DeleteErr fails every delete.
 	DeleteErr error
-	// HeadHook, when set, runs at the start of each HeadObject call with the
+	// HeadHook, when set, runs at the start of each attributes read with the
 	// call's context. A test cancels a context it controls from inside it to
-	// model a cancellation surfacing mid-flight; HeadObject then returns the
+	// model a cancellation surfacing mid-flight; the read then returns the
 	// context's error instead of serving the object.
 	HeadHook func(ctx context.Context)
 
-	bucket            string
-	getRanges         []string
-	putChecksums      []string
-	headChecksumModes []string
-	deleted           []string
-	mu                sync.Mutex
-	nextUploadID      int
-	putCalls          int
-	headCalls         int
-	listCalls         int
-	deleteCalls       int
-	completed         int
-	aborted           int
+	ranges    []Range
+	deleted   []string
+	mu        sync.Mutex
+	putCalls  int
+	headCalls int
+	listCalls int
 }
 
-// New creates a new [Fake] serving bucket; a request naming any other bucket
-// answers NoSuchBucket.
-func New(bucket string) *Fake {
-	return &Fake{
-		bucket:  bucket,
-		objects: make(map[string]Object),
-		uploads: make(map[string]*upload),
-	}
+// New creates a new [Fake] holding no objects.
+func New() *Fake {
+	return &Fake{objects: make(map[string]Object)}
 }
 
-// SetObject stores obj at key directly, bypassing the upload path.
+// Bucket wraps the fake into the [*blob.Bucket] a client is built over,
+// via [remote.WithBucket].
+func (f *Fake) Bucket() *blob.Bucket {
+	return blob.NewBucket(f)
+}
+
+// SetObject stores obj at key directly, bypassing the write path.
 func (f *Fake) SetObject(key string, obj Object) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -159,7 +122,7 @@ func (f *Fake) Keys() []string {
 	return slices.Sorted(maps.Keys(f.objects))
 }
 
-// PutCalls returns how many PutObject calls were served.
+// PutCalls returns how many writes were committed or failed at commit.
 func (f *Fake) PutCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -167,7 +130,7 @@ func (f *Fake) PutCalls() int {
 	return f.putCalls
 }
 
-// HeadCalls returns how many HeadObject calls were served.
+// HeadCalls returns how many attributes reads were served.
 func (f *Fake) HeadCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -175,33 +138,7 @@ func (f *Fake) HeadCalls() int {
 	return f.headCalls
 }
 
-// PutChecksums returns the checksum algorithm of each PutObject and
-// CreateMultipartUpload call in order, "" for calls that carried none.
-func (f *Fake) PutChecksums() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	return slices.Clone(f.putChecksums)
-}
-
-// HeadChecksumModes returns the checksum mode of each HeadObject call in
-// order, "" for calls that carried none.
-func (f *Fake) HeadChecksumModes() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	return slices.Clone(f.headChecksumModes)
-}
-
-// Deleted returns the keys removed by DeleteObjects calls, in request order.
-func (f *Fake) Deleted() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	return slices.Clone(f.deleted)
-}
-
-// ListCalls returns how many ListObjectsV2 calls were served.
+// ListCalls returns how many listing pages were served.
 func (f *Fake) ListCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -209,225 +146,44 @@ func (f *Fake) ListCalls() int {
 	return f.listCalls
 }
 
-// DeleteCalls returns how many DeleteObjects calls were served.
-func (f *Fake) DeleteCalls() int {
+// Deleted returns the keys removed by delete calls, in request order.
+func (f *Fake) Deleted() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	return f.deleteCalls
+	return slices.Clone(f.deleted)
 }
 
-// GetRanges returns the Range header of each GetObject call in order, "" for
-// calls that carried none.
-func (f *Fake) GetRanges() []string {
+// Ranges returns the span of each ranged read in request order.
+func (f *Fake) Ranges() []Range {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	return slices.Clone(f.getRanges)
+	return slices.Clone(f.ranges)
 }
 
-// Completed returns how many multipart uploads completed.
-func (f *Fake) Completed() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+// ErrorCode classifies the fake's errors: a missing object reports
+// [gcerrors.NotFound], everything else (the injected faults) is unknown.
+func (f *Fake) ErrorCode(err error) gcerrors.ErrorCode {
+	if errors.Is(err, errNotFound) {
+		return gcerrors.NotFound
+	}
 
-	return f.completed
+	return gcerrors.Unknown
 }
 
-// Aborted returns how many multipart uploads were aborted.
-func (f *Fake) Aborted() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+// As reports no driver-specific types.
+func (f *Fake) As(any) bool { return false }
 
-	return f.aborted
-}
+// ErrorAs reports no driver-specific error types.
+func (f *Fake) ErrorAs(error, any) bool { return false }
 
-// OpenUploads returns how many multipart uploads are still in flight,
-// neither completed nor aborted — storage a crashed real upload would leak.
-func (f *Fake) OpenUploads() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+// Close releases nothing; the fake holds only memory.
+func (f *Fake) Close() error { return nil }
 
-	return len(f.uploads)
-}
-
-// checkBucket answers NoSuchBucket for a request naming any other bucket.
-func (f *Fake) checkBucket(bucket *string) error {
-	if bucket == nil || *bucket != f.bucket {
-		return &types.NoSuchBucket{}
-	}
-
-	return nil
-}
-
-// PutObject stores the body as one object.
-func (f *Fake) PutObject(
-	_ context.Context, in *s3.PutObjectInput, _ ...func(*s3.Options),
-) (*s3.PutObjectOutput, error) {
-	bucketErr := f.checkBucket(in.Bucket)
-	if bucketErr != nil {
-		return nil, bucketErr
-	}
-
-	data, err := io.ReadAll(in.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read put body: %w", err)
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.PutErr != nil {
-		return nil, f.PutErr
-	}
-
-	f.putCalls++
-	f.putChecksums = append(f.putChecksums, string(in.ChecksumAlgorithm))
-
-	obj := Object{
-		Data:         data,
-		StorageClass: string(in.StorageClass),
-		ETag:         MD5Hex(data),
-	}
-
-	// A single-request write records a full-object checksum, the property the
-	// sync gate's Head comparison rests on.
-	if in.ChecksumAlgorithm == types.ChecksumAlgorithmSha256 {
-		obj.ChecksumSHA256 = SHA256Base64(data)
-	}
-
-	f.objects[*in.Key] = obj
-
-	return &s3.PutObjectOutput{}, nil
-}
-
-// CreateMultipartUpload opens a multipart upload and returns its id.
-func (f *Fake) CreateMultipartUpload(
-	_ context.Context, in *s3.CreateMultipartUploadInput, _ ...func(*s3.Options),
-) (*s3.CreateMultipartUploadOutput, error) {
-	bucketErr := f.checkBucket(in.Bucket)
-	if bucketErr != nil {
-		return nil, bucketErr
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.nextUploadID++
-	id := "upload-" + strconv.Itoa(f.nextUploadID)
-	f.putChecksums = append(f.putChecksums, string(in.ChecksumAlgorithm))
-	f.uploads[id] = &upload{
-		key:      *in.Key,
-		class:    string(in.StorageClass),
-		checksum: string(in.ChecksumAlgorithm),
-		parts:    make(map[int32][]byte),
-	}
-
-	return &s3.CreateMultipartUploadOutput{UploadId: &id}, nil
-}
-
-// UploadPart stores one part of an open multipart upload.
-func (f *Fake) UploadPart(
-	_ context.Context, in *s3.UploadPartInput, _ ...func(*s3.Options),
-) (*s3.UploadPartOutput, error) {
-	bucketErr := f.checkBucket(in.Bucket)
-	if bucketErr != nil {
-		return nil, bucketErr
-	}
-
-	data, err := io.ReadAll(in.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read part body: %w", err)
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.UploadPartErr != nil {
-		return nil, f.UploadPartErr
-	}
-
-	up, ok := f.uploads[*in.UploadId]
-	if !ok {
-		return nil, &types.NoSuchUpload{}
-	}
-
-	up.parts[*in.PartNumber] = data
-	etag := fmt.Sprintf("etag-%d", *in.PartNumber)
-
-	return &s3.UploadPartOutput{ETag: &etag}, nil
-}
-
-// CompleteMultipartUpload assembles the stored parts, in part-number order,
-// into one object.
-func (f *Fake) CompleteMultipartUpload(
-	_ context.Context, in *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options),
-) (*s3.CompleteMultipartUploadOutput, error) {
-	bucketErr := f.checkBucket(in.Bucket)
-	if bucketErr != nil {
-		return nil, bucketErr
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	up, ok := f.uploads[*in.UploadId]
-	if !ok {
-		return nil, &types.NoSuchUpload{}
-	}
-
-	var data []byte
-
-	for _, num := range slices.Sorted(maps.Keys(up.parts)) {
-		data = append(data, up.parts[num]...)
-	}
-
-	// A completed multipart upload records composite integrity metadata: the
-	// "-N" suffix marks both the ETag and any checksum as digests over the
-	// parts, not the object, exactly the shapes the sync gate must refuse to
-	// compare against local bytes.
-	obj := Object{
-		Data:         data,
-		StorageClass: up.class,
-		ETag:         fmt.Sprintf("%s-%d", MD5Hex(data), len(up.parts)),
-	}
-
-	if up.checksum == string(types.ChecksumAlgorithmSha256) {
-		obj.ChecksumSHA256 = fmt.Sprintf("%s-%d", SHA256Base64(data), len(up.parts))
-	}
-
-	f.objects[up.key] = obj
-	delete(f.uploads, *in.UploadId)
-
-	f.completed++
-
-	return &s3.CompleteMultipartUploadOutput{}, nil
-}
-
-// AbortMultipartUpload discards an open multipart upload's parts.
-func (f *Fake) AbortMultipartUpload(
-	_ context.Context, in *s3.AbortMultipartUploadInput, _ ...func(*s3.Options),
-) (*s3.AbortMultipartUploadOutput, error) {
-	bucketErr := f.checkBucket(in.Bucket)
-	if bucketErr != nil {
-		return nil, bucketErr
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	delete(f.uploads, *in.UploadId)
-
-	f.aborted++
-
-	return &s3.AbortMultipartUploadOutput{}, nil
-}
-
-// HeadObject serves an object's metadata: length, storage class, and the raw
-// restore header. An absent object answers the typed NotFound.
-func (f *Fake) HeadObject(
-	ctx context.Context, in *s3.HeadObjectInput, _ ...func(*s3.Options),
-) (*s3.HeadObjectOutput, error) {
+// Attributes serves an object's metadata: its length and recorded MD5. An
+// absent object reports not-found.
+func (f *Fake) Attributes(ctx context.Context, key string) (*driver.Attributes, error) {
 	if f.HeadHook != nil {
 		f.HeadHook(ctx)
 
@@ -435,11 +191,6 @@ func (f *Fake) HeadObject(
 		if err != nil {
 			return nil, err //nolint:wrapcheck // A faked mid-flight cancellation.
 		}
-	}
-
-	bucketErr := f.checkBucket(in.Bucket)
-	if bucketErr != nil {
-		return nil, bucketErr
 	}
 
 	f.mu.Lock()
@@ -450,42 +201,124 @@ func (f *Fake) HeadObject(
 	}
 
 	f.headCalls++
-	f.headChecksumModes = append(f.headChecksumModes, string(in.ChecksumMode))
 
-	obj, ok := f.objects[*in.Key]
+	obj, ok := f.objects[key]
 	if !ok {
-		return nil, &types.NotFound{}
+		return nil, fmt.Errorf("%w: %s", errNotFound, key)
+	}
+
+	return &driver.Attributes{
+		Size: int64(len(obj.Data)),
+		MD5:  obj.MD5,
+	}, nil
+}
+
+// fakeWriter accumulates one write's bytes and commits them at Close.
+type fakeWriter struct {
+	//nolint:containedctx // The driver contract aborts a write via its context.
+	ctx  context.Context
+	f    *Fake
+	key  string
+	md5  []byte
+	body bytes.Buffer
+}
+
+// Write buffers p into the pending object.
+func (w *fakeWriter) Write(p []byte) (int, error) {
+	return w.body.Write(p) //nolint:wrapcheck // A transparent in-memory buffer.
+}
+
+// Close commits the buffered bytes as one object, unless the write's context
+// was canceled (the client's abort path) or a fault is injected.
+func (w *fakeWriter) Close() error {
+	err := w.ctx.Err()
+	if err != nil {
+		return err //nolint:wrapcheck // The driver contract returns ctx.Err().
+	}
+
+	w.f.mu.Lock()
+	defer w.f.mu.Unlock()
+
+	w.f.putCalls++
+
+	if w.f.PutErr != nil {
+		return w.f.PutErr
+	}
+
+	w.f.objects[w.key] = Object{Data: w.body.Bytes(), MD5: w.md5}
+
+	return nil
+}
+
+// NewTypedWriter opens a write to the object at key. The committed object
+// records an MD5 digest only when the write carries one, mirroring the real
+// backends: the client's Put digests its body, while a parted Upload records
+// none.
+func (f *Fake) NewTypedWriter(
+	ctx context.Context, key, _ string, opts *driver.WriterOptions,
+) (driver.Writer, error) {
+	return &fakeWriter{ctx: ctx, f: f, key: key, md5: opts.ContentMD5}, nil
+}
+
+// fakeReader serves one ranged read from an object's bytes.
+type fakeReader struct {
+	io.Reader
+	attrs driver.ReaderAttributes
+}
+
+// Attributes reports the read's metadata.
+func (r *fakeReader) Attributes() *driver.ReaderAttributes { return &r.attrs }
+
+// As reports no driver-specific types.
+func (r *fakeReader) As(any) bool { return false }
+
+// Close releases nothing; the reader serves memory.
+func (r *fakeReader) Close() error { return nil }
+
+// NewRangeReader serves at most length bytes of the object at key from
+// offset, recording the requested span; a negative length reads to the end.
+// An absent object reports not-found, and an offset past the object's end
+// errs as the real backends' range handling does, so a caller that fails to
+// bound its reads cannot pass against the fake.
+func (f *Fake) NewRangeReader(
+	_ context.Context, key string, offset, length int64, _ *driver.ReaderOptions,
+) (driver.Reader, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	obj, ok := f.objects[key]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", errNotFound, key)
 	}
 
 	size := int64(len(obj.Data))
-	out := &s3.HeadObjectOutput{
-		ContentLength: &size,
-		StorageClass:  types.StorageClass(obj.StorageClass),
+
+	if offset > 0 && offset >= size {
+		return nil, fmt.Errorf("offset %d outside object of %d bytes", offset, size)
 	}
 
-	if obj.Restore != "" {
-		out.Restore = &obj.Restore
+	f.ranges = append(f.ranges, Range{Offset: offset, Length: length})
+
+	end := size
+
+	if length >= 0 {
+		end = min(offset+length, size)
 	}
 
-	// As on S3, the checksum fields are served only when the request asks
-	// for them.
-	if in.ChecksumMode == types.ChecksumModeEnabled && obj.ChecksumSHA256 != "" {
-		out.ChecksumSHA256 = &obj.ChecksumSHA256
-	}
-
-	return out, nil
+	return &fakeReader{
+		Reader: bytes.NewReader(obj.Data[offset:end]),
+		attrs:  driver.ReaderAttributes{Size: size, ModTime: time.Time{}},
+	}, nil
 }
 
-// ListObjectsV2 serves one page of the keys under the requested prefix,
-// sorted, honoring MaxKeys and the continuation token (an opaque start key).
-func (f *Fake) ListObjectsV2(
-	_ context.Context, in *s3.ListObjectsV2Input, _ ...func(*s3.Options),
-) (*s3.ListObjectsV2Output, error) {
-	bucketErr := f.checkBucket(in.Bucket)
-	if bucketErr != nil {
-		return nil, bucketErr
-	}
+// listPageSize is how many keys one listing page serves without an explicit
+// page size, matching the real backends' thousand-key pages.
+const listPageSize = 1000
 
+// ListPaged serves one sorted page of the keys under the requested prefix,
+// honoring the page size and continuation token (an opaque start-after key),
+// the same scheme gocloud's own memblob driver pages by.
+func (f *Fake) ListPaged(_ context.Context, opts *driver.ListOptions) (*driver.ListPage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -495,168 +328,69 @@ func (f *Fake) ListObjectsV2(
 
 	f.listCalls++
 
-	var prefix, after string
-
-	if in.Prefix != nil {
-		prefix = *in.Prefix
+	pageSize := opts.PageSize
+	if pageSize <= 0 {
+		pageSize = listPageSize
 	}
 
-	if in.ContinuationToken != nil {
-		after = *in.ContinuationToken
-	}
-
-	pageSize := 1000
-	if in.MaxKeys != nil && *in.MaxKeys > 0 {
-		pageSize = int(*in.MaxKeys)
-	}
+	after := string(opts.PageToken)
 
 	var keys []string
 
 	for _, key := range slices.Sorted(maps.Keys(f.objects)) {
-		if strings.HasPrefix(key, prefix) && key > after {
+		if strings.HasPrefix(key, opts.Prefix) && key > after {
 			keys = append(keys, key)
 		}
 	}
 
+	page := &driver.ListPage{}
+
 	truncated := len(keys) > pageSize
 	if truncated {
 		keys = keys[:pageSize]
+		page.NextPageToken = []byte(keys[len(keys)-1])
 	}
-
-	out := &s3.ListObjectsV2Output{IsTruncated: &truncated}
 
 	for _, key := range keys {
 		obj := f.objects[key]
-		size := int64(len(obj.Data))
-		etag := `"` + obj.ETag + `"`
-		out.Contents = append(out.Contents, types.Object{
-			Key:  &key,
-			Size: &size,
-			ETag: &etag,
+		page.Objects = append(page.Objects, &driver.ListObject{
+			Key:  key,
+			Size: int64(len(obj.Data)),
+			MD5:  obj.MD5,
 		})
 	}
 
-	if truncated {
-		out.NextContinuationToken = &keys[len(keys)-1]
-	}
-
-	return out, nil
+	return page, nil
 }
 
-// DeleteObjects removes the named keys, recording them; an absent key
-// deletes as a no-op, per S3 semantics.
-func (f *Fake) DeleteObjects(
-	_ context.Context, in *s3.DeleteObjectsInput, _ ...func(*s3.Options),
-) (*s3.DeleteObjectsOutput, error) {
-	bucketErr := f.checkBucket(in.Bucket)
-	if bucketErr != nil {
-		return nil, bucketErr
-	}
-
+// Delete removes the object at key, recording it; an absent key reports
+// not-found, per the driver contract, which the client settles as a no-op.
+func (f *Fake) Delete(_ context.Context, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if f.DeleteErr != nil {
-		return nil, f.DeleteErr
+		return f.DeleteErr
 	}
 
-	f.deleteCalls++
-
-	for _, id := range in.Delete.Objects {
-		delete(f.objects, *id.Key)
-
-		f.deleted = append(f.deleted, *id.Key)
+	_, ok := f.objects[key]
+	if !ok {
+		return fmt.Errorf("%w: %s", errNotFound, key)
 	}
 
-	return &s3.DeleteObjectsOutput{}, nil
+	delete(f.objects, key)
+
+	f.deleted = append(f.deleted, key)
+
+	return nil
 }
 
-// GetObject serves an object's bytes, honoring a bytes=start-end range. An
-// object parked unrestored in an archival class answers InvalidObjectState,
-// as S3 does.
-func (f *Fake) GetObject(
-	_ context.Context, in *s3.GetObjectInput, _ ...func(*s3.Options),
-) (*s3.GetObjectOutput, error) {
-	bucketErr := f.checkBucket(in.Bucket)
-	if bucketErr != nil {
-		return nil, bucketErr
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.GetErr != nil {
-		return nil, f.GetErr
-	}
-
-	obj, ok := f.objects[*in.Key]
-	if !ok {
-		return nil, &types.NoSuchKey{}
-	}
-
-	if obj.archived() && !obj.restored() {
-		return nil, &types.InvalidObjectState{
-			StorageClass: types.StorageClass(obj.StorageClass),
-		}
-	}
-
-	var rangeHeader string
-
-	if in.Range != nil {
-		rangeHeader = *in.Range
-	}
-
-	f.getRanges = append(f.getRanges, rangeHeader)
-
-	start, end, err := parseRange(rangeHeader, int64(len(obj.Data)))
-	if err != nil {
-		return nil, err
-	}
-
-	body := obj.Data[start : end+1]
-	size := int64(len(body))
-
-	return &s3.GetObjectOutput{
-		Body:          io.NopCloser(bytes.NewReader(body)),
-		ContentLength: &size,
-	}, nil
+// Copy is unsupported; the client never copies.
+func (f *Fake) Copy(context.Context, string, string, *driver.CopyOptions) error {
+	return errors.ErrUnsupported
 }
 
-// parseRange resolves a bytes=start-end header (end inclusive, possibly
-// open-ended) against an object of size bytes; an empty header is the whole
-// object.
-func parseRange(header string, size int64) (int64, int64, error) {
-	if header == "" {
-		return 0, size - 1, nil
-	}
-
-	spec, ok := strings.CutPrefix(header, "bytes=")
-	if !ok {
-		return 0, 0, fmt.Errorf("unsupported range %q", header)
-	}
-
-	startStr, endStr, ok := strings.Cut(spec, "-")
-	if !ok || startStr == "" {
-		return 0, 0, fmt.Errorf("unsupported range %q", header)
-	}
-
-	start, err := strconv.ParseInt(startStr, 10, 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("parse range %q: %w", header, err)
-	}
-
-	end := size - 1
-
-	if endStr != "" {
-		end, err = strconv.ParseInt(endStr, 10, 64)
-		if err != nil {
-			return 0, 0, fmt.Errorf("parse range %q: %w", header, err)
-		}
-	}
-
-	if start > end || start >= size {
-		return 0, 0, fmt.Errorf("range %q outside object of %d bytes", header, size)
-	}
-
-	return start, min(end, size-1), nil
+// SignedURL is unsupported; the client never signs.
+func (f *Fake) SignedURL(context.Context, string, *driver.SignedURLOptions) (string, error) {
+	return "", errors.ErrUnsupported
 }

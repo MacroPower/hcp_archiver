@@ -87,23 +87,21 @@ scope:
   registryDetail: true
   auditTrail: true
 
-# Mirror the archive to an S3-compatible object store: sealed cold bundles
-# and settled configuration tarballs are evicted there (uploaded, verified,
+# Mirror the archive to a remote object store: sealed cold bundles and
+# settled configuration tarballs are evicted there (uploaded, verified,
 # then removed locally), and every other file syncs there at each org run's
 # close, so the bucket holds a complete copy while local disk stays the
 # grep-able search layer plus in-flight work. Omit the block to keep the
-# whole archive on local disk. Credentials come from the AWS SDK default
-# chain (environment, shared config, instance/task role), never from here.
+# whole archive on local disk. The URL's scheme selects the backend;
+# credentials come from that provider's default chain (AWS SDK chain,
+# Azure environment/DefaultAzureCredential), never from here.
 remote:
-  bucket: my-archive-bucket # required to enable the mirror
+  url: s3://my-archive-bucket?region=us-east-1 # required to enable the mirror
+  # url: s3://my-bucket?endpoint=s3.example.com&use_path_style=true # MinIO, R2, Ceph
+  # url: azblob://my-container # Azure Blob Storage
+  # url: file:///mnt/archive-mirror # local directory tree
   prefix: hcp-archive # optional key prefix
-  region: us-east-1
-  storageClass: DEEP_ARCHIVE # evicted bundles/tarballs; any class the store accepts
-  # syncStorageClass: STANDARD_IA    # synced search-layer files; empty takes the store's default
-  # endpoint: https://s3.example.com # S3-compatible stores (MinIO, R2, Ceph)
-  # forcePathStyle: true             # the addressing shape MinIO/Ceph expect
-  # checksums: false                 # only for stores that reject checksum headers
-  # partSize: 67108864               # multipart tuning; defaults are fine
+  # partSize: 67108864 # parted-upload tuning; defaults are fine
   # concurrency: 4
 ```
 
@@ -155,13 +153,11 @@ browsing and grep stay fully offline — the search layer, including every
 sidecar index, is local — and only opening a sealed member whose bundle was
 evicted reaches the remote store, fetching just that member with ranged reads
 rather than the whole bundle. That read path needs object-store credentials
-from the AWS SDK default chain; a read-only key (`s3:GetObject` on the
-archive prefix) is the right shape. A member whose bundle sits unrestored in
-an archival class (GLACIER, DEEP_ARCHIVE) shows a clear "restore required"
-message on the status line instead of hanging; restore the object and open it
-again. Evicted configuration tarballs have no in-tool read path; fetch one
-directly from its mirrored key (`<prefix>/<org>/config-versions/<id>.tar.gz`)
-with any S3 client.
+from the backend provider's default chain; a read-only identity scoped to the
+archive prefix is the right shape. Evicted configuration tarballs have no
+in-tool read path; fetch one directly from its mirrored key
+(`<prefix>/<org>/config-versions/<id>.tar.gz`) with any client for the
+backing store.
 
 ### Mirroring the archive to object storage
 
@@ -176,51 +172,53 @@ roll-ups, sidecar indexes, ledger snapshots — with the local copy kept: local
 disk stays the canonical, searchable archive, and the bucket is the long-term
 and disaster-recovery copy. Restoring is one download of the org prefix.
 
-The sync is incremental: one bucket LIST per run inventories the mirror
+The sync is incremental: one bucket listing per run inventories the mirror
 (~1 request per 1000 keys) and only absent or changed files upload, compared
-by size and checksum (ETag when it is a plain MD5, the store's recorded
-SHA-256 otherwise; with `checksums: false` the comparison degrades to size
-alone). The mirror also **prunes**: a remote copy of a file that no longer
-exists locally — a loose `run.json` later coalesced into a roll-up, or a
-subtree you deleted — is removed on the next run, so the bucket tracks the
-archive rather than accumulating stale copies. Evicted bundles and tarballs
-are exempt; they are remote-only by design. Eviction verification is layered:
-a bundle is uploaded only after it has sealed and read back intact locally,
-the upload carries a SHA-256 checksum the server validates on write, and the
-local file is removed only once a follow-up probe confirms the object at the
-expected size. Any failure leaves the local copy in place as canonical, warns,
-and is retried by the next run's sweep; sync failures never fail the run.
-Pointing a `remote:` block at an existing all-local archive migrates it: the
-next run's sweep uploads everything (a one-time pass that can take a while on
-a large archive; `sync_progress` log lines track it) and evicts every
-previously sealed bundle.
+by size and the full-object MD5 digest the tool records with each synced
+write (fetched per file when a backend's listings omit it; on a store that
+recorded no digest at all the comparison degrades to size alone). The mirror
+also **prunes**: a remote copy of a file that no longer exists locally — a
+loose `run.json` later coalesced into a roll-up, or a subtree you deleted —
+is removed on the next run, so the bucket tracks the archive rather than
+accumulating stale copies. Evicted bundles and tarballs are exempt; they are
+remote-only by design. Eviction verification is layered: a bundle is
+uploaded only after it has sealed and read back intact locally, a write that
+dies mid-stream is aborted rather than committed as a truncated object, and
+the local file is removed only once a follow-up probe confirms the object at
+the expected size. Any failure leaves the local copy in place as canonical,
+warns, and is retried by the next run's sweep; sync failures never fail the
+run. Pointing a `remote:` block at an existing all-local archive migrates
+it: the next run's sweep uploads everything (a one-time pass that can take a
+while on a large archive; `sync_progress` log lines track it) and evicts
+every previously sealed bundle.
 
-Credentials are never configured in YAML. The client uses the AWS SDK default
-chain — `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `~/.aws/config`
-profiles (`AWS_PROFILE`), SSO, or an instance/task role. The archiving
-identity needs `s3:PutObject`, `s3:GetObject` (Head), `s3:ListBucket`,
-`s3:DeleteObject`, and `s3:AbortMultipartUpload` on the archive prefix;
-`view` needs only `s3:GetObject`, and a separate read-only key for browsing
-is the recommended split.
+Credentials are never configured in YAML. The `url` scheme selects the
+backend, and each backend authenticates through its provider's default chain:
+`s3://` uses the AWS SDK chain (`AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY`, `~/.aws/config` profiles, SSO, an instance/task
+role); `azblob://` uses Azure's environment variables
+(`AZURE_STORAGE_ACCOUNT` with a key, SAS token, or connection string) or
+`DefaultAzureCredential`. The archiving identity needs write, read, list, and
+delete on the archive prefix; `view` needs only read, and a separate
+read-only identity for browsing is the recommended split.
 
-Storage classes split by motion: `storageClass` applies to the evicted cold
-surfaces and `syncStorageClass` to the synced search layer. Three choices are
-worth making deliberately:
+Every object is written in the store's default storage class. Three bucket
+choices are worth making deliberately:
 
-- **Enable bucket versioning** (or Object Lock) on the archive bucket. The
+- **Enable bucket versioning** (or Object Lock / blob soft delete). The
   mirror prunes remote copies of files that no longer exist locally, and the
   evicted bundles exist nowhere else; versioning turns any surprising delete
   or overwrite into a recoverable event instead of a permanent one.
-- **Abort incomplete multipart uploads** after a few days (a lifecycle rule):
-  an upload killed mid-flight is re-run safely by the next sweep, but its
-  already-uploaded parts otherwise linger as billable storage.
-- Prefer `storageClass: DEEP_ARCHIVE` (or another archival class) in the
-  configuration over a class-transition rule: bundles are write-once, so
-  landing them directly in the archival class avoids paying for a transition
-  out of Standard. Keep `syncStorageClass` a directly-readable class
-  (STANDARD, STANDARD_IA): synced files are re-compared, re-uploaded, and
-  pruned as the archive changes. Compatible stores accept their own class
-  names here.
+- **Abort incomplete parted uploads** after a few days (an S3 lifecycle
+  rule): an upload killed mid-flight is re-run safely by the next sweep, but
+  its already-uploaded parts otherwise linger as billable storage.
+- **Do not lifecycle mirrored objects into an archival tier** (S3 Glacier,
+  Azure Archive). The tool has no restore workflow: a `view` read of an
+  archived bundle fails with the backend's error until the object is
+  restored by hand, and synced search-layer files are re-compared and
+  re-uploaded as the archive changes, which archival tiers' minimum-storage
+  charges punish. Infrequent-access tiers that serve reads directly
+  (S3 Standard-IA, Azure Cool) are the safe cost lever.
 
 ### Resuming and re-running
 
@@ -296,10 +294,8 @@ Settings are grouped by how much they vary; see
   block of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
   `registryDetail`, `auditTrail`), each off by default, and a `remote` block
   ([Mirroring the archive](#mirroring-the-archive-to-object-storage))
-  naming the S3-compatible store the archive is mirrored to (`bucket`
-  required to enable; optional `prefix`, `endpoint`, `region`,
-  `forcePathStyle`, `storageClass`, `syncStorageClass`, `checksums`,
-  `partSize`, `concurrency`).
+  naming the object store the archive is mirrored to (`url` required to
+  enable; optional `prefix`, `partSize`, `concurrency`).
 
 ## Output layout
 

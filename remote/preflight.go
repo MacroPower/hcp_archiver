@@ -1,7 +1,6 @@
 package remote
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"path"
@@ -20,19 +19,15 @@ var preflightBody = []byte("hcp_archiver remote store probe\n")
 // Preflight proves the client can manage objects in the configured store by
 // round-tripping a probe under the prefix — write it, read its metadata back,
 // find it in a listing, delete it — the same motions an archive run's mirror
-// performs, so a misconfigured bucket, endpoint, region, or credential set
-// surfaces before any archive work begins. The write carries the same
-// checksum settings as real uploads, so a store that rejects the
-// flexible-checksum headers (the reason [Config.DisableChecksums] exists)
-// also reports here rather than on the first bundle.
+// performs, so a misconfigured bucket URL or credential set surfaces before
+// any archive work begins.
 //
 // The probe key is fixed, so a probe stranded by an interrupted run is
-// overwritten and removed by the next preflight rather than accreting; it is
-// written in the store's default storage class, never an archival one.
+// overwritten and removed by the next preflight rather than accreting.
 func (c *Client) Preflight(ctx context.Context) error {
 	key := strings.TrimPrefix(path.Join("/", c.cfg.Prefix, preflightName), "/")
 
-	err := c.Put(ctx, key, bytes.NewReader(preflightBody), "")
+	err := c.Put(ctx, key, preflightBody)
 	if err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}

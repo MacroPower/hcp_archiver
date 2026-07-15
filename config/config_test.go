@@ -239,19 +239,19 @@ func TestNew_ValidationErrors(t *testing.T) {
 			},
 			wantErr: config.ErrInvalidProgressMode,
 		},
-		"remote without a bucket": {
+		"remote without a url": {
 			opts: []config.Option{
 				config.WithToken("tok"),
 				config.WithOutputDir("/tmp/archive"),
 				config.WithRemote(config.RemoteConfig{Prefix: "hcp"}),
 			},
-			wantErr: config.ErrMissingRemoteBucket,
+			wantErr: config.ErrMissingRemoteURL,
 		},
 		"negative remote part size": {
 			opts: []config.Option{
 				config.WithToken("tok"),
 				config.WithOutputDir("/tmp/archive"),
-				config.WithRemote(config.RemoteConfig{Bucket: "b", PartSize: -1}),
+				config.WithRemote(config.RemoteConfig{URL: "s3://b", PartSize: -1}),
 			},
 			wantErr: config.ErrInvalidRemotePartSize,
 		},
@@ -259,7 +259,7 @@ func TestNew_ValidationErrors(t *testing.T) {
 			opts: []config.Option{
 				config.WithToken("tok"),
 				config.WithOutputDir("/tmp/archive"),
-				config.WithRemote(config.RemoteConfig{Bucket: "b", Concurrency: -1}),
+				config.WithRemote(config.RemoteConfig{URL: "s3://b", Concurrency: -1}),
 			},
 			wantErr: config.ErrInvalidRemoteConcurrency,
 		},

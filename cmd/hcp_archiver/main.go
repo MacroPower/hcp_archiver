@@ -118,7 +118,7 @@ func (af *archiveFlags) config() (*config.Config, error) {
 	}
 
 	// An untouched remote section leaves offloading disabled rather than
-	// enabling it over an empty bucket name.
+	// enabling it over an empty bucket URL.
 	if !file.Remote.IsZero() {
 		opts = append(opts, config.WithRemote(file.Remote.RemoteConfig()))
 	}

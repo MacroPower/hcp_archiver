@@ -58,8 +58,6 @@ type Env struct {
 	logger             *slog.Logger
 	idOwners           map[string]map[string]string
 	remoteOrg          string
-	evictClass         string
-	syncClass          string
 	remoteCfg          remote.Config
 	idMu               sync.Mutex
 	blobRetries        int
@@ -74,7 +72,6 @@ type Env struct {
 //   - [WithBlobRetry]
 //   - [WithLogger]
 //   - [WithRemote]
-//   - [WithStorageClasses]
 //   - [WithTarget]
 type Option func(*Env)
 
@@ -111,32 +108,16 @@ func WithTarget(target string) Option {
 	}
 }
 
-// WithRemote enables mirroring to an S3-compatible store — cold surfaces
+// WithRemote enables mirroring to a remote object store — cold surfaces
 // evict through [Env.OffloadFile] and everything else syncs through
 // [Env.SyncArchive]: client reaches the store, and cfg with orgName compose
 // the object keys through [Env.RemoteKey]. A nil client keeps the archive
-// local-only. Storage classes are configured separately through
-// [WithStorageClasses]. It returns an [Option].
+// local-only. It returns an [Option].
 func WithRemote(client *remote.Client, cfg remote.Config, orgName string) Option {
 	return func(e *Env) {
 		e.remote = client
 		e.remoteCfg = cfg
 		e.remoteOrg = orgName
-	}
-}
-
-// WithStorageClasses sets the storage classes the mirror's writes carry:
-// evictClass for evicted cold surfaces (sealed bundles, settled tarballs;
-// e.g. GLACIER, DEEP_ARCHIVE) and syncClass for synced search-layer files
-// (e.g. STANDARD, STANDARD_IA). The two are separate because synced files
-// change and re-upload across runs — churn an archival class's
-// minimum-storage charges punish — and the disaster-recovery download of the
-// prefix would otherwise be gated behind restores. An empty class takes the
-// store's default. It returns an [Option].
-func WithStorageClasses(evictClass, syncClass string) Option {
-	return func(e *Env) {
-		e.evictClass = evictClass
-		e.syncClass = syncClass
 	}
 }
 
@@ -193,9 +174,9 @@ func (e *Env) Store() *store.Store {
 	return e.store
 }
 
-// Remote returns the client for the S3-compatible store the archive is
-// mirrored to, or nil when no remote is configured; the nil return is the
-// gate every remote code path checks first.
+// Remote returns the client for the object store the archive is mirrored
+// to, or nil when no remote is configured; the nil return is the gate every
+// remote code path checks first.
 func (e *Env) Remote() *remote.Client {
 	return e.remote
 }

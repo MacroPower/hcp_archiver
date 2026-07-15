@@ -180,10 +180,8 @@ func (r *orgRemote) bundle(relBundle string) (*remoteBundle, error) {
 	return b, nil
 }
 
-// buildBundle probes and parses one evicted bundle: one Head for size and
-// storage class, then a central-directory parse over a handful of ranged GETs.
-// An object parked unrestored in an archival storage class surfaces
-// [remote.ErrRestoreRequired] rather than a read that can never succeed. It runs
+// buildBundle probes and parses one evicted bundle: one Head for its size,
+// then a central-directory parse over a handful of ranged reads. It runs
 // outside [orgRemote.mu] so distinct bundles build in parallel.
 //
 //nolint:contextcheck // Only the stored browse context exists behind ReaderAt.
@@ -203,12 +201,6 @@ func (r *orgRemote) buildBundle(relBundle string) (*zip.Reader, io.ReaderAt, int
 		return nil, nil, 0, fmt.Errorf("probe remote bundle: %w", err)
 	}
 
-	if info.Archived && !info.Restored {
-		return nil, nil, 0, fmt.Errorf(
-			"%w: %s (storage class %s); request a restore, wait for it to complete, and retry",
-			remote.ErrRestoreRequired, key, info.StorageClass)
-	}
-
 	// The reader lives as long as the cached central directory, so it cannot
 	// be bound to one call's timeout; timedReaderAt gives each of its ranged
 	// GETs a fresh deadline instead.
@@ -225,7 +217,9 @@ func (r *orgRemote) buildBundle(relBundle string) (*zip.Reader, io.ReaderAt, int
 // clientBuild returns the lazily-built remote client. The build runs once per
 // session behind a [sync.Once], so it needs no external lock and never
 // re-probes the credential chain per read: a failure (a bad marker, no
-// credentials) is remembered and returned on every subsequent read.
+// credentials) is remembered and returned on every subsequent read. The
+// client deliberately lives for the browse session with no close path — the
+// viewer exits with the process, which releases the backend connection.
 //
 // The stored browse context is the intended parent for the build: callers
 // sit behind [io.ReaderAt]-shaped interfaces that carry no context.

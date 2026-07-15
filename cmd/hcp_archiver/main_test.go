@@ -106,13 +106,12 @@ func TestConfigFromArgs(t *testing.T) {
 		"remote section maps onto the config": {
 			token:      "secret",
 			args:       []string{"--output", "/tmp/a"},
-			configYAML: "remote:\n  bucket: my-archive\n  prefix: hcp\n  checksums: false\n",
+			configYAML: "remote:\n  url: s3://my-archive\n  prefix: hcp\n",
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
 				require.NotNil(t, cfg.Remote)
-				assert.Equal(t, "my-archive", cfg.Remote.Bucket)
+				assert.Equal(t, "s3://my-archive", cfg.Remote.URL)
 				assert.Equal(t, "hcp", cfg.Remote.Prefix)
-				assert.True(t, cfg.Remote.DisableChecksums)
 			},
 		},
 		"no remote section leaves offloading disabled": {

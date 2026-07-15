@@ -46,20 +46,19 @@ scope:
   registryDetail: false
   auditTrail: false
 
-# Mirror the archive to an S3-compatible object store: sealed cold bundles and
+# Mirror the archive to a remote object store: sealed cold bundles and
 # settled configuration tarballs are evicted there (uploaded, verified, then
 # removed locally), and every other archive file syncs there at each org run's
 # close, so the bucket holds a complete copy while local disk stays the
 # canonical grep-able search layer. Omit to keep everything local.
-# Credentials come from the AWS SDK default chain, never from this file.
+# The URL's scheme selects the backend; credentials come from that provider's
+# default chain (AWS SDK chain, Azure environment/DefaultAzureCredential),
+# never from this file.
 # remote:
-#   bucket: my-archive-bucket # required to enable the mirror
+#   url: s3://my-archive-bucket?region=us-east-1 # required to enable the mirror
+#   # url: s3://my-bucket?endpoint=s3.example.com&use_path_style=true # MinIO, R2, Ceph
+#   # url: azblob://my-container # Azure Blob Storage
+#   # url: file:///mnt/archive-mirror # local directory tree
 #   prefix: hcp-archive
-#   region: us-east-1
-#   storageClass: DEEP_ARCHIVE # evicted bundles and tarballs
-#   syncStorageClass: STANDARD_IA # synced search-layer files
-#   endpoint: https://s3.example.com # S3-compatible stores (MinIO, R2, Ceph)
-#   forcePathStyle: true # the addressing shape MinIO/Ceph expect
-#   checksums: false # only for stores that reject checksum headers
 #   partSize: 67108864
 #   concurrency: 4

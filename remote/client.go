@@ -2,208 +2,126 @@ package remote
 
 import (
 	"context"
-	"crypto/md5"    //nolint:gosec // Only sizes the S3 ETag algorithm's digest, not a security control.
-	"crypto/sha256" //nolint:gosec // Only sizes the checksum digest, not a security control.
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"slices"
-	"strings"
+	"sync/atomic"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/aws/smithy-go"
+	"gocloud.dev/blob"
+	"gocloud.dev/gcerrors"
+	"golang.org/x/sync/errgroup"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
+	// Each blank import registers one bucket URL scheme with
+	// [blob.OpenBucket]: s3:// (AWS S3 and compatible stores), azblob://
+	// (Azure Blob Storage), and file:// (a local directory tree).
+	_ "gocloud.dev/blob/azureblob"
+	_ "gocloud.dev/blob/fileblob"
+	_ "gocloud.dev/blob/s3blob"
 )
 
 // Sentinel errors reported by [New] and the [Client] methods.
 var (
-	// ErrMissingBucket indicates a [Config] that names no bucket.
-	ErrMissingBucket = errors.New("remote bucket is required")
+	// ErrMissingURL indicates a [Config] that names no bucket URL.
+	ErrMissingURL = errors.New("remote bucket url is required")
 
 	// ErrNotFound indicates the object at a key does not exist in the store.
 	ErrNotFound = errors.New("object not found in remote store")
-
-	// ErrRestoreRequired indicates the object sits unrestored in an archival
-	// storage class (GLACIER, DEEP_ARCHIVE), whose bytes cannot be read until
-	// a restore is requested and completes.
-	ErrRestoreRequired = errors.New("object requires a restore from its archival storage class")
 )
 
-// S3API is the slice of the S3 service a [Client] calls: the transfer
-// manager's upload operations plus the head and ranged-get reads, the
-// prefix listing, and the batch delete. The real [*s3.Client] implements it;
-// tests inject an in-memory fake through [WithS3API].
-type S3API interface {
-	manager.UploadAPIClient
-
-	// HeadObject reads an object's metadata without its body.
-	HeadObject(ctx context.Context, in *s3.HeadObjectInput, opts ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
-	// GetObject reads an object, honoring a byte-range request.
-	GetObject(ctx context.Context, in *s3.GetObjectInput, opts ...func(*s3.Options)) (*s3.GetObjectOutput, error)
-	// ListObjectsV2 lists objects under a prefix, one page per call.
-	ListObjectsV2(
-		ctx context.Context,
-		in *s3.ListObjectsV2Input,
-		opts ...func(*s3.Options),
-	) (*s3.ListObjectsV2Output, error)
-	// DeleteObjects removes a batch of objects in one request.
-	DeleteObjects(
-		ctx context.Context,
-		in *s3.DeleteObjectsInput,
-		opts ...func(*s3.Options),
-	) (*s3.DeleteObjectsOutput, error)
-}
+// maxUploadParts is the smallest part-count ceiling among the backends that
+// split an upload into parts (S3 caps a multipart upload at 10,000 parts;
+// Azure caps a block blob at 50,000 blocks). [Client.Upload] grows its part
+// size so any body fits under it.
+const maxUploadParts = 10_000
 
 // Client reads and writes an organization's mirrored archive objects in one
-// S3-compatible bucket: evicted cold surfaces through [Client.Upload] and the
+// object-store bucket: evicted cold surfaces through [Client.Upload] and the
 // synced search layer through [Client.Put], with [Client.List] and
 // [Client.Delete] serving the sync sweep's inventory and prune.
 //
 // A Client is safe for concurrent use; the archiver shares one across every
-// organization it archives. Create instances with [New].
+// organization it archives. Create instances with [New]; a client that is no
+// longer needed releases its backend resources through [Client.Close].
 type Client struct {
-	api S3API
-	//nolint:staticcheck // The manager module is deprecated in favor of
-	// transfermanager, which is still v0.x; migrate once it stabilizes.
-	uploader *manager.Uploader
-	cfg      Config
+	bucket *blob.Bucket
+	cfg    Config
 }
 
 // Option configures a [Client] passed to [New].
 //
 // Options of this type:
-//   - [WithS3API]
+//   - [WithBucket]
 type Option func(*Client)
 
-// WithS3API injects the S3 API implementation the client calls, replacing
-// the one built from the AWS SDK default chain; tests inject an in-memory
-// fake through it. A nil api keeps the default. It returns an [Option].
-func WithS3API(api S3API) Option {
+// WithBucket injects the opened bucket the client calls, replacing the one
+// [blob.OpenBucket] would resolve from the configured URL; tests inject an
+// in-memory bucket through it. A nil bucket keeps the default. It returns an
+// [Option].
+func WithBucket(bucket *blob.Bucket) Option {
 	return func(c *Client) {
-		if api != nil {
-			c.api = api
+		if bucket != nil {
+			c.bucket = bucket
 		}
 	}
 }
 
 // New creates a new [Client] over cfg.
 //
-// Unless [WithS3API] supplies one, the S3 client is built from the AWS SDK
-// default chain (environment variables, shared configuration, an instance or
-// task role), applying cfg's endpoint, region, path-style, and checksum
-// settings; credentials never come from cfg. It returns [ErrMissingBucket]
-// when cfg names no bucket.
+// Unless [WithBucket] supplies one, the bucket is opened from cfg's URL,
+// whose scheme selects the backend; credentials never come from cfg — each
+// backend authenticates through its provider's default chain. It returns
+// [ErrMissingURL] when cfg names no URL.
 func New(ctx context.Context, cfg Config, opts ...Option) (*Client, error) {
-	if cfg.Bucket == "" {
-		return nil, ErrMissingBucket
-	}
-
 	c := &Client{cfg: cfg}
 
 	for _, opt := range opts {
 		opt(c)
 	}
 
-	if c.api == nil {
-		api, err := newSDKClient(ctx, cfg)
+	if c.bucket == nil {
+		if cfg.URL == "" {
+			return nil, ErrMissingURL
+		}
+
+		bucket, err := blob.OpenBucket(ctx, cfg.URL)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("open bucket: %w", err)
 		}
 
-		c.api = api
+		c.bucket = bucket
 	}
-
-	//nolint:staticcheck // See the uploader field's deprecation note.
-	c.uploader = manager.NewUploader(c.api, func(u *manager.Uploader) {
-		if cfg.PartSize > 0 {
-			u.PartSize = cfg.PartSize
-		}
-
-		if cfg.Concurrency > 0 {
-			u.Concurrency = cfg.Concurrency
-		}
-	})
 
 	return c, nil
 }
 
-// newSDKClient builds the real S3 client from the SDK default chain and cfg's
-// endpoint, region, path-style, and checksum settings.
-func newSDKClient(ctx context.Context, cfg Config) (S3API, error) {
-	var loadOpts []func(*awsconfig.LoadOptions) error
-
-	if cfg.Region != "" {
-		loadOpts = append(loadOpts, awsconfig.WithRegion(cfg.Region))
-	}
-
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
+// Close releases the resources held by the client's backend connection. The
+// client must not be used after Close.
+func (c *Client) Close() error {
+	err := c.bucket.Close()
 	if err != nil {
-		return nil, fmt.Errorf("load aws config: %w", err)
+		return fmt.Errorf("close bucket: %w", err)
 	}
 
-	return s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		if cfg.Endpoint != "" {
-			o.BaseEndpoint = aws.String(cfg.Endpoint)
-		}
-
-		o.UsePathStyle = cfg.ForcePathStyle
-
-		// Some S3-compatible stores reject the flexible-checksum headers;
-		// when checksums are off, calculate and validate them only where the
-		// API requires one.
-		if cfg.DisableChecksums {
-			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
-			o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
-		}
-	}), nil
+	return nil
 }
 
-// ObjectInfo describes one stored object as observed by [Client.Head].
+// ObjectInfo describes one stored object as observed by [Client.Head] and
+// [Client.List].
 type ObjectInfo struct {
-	// StorageClass is the class the object is stored in, empty when the
-	// store reports none (AWS omits it for STANDARD).
-	StorageClass string
-	// SHA256 is the store's recorded full-object SHA-256 digest as raw
-	// bytes, comparable against a locally computed sum. It is nil when the
-	// store recorded none or when the record is a multipart composite (a
-	// "<base64>-N"), which digests the parts' digests rather than the object
-	// and so compares against nothing computable from the local bytes.
-	SHA256 []byte
+	// MD5 is the store's recorded full-object MD5 digest as raw bytes,
+	// comparable against a locally computed sum. It is nil when the store
+	// records none for the object (a parted upload on most backends). Some
+	// backends' listings omit a digest the object still carries, so a nil
+	// from [Client.List] may yet resolve through [Client.Head].
+	MD5 []byte
 	// Size is the object's length in bytes.
 	Size int64
-	// Archived reports an archival storage class (GLACIER, DEEP_ARCHIVE)
-	// whose bytes cannot be read without a restore.
-	Archived bool
-	// Restored reports a completed, still-valid restore of an archived
-	// object, during which its bytes read normally.
-	Restored bool
 }
 
 // Head reads the object's metadata at key. An absent object returns
 // [ErrNotFound].
 func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
-	input := &s3.HeadObjectInput{
-		Bucket: aws.String(c.cfg.Bucket),
-		Key:    aws.String(key),
-	}
-
-	// Requesting the checksum makes the store report the fields the sync gate
-	// compares content by; it is free where supported. A store told to disable
-	// checksums rejects the checksum-mode header (the reason the flag exists), so
-	// omit it there, mirroring how Upload and Put gate ChecksumAlgorithm.
-	if !c.cfg.DisableChecksums {
-		input.ChecksumMode = types.ChecksumModeEnabled
-	}
-
-	out, err := c.api.HeadObject(ctx, input)
+	attrs, err := c.bucket.Attributes(ctx, key)
 	if err != nil {
 		if isNotFound(err) {
 			return ObjectInfo{}, fmt.Errorf("%w: %s", ErrNotFound, key)
@@ -212,69 +130,22 @@ func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
 		return ObjectInfo{}, fmt.Errorf("head %q: %w", key, err)
 	}
 
-	info := ObjectInfo{
-		StorageClass: string(out.StorageClass),
-		SHA256:       fullObjectChecksum(out.ChecksumSHA256),
-		Archived:     archivalClass(out.StorageClass),
-		Restored:     restoreComplete(out.Restore),
-	}
-
-	if out.ContentLength != nil {
-		info.Size = *out.ContentLength
-	}
-
-	return info, nil
+	return ObjectInfo{MD5: attrs.MD5, Size: attrs.Size}, nil
 }
 
-// fullObjectChecksum decodes a store-reported SHA-256 checksum (S3 wire form,
-// base64) into raw digest bytes, only when it digests the whole object: an
-// absent checksum, a multipart composite ("<base64>-N"), an undecodable value,
-// or one that does not decode to a full 32-byte digest yields nil, so a caller
-// never compares an uninterpretable checksum against a locally computed digest.
-func fullObjectChecksum(checksum *string) []byte {
-	if checksum == nil || strings.Contains(*checksum, "-") {
-		return nil
-	}
-
-	sum, err := base64.StdEncoding.DecodeString(*checksum)
-	if err != nil || len(sum) != sha256.Size {
-		return nil
-	}
-
-	return sum
-}
-
-// Upload streams r to the object at key, letting the transfer manager split
-// a large body into a concurrent multipart upload; the parts of an upload
-// that dies midway are aborted rather than left to accrue storage (a bucket
-// lifecycle rule aborting incomplete multipart uploads still catches the
-// parts a crash strands). Unless checksums are disabled, the body carries a
-// SHA-256 checksum the server validates on receipt. The object is written
-// with the given storage class; empty takes the store's default.
+// Upload streams r to the object at key, letting the backend split a large
+// body into a concurrent parted upload; a write that dies midway is aborted
+// rather than committed truncated. The object only becomes visible at the
+// key once the final flush succeeds.
 //
 // The size argument does not bound the upload — the bytes streamed are
 // whatever r yields — it only grows the part size when needed so a very
-// large body still fits the transfer manager's part-count ceiling.
-func (c *Client) Upload(ctx context.Context, key string, r io.Reader, size int64, class string) error {
-	input := &s3.PutObjectInput{
-		Bucket: aws.String(c.cfg.Bucket),
-		Key:    aws.String(key),
-		Body:   r,
-	}
-
-	if class != "" {
-		input.StorageClass = types.StorageClass(class)
-	}
-
-	if !c.cfg.DisableChecksums {
-		input.ChecksumAlgorithm = types.ChecksumAlgorithmSha256
-	}
-
-	//nolint:staticcheck // See the uploader field's deprecation note.
-	_, err := c.uploader.Upload(ctx, input, func(u *manager.Uploader) {
-		if need := partSizeFor(size); need > u.PartSize {
-			u.PartSize = need
-		}
+// large body still fits the backend's part-count ceiling.
+func (c *Client) Upload(ctx context.Context, key string, r io.Reader, size int64) error {
+	err := c.write(ctx, key, r, &blob.WriterOptions{
+		BufferSize:                  partSizeFor(size, c.cfg.PartSize),
+		MaxConcurrency:              c.cfg.Concurrency,
+		DisableContentTypeDetection: true,
 	})
 	if err != nil {
 		return fmt.Errorf("upload %q: %w", key, err)
@@ -283,32 +154,17 @@ func (c *Client) Upload(ctx context.Context, key string, r io.Reader, size int64
 	return nil
 }
 
-// Put writes r to the object at key in one PutObject request, applying the
-// given storage class (empty takes the store's default) and, unless
-// checksums are disabled, a SHA-256 checksum the server validates and
-// records.
-//
-// Unlike [Client.Upload] it never goes multipart, which is what makes the
-// stored checksum a full-object digest a later [Client.Head] can compare
-// against local bytes; a multipart upload records only a composite. A single
-// request is valid to 5 GiB, far above any synced search-layer file. The
-// body must seek (an [*os.File] does) so the SDK can rewind it on a retry.
-func (c *Client) Put(ctx context.Context, key string, r io.ReadSeeker, class string) error {
-	input := &s3.PutObjectInput{
-		Bucket: aws.String(c.cfg.Bucket),
-		Key:    aws.String(key),
-		Body:   r,
-	}
-
-	if class != "" {
-		input.StorageClass = types.StorageClass(class)
-	}
-
-	if !c.cfg.DisableChecksums {
-		input.ChecksumAlgorithm = types.ChecksumAlgorithmSha256
-	}
-
-	_, err := c.api.PutObject(ctx, input)
+// Put writes data to the object at key, recording the body's MD5 digest
+// with the object so later [Client.Head] and [Client.List] calls can compare
+// the stored content against local bytes; the digest doubles as the write's
+// integrity check. The whole body rides in memory — the shape of the small
+// search-layer files Put serves; bulk bytes stream through [Client.Upload].
+func (c *Client) Put(ctx context.Context, key string, data []byte) error {
+	// WriteAll digests the body itself and carries the digest as the
+	// write's ContentMD5.
+	err := c.bucket.WriteAll(ctx, key, data, &blob.WriterOptions{
+		DisableContentTypeDetection: true,
+	})
 	if err != nil {
 		return fmt.Errorf("put %q: %w", key, err)
 	}
@@ -316,171 +172,117 @@ func (c *Client) Put(ctx context.Context, key string, r io.ReadSeeker, class str
 	return nil
 }
 
-// ListedObject describes one stored object as observed by [Client.List].
-type ListedObject struct {
-	// MD5 is the object's MD5 digest as raw bytes, parsed from its ETag when
-	// that is a plain single-part MD5 — the shape a single-request, non-KMS
-	// write records, and the only one comparable against a locally computed
-	// sum. It is nil for the opaque ETags of multipart or encrypted writes.
-	MD5 []byte
-	// Size is the object's length in bytes.
-	Size int64
+// write streams r into one committed object at key. A body that errs midway
+// cancels the write before the final flush, so a truncated read can never
+// commit a truncated object under the key.
+func (c *Client) write(ctx context.Context, key string, r io.Reader, opts *blob.WriterOptions) error {
+	// The writer commits on Close unless its context is canceled first; the
+	// derived context is the abort lever for a body that fails mid-copy.
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	w, err := c.bucket.NewWriter(wctx, key, opts)
+	if err != nil {
+		return fmt.Errorf("open writer: %w", err)
+	}
+
+	_, copyErr := io.Copy(w, r)
+	if copyErr != nil {
+		cancel()
+	}
+
+	closeErr := w.Close()
+
+	switch {
+	case copyErr != nil:
+		return fmt.Errorf("stream body: %w", copyErr)
+	case closeErr != nil:
+		return fmt.Errorf("commit object: %w", closeErr)
+	}
+
+	return nil
 }
 
 // List enumerates every object under prefix, keyed by full object key, at
-// roughly one request per thousand keys. It is the bulk inventory the sync
-// sweep gates uploads and prunes stale keys from, replacing a HeadObject per
-// file.
-func (c *Client) List(ctx context.Context, prefix string) (map[string]ListedObject, error) {
-	out := make(map[string]ListedObject)
-
-	var token *string
+// roughly one request per listing page. It is the bulk inventory the sync
+// sweep gates uploads and prunes stale keys from, replacing a Head per file.
+func (c *Client) List(ctx context.Context, prefix string) (map[string]ObjectInfo, error) {
+	out := make(map[string]ObjectInfo)
+	iter := c.bucket.List(&blob.ListOptions{Prefix: prefix})
 
 	for {
-		page, err := c.api.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-			Bucket:            aws.String(c.cfg.Bucket),
-			Prefix:            aws.String(prefix),
-			ContinuationToken: token,
-		})
+		obj, err := iter.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+
 		if err != nil {
 			return nil, fmt.Errorf("list %q: %w", prefix, err)
 		}
 
-		for _, obj := range page.Contents {
-			if obj.Key == nil {
-				continue
-			}
-
-			lo := ListedObject{MD5: etagMD5(aws.ToString(obj.ETag))}
-			if obj.Size != nil {
-				lo.Size = *obj.Size
-			}
-
-			out[*obj.Key] = lo
+		if obj.IsDir {
+			continue
 		}
 
-		if page.IsTruncated == nil || !*page.IsTruncated {
-			return out, nil
-		}
-
-		// A store that reports a truncated page but omits the continuation token
-		// would send the loop back to the first page forever. Surface the
-		// non-compliant response instead of hanging the sweep.
-		if aws.ToString(page.NextContinuationToken) == "" {
-			return nil, fmt.Errorf("list %q: truncated page carries no continuation token", prefix)
-		}
-
-		token = page.NextContinuationToken
+		out[obj.Key] = ObjectInfo{MD5: obj.MD5, Size: obj.Size}
 	}
 }
 
-// deleteBatchSize is the most keys one DeleteObjects request accepts.
-const deleteBatchSize = 1000
+// deleteConcurrency bounds how many delete requests fly at once. The
+// backends take one request per key, so a prune of thousands of stale keys
+// must not serialize one round-trip per key.
+const deleteConcurrency = 16
 
-// Delete removes the objects at keys, batched a thousand per request, and
-// returns how many keys it durably removed. A key that does not exist deletes
-// as a no-op, per S3 semantics; a per-key error the store reports stops the
-// call, and the count reflects only the keys acknowledged removed before it, so
-// a caller's tally stays truthful across a partial delete.
+// Delete removes the objects at keys and returns how many keys it durably
+// settled. Deletes are idempotent: a key that does not exist settles as
+// removed and counts. An error the store reports stops the fan-out, and the
+// count reflects only the keys that settled, so a caller's tally stays
+// truthful across a partial delete.
 func (c *Client) Delete(ctx context.Context, keys []string) (int, error) {
-	deleted := 0
+	var deleted atomic.Int64
 
-	for batch := range slices.Chunk(keys, deleteBatchSize) {
-		ids := make([]types.ObjectIdentifier, 0, len(batch))
-		for _, key := range batch {
-			ids = append(ids, types.ObjectIdentifier{Key: aws.String(key)})
-		}
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(deleteConcurrency)
 
-		out, err := c.api.DeleteObjects(ctx, &s3.DeleteObjectsInput{
-			Bucket: aws.String(c.cfg.Bucket),
-			Delete: &types.Delete{Objects: ids, Quiet: aws.Bool(true)},
+	for _, key := range keys {
+		g.Go(func() error {
+			err := c.bucket.Delete(ctx, key)
+			if err != nil && !isNotFound(err) {
+				return fmt.Errorf("delete %q: %w", key, err)
+			}
+
+			deleted.Add(1)
+
+			return nil
 		})
-		if err != nil {
-			return deleted, fmt.Errorf("delete %d keys: %w", len(batch), err)
-		}
-
-		if len(out.Errors) > 0 {
-			first := out.Errors[0]
-
-			return deleted + len(batch) - len(out.Errors), fmt.Errorf("delete %d of %d keys (first: %s: %s)",
-				len(out.Errors), len(batch), aws.ToString(first.Key), aws.ToString(first.Message))
-		}
-
-		deleted += len(batch)
 	}
 
-	return deleted, nil
-}
-
-// etagMD5 parses an ETag into the raw MD5 digest it records for a
-// single-request, non-KMS write: 32 hex characters, optionally quoted, with
-// no multipart "-N" suffix. Any other shape — a composite, an SSE-KMS or
-// otherwise opaque value — yields nil.
-func etagMD5(etag string) []byte {
-	etag = strings.Trim(etag, `"`)
-
-	// Hex-decoding enforces the character set; the length check alone rules
-	// out composites and truncations.
-	if len(etag) != 2*md5.Size {
-		return nil
-	}
-
-	sum, err := hex.DecodeString(etag)
+	err := g.Wait()
 	if err != nil {
-		return nil
+		return int(deleted.Load()), err //nolint:wrapcheck // Each worker wraps its own error.
 	}
 
-	return sum
+	return int(deleted.Load()), nil
 }
 
-// partSizeFor returns the smallest part size that fits a body of size bytes
-// within the transfer manager's part-count ceiling.
-func partSizeFor(size int64) int64 {
-	parts := int64(manager.MaxUploadParts)
+// defaultPartSize is the smallest default part size among the parted-upload
+// backends (S3's 5 MiB); it floors the grow-to-fit logic so a small body
+// never shrinks the part size below what any backend would pick itself.
+const defaultPartSize = 5 << 20
 
-	return (size + parts - 1) / parts
+// partSizeFor returns the part size for a body of size bytes: the configured
+// size, grown when needed to fit the body within [maxUploadParts], and zero
+// (the backend default) when nothing is configured and nothing demands more.
+func partSizeFor(size, configured int64) int {
+	need := (size + maxUploadParts - 1) / maxUploadParts
+	if need > max(configured, defaultPartSize) {
+		return int(need)
+	}
+
+	return int(configured)
 }
 
-// archivalClass reports whether class parks an object's bytes behind a
-// restore: GLACIER (flexible retrieval) and DEEP_ARCHIVE. GLACIER_IR serves
-// reads directly and is not archival in this sense.
-func archivalClass(class types.StorageClass) bool {
-	return class == types.StorageClassGlacier || class == types.StorageClassDeepArchive
-}
-
-// restoreComplete reports whether the x-amz-restore header records a
-// completed restore, which it marks with ongoing-request="false"; an ongoing
-// restore carries "true" and no header means none was requested.
-func restoreComplete(restore *string) bool {
-	return restore != nil && strings.Contains(*restore, `ongoing-request="false"`)
-}
-
-// isNotFound classifies the S3 error shapes that mean "no such object": the
-// typed NotFound (HeadObject) and NoSuchKey (GetObject) errors, the bare API
-// error codes some compatible stores answer with, and — when no error code
-// identifies the response at all (a bodyless reply from a nonconforming
-// store) — a plain HTTP 404 status. A coded error that means something else
-// (NoSuchBucket, AccessDenied) is never a not-found, whatever its status.
+// isNotFound reports whether the backend classifies err as "no such object".
 func isNotFound(err error) bool {
-	var (
-		notFound  *types.NotFound
-		noSuchKey *types.NoSuchKey
-		apiErr    smithy.APIError
-		respErr   *smithyhttp.ResponseError
-	)
-
-	switch {
-	case errors.As(err, &notFound), errors.As(err, &noSuchKey):
-		return true
-	case errors.As(err, &apiErr) && apiErr.ErrorCode() != "":
-		code := apiErr.ErrorCode()
-
-		return code == "NotFound" || code == "NoSuchKey"
-
-	case errors.As(err, &respErr):
-		return respErr.HTTPStatusCode() == http.StatusNotFound
-
-	default:
-		return false
-	}
+	return gcerrors.Code(err) == gcerrors.NotFound
 }

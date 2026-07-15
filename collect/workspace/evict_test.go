@@ -17,10 +17,7 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
-const (
-	evictBucket = "archive-bucket"
-	evictPrefix = "hcp"
-)
+const evictPrefix = "hcp"
 
 // newEvictFixture builds a seal fixture whose environment has a remote store
 // configured, backed by an in-memory fake, so the eviction sweep can be
@@ -34,10 +31,10 @@ func newEvictFixture(t *testing.T) (sealFixture, *remotetest.Fake) {
 	ledger, err := manifest.Load(root)
 	require.NoError(t, err)
 
-	fake := remotetest.New(evictBucket)
-	cfg := remote.Config{Bucket: evictBucket, Prefix: evictPrefix}
+	fake := remotetest.New()
+	cfg := remote.Config{Prefix: evictPrefix}
 
-	client, err := remote.New(t.Context(), cfg, remote.WithS3API(fake))
+	client, err := remote.New(t.Context(), cfg, remote.WithBucket(fake.Bucket()))
 	require.NoError(t, err)
 
 	env := collect.NewEnv(nil, st, ledger,
@@ -121,10 +118,10 @@ func TestSealWorkspace_MigratesPreexistingBundles(t *testing.T) {
 
 	// ...gains a remote on a later run: the sweep uploads and evicts the
 	// pre-existing bundle even though this pass sealed nothing new.
-	fake := remotetest.New(evictBucket)
-	cfg := remote.Config{Bucket: evictBucket, Prefix: evictPrefix}
+	fake := remotetest.New()
+	cfg := remote.Config{Prefix: evictPrefix}
 
-	client, err := remote.New(t.Context(), cfg, remote.WithS3API(fake))
+	client, err := remote.New(t.Context(), cfg, remote.WithBucket(fake.Bucket()))
 	require.NoError(t, err)
 
 	env := collect.NewEnv(nil, f.store, f.ledger,
@@ -153,12 +150,12 @@ func TestSealWorkspace_EvictionIsIdempotent(t *testing.T) {
 	f.markComplete(project, ws)
 	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
 
-	uploads := fake.PutCalls() + fake.Completed()
+	uploads := fake.PutCalls()
 	require.Positive(t, uploads)
 
 	// A second pass finds no local zip and re-uploads nothing.
 	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
-	assert.Equal(t, uploads, fake.PutCalls()+fake.Completed(), "a swept bundle is not re-uploaded")
+	assert.Equal(t, uploads, fake.PutCalls(), "a swept bundle is not re-uploaded")
 }
 
 func TestSealWorkspace_EvictionResumesAfterUploadBeforeDelete(t *testing.T) {
@@ -185,13 +182,13 @@ func TestSealWorkspace_EvictionResumesAfterUploadBeforeDelete(t *testing.T) {
 	local := st.AbsPath(st.Join(st.BundleDir(project, ws), "logs.gen0001.zip"))
 	require.NoError(t, os.WriteFile(local, obj.Data, 0o600))
 
-	uploads := fake.PutCalls() + fake.Completed()
+	uploads := fake.PutCalls()
 
 	// The resumed sweep sees the remote copy, verifies size, and evicts
 	// without uploading again.
 	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
 
-	assert.Equal(t, uploads, fake.PutCalls()+fake.Completed(), "a confirmed remote copy is not re-uploaded")
+	assert.Equal(t, uploads, fake.PutCalls(), "a confirmed remote copy is not re-uploaded")
 	assert.False(t, f.exists(st.Join(st.BundleDir(project, ws), "logs.gen0001.zip")),
 		"the local zip is still evicted")
 }

@@ -76,7 +76,7 @@ func TestReadAtServesZip(t *testing.T) {
 	ra := readerAt{ctx: t.Context(), client: client, key: "logs.gen0001.zip", size: size}
 
 	zr, err := zip.NewReader(ra, size)
-	require.NoError(t, err, "the central directory should parse over ranged GETs")
+	require.NoError(t, err, "the central directory should parse over ranged reads")
 
 	for name, want := range members {
 		rc, openErr := zr.Open(name)
@@ -88,23 +88,20 @@ func TestReadAtServesZip(t *testing.T) {
 		assert.Equal(t, want, string(got), "member %s should read back intact", name)
 	}
 
-	for _, r := range fake.GetRanges() {
-		assert.NotEmpty(t, r, "every read should be a ranged GET, never a full download")
+	for _, r := range fake.Ranges() {
+		assert.GreaterOrEqual(t, r.Length, int64(0),
+			"every read should be a bounded ranged request, never a full download")
 	}
 }
 
-func TestReadAtRestoreRequired(t *testing.T) {
+func TestReadAtAbsent(t *testing.T) {
 	t.Parallel()
 
-	client, fake := newClient(t, remote.Config{})
-	fake.SetObject("cold.zip", remotetest.Object{
-		Data:         []byte("frozen bytes"),
-		StorageClass: "DEEP_ARCHIVE",
-	})
+	client, _ := newClient(t, remote.Config{})
 
 	buf := make([]byte, 4)
-	_, err := client.ReadAt(t.Context(), "cold.zip", 12, buf, 0)
-	require.ErrorIs(t, err, remote.ErrRestoreRequired)
+	_, err := client.ReadAt(t.Context(), "missing.zip", 12, buf, 0)
+	require.ErrorIs(t, err, remote.ErrNotFound)
 }
 
 func TestReadAtEdges(t *testing.T) {

@@ -3,7 +3,6 @@ package collect_test
 import (
 	"context"
 	"log/slog"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,11 +16,8 @@ import (
 )
 
 const (
-	syncBucket     = "sync-bucket"
-	syncPrefix     = "hcp"
-	syncOrg        = "org"
-	syncEvictClass = "DEEP_ARCHIVE"
-	syncSyncClass  = "STANDARD_IA"
+	syncPrefix = "hcp"
+	syncOrg    = "org"
 )
 
 // syncFixture is a remote-configured environment over a real store and ledger,
@@ -34,9 +30,8 @@ type syncFixture struct {
 	fake   *remotetest.Fake
 }
 
-// newSyncFixture builds a [syncFixture]; extra remote settings apply on top of
-// the bucket and prefix.
-func newSyncFixture(t *testing.T, cfg remote.Config) syncFixture {
+// newSyncFixture builds a [syncFixture] over the standard test prefix.
+func newSyncFixture(t *testing.T) syncFixture {
 	t.Helper()
 
 	root := t.TempDir()
@@ -45,16 +40,14 @@ func newSyncFixture(t *testing.T, cfg remote.Config) syncFixture {
 	ledger, err := manifest.Load(root)
 	require.NoError(t, err)
 
-	cfg.Bucket = syncBucket
-	cfg.Prefix = syncPrefix
-	fake := remotetest.New(syncBucket)
+	cfg := remote.Config{Prefix: syncPrefix}
+	fake := remotetest.New()
 
-	client, err := remote.New(t.Context(), cfg, remote.WithS3API(fake))
+	client, err := remote.New(t.Context(), cfg, remote.WithBucket(fake.Bucket()))
 	require.NoError(t, err)
 
 	env := collect.NewEnv(nil, st, ledger,
 		collect.WithRemote(client, cfg, syncOrg),
-		collect.WithStorageClasses(syncEvictClass, syncSyncClass),
 		collect.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 
@@ -186,7 +179,7 @@ func TestSyncArchiveClassification(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			f := newSyncFixture(t, remote.Config{})
+			f := newSyncFixture(t)
 
 			content := []byte("tarball")
 			f.write(t, tc.relPath, content)
@@ -220,47 +213,33 @@ func TestSyncArchiveIncrementalGate(t *testing.T) {
 	content := []byte(`{"org":"acme"}`)
 
 	tests := map[string]struct {
-		remoteObj        *remotetest.Object
-		disableChecksums bool
-		wantUpload       bool
-		wantHeads        int
+		remoteObj  *remotetest.Object
+		wantUpload bool
+		wantHeads  int
 	}{
 		"an absent key uploads": {
 			wantUpload: true,
 		},
 		"a size difference uploads": {
-			remoteObj:  &remotetest.Object{Data: []byte("longer stale copy"), ETag: "whatever"},
+			remoteObj:  &remotetest.Object{Data: []byte("longer stale copy")},
 			wantUpload: true,
 		},
-		"an equal size with a matching MD5 ETag skips without a Head": {
-			remoteObj: &remotetest.Object{Data: content, ETag: remotetest.MD5Hex(content)},
+		"an equal size with a matching digest skips without a Head": {
+			remoteObj: &remotetest.Object{Data: content, MD5: remotetest.MD5Sum(content)},
 		},
-		"a matching uppercase-hex ETag still skips": {
-			remoteObj: &remotetest.Object{Data: content, ETag: strings.ToUpper(remotetest.MD5Hex(content))},
-		},
-		"an equal size with a differing MD5 ETag uploads": {
+		"an equal size with a differing digest uploads": {
 			remoteObj: &remotetest.Object{
 				Data: []byte(`{"org":"evil"}`),
-				ETag: remotetest.MD5Hex([]byte(`{"org":"evil"}`)),
+				MD5:  remotetest.MD5Sum([]byte(`{"org":"evil"}`)),
 			},
 			wantUpload: true,
 		},
-		"an uncomparable ETag falls back to the Head checksum": {
-			// A composite ETag with a stale same-length body: only the store's
-			// recorded SHA-256 can tell them apart, so it must be a real 32-byte
-			// digest of the stale remote body, not a placeholder.
-			remoteObj: &remotetest.Object{
-				Data:           []byte(`{"org":"evil"}`),
-				ETag:           "0123456789abcdef0123456789abcdef-2",
-				ChecksumSHA256: remotetest.SHA256Base64([]byte(`{"org":"evil"}`)),
-			},
-			wantUpload: true,
-			wantHeads:  1,
-		},
-		"checksums off degrades to size-only": {
-			remoteObj:        &remotetest.Object{Data: []byte(`{"org":"evil"}`), ETag: "opaque-not-md5"},
-			disableChecksums: true,
-			wantHeads:        1,
+		"an equal size with no recorded digest is trusted after one Head": {
+			// A store that records no digest at all leaves size the whole
+			// gate, the documented degradation; the Head is the fallback for
+			// backends whose listings omit a digest the object still carries.
+			remoteObj: &remotetest.Object{Data: []byte(`{"org":"evil"}`)},
+			wantHeads: 1,
 		},
 	}
 
@@ -268,7 +247,7 @@ func TestSyncArchiveIncrementalGate(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			f := newSyncFixture(t, remote.Config{DisableChecksums: tc.disableChecksums})
+			f := newSyncFixture(t)
 			f.write(t, relPath, content)
 
 			if tc.remoteObj != nil {
@@ -290,44 +269,15 @@ func TestSyncArchiveIncrementalGate(t *testing.T) {
 			}
 
 			assert.Equal(t, tc.wantHeads, f.fake.HeadCalls(),
-				"a comparable inventory ETag must settle without a Head")
+				"a digest-carrying inventory entry must settle without a Head")
 		})
 	}
-}
-
-func TestSyncArchiveAppliesStorageClasses(t *testing.T) {
-	t.Parallel()
-
-	const (
-		zip      = "projects/prod/workspaces/api/bundles/logs.gen0001.zip"
-		loose    = "org.json"
-		zipBytes = "zip bytes"
-	)
-
-	f := newSyncFixture(t, remote.Config{})
-
-	f.write(t, zip, []byte(zipBytes))
-	f.write(t, zip+".sidecar.ndjson", []byte(`{"name":"x"}`))
-	f.write(t, loose, []byte(`{"org":"acme"}`))
-
-	stats := f.env.SyncArchive(t.Context())
-	require.Zero(t, stats.Failed)
-
-	evicted, ok := f.fake.Object(f.key(zip))
-	require.True(t, ok)
-	assert.Equal(t, syncEvictClass, evicted.StorageClass,
-		"an evicted surface takes the eviction class")
-
-	synced, ok := f.fake.Object(f.key(loose))
-	require.True(t, ok)
-	assert.Equal(t, syncSyncClass, synced.StorageClass,
-		"a synced file takes the sync class")
 }
 
 func TestSyncArchiveSecondSweepUploadsNothing(t *testing.T) {
 	t.Parallel()
 
-	f := newSyncFixture(t, remote.Config{})
+	f := newSyncFixture(t)
 	f.write(t, "org.json", []byte(`{"org":"acme"}`))
 	f.write(t, "projects/prod/workspaces/api/workspace.json", []byte(`{"ws":"api"}`))
 
@@ -342,7 +292,7 @@ func TestSyncArchiveSecondSweepUploadsNothing(t *testing.T) {
 	assert.Equal(t, 2, second.Skipped)
 	assert.Equal(t, puts, f.fake.PutCalls())
 	assert.Zero(t, f.fake.HeadCalls(),
-		"our own Put ETags are plain MD5s, so the gate settles from the inventory alone")
+		"our own Put records a digest, so the gate settles from the inventory alone")
 }
 
 func TestSyncArchiveTarballCrashAfterUploadEvictsWithoutReupload(t *testing.T) {
@@ -352,18 +302,18 @@ func TestSyncArchiveTarballCrashAfterUploadEvictsWithoutReupload(t *testing.T) {
 
 	content := []byte("tarball bytes")
 
-	f := newSyncFixture(t, remote.Config{})
+	f := newSyncFixture(t)
 	f.writeDone(t, relPath, content)
 
 	// The crash point: a prior sweep uploaded the tarball but died before the
 	// local delete. The resumed sweep must find the remote copy, verify size,
 	// and delete local without uploading again.
-	f.fake.SetObject(f.key(relPath), remotetest.Object{Data: content, ETag: remotetest.MD5Hex(content)})
+	f.fake.SetObject(f.key(relPath), remotetest.Object{Data: content})
 
 	stats := f.env.SyncArchive(t.Context())
 
 	assert.Equal(t, 1, stats.Evicted)
-	assert.Zero(t, f.fake.PutCalls()+f.fake.Completed(), "a confirmed remote copy is not re-uploaded")
+	assert.Zero(t, f.fake.PutCalls(), "a confirmed remote copy is not re-uploaded")
 	assert.False(t, f.exists(t, relPath), "the local tarball is still evicted")
 }
 
@@ -372,7 +322,7 @@ func TestSyncArchivePrunesStaleRemoteKeys(t *testing.T) {
 
 	const stale = "projects/prod/workspaces/api/runs/run-1/run.json"
 
-	f := newSyncFixture(t, remote.Config{})
+	f := newSyncFixture(t)
 
 	// The mirror holds a loose run.json from before the seal coalesced it; the
 	// local walk no longer sees it, so it must be pruned or a later restore
@@ -398,7 +348,7 @@ func TestSyncArchivePruneExemptsEvictedSurfaces(t *testing.T) {
 		tarball = "config-versions/cv-1.tar.gz"
 	)
 
-	f := newSyncFixture(t, remote.Config{})
+	f := newSyncFixture(t)
 
 	// Both cold surfaces were evicted by an earlier run: remote-only, with the
 	// sidecar (bundle) and the done ledger entry (tarball) as their local
@@ -423,7 +373,7 @@ func TestSyncArchivePruneSurvivesLocalMetadataLoss(t *testing.T) {
 		tarball = "config-versions/cv-1.tar.gz"
 	)
 
-	f := newSyncFixture(t, remote.Config{})
+	f := newSyncFixture(t)
 
 	// The evicted surfaces' local proof is gone — the sidecar lost with a
 	// deleted subtree, the ledger wiped to reset state. The remote copies are
@@ -444,7 +394,7 @@ func TestSyncArchivePruneSurvivesLocalMetadataLoss(t *testing.T) {
 func TestSyncArchiveEmptyWalkPrunesNothing(t *testing.T) {
 	t.Parallel()
 
-	f := newSyncFixture(t, remote.Config{})
+	f := newSyncFixture(t)
 
 	// A remote copy exists but the local walk sees no file at all (a wrong or
 	// wiped root): the guard must keep the prune from emptying the mirror.
@@ -459,7 +409,7 @@ func TestSyncArchiveEmptyWalkPrunesNothing(t *testing.T) {
 func TestSyncArchiveCanceledContextUploadsNothing(t *testing.T) {
 	t.Parallel()
 
-	f := newSyncFixture(t, remote.Config{})
+	f := newSyncFixture(t)
 	f.write(t, "org.json", []byte(`{"org":"acme"}`))
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -476,7 +426,7 @@ func TestSyncArchiveEvictCancellationIsNotFailure(t *testing.T) {
 
 	const zip = "projects/prod/workspaces/api/bundles/logs.gen0001.zip"
 
-	f := newSyncFixture(t, remote.Config{})
+	f := newSyncFixture(t)
 
 	// A sealed zip with its sidecar is eligible for eviction, so the evict loop
 	// runs OffloadFile, whose first Head is where the cancellation surfaces.
@@ -499,7 +449,7 @@ func TestSyncArchiveEvictCancellationIsNotFailure(t *testing.T) {
 func TestSyncArchivePerFileFailureWarnsAndContinues(t *testing.T) {
 	t.Parallel()
 
-	f := newSyncFixture(t, remote.Config{})
+	f := newSyncFixture(t)
 	f.write(t, "org.json", []byte(`{"org":"acme"}`))
 	f.write(t, "memberships.json", []byte(`[]`))
 
