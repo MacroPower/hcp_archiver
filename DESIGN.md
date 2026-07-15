@@ -579,6 +579,13 @@ of the archive, in two motions with different semantics:
   grep remain offline operations; the bucket is the disaster-recovery copy
   (re-download the prefix to restore).
 
+A run with `remote:` configured proves the store manageable at startup: a
+small probe object is written under the prefix (carrying the same checksum
+settings as real uploads), headed, listed, and deleted before any collection
+work begins, so a wrong bucket, endpoint, credential set, or checksum setting
+fails the run immediately instead of surfacing as per-object failures hours
+into an archive.
+
 Sync is always-on when `remote:` is configured; there is no separate knob:
 remote configured means the bucket converges on a complete archive. Object
 keys mirror the local tree: `<prefix>/<org>/<archive-relative path>`, so a

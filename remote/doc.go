@@ -9,6 +9,9 @@
 // checksums, confirms it landed with [Client.Head], and serves later reads
 // through [Client.ReadAt], whose ranged GETs let a zip central directory be
 // parsed and a single member fetched without downloading the bundle.
+// [Client.Preflight] round-trips a small probe object through the write,
+// head, list, and delete motions at startup, so a misconfigured store
+// surfaces before any archive work rather than partway through a run.
 //
 // The backend is anything speaking the S3 API: AWS S3 itself, or a compatible
 // store such as MinIO, Cloudflare R2, or Ceph RGW via [Config.Endpoint] and

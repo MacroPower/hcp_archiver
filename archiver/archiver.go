@@ -175,16 +175,17 @@ func New(cfg *config.Config, opts ...Option) *Archiver {
 
 // Run archives every resolved organization in turn.
 //
-// It validates the configuration, builds the one shared client, resolves the
-// organizations (the single named one, or every visible organization), and
-// archives each sequentially. The orgs run under a cancelable child of ctx
-// whose cancel the reporter's terminal UI holds, so an in-UI ctrl+c aborts the
-// whole run exactly as an external SIGINT does. A non-cancellation failure of
-// one organization is logged and does not abort the others, but leaves the run
-// incomplete; a cancellation aborts the run and is returned wrapped so the
-// command can map it to a graceful exit. Run returns nil on clean completion and
-// [ErrRunIncomplete] when any organization returned a non-cancellation error or
-// captured nothing but failures.
+// It validates the configuration, builds the one shared client — proving a
+// configured remote store manageable with a probe round-trip before any
+// archive work — resolves the organizations (the single named one, or every
+// visible organization), and archives each sequentially. The orgs run under a
+// cancelable child of ctx whose cancel the reporter's terminal UI holds, so an
+// in-UI ctrl+c aborts the whole run exactly as an external SIGINT does. A
+// non-cancellation failure of one organization is logged and does not abort
+// the others, but leaves the run incomplete; a cancellation aborts the run and
+// is returned wrapped so the command can map it to a graceful exit. Run
+// returns nil on clean completion and [ErrRunIncomplete] when any organization
+// returned a non-cancellation error or captured nothing but failures.
 func (a *Archiver) Run(ctx context.Context) error {
 	err := a.cfg.Validate()
 	if err != nil {
@@ -212,11 +213,19 @@ func (a *Archiver) Run(ctx context.Context) error {
 	}
 
 	// One remote client serves every organization: each organization's
-	// mirror lands in the same bucket, keyed under its own subtree.
+	// mirror lands in the same bucket, keyed under its own subtree. The
+	// preflight probe proves the store manageable now, before any archive
+	// work, rather than letting a bad bucket or credential set surface as
+	// per-object failures deep into the run.
 	if a.cfg.Remote != nil {
 		a.remote, err = remote.New(ctx, remoteConfig(a.cfg.Remote))
 		if err != nil {
 			return fmt.Errorf("build remote client: %w", err)
+		}
+
+		err = a.remote.Preflight(ctx)
+		if err != nil {
+			return fmt.Errorf("verify remote store: %w", err)
 		}
 	}
 
