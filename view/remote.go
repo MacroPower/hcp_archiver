@@ -25,6 +25,16 @@ import (
 // compressed span — is one request under its own timeout.
 const remoteReadTimeout = 5 * time.Minute
 
+// maxMemberSize caps a single decompressed bundle member the viewer loads whole
+// into memory. A member's compressed span is already bounded by the bundle
+// object size (see [extractMember]), but DEFLATE expands up to roughly 1032:1,
+// so a crafted or corrupt span within that guard can still inflate without
+// bound and exhaust memory. The cap bounds that expansion while sitting far
+// above any real archived state, log, or metadata object; it applies to both
+// the remote ([decompressMember]) and local ([readLocalBundleMember]) inflate
+// paths, which read the untrusted member with [io.ReadAll].
+const maxMemberSize int64 = 1 << 30 // 1 GiB
+
 // remoteClientFactory builds the client an organization's remote bundle
 // reads go through. [OpenArchive] defaults it to [remote.New]; tests inject
 // a fake-backed builder through [WithRemoteFactory].
@@ -286,8 +296,17 @@ func extractMember(b *remoteBundle, f *zip.File, relPath string) ([]byte, error)
 }
 
 // decompressMember expands one member's compressed span by its zip method:
-// the archive seals members only as STORE or DEFLATE.
+// the archive seals members only as STORE or DEFLATE. The inflate is bounded by
+// [maxMemberSize].
 func decompressMember(method uint16, compressed []byte) ([]byte, error) {
+	return decompressMemberBounded(method, compressed, maxMemberSize)
+}
+
+// decompressMemberBounded is [decompressMember] with the decompressed-size cap
+// injected, so a test can drive the oversize rejection without a gibibyte-scale
+// fixture. A STORE member is returned as-is: its length is the compressed span,
+// already bounded against the bundle object (see [extractMember]).
+func decompressMemberBounded(method uint16, compressed []byte, limit int64) ([]byte, error) {
 	switch method {
 	case zip.Store:
 		return compressed, nil
@@ -295,7 +314,11 @@ func decompressMember(method uint16, compressed []byte) ([]byte, error) {
 	case zip.Deflate:
 		fr := flate.NewReader(bytes.NewReader(compressed))
 
-		data, err := io.ReadAll(fr)
+		// Inflate under an absolute cap rather than trusting the deflate stream or
+		// the central directory's uncompressed size: the compressed span is bounded
+		// but its expansion is not, so read one byte past the cap to tell an
+		// oversized member from a merely large one instead of silently truncating.
+		data, err := io.ReadAll(io.LimitReader(fr, limit+1))
 		if err != nil {
 			return nil, fmt.Errorf("inflate: %w", err)
 		}
@@ -303,6 +326,10 @@ func decompressMember(method uint16, compressed []byte) ([]byte, error) {
 		closeErr := fr.Close()
 		if closeErr != nil {
 			return nil, fmt.Errorf("inflate: %w", closeErr)
+		}
+
+		if int64(len(data)) > limit {
+			return nil, fmt.Errorf("inflated member exceeds the %d-byte cap", limit)
 		}
 
 		return data, nil

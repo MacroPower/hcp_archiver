@@ -398,7 +398,11 @@ func readLocalBundleMember(bundle, relPath string) ([]byte, error) {
 			return nil, fmt.Errorf("open member %q: %w", relPath, openErr)
 		}
 
-		data, readErr := io.ReadAll(rc)
+		// Bound the decompressed member: f.Open inflates on the fly, so an
+		// unbounded read of a crafted or corrupt DEFLATE member would OOM the
+		// viewer. Read one byte past the cap to catch an oversized member rather
+		// than truncate it, matching the remote path (see [maxMemberSize]).
+		data, readErr := io.ReadAll(io.LimitReader(rc, maxMemberSize+1))
 		closeErr := rc.Close()
 
 		switch {
@@ -406,6 +410,8 @@ func readLocalBundleMember(bundle, relPath string) ([]byte, error) {
 			return nil, fmt.Errorf("read member %q: %w", relPath, readErr)
 		case closeErr != nil:
 			return nil, fmt.Errorf("close member %q: %w", relPath, closeErr)
+		case int64(len(data)) > maxMemberSize:
+			return nil, fmt.Errorf("member %q exceeds the %d-byte cap", relPath, maxMemberSize)
 		}
 
 		return data, nil
