@@ -46,7 +46,9 @@ func (c *Collector) collectDeployments(ctx context.Context, project string, stac
 
 // collectStates archives every stack state generation. The archived file is the
 // full state description; new generations append and existing ones are never
-// re-fetched.
+// re-fetched. A generation whose description has not finished uploading is
+// skipped rather than fetched, so its transient 204 is not settled as a
+// permanent gap (see [stateTerminal]).
 func (c *Collector) collectStates(ctx context.Context, project string, stack *tfe.Stack) error {
 	states, err := tfeclient.Paginate(ctx, c.env.Client(),
 		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.StackState, *tfe.Pagination, error) {
@@ -70,6 +72,14 @@ func (c *Collector) collectStates(ctx context.Context, project string, stack *tf
 	g.SetLimit(c.env.Concurrency())
 
 	for _, state := range states {
+		// A generation is listable before its description is uploaded, answering
+		// 204 (or 404) meanwhile; fetching it then would settle a permanent gap
+		// the re-run never revisits, so skip until it is terminal and let a later
+		// run capture the finalized description.
+		if !stateTerminal(state.Status) {
+			continue
+		}
+
 		stateFile := c.env.Store().StackStateFile(
 			project,
 			stack.Name,

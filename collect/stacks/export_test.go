@@ -16,6 +16,11 @@ func RunTerminalForTest(status tfe.DeploymentRunStatus) bool {
 	return runTerminal(status)
 }
 
+// StateTerminalForTest exposes [stateTerminal] to the external test package.
+func StateTerminalForTest(status string) bool {
+	return stateTerminal(status)
+}
+
 // GenerationNameForTest exposes [generationName] to the external test package.
 func GenerationNameForTest(generation int) string {
 	return generationName(generation)

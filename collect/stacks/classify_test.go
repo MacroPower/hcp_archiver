@@ -63,6 +63,29 @@ func TestRunTerminal(t *testing.T) {
 	}
 }
 
+func TestStateTerminal(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		status string
+		want   bool
+	}{
+		"completed is terminal": {status: "completed", want: true},
+		"empty is terminal":     {status: "", want: true},
+		"pending is live":       {status: "pending", want: false},
+		"uploading is live":     {status: "uploading", want: false},
+		"unknown is live":       {status: "surprise", want: false},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, stacks.StateTerminalForTest(tc.status))
+		})
+	}
+}
+
 func TestGenerationName(t *testing.T) {
 	t.Parallel()
 
