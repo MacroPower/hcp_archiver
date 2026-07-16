@@ -197,6 +197,24 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 			// guards the tree. An interrupted run skips it; the next run sweeps.
 			syncFailed = a.syncOrg(ctx, env, orgName).Failed
 
+			// The sweep deliberately skips the per-shard replay logs and mirrors
+			// only the snapshots, on the guarantee the final flush just made
+			// them current. A failed flush breaks that guarantee: the sweep
+			// mirrored a ledger the run knows is behind, and a restore from the
+			// bucket would replay resurrected state. Local disk self-heals on
+			// the next flush, but the mirror is the long-term record, so the
+			// run must not exit clean over it.
+			if ferr != nil && a.remote != nil && ctx.Err() == nil {
+				syncFailed++
+
+				a.logger.LogAttrs(ctx, slog.LevelError, "remote_ledger_stale",
+					slog.String("org", orgName),
+					slog.String("detail", "the final ledger flush failed, so the mirrored "+
+						"snapshots are stale; the run is marked incomplete and the next "+
+						"run's flush and sweep re-mirror them"),
+				)
+			}
+
 			serr := reporter.Summary()
 			if serr != nil {
 				a.logger.LogAttrs(ctx, slog.LevelWarn, "progress_summary_error",
