@@ -901,6 +901,29 @@ func (l *Ledger) Failures() []Failure {
 	return out
 }
 
+// DoneEntriesUnder returns a copy of every entry recorded [StatusDone] whose
+// relpath begins with prefix, keyed by relpath. The remote sweep enumerates
+// the proven configuration-version tarballs through it: an evicted tarball
+// leaves no local file, so the ledger entry is the only local record that a
+// remote copy must exist, and the sweep verifies the store still answers for
+// each one.
+func (l *Ledger) DoneEntriesUnder(prefix string) map[string]Entry {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	out := make(map[string]Entry)
+
+	for _, sh := range l.shards {
+		for relPath, e := range sh.entries {
+			if e.Status == StatusDone && strings.HasPrefix(relPath, prefix) {
+				out[relPath] = cloneEntry(*e)
+			}
+		}
+	}
+
+	return out
+}
+
 // StartRun opens a new run: it advances the run count and start time and resets
 // the per-run tally so counts and bytes reflect only the new run. It records
 // whether the run resumed prior work, and leaves the cumulative tally intact so

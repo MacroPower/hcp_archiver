@@ -551,6 +551,65 @@ func TestSyncArchiveEvictRefusesForeignRemoteCopy(t *testing.T) {
 	assert.Equal(t, foreign, obj.Data, "the sweep never overwrites remote history at the key")
 }
 
+func TestSyncArchiveVerifiesEvictedSurfacesRemain(t *testing.T) {
+	t.Parallel()
+
+	const (
+		tarball = "config-versions/cv-1.tar.gz"
+		zip     = "projects/prod/workspaces/api/bundles/logs.gen0001.zip"
+	)
+
+	f := newSyncFixture(t)
+
+	f.writeDone(t, tarball, []byte("proven tarball bytes"))
+	f.sealBundle(t, zip, "projects/prod/workspaces/api/runs/run-1/plan.log", []byte("plan output"))
+
+	stats := f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+	require.Equal(t, 2, stats.Evicted)
+
+	// A later sweep against the intact store re-verifies both evicted
+	// surfaces from the inventory and stays clean.
+	stats = f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed,
+		"a store that still holds every evicted surface passes verification")
+
+	// The store loses both only-copies (a re-pointed bucket, a mis-scoped
+	// lifecycle rule, a manual delete). No local walk can see the hole — the
+	// zip and tarball have no local files — so the sweep must derive the
+	// obligation from the sidecar and the ledger and fail the run.
+	require.NoError(t, f.fake.Delete(t.Context(), f.key(tarball)))
+	require.NoError(t, f.fake.Delete(t.Context(), f.key(zip)))
+
+	stats = f.env.SyncArchive(t.Context())
+	assert.Equal(t, 2, stats.Failed,
+		"every evicted surface missing from the store must count a failure")
+}
+
+func TestSyncArchiveVerifiesEvictedTarballSize(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t)
+
+	data := []byte("proven tarball bytes")
+	f.writeDone(t, tarball, data)
+
+	stats := f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+	require.Equal(t, 1, stats.Evicted)
+
+	// The remote copy is silently replaced with a different-size object; the
+	// ledger signature is the local side's only record of the tarball, so the
+	// size comparison is what catches it.
+	f.fake.SetObject(f.key(tarball), remotetest.Object{Data: []byte("truncated")})
+
+	stats = f.env.SyncArchive(t.Context())
+	assert.Equal(t, 1, stats.Failed,
+		"an evicted tarball whose remote size diverges from its ledger signature must fail the run")
+}
+
 func TestSyncArchiveEvictDemandsRecordedDigestsBack(t *testing.T) {
 	t.Parallel()
 

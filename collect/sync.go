@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -406,6 +407,12 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 		return counters.stats()
 	}
 
+	// The presence obligations are derived before any of this sweep's
+	// evictions run: the inventory above predates them too, so a surface this
+	// sweep is about to evict (still local here) must not be demanded of the
+	// pre-eviction listing.
+	obligations := e.evictedObligations(sweep)
+
 	// Cold surfaces move sequentially: each is one large upload already
 	// parallelized inside the transfer manager, and each ends in a local
 	// delete, which deserves the simplest possible ordering.
@@ -439,10 +446,96 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 	e.syncFiles(ctx, sweep.sync, inventory, counters)
 
 	if ctx.Err() == nil {
+		e.verifyEvicted(ctx, inventory, obligations, counters)
 		e.pruneRemote(ctx, orgPrefix, inventory, sweep, counters)
 	}
 
 	return counters.stats()
+}
+
+// evictedObligations maps each surface whose only copy is already the store
+// to the size its local proof records (zero when the proof carries none):
+// the bundles a sidecar records as evicted (the zip no longer beside it,
+// gathered by the walk) and the configuration-version tarballs the ledger
+// records done with no local file. It runs before any of the current sweep's
+// evictions, so a surface still local — about to evict against the same
+// pre-eviction inventory — is never an obligation.
+func (e *Env) evictedObligations(sweep *treeSweep) map[string]int64 {
+	obligations := make(map[string]int64, len(sweep.evictedZips))
+
+	for _, zipRel := range sweep.evictedZips {
+		obligations[zipRel] = 0
+	}
+
+	done := e.ledger.DoneEntriesUnder(store.ConfigVersionsDirName + "/")
+
+	for _, relPath := range slices.Sorted(maps.Keys(done)) {
+		if !isConfigTarball(relPath) {
+			continue
+		}
+
+		present, err := e.store.Exists(relPath)
+		if err != nil || present {
+			// A local copy (or an unreadable root) means the tarball is not
+			// remote-only: it evicts this sweep or stays canonical.
+			continue
+		}
+
+		var size int64
+
+		if sig := done[relPath].Signature; sig != nil {
+			size = sig.Size
+		}
+
+		obligations[relPath] = size
+	}
+
+	return obligations
+}
+
+// verifyEvicted proves the store still holds every surface whose only copy
+// it is (see [Env.evictedObligations]). Everything else in the mirror
+// re-derives from local bytes on the next sweep; these alone cannot, so
+// their absence is the one gap that is invisible to a local walk and
+// unrepairable once noticed late — a re-pointed remote block, a mis-scoped
+// lifecycle rule, or a bucket-side delete would otherwise leave every later
+// run reporting a complete mirror over a hole in the archive's long-term
+// record. Each missing or size-mismatched object logs an error and counts a
+// failure, so the run exits incomplete.
+//
+// The check is a lookup against the inventory listing already in hand — no
+// extra requests — comparing sizes where the ledger recorded one (a sidecar
+// records its members' digests, not the zip's, so bundles verify by
+// presence).
+func (e *Env) verifyEvicted(
+	ctx context.Context,
+	inventory map[string]remote.ObjectInfo,
+	obligations map[string]int64,
+	counters *syncCounters,
+) {
+	for _, relPath := range slices.Sorted(maps.Keys(obligations)) {
+		info, ok := inventory[e.RemoteKey(relPath)]
+
+		switch {
+		case !ok:
+			e.logger.LogAttrs(ctx, slog.LevelError, "evicted_object_missing",
+				slog.String("path", relPath),
+				slog.String("key", e.RemoteKey(relPath)),
+				slog.String("detail", "the store does not hold this surface's only copy; "+
+					"if the remote was re-pointed, restore or copy the old prefix"),
+			)
+			counters.failed.Add(1)
+
+		case obligations[relPath] > 0 && info.Size != obligations[relPath]:
+			e.logger.LogAttrs(ctx, slog.LevelError, "evicted_object_size_mismatch",
+				slog.String("path", relPath),
+				slog.String("key", e.RemoteKey(relPath)),
+				slog.Int64("remote_bytes", info.Size),
+				slog.Int64("recorded_bytes", obligations[relPath]),
+			)
+			counters.failed.Add(1)
+		}
+	}
 }
 
 // listInventory runs one scoped inventory listing for a sync pass, settling
@@ -473,12 +566,14 @@ func (e *Env) listInventory(
 }
 
 // treeSweep is one classification pass over the archive tree: the files to
-// evict, the files to sync, and the remote key of every file the mirror must
-// not prune.
+// evict, the files to sync, the remote key of every file the mirror must not
+// prune, and the evicted bundles whose remote presence the sweep must
+// verify.
 type treeSweep struct {
-	keep  map[string]struct{}
-	evict []string
-	sync  []string
+	keep        map[string]struct{}
+	evict       []string
+	sync        []string
+	evictedZips []string
 }
 
 // classifyTree walks the store root and sorts every regular file into the
@@ -487,11 +582,24 @@ type treeSweep struct {
 // tarball) lands in neither list but still marks its key kept, so the prune
 // step cannot delete a remote copy out from under a local file the sweep
 // declined to touch; staging temps and ledger-internal files mark nothing.
+//
+// A bundle sidecar whose zip is no longer beside it is the local record of a
+// finished eviction — the zip's only copy is the store — so the walk also
+// collects those zips' paths for the sweep's remote-presence verification.
 func (e *Env) classifyTree(ctx context.Context) (*treeSweep, error) {
 	sweep := &treeSweep{keep: make(map[string]struct{})}
 
 	err := e.walkEligible(ctx, "", func(relPath string) error {
 		sweep.keep[e.RemoteKey(relPath)] = struct{}{}
+
+		if isBundleSidecar(relPath) {
+			zipRel := strings.TrimSuffix(relPath, seal.SidecarSuffix)
+
+			present, existsErr := e.store.Exists(zipRel)
+			if existsErr == nil && !present {
+				sweep.evictedZips = append(sweep.evictedZips, zipRel)
+			}
+		}
 
 		switch e.classifyFile(ctx, relPath) {
 		case actionEvict:
@@ -509,6 +617,7 @@ func (e *Env) classifyTree(ctx context.Context) (*treeSweep, error) {
 
 	slices.Sort(sweep.evict)
 	slices.Sort(sweep.sync)
+	slices.Sort(sweep.evictedZips)
 
 	return sweep, nil
 }
@@ -627,6 +736,17 @@ func (e *Env) classifyTarball(ctx context.Context, relPath string) syncAction {
 // directory.
 func isBundleZip(relPath string) bool {
 	return strings.HasSuffix(relPath, ".zip") && path.Base(path.Dir(relPath)) == store.BundlesDirName
+}
+
+// isBundleSidecar reports a sealed bundle's sidecar index: the sidecar
+// suffix over a bundle-zip stem. After eviction the sidecar is the local
+// side's only record of the bundle — the presence obligation the sweep
+// verifies against the store, and the proof index the prune must never
+// delete out from under a remote-only zip.
+func isBundleSidecar(relPath string) bool {
+	stem, ok := strings.CutSuffix(relPath, seal.SidecarSuffix)
+
+	return ok && isBundleZip(stem)
 }
 
 // isConfigTarball reports an org-wide configuration-version tarball.
