@@ -596,7 +596,14 @@ never a secret. Evicted uploads stream through the backend's parted-upload
 path (concurrent parts for large state bundles), and a write that dies
 midway aborts rather than committing a truncated object; synced files are
 digested before upload so the store records a full-object MD5 later runs
-can compare. Every write lands in the store's default storage class.
+can compare, and evicted uploads record their full-object MD5 and SHA-256
+as object metadata so the same egress-free comparison exists even where a
+parted upload leaves no backend digest. Every store operation retries a
+transient failure under a bounded doubling backoff — the same in-run
+persistence the API transport gives fetches, above whatever the provider
+SDK retries itself — while errors the store pins on the request (absent
+key, permission denial, failed precondition) surface immediately. Every
+write lands in the store's default storage class.
 
 The close sweep walks every regular file under the org root and classifies it
 top-down:
@@ -649,28 +656,40 @@ versioning (or Object Lock) is the recommended backstop either way: it turns
 any surprising prune or overwrite into a recoverable event.
 
 Bundle eviction extends verify-before-delete one hop without any cross-run
-state: every step is derived from three observable facts — is the local zip
-present, is its sidecar present, does `HeadObject` answer — so each crash
-point self-heals on the next run:
+state: every step is derived from observable facts — is the local zip
+present, is its sidecar present, do the local bytes still hash to their
+recorded proof, does `HeadObject` answer and with what digests — so each
+crash point self-heals on the next run:
 
 - **zip, no sidecar** (died mid-`seal.Seal`): the zip is unverified and the
   loose files are still canonical. The sweep never uploads it; the next seal
   writes a fresh generation and the orphan leaks one number, as today.
 - **zip + sidecar, no remote object** (sealed, upload never ran or died
-  midway; an aborted parted upload is not an object): upload, confirm
-  with a Head, size-check, then delete the local zip. On S3, a bucket
-  lifecycle rule aborting incomplete multipart uploads mops up parts a
-  crash strands.
+  midway; an aborted parted upload is not an object): re-prove the local
+  bytes, upload with the digests recorded as metadata, confirm with a Head
+  (size plus every digest both sides carry), then delete the local zip. On
+  S3, a bucket lifecycle rule aborting incomplete multipart uploads mops up
+  parts a crash strands.
 - **zip + sidecar + remote object** (died after upload, before the local
-  delete): the Head finds the copy, the size matches, and the zip is deleted
-  without re-uploading.
+  delete): the Head finds the copy, size and recorded digests match the
+  local bytes, and the zip is deleted without re-uploading.
 - **sidecar only** (eviction finished): nothing local to sweep; done.
 
-The bundle's bytes were already read back and hash-verified locally by the
-seal, and an interrupted upload aborts instead of committing a partial
-object, so Head-existence plus size is the egress-free verify gate. Failure
-to evict one bundle is a warning, never an abort: the local zip simply stays
-canonical, exactly as if no remote were configured. Because eviction removes zips but never sidecars, generation
+The custody transfer is guarded at both ends, because after the local delete
+the remote copy is the archive's only copy. Before any remote traffic the
+local bytes are re-proven against the record that settled them — a bundle
+zip member by member against its sidecar digests (the seal's own read-back
+check, re-run at the moment it matters most), a configuration-version
+tarball against its ledger signature's SHA-256 — so rot that crept in after
+sealing is refused, kept local for inspection, and never becomes the
+long-term record. On the remote side, an upload records the file's MD5 and
+SHA-256 as object metadata, and the confirm compares size plus every digest
+both sides carry; an object recorded by an older build carries no metadata
+and still gates on size, the strongest egress-free comparison available for
+it. A mismatch on either side warns, keeps the local file canonical, and
+never overwrites remote history at the key. Failure to evict one bundle is
+a warning, never an abort: the local zip simply stays canonical, exactly as
+if no remote were configured. Because eviction removes zips but never sidecars, generation
 numbering takes its maximum over both the `*.zip` and `*.zip.sidecar.ndjson`
 names — a zip-only scan would restart at gen0001 once bundles left disk and
 overwrite remote history at the same key. Tarball eviction recovers from the

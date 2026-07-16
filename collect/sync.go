@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5" //nolint:gosec // Content MD5 is the stores' integrity currency, not a security control.
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -75,18 +77,46 @@ func (c *syncCounters) stats() SyncStats {
 	}
 }
 
-// OffloadFile moves the local file at relPath to the remote store: it uploads
-// the file if the store does not already hold its key, re-confirms the remote
-// copy, and only then removes the local file.
+// Sentinel errors reported by [Env.OffloadFile] when the eviction's verify
+// gate refuses the custody transfer.
+var (
+	// ErrOffloadUnproven indicates a cold surface whose local bytes no longer
+	// match the proof that settled them (a bundle's sidecar digests, a
+	// tarball's ledger signature); the rotted file is never uploaded and
+	// stays local for manual inspection.
+	ErrOffloadUnproven = errors.New("offload source does not match its recorded proof")
+
+	// ErrRemoteCopyMismatch indicates a remote object already at an eviction
+	// key whose size or recorded digest differs from the proven local bytes;
+	// the local file is kept canonical and the remote object needs manual
+	// inspection. The mismatch never resolves on its own: the sweep refuses
+	// to overwrite remote history at the key, so every run re-reports it.
+	ErrRemoteCopyMismatch = errors.New("remote copy differs from the proven local file")
+)
+
+// OffloadFile moves the local file at relPath to the remote store: it
+// re-proves the local bytes against the record that settled them, uploads
+// the file if the store does not already hold its key, re-confirms the
+// remote copy, and only then removes the local file.
 //
-// Every state is derived from what is observable — the local file and a
-// metadata probe — so any crash point self-heals on the next sweep with no
-// persisted flags: an interrupted upload re-uploads (an aborted parted
-// upload is not an object), an upload that finished before the local delete
-// is found by the probe and evicted without re-uploading, and a finished
-// eviction is a no-op. Callers only hand this method files whose bytes were
-// already verified locally (a sealed bundle's read-back, a tarball's ledger
-// signature), so existence and size are the verify-before-delete gate.
+// The gate runs at both ends of the transfer, because after the delete the
+// remote copy is the archive's only copy. Before any remote traffic the
+// local bytes are verified against their proof — a bundle zip member by
+// member against the sidecar digests [seal.Seal] recorded, a
+// configuration-version tarball against its ledger signature — so rot that
+// crept in after the artifact was proven is refused ([ErrOffloadUnproven])
+// rather than enshrined as the long-term record. The upload then records the
+// file's digests as object metadata, and the confirm compares size plus
+// every digest both sides carry, so a foreign or stale object at the key
+// refuses the delete ([ErrRemoteCopyMismatch]); an object without recorded
+// digests (an upload by an older build) still gates on size.
+//
+// Every state is derived from what is observable — the local file, its
+// recorded proof, and a metadata probe — so any crash point self-heals on
+// the next sweep with no persisted flags: an interrupted upload re-uploads
+// (an aborted parted upload is not an object), an upload that finished
+// before the local delete is found by the probe, matched digest for digest,
+// and evicted without re-uploading, and a finished eviction is a no-op.
 func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 	rc := e.remote
 	key := e.RemoteKey(relPath)
@@ -97,13 +127,18 @@ func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 		return fmt.Errorf("stat offload source: %w", err)
 	}
 
+	digests, err := e.proveOffloadSource(relPath, absPath)
+	if err != nil {
+		return err
+	}
+
 	info, err := rc.Head(ctx, key)
 
 	switch {
 	case errors.Is(err, remote.ErrNotFound):
 		start := time.Now()
 
-		uploadErr := e.uploadFile(ctx, absPath, key, local.Size())
+		uploadErr := e.uploadFile(ctx, absPath, key, local.Size(), digests)
 		if uploadErr != nil {
 			return uploadErr
 		}
@@ -123,15 +158,9 @@ func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 		return fmt.Errorf("probe remote copy: %w", err)
 	}
 
-	if info.Size != local.Size() {
-		// A mismatch never resolves on its own: the sweep refuses to overwrite
-		// remote history at the key, so every run re-reports it until the
-		// remote object is inspected and removed by hand.
-		return fmt.Errorf(
-			"remote copy of %q is %d bytes, local is %d; keeping the local file"+
-				" (needs manual inspection of the remote object)",
-			key, info.Size, local.Size(),
-		)
+	err = confirmRemoteCopy(info, local.Size(), digests, key)
+	if err != nil {
+		return err
 	}
 
 	err = os.Remove(absPath)
@@ -147,16 +176,118 @@ func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 	return nil
 }
 
+// proveOffloadSource re-proves the local bytes at relPath against the record
+// that settled them and returns the digests the upload records with the
+// remote object. Only the two evictable surfaces carry a proof: a sealed
+// bundle re-verifies member by member against its sidecar, and a
+// configuration-version tarball re-hashes against its ledger signature.
+// Anything else, or a file that fails its proof, reports
+// [ErrOffloadUnproven].
+func (e *Env) proveOffloadSource(relPath, absPath string) (remote.Digests, error) {
+	digests, err := hashFile(absPath)
+	if err != nil {
+		return remote.Digests{}, fmt.Errorf("hash offload source: %w", err)
+	}
+
+	switch {
+	case isBundleZip(relPath):
+		entries, sidecarErr := seal.ReadSidecar(absPath + seal.SidecarSuffix)
+		if sidecarErr != nil {
+			return remote.Digests{}, fmt.Errorf("read sidecar proof: %w", sidecarErr)
+		}
+
+		if len(entries) == 0 {
+			return remote.Digests{}, fmt.Errorf("%w: bundle %q has no sidecar", ErrOffloadUnproven, relPath)
+		}
+
+		verifyErr := seal.Verify(absPath, entries)
+		if verifyErr != nil {
+			return remote.Digests{}, fmt.Errorf("%w: %w", ErrOffloadUnproven, verifyErr)
+		}
+
+	case isConfigTarball(relPath):
+		entry, ok := e.ledger.Entry(relPath)
+		if !ok || entry.Status != manifest.StatusDone || entry.Signature == nil {
+			return remote.Digests{}, fmt.Errorf("%w: tarball %q has no settled ledger entry",
+				ErrOffloadUnproven, relPath)
+		}
+
+		if entry.Signature.Hash != "" && entry.Signature.Hash != digests.SHA256 {
+			return remote.Digests{}, fmt.Errorf("%w: tarball %q does not hash to its ledger signature",
+				ErrOffloadUnproven, relPath)
+		}
+
+	default:
+		return remote.Digests{}, fmt.Errorf("%w: %q is not an evictable surface", ErrOffloadUnproven, relPath)
+	}
+
+	return digests, nil
+}
+
+// confirmRemoteCopy proves the remote object carries the proven local
+// content before the local copy is released: the sizes must match, and so
+// must every digest both sides carry. A remote object without recorded
+// digests (an upload by an older build, a foreign write) still gates on
+// size, the strongest egress-free comparison available for it.
+func confirmRemoteCopy(info remote.ObjectInfo, size int64, digests remote.Digests, key string) error {
+	switch {
+	case info.Size != size:
+		return fmt.Errorf("%w: %q is %d bytes remote, %d local (needs manual inspection)",
+			ErrRemoteCopyMismatch, key, info.Size, size)
+
+	case info.SHA256 != "" && digests.SHA256 != "" && info.SHA256 != digests.SHA256:
+		return fmt.Errorf("%w: %q records sha256 %s remote, %s local (needs manual inspection)",
+			ErrRemoteCopyMismatch, key, info.SHA256, digests.SHA256)
+
+	case len(info.MD5) > 0 && len(digests.MD5) > 0 && !bytes.Equal(info.MD5, digests.MD5):
+		return fmt.Errorf("%w: %q records a different md5 (needs manual inspection)",
+			ErrRemoteCopyMismatch, key)
+	}
+
+	return nil
+}
+
+// hashFile streams the file at absPath through the two digests the remote
+// store compares in: the SHA-256 the archive's local proofs carry and the
+// MD5 the stores record.
+func hashFile(absPath string) (remote.Digests, error) {
+	//nolint:gosec // The path is composed by the store from its archive root.
+	f, err := os.Open(absPath)
+	if err != nil {
+		return remote.Digests{}, fmt.Errorf("open: %w", err)
+	}
+
+	sha := sha256.New()
+	//nolint:gosec // Content MD5 is the stores' integrity currency, not a security control.
+	sum := md5.New()
+
+	_, copyErr := io.Copy(io.MultiWriter(sha, sum), f)
+	closeErr := f.Close()
+
+	switch {
+	case copyErr != nil:
+		return remote.Digests{}, fmt.Errorf("hash: %w", copyErr)
+	case closeErr != nil:
+		return remote.Digests{}, fmt.Errorf("close: %w", closeErr)
+	}
+
+	return remote.Digests{
+		SHA256: hex.EncodeToString(sha.Sum(nil)),
+		MD5:    sum.Sum(nil),
+	}, nil
+}
+
 // uploadFile streams one local file to the remote store at key, letting the
-// client split a large body into a concurrent parted upload.
-func (e *Env) uploadFile(ctx context.Context, absPath, key string, size int64) error {
+// client split a large body into a concurrent parted upload; digests ride
+// with the write as its integrity check and recorded metadata.
+func (e *Env) uploadFile(ctx context.Context, absPath, key string, size int64, digests remote.Digests) error {
 	//nolint:gosec // The path is composed by the store from its archive root.
 	f, err := os.Open(absPath)
 	if err != nil {
 		return fmt.Errorf("open offload source: %w", err)
 	}
 
-	uploadErr := e.remote.Upload(ctx, key, f, size, remote.Digests{})
+	uploadErr := e.remote.Upload(ctx, key, f, size, digests)
 	closeErr := f.Close()
 
 	switch {

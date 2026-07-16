@@ -3,6 +3,8 @@ package collect_test
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -89,6 +91,23 @@ func (f syncFixture) exists(t *testing.T, relPath string) bool {
 	return ok
 }
 
+// sealBundle seals one member into a real verified bundle (zip plus sidecar)
+// at relBundle, so the eviction path sees exactly what [seal.Seal] produces
+// and its proof gate has a sidecar to verify against.
+func (f syncFixture) sealBundle(t *testing.T, relBundle, memberName string, content []byte) {
+	t.Helper()
+
+	src := filepath.Join(t.TempDir(), "member")
+	require.NoError(t, os.WriteFile(src, content, 0o600))
+
+	_, err := seal.Seal(f.store.AbsPath(relBundle), []seal.Member{{
+		Name:     memberName,
+		Source:   src,
+		Compress: true,
+	}})
+	require.NoError(t, err)
+}
+
 func TestSyncArchiveNoRemoteIsNoop(t *testing.T) {
 	t.Parallel()
 
@@ -129,7 +148,8 @@ func TestSyncArchiveClassification(t *testing.T) {
 		"a sealed zip with its sidecar evicts": {
 			seed: func(t *testing.T, f syncFixture) {
 				t.Helper()
-				f.write(t, bundles+"/logs.gen0001.zip.sidecar.ndjson", []byte(`{"name":"x"}`))
+				f.sealBundle(t, bundles+"/logs.gen0001.zip",
+					"projects/prod/workspaces/api/runs/run-1/plan.log", []byte("plan output"))
 			},
 			relPath:     bundles + "/logs.gen0001.zip",
 			wantRemote:  true,
@@ -239,7 +259,7 @@ func TestSyncArchiveMirrorsEveryMeaningfulFile(t *testing.T) {
 
 	// Each seed writes one representative file at relPath and credits the
 	// store builders that shaped it toward the completeness sweep below.
-	seed := func(relPath string, builders ...string) string {
+	seed := func(relPath string, builders ...string) {
 		f.write(t, relPath, []byte("payload for "+relPath))
 
 		mirrored = append(mirrored, relPath)
@@ -247,8 +267,6 @@ func TestSyncArchiveMirrorsEveryMeaningfulFile(t *testing.T) {
 		for _, b := range builders {
 			covered[b] = struct{}{}
 		}
-
-		return relPath
 	}
 
 	// Org-level surfaces.
@@ -305,8 +323,11 @@ func TestSyncArchiveMirrorsEveryMeaningfulFile(t *testing.T) {
 	// The cold surfaces reach the remote by eviction rather than sync: a
 	// sealed bundle proven by its sidecar (the sidecar itself syncs), and a
 	// configuration-version tarball proven by its done ledger entry.
-	bundleZip := seed(st.Join(st.BundleDir(project, ws), "logs.gen0001.zip"), "BundleDir")
-	seed(bundleZip + seal.SidecarSuffix)
+	bundleZip := st.Join(st.BundleDir(project, ws), "logs.gen0001.zip")
+	f.sealBundle(t, bundleZip, st.RunFile(project, ws, "run-9", "apply.log"), []byte("sealed apply output"))
+
+	mirrored = append(mirrored, bundleZip, bundleZip+seal.SidecarSuffix)
+	covered["BundleDir"] = struct{}{}
 
 	tarball := st.ConfigVersionTarball("cv-1")
 	f.writeDone(t, tarball, []byte("payload for "+tarball))
@@ -372,6 +393,126 @@ func TestSyncArchiveMirrorsEveryMeaningfulFile(t *testing.T) {
 	assert.Equal(t, len(mirrored)-2, stats.Uploaded, "everything else syncs in place")
 	assert.False(t, f.exists(t, bundleZip), "an evicted bundle leaves disk")
 	assert.False(t, f.exists(t, tarball), "an evicted tarball leaves disk")
+}
+
+func TestSyncArchiveEvictionRecordsDigests(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+
+	data := []byte("tarball bytes")
+	f.writeDone(t, "config-versions/cv-1.tar.gz", data)
+
+	stats := f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+	require.Equal(t, 1, stats.Evicted)
+
+	obj, ok := f.fake.Object(f.key("config-versions/cv-1.tar.gz"))
+	require.True(t, ok)
+	assert.Equal(t, manifest.SignatureOf(data).Hash, obj.Metadata["sha256"],
+		"the evicted object records the proof's sha256 as metadata")
+	assert.Equal(t, remotetest.MD5Sum(data), obj.MD5,
+		"the evicted object records a comparable md5")
+}
+
+func TestSyncArchiveRefusesRottedTarball(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t)
+
+	// The ledger proved one payload; the file on disk now carries another of
+	// the same size (bit rot, a partial restore). The custody transfer must
+	// refuse it: rotted bytes must never become the archive's only copy.
+	f.writeDone(t, tarball, []byte("proven tarball bytes"))
+	f.write(t, tarball, []byte("rotted tarball bytes"))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Equal(t, 1, stats.Failed, "a failed proof counts and re-reports every run")
+	assert.Zero(t, stats.Evicted)
+	assert.True(t, f.exists(t, tarball), "the suspect file stays local for inspection")
+
+	_, ok := f.fake.Object(f.key(tarball))
+	assert.False(t, ok, "rotted bytes are never uploaded")
+}
+
+func TestSyncArchiveRefusesCorruptedBundle(t *testing.T) {
+	t.Parallel()
+
+	const zip = "projects/prod/workspaces/api/bundles/logs.gen0001.zip"
+
+	f := newSyncFixture(t)
+
+	// A real seal, then rot: the zip's bytes change under its sidecar. The
+	// member-by-member re-verify at eviction must catch it.
+	f.sealBundle(t, zip, "projects/prod/workspaces/api/runs/run-1/plan.log", []byte("plan output"))
+	f.write(t, zip, []byte("rotted zip bytes"))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Equal(t, 1, stats.Failed)
+	assert.True(t, f.exists(t, zip), "the suspect bundle stays local for inspection")
+
+	_, ok := f.fake.Object(f.key(zip))
+	assert.False(t, ok, "a bundle that fails its sidecar proof is never uploaded")
+}
+
+func TestSyncArchiveEvictRefusesForeignRemoteCopy(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t)
+
+	local := []byte("proven tarball bytes")
+	foreign := []byte("foreign remote bytes")
+
+	f.writeDone(t, tarball, local)
+
+	// A remote object already answers the eviction key with the same size but
+	// different recorded content: deleting the local file would leave the
+	// wrong bytes as the archive's only copy.
+	f.fake.SetObject(f.key(tarball), remotetest.Object{
+		Data:     foreign,
+		Metadata: map[string]string{"sha256": manifest.SignatureOf(foreign).Hash},
+	})
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Equal(t, 1, stats.Failed)
+	assert.True(t, f.exists(t, tarball), "a digest mismatch keeps the local file canonical")
+
+	obj, _ := f.fake.Object(f.key(tarball))
+	assert.Equal(t, foreign, obj.Data, "the sweep never overwrites remote history at the key")
+}
+
+func TestSyncArchiveEvictDigestMatchSkipsReupload(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t)
+
+	data := []byte("proven tarball bytes")
+	f.writeDone(t, tarball, data)
+
+	// Crash point: a prior run uploaded (recording digests) and died before
+	// the local delete. The resumed sweep matches digest for digest and
+	// evicts without re-uploading.
+	f.fake.SetObject(f.key(tarball), remotetest.Object{
+		Data:     data,
+		MD5:      remotetest.MD5Sum(data),
+		Metadata: map[string]string{"sha256": manifest.SignatureOf(data).Hash},
+	})
+
+	stats := f.env.SyncArchive(t.Context())
+
+	require.Zero(t, stats.Failed)
+	assert.Equal(t, 1, stats.Evicted)
+	assert.Zero(t, f.fake.PutCalls(), "a digest-confirmed remote copy is not re-uploaded")
+	assert.False(t, f.exists(t, tarball), "the local copy is released")
 }
 
 func TestSyncArchiveIncrementalGate(t *testing.T) {
@@ -599,8 +740,7 @@ func TestSyncArchiveEvictCancellationIsNotFailure(t *testing.T) {
 
 	// A sealed zip with its sidecar is eligible for eviction, so the evict loop
 	// runs OffloadFile, whose first Head is where the cancellation surfaces.
-	f.write(t, zip, []byte("zip bytes"))
-	f.write(t, zip+".sidecar.ndjson", []byte(`{"name":"x"}`))
+	f.sealBundle(t, zip, "projects/prod/workspaces/api/runs/run-1/plan.log", []byte("plan output"))
 
 	ctx, cancel := context.WithCancel(t.Context())
 

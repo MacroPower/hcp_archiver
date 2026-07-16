@@ -177,7 +177,7 @@ func Seal(bundlePath string, members []Member) ([]Entry, error) {
 		return nil, fmt.Errorf("write bundle %q: %w", bundlePath, err)
 	}
 
-	err = verifyBundle(bundlePath, entries)
+	err = Verify(bundlePath, entries)
 	if err != nil {
 		return nil, err
 	}
@@ -329,10 +329,12 @@ func writeSidecar(path string, entries []Entry) error {
 	return nil
 }
 
-// verifyBundle re-opens the written bundle and confirms every member reads back
-// to its recorded SHA-256, so the loose sources are only removed once the bundle
-// is proven intact.
-func verifyBundle(bundlePath string, entries []Entry) error {
+// Verify re-opens the bundle at bundlePath and confirms every member reads
+// back to its recorded SHA-256. [Seal] runs it before the loose sources are
+// removed, so a bundle is only trusted once proven intact; the eviction sweep
+// runs it again before the local zip is released to the remote store, so
+// bytes that rotted after sealing can never become the archive's only copy.
+func Verify(bundlePath string, entries []Entry) error {
 	zr, err := zip.OpenReader(bundlePath)
 	if err != nil {
 		return fmt.Errorf("open bundle %q to verify: %w", bundlePath, err)
