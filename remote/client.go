@@ -592,9 +592,25 @@ const defaultPartSize = 5 << 20
 // partSizeFor returns the part size for a body of size bytes: the configured
 // size, grown when needed to fit the body within [maxUploadParts], and zero
 // (the backend default) when nothing is configured and nothing demands more.
+//
+// Growth gates on the part size actually in effect — the configured value
+// when set, else [defaultPartSize] as the smallest backend default — never on
+// their max: a configured size below the default is still the size the
+// backend uses, so gating growth above the default would let a large body's
+// part count sail past the ceiling, a failure that is a pure function of size
+// and configuration and so would repeat on every retry and every run.
 func partSizeFor(size, configured int64) int {
 	need := (size + maxUploadParts - 1) / maxUploadParts
-	if need > max(configured, defaultPartSize) {
+
+	if configured <= 0 {
+		if need > defaultPartSize {
+			return int(need)
+		}
+
+		return 0
+	}
+
+	if need > configured {
 		return int(need)
 	}
 
