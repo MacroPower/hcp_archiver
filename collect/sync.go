@@ -929,8 +929,12 @@ func (e *Env) syncFiles(
 				return nil
 			}
 
-			e.syncFile(ctx, relPath, inventory, counters)
-			e.recordSyncProgress(ctx, counters)
+			// A file the wind-down declined settled nothing, so it must not
+			// advance the settled counter either — the progress line's counts
+			// stay a sum of real outcomes, as the evict loop already keeps them.
+			if e.syncFile(ctx, relPath, inventory, counters) {
+				e.recordSyncProgress(ctx, counters)
+			}
 
 			return nil
 		})
@@ -941,13 +945,15 @@ func (e *Env) syncFiles(
 }
 
 // syncFile settles one file against the remote store: upload when the remote
-// copy is absent or differs, skip when it matches.
+// copy is absent or differs, skip when it matches. It reports whether the
+// file reached an outcome — false only on the wind-down path, where nothing
+// settled and nothing may count.
 func (e *Env) syncFile(
 	ctx context.Context,
 	relPath string,
 	inventory map[string]remote.ObjectInfo,
 	counters *syncCounters,
-) {
+) bool {
 	needed, size, err := e.uploadNeeded(ctx, relPath, inventory)
 	if err == nil && needed {
 		err = e.putFile(ctx, relPath, size)
@@ -958,6 +964,7 @@ func (e *Env) syncFile(
 		// A cancellation surfacing mid-upload is the wind-down, not a per-file
 		// failure: the worker settles nothing and leaves the file for the next
 		// run, matching the evict loop's in-flight guard.
+		return false
 
 	case err != nil:
 		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_file_error",
@@ -975,6 +982,8 @@ func (e *Env) syncFile(
 	default:
 		counters.skipped.Add(1)
 	}
+
+	return true
 }
 
 // putFile uploads one search-layer file: small files ride whole in memory
