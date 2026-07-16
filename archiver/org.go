@@ -86,7 +86,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 
 		// The marker is written before any collector runs so even an archive
 		// interrupted mid-run records where its evicted bundles live.
-		markerErr := a.writeRemoteMarker(st)
+		markerErr := a.writeRemoteMarker(ctx, st, orgName)
 		if markerErr != nil {
 			return manifest.Tally{}, 0, markerErr
 		}

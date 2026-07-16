@@ -179,7 +179,7 @@ func (e *Env) streamBlob(
 		return true, e.failWrite(ctx, relPath, err)
 	}
 
-	e.recordDone(relPath, res)
+	e.recordDone(ctx, relPath, res)
 
 	return true, nil
 }
@@ -273,7 +273,7 @@ func (e *Env) Bytes(ctx context.Context, relPath string, fetch func(context.Cont
 		return e.failWrite(ctx, relPath, err)
 	}
 
-	e.recordDone(relPath, res)
+	e.recordDone(ctx, relPath, res)
 
 	return nil
 }
@@ -328,7 +328,7 @@ func (e *Env) archiveJSON(ctx context.Context, relPath string, fetch func(contex
 		return e.failWrite(ctx, relPath, err)
 	}
 
-	e.recordDone(relPath, res)
+	e.recordDone(ctx, relPath, res)
 
 	return nil
 }
@@ -367,8 +367,9 @@ func (e *Env) sealedElsewhere(relPath string, data []byte) bool {
 }
 
 // recordDone records a successful write and counts its bytes when the commit
-// actually changed the on-disk content.
-func (e *Env) recordDone(relPath string, res store.WriteResult) {
+// actually changed the on-disk content, then mirrors an org-scope change to
+// the remote store as written (see [Env.eagerSync]).
+func (e *Env) recordDone(ctx context.Context, relPath string, res store.WriteResult) {
 	e.ledger.RecordDone(relPath, manifest.Signature{
 		Hash: res.SHA256,
 		Size: res.Size,
@@ -377,6 +378,8 @@ func (e *Env) recordDone(relPath string, res store.WriteResult) {
 	if res.Changed {
 		e.ledger.AddBytes(res.Size)
 	}
+
+	e.eagerSync(ctx, relPath, res)
 }
 
 // fail maps a fetch error onto a ledger status, the one place the client's

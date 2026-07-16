@@ -114,7 +114,26 @@ func (c *Collector) SealWorkspace(ctx context.Context, project, ws string) error
 	// work, and pointing a remote at an existing all-local archive migrates
 	// it one re-run later.
 	if c.env.Remote() != nil {
-		return c.evictBundles(ctx, project, ws)
+		err = c.evictBundles(ctx, project, ws)
+		if err != nil {
+			return err
+		}
+
+		// The subtree now holds only the search layer, its final shape until
+		// the next run, so mirror it here rather than leaving it to the close
+		// sweep: an interrupted run then loses at most the workspaces still
+		// mid-collection. Failures are stats-only — the local tree stays
+		// canonical and the close sweep retries — so they never fail the seal.
+		stats := c.env.SyncSubtree(ctx, c.env.Store().WorkspaceDir(project, ws))
+		if stats.Uploaded > 0 || stats.Failed > 0 {
+			c.env.Log().LogAttrs(ctx, slog.LevelInfo, "workspace_sync_complete",
+				slog.String("project", project),
+				slog.String("workspace", ws),
+				slog.Int("uploaded", stats.Uploaded),
+				slog.Int("skipped", stats.Skipped),
+				slog.Int("failed", stats.Failed),
+			)
+		}
 	}
 
 	return nil

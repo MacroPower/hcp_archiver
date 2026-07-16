@@ -255,7 +255,10 @@ func newSyncOrgFixture(t *testing.T, buf *bytes.Buffer) (*archiver.Archiver, *co
 	_, err = st.WriteBytes("org.json", []byte(`{"org":"acme"}`))
 	require.NoError(t, err)
 
-	a := archiver.New(&config.Config{}, archiver.WithLogger(logger))
+	a := archiver.New(
+		&config.Config{Remote: &config.RemoteConfig{Prefix: "hcp"}},
+		archiver.WithLogger(logger),
+	)
 	a.SetRemote(client)
 
 	return a, env, fake
@@ -307,4 +310,63 @@ func TestSyncOrgLogsSummary(t *testing.T) {
 	out := buf.String()
 	assert.Contains(t, out, "remote_sync_complete")
 	assert.Contains(t, out, "uploaded=1")
+	assert.Contains(t, out, "eager_failed=0")
+}
+
+func TestSyncOrgEagerFailureIsVisibilityOnly(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+
+	// One eager as-written upload fails; the close sweep retries it cleanly,
+	// so the run stays complete (only the sweep's own Failed marks it).
+	fake.PutErr = assert.AnError
+	fake.PutErrN = 1
+
+	require.NoError(t, env.Bytes(t.Context(), "users/user-1.json",
+		func(context.Context) ([]byte, error) { return []byte(`{"id":"user-1"}`), nil }))
+	require.Equal(t, 1, env.EagerFailures())
+
+	stats := archiver.SyncOrg(a, t.Context(), env, "acme")
+
+	assert.Zero(t, stats.Failed, "a retried eager failure never marks the run incomplete")
+	assert.Contains(t, fake.Keys(), "hcp/acme/users/user-1.json")
+	assert.Contains(t, buf.String(), "eager_failed=1")
+}
+
+func TestWriteRemoteMarkerMirrorsEagerly(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), st, "acme"))
+
+	local, err := st.Exists(remote.MarkerName)
+	require.NoError(t, err)
+	assert.True(t, local, "the marker lands at the archive root")
+
+	_, ok := fake.Object("hcp/acme/" + remote.MarkerName)
+	assert.True(t, ok, "the marker mirrors immediately, not at the close sweep")
+}
+
+func TestWriteRemoteMarkerMirrorFailureWarnsOnly(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	fake.PutErr = assert.AnError
+
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), st, "acme"),
+		"a marker mirror failure defers to the close sweep")
+
+	local, err := st.Exists(remote.MarkerName)
+	require.NoError(t, err)
+	assert.True(t, local, "the local marker write still succeeds")
+
+	assert.Contains(t, buf.String(), "remote_marker_sync_error")
 }

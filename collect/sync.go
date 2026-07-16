@@ -28,7 +28,8 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
-// SyncStats tallies one [Env.SyncArchive] sweep.
+// SyncStats tallies one sync pass: a whole-tree [Env.SyncArchive] sweep or a
+// seal-boundary [Env.SyncSubtree].
 type SyncStats struct {
 	// UploadedBytes is the total size of the files uploaded.
 	UploadedBytes int64
@@ -346,22 +347,8 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 	counters := &syncCounters{}
 	orgPrefix := e.RemoteKey("") + "/"
 
-	inventory, err := e.remote.List(ctx, orgPrefix)
-	if err != nil {
-		if ctx.Err() != nil {
-			// A cancellation surfacing from the inventory list is the wind-down,
-			// not a sync failure: return without logging or counting, matching the
-			// evict and sync loops below.
-			return counters.stats()
-		}
-
-		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_inventory_error",
-			slog.String("prefix", orgPrefix),
-			slog.String("error", err.Error()),
-		)
-
-		counters.failed.Add(1)
-
+	inventory, ok := e.listInventory(ctx, orgPrefix, counters)
+	if !ok {
 		return counters.stats()
 	}
 
@@ -421,6 +408,33 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 	return counters.stats()
 }
 
+// listInventory runs one scoped inventory listing for a sync pass, settling
+// the shared failure ladder: a cancellation surfacing from the list is the
+// wind-down, reported without logging or counting (matching the passes'
+// per-file guards), while any other error warns and counts one failure. The
+// second return is false on either early-return path.
+func (e *Env) listInventory(
+	ctx context.Context,
+	prefix string,
+	counters *syncCounters,
+) (map[string]remote.ObjectInfo, bool) {
+	inventory, err := e.remote.List(ctx, prefix)
+	if err == nil {
+		return inventory, true
+	}
+
+	if ctx.Err() == nil {
+		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_inventory_error",
+			slog.String("prefix", prefix),
+			slog.String("error", err.Error()),
+		)
+
+		counters.failed.Add(1)
+	}
+
+	return nil, false
+}
+
 // treeSweep is one classification pass over the archive tree: the files to
 // evict, the files to sync, and the remote key of every file the mirror must
 // not prune.
@@ -437,29 +451,9 @@ type treeSweep struct {
 // step cannot delete a remote copy out from under a local file the sweep
 // declined to touch; staging temps and ledger-internal files mark nothing.
 func (e *Env) classifyTree(ctx context.Context) (*treeSweep, error) {
-	root := e.store.Root()
 	sweep := &treeSweep{keep: make(map[string]struct{})}
 
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		switch {
-		case err != nil:
-			return err
-		case ctx.Err() != nil:
-			return ctx.Err()
-		case !d.Type().IsRegular():
-			return nil
-		}
-
-		rel, relErr := filepath.Rel(root, p)
-		if relErr != nil {
-			return fmt.Errorf("relativize %q: %w", p, relErr)
-		}
-
-		relPath := filepath.ToSlash(rel)
-		if !syncEligible(relPath) {
-			return nil
-		}
-
+	err := e.walkEligible(ctx, "", func(relPath string) error {
 		sweep.keep[e.RemoteKey(relPath)] = struct{}{}
 
 		switch e.classifyFile(ctx, relPath) {
@@ -480,6 +474,41 @@ func (e *Env) classifyTree(ctx context.Context) (*treeSweep, error) {
 	slices.Sort(sweep.sync)
 
 	return sweep, nil
+}
+
+// walkEligible walks the tree under the archive-relative relPrefix (the whole
+// archive when empty) and hands each regular, sync-eligible file's
+// archive-relative path to fn: the shared skeleton of the sync passes'
+// walks, owning the cancellation check, the relativization, and the
+// [syncEligible] gate. An error from fn, the walk, or the cancellation
+// propagates.
+func (e *Env) walkEligible(ctx context.Context, relPrefix string, fn func(relPath string) error) error {
+	root := e.store.Root()
+
+	//nolint:wrapcheck // Callers wrap with their pass's context.
+	return filepath.WalkDir(filepath.Join(root, filepath.FromSlash(relPrefix)),
+		func(p string, d fs.DirEntry, err error) error {
+			switch {
+			case err != nil:
+				return err
+			case ctx.Err() != nil:
+				return ctx.Err()
+			case !d.Type().IsRegular():
+				return nil
+			}
+
+			rel, relErr := filepath.Rel(root, p)
+			if relErr != nil {
+				return fmt.Errorf("relativize %q: %w", p, relErr)
+			}
+
+			relPath := filepath.ToSlash(rel)
+			if !syncEligible(relPath) {
+				return nil
+			}
+
+			return fn(relPath)
+		})
 }
 
 // syncEligible reports whether a file belongs to the mirror at all. Staging
@@ -566,6 +595,139 @@ func isBundleZip(relPath string) bool {
 // isConfigTarball reports an org-wide configuration-version tarball.
 func isConfigTarball(relPath string) bool {
 	return strings.HasPrefix(relPath, store.ConfigVersionsDirName+"/") && strings.HasSuffix(relPath, ".tar.gz")
+}
+
+// underWorkspaceSubtree reports whether relPath lives inside a workspace's
+// subtree (projects/<project>/workspaces/<workspace>/...), the scope whose
+// mirror converges at the workspace's seal boundary rather than as written.
+func underWorkspaceSubtree(relPath string) bool {
+	const minSegments = 5 // projects/<p>/workspaces/<ws>/<file>
+
+	segs := strings.Split(relPath, "/")
+
+	return len(segs) >= minSegments && segs[0] == "projects" && segs[2] == "workspaces"
+}
+
+// eagerScope reports whether a freshly committed file syncs to the remote the
+// moment its content changes. Workspace subtrees are excluded because their
+// seal-destined files would be re-shaped minutes later (the subtree syncs at
+// its seal boundary instead), and the eviction surfaces are excluded because
+// they move by eviction, never by sync.
+func eagerScope(relPath string) bool {
+	return !underWorkspaceSubtree(relPath) && !isConfigTarball(relPath) && !isBundleZip(relPath)
+}
+
+// sealBoundarySkip reports the files [Env.SyncSubtree] leaves to the close
+// sweep even though they pass the shared [syncEligible] gate: every file
+// under a .ledger/ directory (a mid-run shard snapshot is stale by
+// construction; the sweep mirrors the post-compaction one) and every bundle
+// zip (an evicted zip is already gone, and an orphan without its sidecar is
+// never uploaded).
+func sealBoundarySkip(relPath string) bool {
+	return path.Base(path.Dir(relPath)) == manifest.LedgerDirName || isBundleZip(relPath)
+}
+
+// eagerSync mirrors one just-committed file to the remote store, the
+// as-written motion behind the archive primitives: [Env.recordDone] calls it
+// after every ledger record, and it uploads only when a remote is configured,
+// the commit actually changed the on-disk bytes, and the file is org-scope
+// ([eagerScope]). The upload is unconditional — the bytes just changed, so
+// the remote copy is stale by definition and no inventory probe is needed.
+//
+// A semaphore sized [DefaultConcurrency] bounds the burst: the per-page
+// archive fan-out is not limited, so without it hundreds of writes landing at
+// once would open as many concurrent uploads. A failure warns, counts toward
+// [Env.EagerFailures], and defers to the close sweep; it never fails the
+// write it rides on. A cancellation settles nothing, matching the sweep's
+// wind-down semantics.
+func (e *Env) eagerSync(ctx context.Context, relPath string, res store.WriteResult) {
+	if e.remote == nil || !res.Changed || !eagerScope(relPath) {
+		return
+	}
+
+	// An acquire that fails is a cancellation: the wind-down settles nothing,
+	// leaving the file to the next run's sweep.
+	if e.eagerSem.Acquire(ctx, 1) != nil {
+		return
+	}
+
+	defer e.eagerSem.Release(1)
+
+	err := e.putFile(ctx, relPath, res.Size)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+
+		e.logger.LogAttrs(ctx, slog.LevelWarn, "eager_sync_error",
+			slog.String("path", relPath),
+			slog.String("error", err.Error()),
+		)
+		e.eagerFailed.Add(1)
+	}
+}
+
+// SyncSubtree mirrors the search layer under one archive-relative prefix to
+// the remote store, the per-workspace motion at the seal boundary; it is a
+// no-op without a remote configured.
+//
+// It runs one scoped inventory listing and settles each eligible file through
+// the same incremental gate as [Env.SyncArchive], so an unchanged file skips
+// and a file left stale by an interrupted prior run still uploads. Files
+// under a .ledger/ directory are skipped whole — a mid-run shard snapshot is
+// stale by construction; the close sweep mirrors the post-compaction one —
+// and bundle zips are skipped too (an evicted zip is already gone, and an
+// orphan without its sidecar must never be uploaded). Files settle
+// sequentially: workspaces seal concurrently, so the workspace goroutines are
+// the parallelism, exactly as they are for bundle eviction.
+//
+// There is no prune — deletion reconciliation stays global at the close
+// sweep. Per-file failures warn, count in the returned stats, and add to
+// [Env.EagerFailures]; they never abort the subtree or the seal, and the
+// close sweep retries them. A cancellation winds down settling nothing.
+func (e *Env) SyncSubtree(ctx context.Context, relPrefix string) SyncStats {
+	if e.remote == nil {
+		return SyncStats{}
+	}
+
+	counters := &syncCounters{}
+	defer func() {
+		e.eagerFailed.Add(counters.failed.Load())
+	}()
+
+	prefix := e.RemoteKey(relPrefix) + "/"
+
+	inventory, ok := e.listInventory(ctx, prefix, counters)
+	if !ok {
+		return counters.stats()
+	}
+
+	err := e.walkEligible(ctx, relPrefix, func(relPath string) error {
+		if sealBoundarySkip(relPath) {
+			return nil
+		}
+
+		e.syncFile(ctx, relPath, inventory, counters)
+
+		return nil
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// A subtree that never materialized has nothing to mirror.
+		case ctx.Err() != nil:
+			// As above: a cancellation surfacing from the walk is the wind-down.
+		default:
+			e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_walk_error",
+				slog.String("prefix", relPrefix),
+				slog.String("error", err.Error()),
+			)
+
+			counters.failed.Add(1)
+		}
+	}
+
+	return counters.stats()
 }
 
 // syncFiles settles each search-layer file against the inventory, fanned out

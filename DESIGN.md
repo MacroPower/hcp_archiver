@@ -564,7 +564,7 @@ loose files canonical and simply re-runs.
 ### Remote offload and full-archive sync (optional)
 
 With a `remote:` block configured, the object store holds a **complete copy**
-of the archive, in two motions with different semantics:
+of the archive, in two modes with different semantics:
 
 - **Eviction** (upload → verify → delete local) moves the cold surfaces off
   disk: sealed bundles as each workspace seals, and org-wide
@@ -573,11 +573,47 @@ of the archive, in two motions with different semantics:
   which is what lets a 5k+ workspace org's archive run on a machine that could
   never hold the whole thing at once.
 - **Sync** (incremental upload, local kept) mirrors everything else — loose
-  files, roll-ups, sidecar indexes, ledger snapshots — at each org run's
-  close, after the final ledger flush and while the cross-process flock is
-  still held. Local disk stays the canonical search layer, so browsing and
-  grep remain offline operations; the bucket is the disaster-recovery copy
-  (re-download the prefix to restore).
+  files, roll-ups, sidecar indexes, ledger snapshots. Local disk stays the
+  canonical search layer, so browsing and grep remain offline operations;
+  the bucket is the disaster-recovery copy (re-download the prefix to
+  restore).
+
+Sync converges during the run rather than in one closing sweep, in three
+motions:
+
+- **As written**: an org-scope file — anything outside a workspace subtree
+  that is not an eviction surface: `org.json`, users, teams, the registry,
+  project files, stacks — uploads the moment a write actually changes its
+  on-disk content (the store's atomic commit reports whether the bytes
+  changed, so an unchanged re-read costs no upload). The upload skips any
+  probe: the bytes just changed, so the remote copy is stale by definition.
+  Workspace-subtree files are deliberately not synced as written — sealing
+  re-shapes them minutes later (children into roll-ups, blobs and logs into
+  bundles), so eager copies would be pure churn the prune would delete. A
+  semaphore at the shared concurrency ceiling bounds the burst, since the
+  per-page archive fan-out is otherwise unbounded. The `.remote.json`
+  marker, written before any collector runs, also mirrors eagerly: it is
+  what an interrupted run's mirror needs to locate its evicted bundles.
+- **At each workspace's seal boundary**: right after a workspace seals
+  (bundles evicted, roll-ups coalesced), its subtree holds only its final
+  search layer, and that subtree syncs — one scoped inventory listing, the
+  same incremental gate as the close sweep, files settled sequentially (the
+  concurrently-sealing workspaces are the parallelism), and no prune. An
+  interrupted run then loses at most the workspaces still mid-collection.
+  Orphan zips are skipped, as in the close sweep's classification, and the
+  workspace shard's `.ledger/` files are skipped whole: a mid-run snapshot
+  is stale by construction.
+- **The close sweep**, the backstop: a full-inventory incremental pass over
+  the whole tree at each org run's close, after the final ledger flush and
+  while the cross-process flock is still held. It retries eager failures,
+  migrates pre-existing archives, evicts settled tarballs and any bundle
+  the seal-time eviction missed, mirrors the post-compaction ledger
+  snapshots (shards mirror only here), and prunes stale remote keys —
+  deletion reconciliation lives only here.
+
+Eager failures (the as-written and seal-boundary motions) warn, count into
+the close summary's `eager_failed`, and defer to the sweep; only the close
+sweep's own failures mark the run incomplete.
 
 A run with `remote:` configured proves the store manageable at startup: a
 small probe object is written under the prefix, headed, listed, read back
@@ -591,20 +627,21 @@ digest check: a store whose recorded MD5 does not match the written bytes
 fails preflight, while a store that records none simply leaves the sync
 gate's digest comparisons gating on size, as designed.
 
-Sync is always-on when `remote:` is configured; there is no separate knob:
-remote configured means the bucket converges on a complete archive. Object
-keys mirror the local tree: `<prefix>/<org>/<archive-relative path>`, so a
-bucket listing reads like the archive and the sidecar's `bundle` field still
-names the object. The backend is resolved from one gocloud.dev bucket URL
-(`s3://`, `azblob://`, `file://`), and credentials come only from that
-provider's default chain; the YAML carries the URL and transfer tuning,
-never a secret. Evicted uploads stream through the backend's parted-upload
-path (concurrent parts for large state bundles), and a write that dies
-midway aborts rather than committing a truncated object; synced files are
-digested before upload so the store records a full-object MD5 later runs
-can compare, and evicted uploads record their full-object MD5 and SHA-256
-as object metadata so the same egress-free comparison exists even where a
-parted upload leaves no backend digest. Every store operation retries a
+Sync is always-on when `remote:` is configured; there is no separate knob
+or per-motion toggle: remote configured means the bucket converges on a
+complete archive. Object keys mirror the local tree:
+`<prefix>/<org>/<archive-relative path>`, so a bucket listing reads like
+the archive and the sidecar's `bundle` field still names the object. The
+backend is resolved from one gocloud.dev bucket URL (`s3://`, `azblob://`,
+`file://`), and credentials come only from that provider's default chain;
+the YAML carries the URL and transfer tuning, never a secret. Evicted
+uploads stream through the backend's parted-upload path (concurrent parts
+for large state bundles), and a write that dies midway aborts rather than
+committing a truncated object; synced files are digested before upload so
+the store records a full-object MD5 later runs can compare, and evicted
+uploads record their full-object MD5 and SHA-256 as object metadata so the
+same egress-free comparison exists even where a parted upload leaves no
+backend digest. Every store operation retries a
 transient failure under a bounded doubling backoff — the same in-run
 persistence the API transport gives fetches, above whatever the provider
 SDK retries itself — while errors the store pins on the request (absent
@@ -612,7 +649,8 @@ key, permission denial, failed precondition) surface immediately. Every
 write lands in the store's default storage class.
 
 The close sweep walks every regular file under the org root and classifies it
-top-down:
+top-down (the eager motions honor the same classification — they change when
+a file first settles, never what happens to it):
 
 1. an atomicfile staging temp: skip (a crash's partial write);
 2. `.ledger/lock`: skip (meaningful only as a kernel flock target);

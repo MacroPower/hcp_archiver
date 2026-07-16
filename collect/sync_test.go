@@ -2,15 +2,18 @@ package collect_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
@@ -837,4 +840,375 @@ func TestSyncArchivePerFileFailureWarnsAndContinues(t *testing.T) {
 
 	assert.Equal(t, 2, stats.Failed, "each failed file counts and the sweep continues")
 	assert.Zero(t, stats.Uploaded)
+}
+
+func TestUnderWorkspaceSubtree(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		relPath string
+		want    bool
+	}{
+		"a workspace file": {
+			relPath: "projects/prod/workspaces/api/workspace.json",
+			want:    true,
+		},
+		"a nested run child": {
+			relPath: "projects/prod/workspaces/api/runs/run-1/run.json",
+			want:    true,
+		},
+		"the workspace directory itself has no file segment": {
+			relPath: "projects/prod/workspaces/api",
+		},
+		"a project file sits above the workspaces": {
+			relPath: "projects/prod/project.json",
+		},
+		"a stack subtree is not a workspace subtree": {
+			relPath: "projects/prod/stacks/net/stack.json",
+		},
+		"an org-root file": {
+			relPath: "org.json",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, collect.UnderWorkspaceSubtree(tc.relPath))
+		})
+	}
+}
+
+func TestEagerScope(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		relPath string
+		want    bool
+	}{
+		"an org metadata file syncs as written": {
+			relPath: "org.json",
+			want:    true,
+		},
+		"a user file syncs as written": {
+			relPath: "users/user-1.json",
+			want:    true,
+		},
+		"a project file syncs as written": {
+			relPath: "projects/prod/project.json",
+			want:    true,
+		},
+		"a stack file syncs as written (stacks have no seal path)": {
+			relPath: "projects/prod/stacks/net/deployments/production/deployment.json",
+			want:    true,
+		},
+		"a workspace-subtree file waits for its seal boundary": {
+			relPath: "projects/prod/workspaces/api/runs/run-1/plan.log",
+		},
+		"a configuration-version tarball moves by eviction, not sync": {
+			relPath: "config-versions/cv-1.tar.gz",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, collect.EagerScope(tc.relPath))
+		})
+	}
+}
+
+// wsSubtree is the workspace subtree the SyncSubtree tests mirror.
+const wsSubtree = "projects/prod/workspaces/api"
+
+func TestSyncSubtreeNoRemoteIsNoop(t *testing.T) {
+	t.Parallel()
+
+	env, _, _ := newEnv(t)
+
+	assert.Zero(t, env.SyncSubtree(t.Context(), wsSubtree))
+}
+
+func TestSyncSubtreeMirrorsSearchLayer(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+
+	// The subtree's search layer after a seal: loose metadata, a roll-up, and
+	// a sidecar index; beside them an orphan zip (crash mid-seal, never
+	// uploaded) and the workspace shard's ledger files (mid-run state the
+	// close sweep mirrors post-compaction).
+	f.write(t, wsSubtree+"/workspace.json", []byte(`{"ws":"api"}`))
+	f.write(t, wsSubtree+"/rollups/runs.ndjson", []byte(`{"id":"run-1"}`))
+	f.write(t, wsSubtree+"/bundles/logs.gen0001.zip.sidecar.ndjson", []byte(`{"name":"x"}`))
+	f.write(t, wsSubtree+"/bundles/logs.gen0002.zip", []byte("orphan zip"))
+	f.write(t, wsSubtree+"/"+manifest.LedgerDirName+"/snapshot.json", []byte(`{}`))
+	f.write(t, wsSubtree+"/"+manifest.LedgerDirName+"/"+manifest.LogFileName, []byte(`{}`))
+
+	// A file outside the subtree is out of scope entirely.
+	f.write(t, "org.json", []byte(`{"org":"acme"}`))
+
+	stats := f.env.SyncSubtree(t.Context(), wsSubtree)
+
+	require.Zero(t, stats.Failed)
+	assert.Equal(t, 3, stats.Uploaded)
+	assert.Equal(t, []string{
+		f.key(wsSubtree + "/bundles/logs.gen0001.zip.sidecar.ndjson"),
+		f.key(wsSubtree + "/rollups/runs.ndjson"),
+		f.key(wsSubtree + "/workspace.json"),
+	}, f.fake.Keys(), "exactly the subtree's search layer is mirrored")
+}
+
+func TestSyncSubtreeMissingSubtreeIsNoop(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+
+	stats := f.env.SyncSubtree(t.Context(), wsSubtree)
+
+	assert.Zero(t, stats, "a subtree that never materialized has nothing to mirror")
+	assert.Zero(t, f.env.EagerFailures())
+}
+
+func TestSyncSubtreeIncrementalGate(t *testing.T) {
+	t.Parallel()
+
+	relPath := wsSubtree + "/workspace.json"
+	content := []byte(`{"ws":"api"}`)
+
+	tests := map[string]struct {
+		remoteObj    *remotetest.Object
+		wantUploaded int
+		wantSkipped  int
+	}{
+		"an absent key uploads": {
+			wantUploaded: 1,
+		},
+		"a stale copy uploads": {
+			remoteObj:    &remotetest.Object{Data: []byte("longer stale copy")},
+			wantUploaded: 1,
+		},
+		"a matching copy skips": {
+			remoteObj:   &remotetest.Object{Data: content, MD5: remotetest.MD5Sum(content)},
+			wantSkipped: 1,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSyncFixture(t)
+			f.write(t, relPath, content)
+
+			if tc.remoteObj != nil {
+				f.fake.SetObject(f.key(relPath), *tc.remoteObj)
+			}
+
+			stats := f.env.SyncSubtree(t.Context(), wsSubtree)
+
+			require.Zero(t, stats.Failed)
+			assert.Equal(t, tc.wantUploaded, stats.Uploaded)
+			assert.Equal(t, tc.wantSkipped, stats.Skipped)
+
+			obj, ok := f.fake.Object(f.key(relPath))
+			require.True(t, ok)
+			assert.Equal(t, content, obj.Data)
+		})
+	}
+}
+
+func TestSyncSubtreeNeverPrunes(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+
+	// A stale remote key nothing local backs anymore: deletion reconciliation
+	// stays global at the close sweep, so the subtree sync must leave it.
+	stale := wsSubtree + "/runs/run-1/run.json"
+	f.fake.SetObject(f.key(stale), remotetest.Object{Data: []byte(`{"id":"run-1"}`)})
+
+	f.write(t, wsSubtree+"/rollups/runs.ndjson", []byte(`{"id":"run-1"}`))
+
+	stats := f.env.SyncSubtree(t.Context(), wsSubtree)
+
+	require.Zero(t, stats.Failed)
+	assert.Zero(t, stats.Pruned)
+	assert.Empty(t, f.fake.Deleted())
+
+	_, ok := f.fake.Object(f.key(stale))
+	assert.True(t, ok, "the stale key waits for the close sweep's prune")
+}
+
+func TestSyncSubtreeCanceledContextSettlesNothing(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	f.write(t, wsSubtree+"/workspace.json", []byte(`{"ws":"api"}`))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	stats := f.env.SyncSubtree(ctx, wsSubtree)
+
+	assert.Zero(t, stats, "a cancellation is the wind-down, not a failure")
+	assert.Empty(t, f.fake.Keys())
+	assert.Zero(t, f.env.EagerFailures())
+}
+
+func TestSyncSubtreeFailureCountsAndDefersToSweep(t *testing.T) {
+	t.Parallel()
+
+	relPath := wsSubtree + "/workspace.json"
+
+	f := newSyncFixture(t)
+	f.write(t, relPath, []byte(`{"ws":"api"}`))
+
+	f.fake.PutErr = assert.AnError
+	f.fake.PutErrN = 1
+
+	stats := f.env.SyncSubtree(t.Context(), wsSubtree)
+
+	assert.Equal(t, 1, stats.Failed)
+	assert.Equal(t, 1, f.env.EagerFailures(), "a subtree failure counts as an eager failure")
+
+	sweep := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, sweep.Failed, "the sweep's Failed reflects only sweep outcomes")
+	assert.Equal(t, 1, sweep.Uploaded, "the close sweep retries the eager failure")
+
+	_, ok := f.fake.Object(f.key(relPath))
+	assert.True(t, ok)
+}
+
+func TestEagerSyncMirrorsOrgScopeWriteAsWritten(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+
+	data := []byte(`{"org":"acme"}`)
+
+	require.NoError(t, f.env.Bytes(t.Context(), "org.json",
+		func(context.Context) ([]byte, error) { return data, nil }))
+
+	obj, ok := f.fake.Object(f.key("org.json"))
+	require.True(t, ok, "an org-scope write mirrors the moment it commits")
+	assert.Equal(t, data, obj.Data)
+}
+
+func TestEagerSyncSkipsUnchangedRewrite(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+
+	fetch := func(context.Context) (any, error) {
+		return map[string]string{"org": "acme"}, nil
+	}
+
+	require.NoError(t, f.env.Mutable(t.Context(), "org.json", fetch))
+	require.Equal(t, 1, f.fake.PutCalls())
+
+	require.NoError(t, f.env.Mutable(t.Context(), "org.json", fetch))
+	assert.Equal(t, 1, f.fake.PutCalls(), "a re-read that changed nothing on disk uploads nothing")
+}
+
+func TestEagerSyncSkipsWorkspaceSubtreeWrites(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+
+	require.NoError(t, f.env.Bytes(t.Context(), wsSubtree+"/runs/run-1/plan.log",
+		func(context.Context) ([]byte, error) { return []byte("plan output"), nil }))
+
+	assert.Empty(t, f.fake.Keys(),
+		"a seal-destined file waits for its workspace's seal boundary")
+}
+
+func TestEagerSyncFailureDefersToSweep(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+
+	f.fake.PutErr = assert.AnError
+	f.fake.PutErrN = 1
+
+	require.NoError(t, f.env.Bytes(t.Context(), "org.json",
+		func(context.Context) ([]byte, error) { return []byte(`{"org":"acme"}`), nil }),
+		"an eager failure never fails the write it rides on")
+
+	assert.Equal(t, 1, f.env.EagerFailures())
+
+	_, ok := f.fake.Object(f.key("org.json"))
+	require.False(t, ok)
+
+	sweep := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, sweep.Failed, "the sweep's Failed reflects only sweep outcomes")
+	assert.Equal(t, 1, sweep.Uploaded)
+
+	_, ok = f.fake.Object(f.key("org.json"))
+	assert.True(t, ok)
+}
+
+func TestEagerSyncBoundsConcurrentUploads(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+
+	// Track the high-water mark of concurrent commits: the per-page archive
+	// fan-out is unbounded, so the eager semaphore is the only cap.
+	var inFlight, peak atomic.Int64
+
+	f.fake.PutHook = func(context.Context) {
+		n := inFlight.Add(1)
+		defer inFlight.Add(-1)
+
+		for {
+			p := peak.Load()
+			if n <= p || peak.CompareAndSwap(p, n) {
+				break
+			}
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
+	const writes = 4 * collect.DefaultConcurrency
+
+	var g errgroup.Group
+
+	for i := range writes {
+		relPath := fmt.Sprintf("users/user-%02d.json", i)
+
+		g.Go(func() error {
+			return f.env.Bytes(t.Context(), relPath,
+				func(context.Context) ([]byte, error) { return []byte(`{"id":"` + relPath + `"}`), nil })
+		})
+	}
+
+	require.NoError(t, g.Wait())
+
+	assert.LessOrEqual(t, peak.Load(), int64(collect.DefaultConcurrency),
+		"in-flight eager uploads never exceed the fan-out ceiling")
+	assert.Len(t, f.fake.Keys(), writes, "every write still mirrors")
+}
+
+func TestEagerSyncThenSweepSkipsWithoutSecondUpload(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+
+	require.NoError(t, f.env.Bytes(t.Context(), "org.json",
+		func(context.Context) ([]byte, error) { return []byte(`{"org":"acme"}`), nil }))
+	require.Equal(t, 1, f.fake.PutCalls())
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Uploaded, "the sweep sees the eager copy as settled")
+	assert.Equal(t, 1, stats.Skipped)
+	assert.Equal(t, 1, f.fake.PutCalls())
+	assert.Zero(t, f.fake.HeadCalls(),
+		"the eager Put records a digest, so the gate settles from the inventory alone")
 }

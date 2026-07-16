@@ -5,7 +5,10 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/remote"
@@ -63,9 +66,11 @@ type Env struct {
 	remote             *remote.Client
 	logger             *slog.Logger
 	idOwners           map[string]map[string]string
+	eagerSem           *semaphore.Weighted
 	remoteOrg          string
 	remoteCfg          remote.Config
 	idMu               sync.Mutex
+	eagerFailed        atomic.Int64
 	blobRetries        int
 	blobRetryDelay     time.Duration
 	absentConfirmDelay time.Duration
@@ -175,6 +180,13 @@ func NewEnv(client *tfeclient.Client, st *store.Store, ledger *manifest.Ledger, 
 		e.logger = slog.Default()
 	}
 
+	// The eager as-written uploads ride the archive fan-out, whose per-page
+	// spread is unbounded; this semaphore is what caps their burst at the
+	// same ceiling every other fan-out respects.
+	if e.remote != nil {
+		e.eagerSem = semaphore.NewWeighted(DefaultConcurrency)
+	}
+
 	return e
 }
 
@@ -198,6 +210,14 @@ func (e *Env) Store() *store.Store {
 // remote code path checks first.
 func (e *Env) Remote() *remote.Client {
 	return e.remote
+}
+
+// EagerFailures returns how many eager remote uploads — as-written syncs and
+// seal-boundary subtree files — failed so far. Eager failures warn and defer
+// to the close sweep, which retries them; they never mark the run incomplete,
+// so this count is visibility, not a gate.
+func (e *Env) EagerFailures() int {
+	return int(e.eagerFailed.Load())
 }
 
 // RemoteKey composes the object key for an archive-relative path, delegating

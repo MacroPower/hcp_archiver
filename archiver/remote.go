@@ -48,6 +48,9 @@ func (a *Archiver) syncOrg(ctx context.Context, env *collect.Env, orgName string
 		level = slog.LevelWarn
 	}
 
+	// The eager failures (as-written and seal-boundary uploads that warned
+	// and deferred) ride along for visibility only: the sweep just retried
+	// them, so its own Failed count remains the sole run-incomplete signal.
 	a.logger.LogAttrs(ctx, level, "remote_sync_complete",
 		slog.String("org", orgName),
 		slog.Int("uploaded", stats.Uploaded),
@@ -56,6 +59,7 @@ func (a *Archiver) syncOrg(ctx context.Context, env *collect.Env, orgName string
 		slog.Int("evicted", stats.Evicted),
 		slog.Int("pruned", stats.Pruned),
 		slog.Int("failed", stats.Failed),
+		slog.Int("eager_failed", env.EagerFailures()),
 	)
 
 	return stats
@@ -63,18 +67,32 @@ func (a *Archiver) syncOrg(ctx context.Context, env *collect.Env, orgName string
 
 // writeRemoteMarker records the read-relevant remote settings at the
 // organization's archive root, so a later `view` of the archive can reach
-// the offloaded bundles without the original configuration file.
-func (a *Archiver) writeRemoteMarker(st *store.Store) error {
-	marker := remoteConfig(a.cfg.Remote).Marker()
+// the offloaded bundles without the original configuration file, then
+// mirrors it eagerly: the marker is what an interrupted run's mirror needs
+// to locate its evicted bundles, so it must not wait for the close sweep. A
+// mirror failure warns and defers to the sweep; only the local side can
+// fail the run.
+func (a *Archiver) writeRemoteMarker(ctx context.Context, st *store.Store, orgName string) error {
+	cfg := remoteConfig(a.cfg.Remote)
 
-	data, err := json.MarshalIndent(marker, "", "  ")
+	data, err := json.MarshalIndent(cfg.Marker(), "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal remote marker: %w", err)
 	}
 
-	err = atomicfile.WriteFile(filepath.Join(st.Root(), remote.MarkerName), append(data, '\n'))
+	data = append(data, '\n')
+
+	err = atomicfile.WriteFile(filepath.Join(st.Root(), remote.MarkerName), data)
 	if err != nil {
 		return fmt.Errorf("write remote marker: %w", err)
+	}
+
+	err = a.remote.Put(ctx, cfg.Key(orgName, remote.MarkerName), data)
+	if err != nil && ctx.Err() == nil {
+		a.logger.LogAttrs(ctx, slog.LevelWarn, "remote_marker_sync_error",
+			slog.String("org", orgName),
+			slog.String("error", err.Error()),
+		)
 	}
 
 	return nil

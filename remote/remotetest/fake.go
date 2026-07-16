@@ -86,6 +86,11 @@ type Fake struct {
 	// model a cancellation surfacing mid-flight; the read then returns the
 	// context's error instead of serving the object.
 	HeadHook func(ctx context.Context)
+	// PutHook, when set, runs as each write commits, before the fake's mutex
+	// is taken, so concurrent commits run it concurrently: a test measures
+	// in-flight write parallelism from inside it, or cancels a context it
+	// controls to model a cancellation surfacing mid-commit.
+	PutHook func(ctx context.Context)
 	// DeleteHook, when set, runs at the start of each delete with the call's
 	// context, serving the same mid-flight cancellation modeling as HeadHook.
 	DeleteHook func(ctx context.Context)
@@ -286,6 +291,10 @@ func (w *fakeWriter) Write(p []byte) (int, error) {
 // Close commits the buffered bytes as one object, unless the write's context
 // was canceled (the client's abort path) or a fault is injected.
 func (w *fakeWriter) Close() error {
+	if w.f.PutHook != nil {
+		w.f.PutHook(w.ctx)
+	}
+
 	err := w.ctx.Err()
 	if err != nil {
 		return err //nolint:wrapcheck // The driver contract returns ctx.Err().

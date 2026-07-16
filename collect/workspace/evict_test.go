@@ -301,3 +301,51 @@ func TestSealWorkspace_ZipWithLostSidecarBlocksItsGeneration(t *testing.T) {
 		f.exists(st.Join(st.BundleDir(project, ws), "logs.gen0004.zip.sidecar.ndjson")),
 		"the new bundle takes the next generation past the sidecar-less survivor")
 }
+
+func TestSealWorkspace_MirrorsSubtreeAtSealBoundary(t *testing.T) {
+	t.Parallel()
+
+	f, fake := newEvictFixture(t)
+	st := f.store
+	project, ws := "prod", "api"
+
+	f.writeDone(t, st.RunFile(project, ws, "run-1", "plan.log"), []byte("plan output"))
+	f.writeDone(t, st.WorkspaceFile(project, ws, "workspace.json"), []byte(`{"ws":"api"}`))
+	f.markComplete(project, ws)
+
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	// The subtree's post-seal search layer is mirrored the moment the seal
+	// settles, not left for the close sweep; the zip itself reached the
+	// remote by eviction just before.
+	for _, rel := range []string{
+		st.WorkspaceFile(project, ws, "workspace.json"),
+		st.Join(st.BundleDir(project, ws), "logs.gen0001.zip.sidecar.ndjson"),
+	} {
+		_, ok := fake.Object(evictPrefix + "/org/" + rel)
+		assert.True(t, ok, "%s should be mirrored at the seal boundary", rel)
+	}
+}
+
+func TestSealWorkspace_SubtreeSyncFailureDoesNotFailSeal(t *testing.T) {
+	t.Parallel()
+
+	f, fake := newEvictFixture(t)
+	st := f.store
+	project, ws := "prod", "api"
+
+	// Nothing frozen to bundle or evict, so the injected fault lands only on
+	// the subtree sync's uploads.
+	f.writeDone(t, st.WorkspaceFile(project, ws, "workspace.json"), []byte(`{"ws":"api"}`))
+	f.markComplete(project, ws)
+
+	fake.PutErr = assert.AnError
+
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws),
+		"a subtree-sync failure is stats-only; the close sweep retries")
+
+	_, ok := fake.Object(evictPrefix + "/org/" + st.WorkspaceFile(project, ws, "workspace.json"))
+	assert.False(t, ok, "the failed upload defers to the close sweep")
+	assert.True(t, f.exists(st.WorkspaceFile(project, ws, "workspace.json")),
+		"local disk stays canonical")
+}

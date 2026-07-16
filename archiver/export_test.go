@@ -6,6 +6,8 @@ import "go.jacobcolvin.com/hcp_archiver/remote"
 var (
 	// SyncOrg exposes (*Archiver).syncOrg for tests.
 	SyncOrg = (*Archiver).syncOrg
+	// WriteRemoteMarker exposes (*Archiver).writeRemoteMarker for tests.
+	WriteRemoteMarker = (*Archiver).writeRemoteMarker
 	// ResolveOrgs exposes resolveOrgs for tests.
 	ResolveOrgs = resolveOrgs
 	// ProjectNameFor exposes projectNameFor for tests.
