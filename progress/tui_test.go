@@ -374,3 +374,124 @@ func TestRenderSummary_RateLimited(t *testing.T) {
 
 	golden.RequireEqual(t, []byte(progress.RenderSummary(panel)))
 }
+
+// remotePanel is barPanel with a remote configured and a clean transfer tally,
+// shared by the remote-readout tests.
+func remotePanel() progress.PanelSnapshot {
+	panel := barPanel()
+	panel.HasRemote = true
+	panel.Remote = progress.RemoteStats{
+		UploadedBytes: 1288490188, // 1.2 GiB
+		Uploaded:      5432,
+		Evicted:       87,
+	}
+
+	return panel
+}
+
+func TestRenderPanel_Remote(t *testing.T) {
+	t.Parallel()
+
+	// A remote-configured run closes the panel with the transfer readout; with
+	// nothing failed the whole line stays muted, no amber segment.
+	golden.RequireEqual(t, []byte(progress.RenderPanel(remotePanel())))
+}
+
+func TestRenderPanel_RemoteFailed(t *testing.T) {
+	t.Parallel()
+
+	// Once any remote motion has failed the amber failed segment rides at the
+	// end of the readout, the same convention as the 429 total.
+	panel := remotePanel()
+	panel.Remote.Failed = 3
+
+	golden.RequireEqual(t, []byte(progress.RenderPanel(panel)))
+}
+
+func TestRenderPanel_NoRemoteOmitsLine(t *testing.T) {
+	t.Parallel()
+
+	// A local-only run carries no remote line at all: presence is gated by the
+	// option, not the sampled values.
+	out := ansi.Strip(progress.RenderPanel(barPanel()))
+
+	assert.NotContains(t, out, "☁")
+	assert.NotContains(t, out, "uploaded")
+}
+
+func TestRenderSummary_Remote(t *testing.T) {
+	t.Parallel()
+
+	panel := progress.PanelSnapshot{
+		Tally: manifest.Tally{
+			Done:            100,
+			BytesDownloaded: 5 * 1024 * 1024,
+		},
+		Elapsed:   200 * time.Second,
+		HasRemote: true,
+		Remote: progress.RemoteStats{
+			UploadedBytes: 1288490188,
+			Uploaded:      5432,
+			Evicted:       87,
+			Failed:        3,
+		},
+	}
+
+	golden.RequireEqual(t, []byte(progress.RenderSummary(panel)))
+}
+
+func TestRenderPanel_RemoteTaskLinesFitTerminalHeight(t *testing.T) {
+	t.Parallel()
+
+	// The remote readout claims a footer line, so a short terminal reserves
+	// five lines rather than four: at six rows one task line fits beside the
+	// first line, the overflow line, the counts, the metadata, and the readout.
+	panel := remotePanel()
+	for i := range 11 {
+		panel.Tasks = append(panel.Tasks, progress.PanelTask{
+			Name:  fmt.Sprintf("acme/ws-%02d", i),
+			Total: 10,
+			Done:  i,
+		})
+	}
+
+	rendered := progress.RenderPanelAt(panel, 80, 6)
+	lines := strings.Split(rendered, "\n")
+
+	assert.Len(t, lines, 6, "panel height matches the terminal")
+	assert.Contains(t, ansi.Strip(rendered), "+10 more active")
+	assert.Contains(t, ansi.Strip(rendered), "☁")
+}
+
+func TestRenderPanel_RemoteHeightHoldsOnShortTerminal(t *testing.T) {
+	t.Parallel()
+
+	// The high-water pad must respect the tighter remote budget on both of its
+	// call sites: as tasks finish on a short terminal the padded region holds
+	// the panel's height without ever outgrowing the screen.
+	peak := remotePanel()
+	peak.Tally.Target = ""
+
+	for i := range 11 {
+		peak.Tasks = append(peak.Tasks, progress.PanelTask{
+			Name:  fmt.Sprintf("acme/ws-%02d", i),
+			Total: 10,
+			Done:  i,
+		})
+	}
+
+	after := remotePanel()
+	after.Tally.Target = ""
+	after.Tasks = peak.Tasks[:1]
+
+	frames := progress.RenderPanelFrames(80, 6, peak, after)
+
+	for i, frame := range frames {
+		assert.LessOrEqual(t, strings.Count(frame, "\n")+1, 6,
+			"frame %d fits the terminal", i)
+	}
+
+	assert.Equal(t, strings.Count(frames[0], "\n"), strings.Count(frames[1], "\n"),
+		"panel height holds as tasks finish")
+	assert.Contains(t, ansi.Strip(frames[1]), "acme/ws-00", "remaining task still shown")
+}

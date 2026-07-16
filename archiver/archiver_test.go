@@ -333,6 +333,14 @@ func TestSyncOrgEagerFailureIsVisibilityOnly(t *testing.T) {
 	assert.Zero(t, stats.Failed, "a retried eager failure never marks the run incomplete")
 	assert.Contains(t, fake.Keys(), "hcp/acme/users/user-1.json")
 	assert.Contains(t, buf.String(), "eager_failed=1")
+
+	// The run-wide tally the reporter renders (via WithRemoteStats) spans both
+	// motions: the failed eager upload and the sweep's two retried uploads.
+	tally := env.RemoteTally()
+	assert.Equal(t, 2, tally.Uploaded)
+	assert.Equal(t, 1, tally.Failed)
+	assert.Zero(t, tally.Evicted)
+	assert.Positive(t, tally.UploadedBytes)
 }
 
 func TestWriteRemoteMarkerMirrorsEagerly(t *testing.T) {

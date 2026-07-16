@@ -465,6 +465,17 @@ func TestSyncArchiveEvictionRecordsDigests(t *testing.T) {
 		"the evicted object records the proof's sha256 as metadata")
 	assert.Equal(t, remotetest.MD5Sum(data), obj.MD5,
 		"the evicted object records a comparable md5")
+
+	// The run-wide tally credits the eviction's bytes; the per-pass stats
+	// exclude them.
+	assert.Zero(t, stats.Uploaded)
+	assert.Zero(t, stats.UploadedBytes, "per-pass uploaded bytes exclude evictions")
+
+	tally := f.env.RemoteTally()
+	assert.Equal(t, 1, tally.Evicted)
+	assert.Zero(t, tally.Uploaded)
+	assert.Equal(t, int64(len(data)), tally.UploadedBytes,
+		"the run tally includes the eviction's transferred bytes")
 }
 
 func TestSyncArchiveRefusesRottedTarball(t *testing.T) {
@@ -805,6 +816,8 @@ func TestSyncArchiveEvictCancellationIsNotFailure(t *testing.T) {
 	assert.Zero(t, stats.Failed, "an in-flight cancellation is the wind-down, not a failure")
 	assert.Zero(t, stats.Evicted, "the offload did not complete")
 	assert.True(t, f.exists(t, zip), "the local bundle stays canonical for the next run")
+	assert.Zero(t, f.env.RemoteTally().Failed,
+		"a cancellation surfacing from inside the offload settles nothing run-wide either")
 }
 
 func TestSyncArchivePruneCancellationIsNotFailure(t *testing.T) {
@@ -1193,6 +1206,150 @@ func TestEagerSyncBoundsConcurrentUploads(t *testing.T) {
 	assert.LessOrEqual(t, peak.Load(), int64(collect.DefaultConcurrency),
 		"in-flight eager uploads never exceed the fan-out ceiling")
 	assert.Len(t, f.fake.Keys(), writes, "every write still mirrors")
+}
+
+// TestRemoteTallySpansMotions drives all four remote motions through one
+// environment and asserts the run-wide tally accumulates across them while
+// each pass's own [collect.SyncStats] stays scoped to that pass — including
+// where the two split: eviction bytes ride the run tally but never a pass's
+// UploadedBytes.
+func TestRemoteTallySpansMotions(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+
+	// Motion one: an eager as-written upload the moment the write commits.
+	orgData := []byte(`{"org":"acme"}`)
+	require.NoError(t, f.env.Bytes(t.Context(), "org.json",
+		func(context.Context) ([]byte, error) { return orgData, nil }))
+
+	tally := f.env.RemoteTally()
+	assert.Equal(t, 1, tally.Uploaded)
+	assert.Equal(t, int64(len(orgData)), tally.UploadedBytes)
+
+	// Motion two: the seal-boundary subtree sync.
+	wsData := []byte(`{"ws":"api"}`)
+	f.write(t, wsSubtree+"/workspace.json", wsData)
+
+	subtree := f.env.SyncSubtree(t.Context(), wsSubtree)
+	require.Zero(t, subtree.Failed)
+
+	tally = f.env.RemoteTally()
+	assert.Equal(t, 2, tally.Uploaded)
+	assert.Equal(t, int64(len(orgData)+len(wsData)), tally.UploadedBytes)
+
+	// Motions three and four: the close sweep syncs the sidecar and evicts the
+	// sealed bundle. The already-mirrored files skip and count nothing.
+	zip := wsSubtree + "/bundles/logs.gen0001.zip"
+	f.sealBundle(t, zip, "projects/prod/workspaces/api/runs/run-1/plan.log", []byte("plan output"))
+
+	zipInfo, err := os.Stat(f.store.AbsPath(zip))
+	require.NoError(t, err)
+
+	sidecarInfo, err := os.Stat(f.store.AbsPath(zip + seal.SidecarSuffix))
+	require.NoError(t, err)
+
+	sweep := f.env.SyncArchive(t.Context())
+	require.Zero(t, sweep.Failed)
+	require.Equal(t, 1, sweep.Evicted)
+	assert.Equal(t, 1, sweep.Uploaded, "the sweep uploads only the sidecar")
+	assert.Equal(t, sidecarInfo.Size(), sweep.UploadedBytes,
+		"the pass's uploaded bytes exclude the eviction transfer")
+
+	tally = f.env.RemoteTally()
+	assert.Equal(t, 3, tally.Uploaded)
+	assert.Equal(t, 1, tally.Evicted)
+	assert.Zero(t, tally.Failed)
+	assert.Equal(t, int64(len(orgData)+len(wsData))+sidecarInfo.Size()+zipInfo.Size(),
+		tally.UploadedBytes, "the run tally includes the eviction transfer")
+}
+
+func TestRemoteTallyFailureMotions(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		run func(t *testing.T, f syncFixture)
+	}{
+		"an eager upload failure": {
+			run: func(t *testing.T, f syncFixture) {
+				t.Helper()
+
+				f.fake.PutErr = assert.AnError
+				f.fake.PutErrN = 1
+
+				require.NoError(t, f.env.Bytes(t.Context(), "org.json",
+					func(context.Context) ([]byte, error) { return []byte(`{"org":"acme"}`), nil }))
+			},
+		},
+		"a subtree sync failure": {
+			run: func(t *testing.T, f syncFixture) {
+				t.Helper()
+
+				f.write(t, wsSubtree+"/workspace.json", []byte(`{"ws":"api"}`))
+
+				f.fake.PutErr = assert.AnError
+				f.fake.PutErrN = 1
+
+				stats := f.env.SyncSubtree(t.Context(), wsSubtree)
+				require.Equal(t, 1, stats.Failed)
+			},
+		},
+		"an eviction transfer failure": {
+			run: func(t *testing.T, f syncFixture) {
+				t.Helper()
+
+				f.writeDone(t, "config-versions/cv-1.tar.gz", []byte("tarball bytes"))
+
+				f.fake.PutErr = assert.AnError
+				f.fake.PutErrN = 1
+
+				stats := f.env.SyncArchive(t.Context())
+				require.Equal(t, 1, stats.Failed)
+			},
+		},
+		"an eviction refused before any transfer": {
+			run: func(t *testing.T, f syncFixture) {
+				t.Helper()
+
+				// The proof gate refuses rotted bytes with no remote traffic at
+				// all; the refusal still counts, matching the pass's Failed.
+				f.writeDone(t, "config-versions/cv-1.tar.gz", []byte("proven tarball bytes"))
+				f.write(t, "config-versions/cv-1.tar.gz", []byte("rotted tarball bytes"))
+
+				stats := f.env.SyncArchive(t.Context())
+				require.Equal(t, 1, stats.Failed)
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSyncFixture(t)
+			tc.run(t, f)
+
+			tally := f.env.RemoteTally()
+			assert.Equal(t, 1, tally.Failed)
+			assert.Zero(t, tally.Evicted)
+			assert.Zero(t, tally.UploadedBytes)
+		})
+	}
+}
+
+func TestRemoteTallyCanceledContextSettlesNothing(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	f.write(t, "org.json", []byte(`{"org":"acme"}`))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	f.env.SyncArchive(ctx)
+
+	assert.Zero(t, f.env.RemoteTally(),
+		"a cancellation is the wind-down: no motion settles into the run tally")
 }
 
 func TestEagerSyncThenSweepSkipsWithoutSecondUpload(t *testing.T) {

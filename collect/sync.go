@@ -119,6 +119,23 @@ var (
 // before the local delete is found by the probe, matched digest for digest,
 // and evicted without re-uploading, and a finished eviction is a no-op.
 func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
+	// The run-wide eviction accounting lives here rather than at the callers
+	// (the seal boundary and the close sweep's evict loop), so each eviction
+	// counts exactly once whoever drives it. A non-cancel failure counts even
+	// before any transfer (a stat error, a refused proof), matching the sweep's
+	// per-pass failure semantics; a cancellation is the wind-down and settles
+	// nothing.
+	err := e.offloadFile(ctx, relPath)
+	if err != nil && ctx.Err() == nil {
+		e.remoteTally.fail()
+	}
+
+	return err
+}
+
+// offloadFile is the transfer behind [Env.OffloadFile], separated so the
+// wrapper can settle the run-wide tally from its one return.
+func (e *Env) offloadFile(ctx context.Context, relPath string) error {
 	rc := e.remote
 	key := e.RemoteKey(relPath)
 	absPath := e.store.AbsPath(relPath)
@@ -133,6 +150,10 @@ func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 		return err
 	}
 
+	// The run tally credits eviction bytes only when this call actually moved
+	// them: a probe that finds a finished prior upload transfers nothing.
+	var uploadedBytes int64
+
 	info, err := rc.Head(ctx, key)
 
 	switch {
@@ -143,6 +164,8 @@ func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 		if uploadErr != nil {
 			return uploadErr
 		}
+
+		uploadedBytes = local.Size()
 
 		info, err = rc.Head(ctx, key)
 		if err != nil {
@@ -168,6 +191,8 @@ func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 	if err != nil {
 		return fmt.Errorf("remove evicted file: %w", err)
 	}
+
+	e.remoteTally.evict(uploadedBytes)
 
 	e.logger.LogAttrs(ctx, slog.LevelInfo, "offload_evicted",
 		slog.String("path", relPath),
@@ -664,7 +689,12 @@ func (e *Env) eagerSync(ctx context.Context, relPath string, res store.WriteResu
 			slog.String("error", err.Error()),
 		)
 		e.eagerFailed.Add(1)
+		e.remoteTally.fail()
+
+		return
 	}
+
+	e.remoteTally.upload(res.Size)
 }
 
 // SyncSubtree mirrors the search layer under one archive-relative prefix to
@@ -793,10 +823,12 @@ func (e *Env) syncFile(
 			slog.String("error", err.Error()),
 		)
 		counters.failed.Add(1)
+		e.remoteTally.fail()
 
 	case needed:
 		counters.uploaded.Add(1)
 		counters.uploadedBytes.Add(size)
+		e.remoteTally.upload(size)
 
 	default:
 		counters.skipped.Add(1)

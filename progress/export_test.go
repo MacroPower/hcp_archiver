@@ -29,9 +29,11 @@ type PanelSnapshot struct {
 	PausedFor    time.Duration
 	WireBytes    int64
 	RateLimited  int64
+	Remote       RemoteStats
 	Total        int
 	Completed    int
 	HasRate      bool
+	HasRemote    bool
 }
 
 // PanelTask mirrors one in-flight work item fed to the panel by a test.
@@ -59,9 +61,11 @@ func (ps PanelSnapshot) snap() snapshot {
 		pausedFor:    ps.PausedFor,
 		wireBytes:    ps.WireBytes,
 		rateLimited:  ps.RateLimited,
+		remote:       ps.Remote,
 		total:        ps.Total,
 		completed:    ps.Completed,
 		hasRate:      ps.HasRate,
+		hasRemote:    ps.HasRemote,
 	}
 }
 

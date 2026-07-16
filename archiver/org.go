@@ -101,14 +101,28 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 	}
 
 	env := collect.NewEnv(a.client, st, ledger, envOpts...)
-	reporter := progress.New(a.w, a.cfg.ProgressMode, ledger,
+
+	reporterOpts := []progress.Option{
 		progress.WithInterval(a.cfg.ProgressInterval),
 		progress.WithInterrupt(a.cancelRun),
 		progress.WithLogSink(a.logSink),
 		progress.WithWireBytes(a.wireBytes),
 		progress.WithRateStatus(a.client.RateStatus),
 		progress.WithRateLimited(a.rateLimited),
-	)
+	}
+
+	// With a remote configured the reporter watches the environment's run-wide
+	// transfer tally, so uploads and evictions read live in every output form.
+	// A plain conversion carries the snapshot across the package boundary: the
+	// two structs are field-identical, and a drift in either fails to compile
+	// here rather than silently dropping a field.
+	if a.remote != nil {
+		reporterOpts = append(reporterOpts, progress.WithRemoteStats(func() progress.RemoteStats {
+			return progress.RemoteStats(env.RemoteTally())
+		}))
+	}
+
+	reporter := progress.New(a.w, a.cfg.ProgressMode, ledger, reporterOpts...)
 
 	ledger.StartRun()
 

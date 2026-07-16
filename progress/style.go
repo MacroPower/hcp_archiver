@@ -20,6 +20,11 @@ const (
 	glyphRPS     = "⇉"
 )
 
+// glyphCloud leads the remote-transfer readout. U+2601 renders one or two
+// cells depending on the terminal; the readout is a free-form ·-separated
+// line joining no grid, so the ambiguity is deliberately tolerated.
+const glyphCloud = "☁"
+
 // Palette for the live view. In lipgloss v2 [lipgloss.Color] is a function
 // returning an [image/color.Color], and [lipgloss.Style.Render] always emits
 // truecolor; Bubble Tea downsamples the composed view to the terminal's

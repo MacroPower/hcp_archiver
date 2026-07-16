@@ -51,6 +51,7 @@ type Reporter struct {
 	in          io.Reader
 	source      TallySource
 	rateStatus  func() (rps float64, pausedFor time.Duration)
+	remoteStats func() RemoteStats
 	sink        LogSink
 	w           io.Writer
 	now         func() time.Time
@@ -82,6 +83,7 @@ type Reporter struct {
 //   - [WithWireBytes]
 //   - [WithRateStatus]
 //   - [WithRateLimited]
+//   - [WithRemoteStats]
 type Option func(*Reporter)
 
 // WithInterval sets the default cadence used by [Reporter.Run] when it is
@@ -187,6 +189,37 @@ func WithRateStatus(fn func() (rps float64, pausedFor time.Duration)) Option {
 func WithRateLimited(counter *atomic.Int64) Option {
 	return func(r *Reporter) {
 		r.rateLimited = counter
+	}
+}
+
+// RemoteStats is one sampled snapshot of the run's remote-transfer tally: the
+// files and bytes uploaded to the mirror, the cold surfaces evicted to it, and
+// the motions that failed. The archiver adapts it from the collect
+// environment's run-wide tally, so this package stays free of that dependency.
+type RemoteStats struct {
+	// UploadedBytes is the total size of the files transferred, synced
+	// uploads and eviction uploads alike.
+	UploadedBytes int64
+	// Uploaded counts files uploaded because the remote copy was absent or
+	// differed.
+	Uploaded int
+	// Evicted counts cold surfaces moved remote and removed locally.
+	Evicted int
+	// Failed counts failed remote motions, retried by a later pass or run.
+	Failed int
+}
+
+// WithRemoteStats sets the source of the run-wide remote-transfer tally, so
+// the mirror's motions are visible as they happen rather than only in the
+// close sweep's log line. Every output form renders it; the option's presence
+// (not the sampled values) gates the readout, so a local-only run carries no
+// remote figures at all. A nil fn leaves the readout off. It returns an
+// [Option].
+func WithRemoteStats(fn func() RemoteStats) Option {
+	return func(r *Reporter) {
+		if fn != nil {
+			r.remoteStats = fn
+		}
 	}
 }
 
@@ -416,9 +449,10 @@ func (r *Reporter) takeTasks() []taskProgress {
 
 // snapshot is one rendered frame's worth of derived state, computed under lock.
 //
-// The hasRate flag is set from the option's presence ([WithRateStatus]), not
-// from the sampled figures, so a reading that is transiently zero does not
-// drop the readout at exactly the moment throttling is most interesting.
+// The hasRate and hasRemote flags are set from their options' presence
+// ([WithRateStatus], [WithRemoteStats]), not from the sampled figures, so a
+// reading that is transiently zero does not drop the readout at exactly the
+// moment it is most interesting.
 type snapshot struct {
 	phase        string
 	tasks        []taskProgress
@@ -430,9 +464,11 @@ type snapshot struct {
 	pausedFor    time.Duration
 	wireBytes    int64
 	rateLimited  int64
+	remote       RemoteStats
 	total        int
 	completed    int
 	hasRate      bool
+	hasRemote    bool
 }
 
 // hasBar reports whether the phase is determinate, so the view renders a bar and
@@ -524,6 +560,12 @@ func (r *Reporter) take() snapshot {
 		rateLimited = r.rateLimited.Load()
 	}
 
+	var remote RemoteStats
+
+	if r.remoteStats != nil {
+		remote = r.remoteStats()
+	}
+
 	return snapshot{
 		tally:        t,
 		phase:        r.phase,
@@ -535,9 +577,11 @@ func (r *Reporter) take() snapshot {
 		pausedFor:    pausedFor,
 		wireBytes:    wire,
 		rateLimited:  rateLimited,
+		remote:       remote,
 		total:        r.total,
 		completed:    r.completed,
 		hasRate:      r.rateStatus != nil,
+		hasRemote:    r.remoteStats != nil,
 	}
 }
 
@@ -778,6 +822,18 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 		fmt.Fprintf(&b, " rateLimited=%d", snap.rateLimited)
 	}
 
+	// The remote tally is cumulative, so it rides progress and summary lines
+	// alike; the option's presence gates it, so a local-only run emits no
+	// remote keys rather than a row of zeros.
+	if snap.hasRemote {
+		fmt.Fprintf(&b, " remoteUploaded=%d remoteUploadedBytes=%s remoteEvicted=%d remoteFailed=%d",
+			snap.remote.Uploaded,
+			humanBytes(snap.remote.UploadedBytes),
+			snap.remote.Evicted,
+			snap.remote.Failed,
+		)
+	}
+
 	fmt.Fprintf(
 		&b,
 		" bytes=%s elapsed=%s rate=%s/s\n",
@@ -837,6 +893,13 @@ func (r *Reporter) summaryBlock(snap snapshot) string {
 		lines[2] += " " + styleRateLimited.Render(fmt.Sprintf("· rate limited %d", snap.rateLimited))
 	}
 
+	// The mirror's final tally closes the block, in the same form as the live
+	// panel's remote line; the close sweep runs before this summary, so its
+	// uploads and evictions are already counted.
+	if snap.hasRemote {
+		lines = append(lines, remoteReadout(snap.remote))
+	}
+
 	return styleSummaryRule.Render(strings.Join(lines, "\n")) + "\n"
 }
 
@@ -851,32 +914,39 @@ func (r *Reporter) summaryBlock(snap snapshot) string {
 // only when the reporter watches a rate source, with PausedMs carrying the
 // remaining rate-limit cooldown while one is in force; RateLimited is the
 // cumulative count of rate-limited (429) responses, present once any were
-// observed.
+// observed. RemoteUploaded, RemoteUploadedBytes, RemoteEvicted, and
+// RemoteFailed carry the run-wide remote-transfer tally on progress and
+// summary lines alike, present only when the reporter watches a remote
+// source, so a local-only run emits none of them.
 type jsonLine struct {
-	PhaseTotal        *int     `json:"phaseTotal,omitempty"`
-	PhaseCompleted    *int     `json:"phaseCompleted,omitempty"`
-	TaskTotal         *int     `json:"taskTotal,omitempty"`
-	TaskCompleted     *int     `json:"taskCompleted,omitempty"`
-	RequestsPerSecond *float64 `json:"requestsPerSecond,omitempty"`
-	Phase             string   `json:"phase,omitempty"`
-	Task              string   `json:"task,omitempty"`
-	Target            string   `json:"target,omitempty"`
-	TasksActive       int      `json:"tasksActive,omitempty"`
-	PausedMs          int64    `json:"pausedMs,omitempty"`
-	RateLimited       int64    `json:"rateLimited,omitempty"`
-	Done              int      `json:"done"`
-	Absent            int      `json:"absent"`
-	Skipped           int      `json:"skipped"`
-	Errored           int      `json:"errored"`
-	Forbidden         int      `json:"forbidden"`
-	NotApplicable     int      `json:"notApplicable"`
-	Retried           int64    `json:"retried"`
-	Total             int      `json:"total"`
-	BytesDownloaded   int64    `json:"bytesDownloaded"`
-	ElapsedSeconds    float64  `json:"elapsedSeconds"`
-	BytesPerSecond    float64  `json:"bytesPerSecond"`
-	Summary           bool     `json:"summary,omitempty"`
-	Resumed           bool     `json:"resumed,omitempty"`
+	PhaseTotal          *int     `json:"phaseTotal,omitempty"`
+	PhaseCompleted      *int     `json:"phaseCompleted,omitempty"`
+	TaskTotal           *int     `json:"taskTotal,omitempty"`
+	TaskCompleted       *int     `json:"taskCompleted,omitempty"`
+	RequestsPerSecond   *float64 `json:"requestsPerSecond,omitempty"`
+	RemoteUploaded      *int     `json:"remoteUploaded,omitempty"`
+	RemoteUploadedBytes *int64   `json:"remoteUploadedBytes,omitempty"`
+	RemoteEvicted       *int     `json:"remoteEvicted,omitempty"`
+	RemoteFailed        *int     `json:"remoteFailed,omitempty"`
+	Phase               string   `json:"phase,omitempty"`
+	Task                string   `json:"task,omitempty"`
+	Target              string   `json:"target,omitempty"`
+	TasksActive         int      `json:"tasksActive,omitempty"`
+	PausedMs            int64    `json:"pausedMs,omitempty"`
+	RateLimited         int64    `json:"rateLimited,omitempty"`
+	Done                int      `json:"done"`
+	Absent              int      `json:"absent"`
+	Skipped             int      `json:"skipped"`
+	Errored             int      `json:"errored"`
+	Forbidden           int      `json:"forbidden"`
+	NotApplicable       int      `json:"notApplicable"`
+	Retried             int64    `json:"retried"`
+	Total               int      `json:"total"`
+	BytesDownloaded     int64    `json:"bytesDownloaded"`
+	ElapsedSeconds      float64  `json:"elapsedSeconds"`
+	BytesPerSecond      float64  `json:"bytesPerSecond"`
+	Summary             bool     `json:"summary,omitempty"`
+	Resumed             bool     `json:"resumed,omitempty"`
 }
 
 // writeJSON encodes one snapshot as a compact JSON object followed by a
@@ -912,6 +982,18 @@ func (r *Reporter) writeJSON(snap snapshot, summary bool) error {
 		rps := snap.rps
 		line.RequestsPerSecond = &rps
 		line.PausedMs = snap.pausedFor.Milliseconds()
+	}
+
+	// Cumulative, so it rides summary lines too. Pointers, not bare ints, so
+	// a genuine zero still emits while a remote is configured (same rationale
+	// as RequestsPerSecond): the readout's presence is what says a mirror is
+	// in play.
+	if snap.hasRemote {
+		remote := snap.remote
+		line.RemoteUploaded = &remote.Uploaded
+		line.RemoteUploadedBytes = &remote.UploadedBytes
+		line.RemoteEvicted = &remote.Evicted
+		line.RemoteFailed = &remote.Failed
 	}
 
 	if snap.hasBar() {

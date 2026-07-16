@@ -194,7 +194,8 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Advance the task region's high-water mark so render can hold the
 			// panel's height as work items finish within the phase. Growth-only
 			// here; render caps it to what the terminal fits.
-			m.taskRegionHigh = max(m.taskRegionHigh, taskRegionLines(len(m.snap.tasks), m.taskLineBudget()))
+			m.taskRegionHigh = max(m.taskRegionHigh,
+				taskRegionLines(len(m.snap.tasks), m.taskLineBudget(m.snap.hasRemote)))
 		}
 
 		m.spin, cmd = m.spin.Update(msg)
@@ -262,9 +263,10 @@ func (m *tuiModel) throughput(snap snapshot) float64 {
 // each with its own bar, percent, unit fraction, and name, in registration
 // order so rows hold still as their bars move; items past the cap are counted
 // on an overflow line. This region holds at its high-water line count, padded
-// with blank lines, so the panel does not shrink as work items finish. The last
-// line carries the colored per-status counts and the byte, rate, and elapsed
-// metadata. Every field before a line's trailing name or metadata holds a
+// with blank lines, so the panel does not shrink as work items finish. The
+// closing lines carry the colored per-status counts, the byte, rate, and
+// elapsed metadata, and — when a remote is configured — the remote-transfer
+// readout. Every field before a line's trailing name or metadata holds a
 // constant width, so the panel does not reflow as values change.
 func (m *tuiModel) render(snap snapshot) string {
 	var line1 strings.Builder
@@ -340,11 +342,10 @@ func (m *tuiModel) render(snap snapshot) string {
 		metaLine += " " + styleRateLimited.Render(fmt.Sprintf("· 429s %d", snap.rateLimited))
 	}
 
-	budget := m.taskLineBudget()
+	budget := m.taskLineBudget(snap.hasRemote)
 
-	// Capacity: line one, up to budget task rows, the overflow slot, and the two
-	// footer lines.
-	lines := make([]string, 0, budget+4)
+	// Capacity: up to budget task rows plus the panel's chrome.
+	lines := make([]string, 0, budget+chromeLines(snap.hasRemote))
 	lines = append(lines, m.fit(line1.String()))
 
 	visible := min(len(snap.tasks), budget)
@@ -368,20 +369,37 @@ func (m *tuiModel) render(snap snapshot) string {
 
 	lines = append(lines, m.fit(counts), m.fit(metaLine))
 
+	if snap.hasRemote {
+		lines = append(lines, m.fit("  "+remoteReadout(snap.remote)))
+	}
+
 	return strings.Join(lines, "\n")
 }
 
+// chromeLines is how many non-task lines the panel renders around the task
+// region: line one, the overflow slot, the counts line, the metadata line,
+// and — when a remote is configured — the remote readout. The task-line
+// budget and render's capacity hint both derive from it, so the two cannot
+// drift apart.
+func chromeLines(hasRemote bool) int {
+	if hasRemote {
+		return 5
+	}
+
+	return 4
+}
+
 // taskLineBudget bounds how many task lines the panel may show: the fixed cap,
-// tightened on a short terminal so the panel (its first line, the task lines,
-// a possible overflow line, the counts line, and the metadata line) never
-// outgrows the screen. An unknown height (before the first size message, and
-// in the golden tests) keeps the fixed cap.
-func (m *tuiModel) taskLineBudget() int {
+// tightened on a short terminal so the panel (the task lines plus its
+// chrome, see [chromeLines]) never outgrows the screen. An unknown height
+// (before the first size message, and in the golden tests) keeps the fixed
+// cap.
+func (m *tuiModel) taskLineBudget(hasRemote bool) int {
 	if m.height <= 0 {
 		return maxTaskLines
 	}
 
-	return min(maxTaskLines, max(m.height-4, 0))
+	return min(maxTaskLines, max(m.height-chromeLines(hasRemote), 0))
 }
 
 // taskRegionLines is the natural line count of the task region for a pool of the
@@ -452,6 +470,21 @@ func statusCounts(t manifest.Tally, doneWidth, erroredWidth, forbiddenWidth, ret
 		styleForbidden.Render(fmt.Sprintf(glyphForbidden+" forbidden %-*d", forbiddenWidth, t.Forbidden)),
 		styleRetried.Render(fmt.Sprintf(glyphRetried+" retried %-*d", retriedWidth, t.Retried)),
 	)
+}
+
+// remoteReadout renders the remote-transfer tally shared by the live panel
+// and the summary block: the transferred bytes, uploads, and evictions in the
+// muted metadata tone, with the failed count riding in amber only once
+// anything has failed, the same convention as the 429 readout.
+func remoteReadout(rs RemoteStats) string {
+	out := styleMeta.Render(fmt.Sprintf(glyphCloud+" %s · uploaded %d · evicted %d",
+		humanBytes(rs.UploadedBytes), rs.Uploaded, rs.Evicted))
+
+	if rs.Failed > 0 {
+		out += " " + styleRateLimited.Render(fmt.Sprintf("· failed %d", rs.Failed))
+	}
+
+	return out
 }
 
 // compactDuration formats d for the eta column: bare seconds under a minute,

@@ -71,6 +71,7 @@ type Env struct {
 	remoteCfg          remote.Config
 	idMu               sync.Mutex
 	eagerFailed        atomic.Int64
+	remoteTally        remoteTally
 	blobRetries        int
 	blobRetryDelay     time.Duration
 	absentConfirmDelay time.Duration
@@ -218,6 +219,78 @@ func (e *Env) Remote() *remote.Client {
 // so this count is visibility, not a gate.
 func (e *Env) EagerFailures() int {
 	return int(e.eagerFailed.Load())
+}
+
+// remoteTally is the run-wide accumulator behind [RemoteStats]: unlike the
+// per-pass [SyncStats], it spans every remote motion of the organization's
+// run — the eager as-written uploads, the seal-boundary subtree syncs, the
+// eviction transfers, and the close sweep — so the progress reporter can
+// snapshot one live figure for the whole run.
+// The motions run concurrently, so every field is atomic and the zero value
+// is ready to use.
+type remoteTally struct {
+	uploaded      atomic.Int64
+	uploadedBytes atomic.Int64
+	evicted       atomic.Int64
+	failed        atomic.Int64
+}
+
+// upload counts one uploaded file and its size.
+func (t *remoteTally) upload(bytes int64) {
+	t.uploaded.Add(1)
+	t.uploadedBytes.Add(bytes)
+}
+
+// evict counts one evicted surface and the bytes its transfer moved (zero
+// when the probe found a finished prior upload).
+func (t *remoteTally) evict(transferred int64) {
+	t.evicted.Add(1)
+	t.uploadedBytes.Add(transferred)
+}
+
+// fail counts one failed motion.
+func (t *remoteTally) fail() {
+	t.failed.Add(1)
+}
+
+// stats converts the accumulator into a [RemoteStats] snapshot.
+func (t *remoteTally) stats() RemoteStats {
+	return RemoteStats{
+		UploadedBytes: t.uploadedBytes.Load(),
+		Uploaded:      int(t.uploaded.Load()),
+		Evicted:       int(t.evicted.Load()),
+		Failed:        int(t.failed.Load()),
+	}
+}
+
+// RemoteStats is a point-in-time snapshot of the run's remote-transfer tally,
+// read through [Env.RemoteTally].
+//
+// Failed counts motions, not distinct files: a file that fails eagerly, again
+// at its seal boundary, and again in the close sweep counts three times, and
+// an [ErrRemoteCopyMismatch] re-reports every run by design, so the count can
+// hold above zero steadily. Per-file and per-eviction outcomes are covered;
+// pass-level failures (an inventory listing, a tree walk, a prune batch) stay
+// out and surface through each pass's [SyncStats] instead.
+type RemoteStats struct {
+	// UploadedBytes is the total size of the files transferred: synced
+	// uploads plus eviction uploads, unlike the per-pass
+	// [SyncStats.UploadedBytes], which excludes eviction bytes.
+	UploadedBytes int64
+	// Uploaded counts files uploaded because the remote copy was absent or
+	// differed.
+	Uploaded int
+	// Evicted counts cold surfaces moved remote and removed locally.
+	Evicted int
+	// Failed counts failed remote motions: a file's eager, seal-boundary, or
+	// sweep upload, or an eviction refused at any of its gates.
+	Failed int
+}
+
+// RemoteTally returns a snapshot of the run-wide remote-transfer tally across
+// every motion so far; it reads zero without a remote configured.
+func (e *Env) RemoteTally() RemoteStats {
+	return e.remoteTally.stats()
 }
 
 // RemoteKey composes the object key for an archive-relative path, delegating

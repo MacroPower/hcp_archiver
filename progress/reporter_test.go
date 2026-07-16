@@ -702,6 +702,140 @@ func TestReporter_JSONLine_RateStatus(t *testing.T) {
 	assert.Contains(t, summary, "rateLimited")
 }
 
+// staticRemoteStats returns a remote-tally source that always reports rs,
+// standing in for the collect environment's run-wide accumulator.
+func staticRemoteStats(rs progress.RemoteStats) func() progress.RemoteStats {
+	return func() progress.RemoteStats {
+		return rs
+	}
+}
+
+func TestReporter_HumanLine_RemoteStats(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	src := fakeSource{tally: manifest.Tally{Done: 1}}
+
+	buf := &bytes.Buffer{}
+	r := progress.New(
+		buf,
+		config.ProgressModeHuman,
+		src,
+		progress.WithClock(fixedClock(base, base.Add(time.Second), base.Add(2*time.Second))),
+		progress.WithRemoteStats(staticRemoteStats(progress.RemoteStats{
+			UploadedBytes: 2 * 1024 * 1024,
+			Uploaded:      5,
+			Evicted:       3,
+			Failed:        1,
+		})),
+	)
+
+	require.NoError(t, r.Report())
+
+	line := buf.String()
+	assert.Contains(t, line, "remoteUploaded=5")
+	assert.Contains(t, line, "remoteUploadedBytes=2.0 MiB")
+	assert.Contains(t, line, "remoteEvicted=3")
+	assert.Contains(t, line, "remoteFailed=1")
+
+	// The tally is cumulative, so unlike the live rate figures it rides the
+	// summary line too.
+	buf.Reset()
+	require.NoError(t, r.Summary())
+
+	line = buf.String()
+	assert.Contains(t, line, "remoteUploaded=5")
+	assert.Contains(t, line, "remoteUploadedBytes=2.0 MiB")
+	assert.Contains(t, line, "remoteEvicted=3")
+	assert.Contains(t, line, "remoteFailed=1")
+}
+
+func TestReporter_HumanLine_NoRemoteWithoutSource(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	src := fakeSource{tally: manifest.Tally{Done: 1}}
+
+	buf := &bytes.Buffer{}
+	r := progress.New(
+		buf,
+		config.ProgressModeHuman,
+		src,
+		progress.WithClock(fixedClock(base, base.Add(time.Second), base.Add(2*time.Second))),
+	)
+
+	require.NoError(t, r.Report())
+	require.NoError(t, r.Summary())
+
+	assert.NotContains(t, buf.String(), "remoteUploaded=",
+		"a local-only run carries no remote keys on any line")
+}
+
+func TestReporter_JSONLine_RemoteStats(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	src := fakeSource{tally: manifest.Tally{Done: 1}}
+
+	buf := &bytes.Buffer{}
+	r := progress.New(
+		buf,
+		config.ProgressModeJSON,
+		src,
+		progress.WithClock(fixedClock(base, base.Add(time.Second), base.Add(2*time.Second))),
+		// All-zero values pin the pointer encoding: a configured remote that
+		// has moved nothing yet still emits its keys.
+		progress.WithRemoteStats(staticRemoteStats(progress.RemoteStats{})),
+	)
+
+	require.NoError(t, r.Report())
+	require.NoError(t, r.Summary())
+
+	for _, raw := range strings.SplitAfter(strings.TrimSuffix(buf.String(), "\n"), "\n") {
+		var line struct {
+			RemoteUploaded      *int   `json:"remoteUploaded"`
+			RemoteUploadedBytes *int64 `json:"remoteUploadedBytes"`
+			RemoteEvicted       *int   `json:"remoteEvicted"`
+			RemoteFailed        *int   `json:"remoteFailed"`
+		}
+
+		require.NoError(t, json.Unmarshal([]byte(raw), &line))
+		require.NotNil(t, line.RemoteUploaded)
+		require.NotNil(t, line.RemoteUploadedBytes)
+		require.NotNil(t, line.RemoteEvicted)
+		require.NotNil(t, line.RemoteFailed)
+		assert.Zero(t, *line.RemoteUploaded, "a genuine zero still emits")
+	}
+}
+
+func TestReporter_JSONLine_NoRemoteWithoutSource(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	src := fakeSource{tally: manifest.Tally{Done: 1}}
+
+	buf := &bytes.Buffer{}
+	r := progress.New(
+		buf,
+		config.ProgressModeJSON,
+		src,
+		progress.WithClock(fixedClock(base, base.Add(time.Second), base.Add(2*time.Second))),
+	)
+
+	require.NoError(t, r.Report())
+	require.NoError(t, r.Summary())
+
+	for _, raw := range strings.SplitAfter(strings.TrimSuffix(buf.String(), "\n"), "\n") {
+		var line map[string]any
+
+		require.NoError(t, json.Unmarshal([]byte(raw), &line))
+		assert.NotContains(t, line, "remoteUploaded")
+		assert.NotContains(t, line, "remoteUploadedBytes")
+		assert.NotContains(t, line, "remoteEvicted")
+		assert.NotContains(t, line, "remoteFailed")
+	}
+}
+
 func TestReporter_JSONLine_NoRateWithoutSource(t *testing.T) {
 	t.Parallel()
 
