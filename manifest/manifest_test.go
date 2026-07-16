@@ -898,6 +898,37 @@ func TestLedger_HasUnsettledUnderPrefixIsolation(t *testing.T) {
 	assert.True(t, ledger.HasUnsettledUnder(svKey), "the forbidden state-version child is unsettled")
 }
 
+func TestLedger_HasUnsettledUnderRetryAbsent(t *testing.T) {
+	t.Parallel()
+
+	const runsKey = "projects/p/workspaces/w/runs"
+
+	root := t.TempDir()
+
+	ledger, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	ledger.RecordDone(runsKey+"/r1/run.json", manifest.Signature{Size: 1})
+	ledger.RecordAbsent(runsKey+"/r1/plan.json", errors.New("404"))
+	require.NoError(t, ledger.Flush())
+	require.NoError(t, ledger.Close())
+
+	normal, err := manifest.Load(root)
+	require.NoError(t, err)
+	assert.False(t, normal.HasUnsettledUnder(runsKey),
+		"a recorded absence is settled for a normal run")
+	require.NoError(t, normal.Close())
+
+	// Under retry-absent the absence counts as unsettled, so a settled
+	// collection's early stop re-opens and the re-walk actually reaches the
+	// absent children the flag exists to re-probe.
+	retry, err := manifest.Load(root, manifest.WithRetryAbsent(true))
+	require.NoError(t, err)
+	assert.True(t, retry.HasUnsettledUnder(runsKey),
+		"a recorded absence is unsettled under retry-absent")
+	require.NoError(t, retry.Close())
+}
+
 func TestLedger_HasUnsettledUnderMatchesDeepDescendant(t *testing.T) {
 	t.Parallel()
 

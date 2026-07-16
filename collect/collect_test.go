@@ -706,6 +706,85 @@ func TestWalkEarlyStopsWhenFullySettled(t *testing.T) {
 	assert.Equal(t, r3.createdAt, ledger.HighWaterMark("runs"), "the mark advances to the newest element seen")
 }
 
+func TestWalkRetryAbsentPiercesEarlyStop(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
+
+	// A fully settled collection whose oldest run has an absent child (an
+	// expired plan.json settled by a confirmed 404). A normal run early-stops
+	// at the newest boundary, so the absence is never re-probed; under
+	// retry-absent the absence must re-open the early stop, or the flag is
+	// silently inert for the dominant absent population.
+	r2 := walkItem{relPath: "runs/r2/run.json", createdAt: base.Add(2 * time.Hour), terminal: true}
+	r1 := walkItem{relPath: "runs/r1/run.json", createdAt: base.Add(1 * time.Hour), terminal: true}
+
+	const absentChild = "runs/r1/plan.json"
+
+	for name, retryAbsent := range map[string]bool{"normal": false, "retry-absent": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			root := t.TempDir()
+			st := store.New(root)
+
+			ledger, err := manifest.Load(root,
+				manifest.WithClock(fixedClock()), manifest.WithRetryAbsent(retryAbsent))
+			require.NoError(t, err)
+
+			env := collect.NewEnv(nil, st, ledger, collect.WithAbsentConfirm(0))
+
+			for _, it := range []walkItem{r2, r1} {
+				ledger.RecordDone(it.relPath, manifest.Signature{Hash: "prior", Size: 1})
+			}
+
+			ledger.RecordAbsent(absentChild, errors.New("404"))
+			ledger.MarkCollectionComplete("runs")
+			ledger.SetCollectionSettled("runs", true)
+
+			reprobes := 0
+			pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
+				if page == 1 {
+					return []walkItem{r2, r1}, false, nil
+				}
+
+				return nil, false, nil
+			}
+
+			describe := func(it walkItem) collect.Item {
+				return collect.Item{
+					RelPath:   it.relPath,
+					CreatedAt: it.createdAt,
+					Terminal:  it.terminal,
+					Archive: func(ctx context.Context) error {
+						if it.relPath != r1.relPath {
+							return nil
+						}
+
+						// The absent child re-probes only if the walk reaches
+						// r1 at all and ShouldFetch admits the absence.
+						return env.Object(ctx, absentChild, func(_ context.Context) (any, error) {
+							reprobes++
+
+							return cannedProject(), nil
+						})
+					},
+				}
+			}
+
+			require.NoError(t, collect.Walk(t.Context(), env, "runs", pager, describe))
+
+			if retryAbsent {
+				assert.Equal(t, 1, reprobes,
+					"retry-absent must reach and re-probe an absence below the early-stop boundary")
+			} else {
+				assert.Zero(t, reprobes,
+					"a normal run early-stops at the boundary and leaves the absence settled")
+			}
+		})
+	}
+}
+
 func TestWalkPagesPastNonTerminalBoundary(t *testing.T) {
 	t.Parallel()
 

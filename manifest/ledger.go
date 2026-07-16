@@ -745,13 +745,23 @@ func (l *Ledger) SetCollectionSettled(key string, settled bool) {
 }
 
 // HasUnsettledUnder reports whether any entry beneath prefix (a key beginning
-// with prefix + "/") is recorded in a status a normal re-run still retries.
+// with prefix + "/") is recorded in a status this run still retries.
 //
 // It scans the shard that owns prefix, so a collection's walk can tell whether
 // an errored or forbidden child left below its newest done boundary still needs
 // reaching. A prefix whose shard holds no such child returns false, which
 // includes a synthetic cursor key that is not a genuine path prefix of any
 // entry (a stack walk's id cursor).
+//
+// Under retry-absent (see [WithRetryAbsent]) a recorded absence counts as
+// unsettled too, mirroring [Ledger.ShouldFetch]: most absences live below a
+// settled collection's newest-first early-stop boundary (expired plan logs,
+// plan JSON of old runs), and a boundary gated on the normal settled
+// predicate would stop the walk before any of them is re-probed, leaving the
+// flag silently inert for exactly the entries it exists for. The widened
+// predicate keeps a retry-absent run's collections recorded unsettled while
+// absences remain, so the following normal run re-pages them once and then
+// settles them again.
 func (l *Ledger) HasUnsettledUnder(prefix string) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -764,7 +774,11 @@ func (l *Ledger) HasUnsettledUnder(prefix string) bool {
 	under := prefix + "/"
 
 	for relPath, e := range sh.entries {
-		if strings.HasPrefix(relPath, under) && !e.Status.Settled() {
+		if !strings.HasPrefix(relPath, under) {
+			continue
+		}
+
+		if !e.Status.Settled() || (l.retryAbsent && e.Status == StatusAbsent) {
 			return true
 		}
 	}
