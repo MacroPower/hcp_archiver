@@ -64,6 +64,7 @@ type shard struct {
 	completed       map[string]bool
 	settled         map[string]bool
 	dirtySettled    map[string]struct{}
+	dirtyUnsettled  map[string]struct{}
 	dirtyEntries    map[string]struct{}
 	dirtyWatermarks map[string]struct{}
 	lastRun         *RunRecord
@@ -87,6 +88,7 @@ func newShard(dir string) *shard {
 		dirtyWatermarks: make(map[string]struct{}),
 		dirtyCompleted:  make(map[string]struct{}),
 		dirtySettled:    make(map[string]struct{}),
+		dirtyUnsettled:  make(map[string]struct{}),
 	}
 }
 
@@ -205,6 +207,7 @@ func (s *shard) hasDirty() bool {
 		len(s.dirtyWatermarks) > 0 ||
 		len(s.dirtyCompleted) > 0 ||
 		len(s.dirtySettled) > 0 ||
+		len(s.dirtyUnsettled) > 0 ||
 		s.runDirty
 }
 
@@ -220,6 +223,7 @@ type drainedState struct {
 	watermarks map[string]struct{}
 	completed  map[string]struct{}
 	settled    map[string]struct{}
+	unsettled  map[string]struct{}
 	recs       []walRecord
 	run        bool
 }
@@ -237,6 +241,7 @@ func (s *shard) drainDirty() drainedState {
 		watermarks: s.dirtyWatermarks,
 		completed:  s.dirtyCompleted,
 		settled:    s.dirtySettled,
+		unsettled:  s.dirtyUnsettled,
 		run:        s.runDirty,
 	}
 
@@ -244,10 +249,23 @@ func (s *shard) drainDirty() drainedState {
 	s.dirtyWatermarks = make(map[string]struct{})
 	s.dirtyCompleted = make(map[string]struct{})
 	s.dirtySettled = make(map[string]struct{})
+	s.dirtyUnsettled = make(map[string]struct{})
 	s.runDirty = false
 
 	d.recs = make([]walRecord, 0,
-		len(d.entries)+len(d.watermarks)+len(d.completed)+len(d.settled)+1)
+		len(d.unsettled)+len(d.entries)+len(d.watermarks)+len(d.completed)+len(d.settled)+1)
+
+	// A collection's unsettlement leads every entry in the batch. The log is
+	// replayed as a prefix after a crash (a torn tail drops), so the order
+	// within one append is a durability order: were the unsettle record to
+	// trail the entries, a crash between them would persist freshly frozen
+	// entries under a stale settled flag, and the next walk's early stop
+	// would halt above elements the interrupted walk never listed. Leading,
+	// the record is durable before any entry it guards; a settlement earned
+	// later in the same batch still lands after the entries as usual.
+	for key := range d.unsettled {
+		d.recs = append(d.recs, walRecord{Kind: walSettled, Key: key})
+	}
 
 	for relPath := range d.entries {
 		e := s.entries[relPath]
@@ -269,6 +287,12 @@ func (s *shard) drainDirty() drainedState {
 	}
 
 	for key := range d.settled {
+		// A key drained unsettled whose value is still false already leads the
+		// batch; re-appending it here would only duplicate the line.
+		if _, led := d.unsettled[key]; led && !s.settled[key] {
+			continue
+		}
+
 		d.recs = append(d.recs, walRecord{Kind: walSettled, Key: key, Settled: s.settled[key]})
 	}
 
@@ -306,6 +330,10 @@ func (s *shard) restoreDirty(d drainedState) {
 
 	for k := range d.settled {
 		s.dirtySettled[k] = struct{}{}
+	}
+
+	for k := range d.unsettled {
+		s.dirtyUnsettled[k] = struct{}{}
 	}
 
 	s.runDirty = s.runDirty || d.run

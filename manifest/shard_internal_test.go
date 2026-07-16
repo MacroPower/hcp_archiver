@@ -22,6 +22,9 @@ func dirtyEverything(t *testing.T, sh *shard) {
 	sh.dirtyCompleted["c1"] = struct{}{}
 	sh.settled["s1"] = true
 	sh.dirtySettled["s1"] = struct{}{}
+	sh.settled["u1"] = false
+	sh.dirtySettled["u1"] = struct{}{}
+	sh.dirtyUnsettled["u1"] = struct{}{}
 	sh.runDirty = true
 	sh.runCount = 3
 }
@@ -35,7 +38,7 @@ func TestShardDrainRestoreRoundTrip(t *testing.T) {
 	d := sh.drainDirty()
 
 	assert.False(t, sh.hasDirty(), "a drain leaves the shard clean")
-	require.Len(t, d.recs, 5, "one record per dirty item, plus the run record")
+	require.Len(t, d.recs, 6, "one record per dirty item, plus the run record")
 
 	// A worker re-dirties one key while the (conceptually failed) append is in
 	// flight; the restore must union, not overwrite, so both the re-dirtied key
@@ -49,14 +52,75 @@ func TestShardDrainRestoreRoundTrip(t *testing.T) {
 	assert.Equal(t, map[string]struct{}{"e1": {}, "e2": {}}, sh.dirtyEntries)
 	assert.Equal(t, map[string]struct{}{"w1": {}}, sh.dirtyWatermarks)
 	assert.Equal(t, map[string]struct{}{"c1": {}}, sh.dirtyCompleted)
-	assert.Equal(t, map[string]struct{}{"s1": {}}, sh.dirtySettled)
+	assert.Equal(t, map[string]struct{}{"s1": {}, "u1": {}}, sh.dirtySettled)
+	assert.Equal(t, map[string]struct{}{"u1": {}}, sh.dirtyUnsettled)
 	assert.True(t, sh.runDirty)
 
 	// A second drain after the restore re-emits the full delta, so a retried
 	// flush appends everything the failed one attempted.
 	d2 := sh.drainDirty()
-	assert.Len(t, d2.recs, 6, "the restored delta plus the re-dirtied entry")
+	assert.Len(t, d2.recs, 7, "the restored delta plus the re-dirtied entry")
 	assert.False(t, sh.hasDirty())
+}
+
+func TestShardDrainLeadsUnsettleRecords(t *testing.T) {
+	t.Parallel()
+
+	// A walk unsettles a collection before recording its new entries; the
+	// drain must emit that false record ahead of every entry, because the log
+	// replays as a prefix after a crash and entries durable without the
+	// unsettlement would leave a stale settled flag guarding a gap.
+	sh := newShard(t.TempDir())
+
+	sh.entries["runs/r4/run.json"] = &Entry{Status: StatusDone}
+	sh.dirtyEntries["runs/r4/run.json"] = struct{}{}
+	sh.settled["runs"] = false
+	sh.dirtySettled["runs"] = struct{}{}
+	sh.dirtyUnsettled["runs"] = struct{}{}
+
+	d := sh.drainDirty()
+
+	require.NotEmpty(t, d.recs)
+	assert.Equal(t, walSettled, d.recs[0].Kind, "the unsettle record leads the batch")
+	assert.Equal(t, "runs", d.recs[0].Key)
+	assert.False(t, d.recs[0].Settled)
+
+	// The still-false key already led the batch; a trailing duplicate would
+	// only repeat the line.
+	settledRecs := 0
+
+	for _, rec := range d.recs {
+		if rec.Kind == walSettled {
+			settledRecs++
+		}
+	}
+
+	assert.Equal(t, 1, settledRecs, "a still-false key emits exactly one record")
+}
+
+func TestShardDrainUnsettleThenResettleInOneBatch(t *testing.T) {
+	t.Parallel()
+
+	// A fast walk can unsettle and re-settle a collection inside one flush
+	// window. The withdrawal must still lead the entries and the re-earned
+	// settlement must still trail them, so any torn append leaves either no
+	// new entries or entries guarded by a durable false.
+	sh := newShard(t.TempDir())
+
+	sh.entries["runs/r4/run.json"] = &Entry{Status: StatusDone}
+	sh.dirtyEntries["runs/r4/run.json"] = struct{}{}
+	sh.settled["runs"] = true
+	sh.dirtySettled["runs"] = struct{}{}
+	sh.dirtyUnsettled["runs"] = struct{}{}
+
+	d := sh.drainDirty()
+
+	require.Len(t, d.recs, 3)
+	assert.Equal(t, walSettled, d.recs[0].Kind)
+	assert.False(t, d.recs[0].Settled, "the withdrawal leads the entries")
+	assert.Equal(t, walEntry, d.recs[1].Kind)
+	assert.Equal(t, walSettled, d.recs[2].Kind)
+	assert.True(t, d.recs[2].Settled, "the re-earned settlement trails the entries")
 }
 
 func TestShardDrainRecordsReplayToSameState(t *testing.T) {

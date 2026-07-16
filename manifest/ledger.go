@@ -735,6 +735,11 @@ func (l *Ledger) IsCollectionSettled(key string) bool {
 // It is deliberately non-monotonic: passing false undoes an earlier true, which
 // is how a walk that reaches a still-running element forces the next run to
 // re-page the collection until that element settles.
+//
+// A false write is additionally drained ahead of every entry record in its
+// shard's next log append (see [shard.drainDirty]): unsettlement guards the
+// entries a walk is about to record, so it must never become durable after
+// them.
 func (l *Ledger) SetCollectionSettled(key string, settled bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -742,6 +747,10 @@ func (l *Ledger) SetCollectionSettled(key string, settled bool) {
 	sh := l.shardFor(key)
 	sh.settled[key] = settled
 	sh.dirtySettled[key] = struct{}{}
+
+	if !settled {
+		sh.dirtyUnsettled[key] = struct{}{}
+	}
 }
 
 // HasUnsettledUnder reports whether any entry beneath prefix (a key beginning
