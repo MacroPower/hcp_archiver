@@ -117,9 +117,12 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 	// two structs are field-identical, and a drift in either fails to compile
 	// here rather than silently dropping a field.
 	if a.remote != nil {
-		reporterOpts = append(reporterOpts, progress.WithRemoteStats(func() progress.RemoteStats {
-			return progress.RemoteStats(env.RemoteTally())
-		}))
+		reporterOpts = append(reporterOpts,
+			progress.WithRemoteStats(func() progress.RemoteStats {
+				return progress.RemoteStats(env.RemoteTally())
+			}),
+			progress.WithUploadWireBytes(a.uploadWireBytes),
+		)
 	}
 
 	reporter := progress.New(a.w, a.cfg.ProgressMode, ledger, reporterOpts...)

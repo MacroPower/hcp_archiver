@@ -61,6 +61,7 @@ const (
 // longer needed releases its backend resources through [Client.Close].
 type Client struct {
 	bucket     *blob.Bucket
+	wireBytes  *atomic.Int64
 	cfg        Config
 	retries    int
 	retryDelay time.Duration
@@ -71,6 +72,7 @@ type Client struct {
 // Options of this type:
 //   - [WithBucket]
 //   - [WithRetry]
+//   - [WithWireBytes]
 type Option func(*Client)
 
 // WithBucket injects the opened bucket the client calls, replacing the one
@@ -95,6 +97,17 @@ func WithRetry(retries int, delay time.Duration) Option {
 	return func(c *Client) {
 		c.retries = max(retries, 0)
 		c.retryDelay = delay
+	}
+}
+
+// WithWireBytes sets a shared counter that accumulates upload bytes as they
+// stream to the store, so a progress view can derive live throughput while a
+// large object is still in flight. Bytes are counted as they move, so a
+// retried attempt recounts what it re-streams. A nil counter leaves bytes
+// uncounted. It returns an [Option].
+func WithWireBytes(counter *atomic.Int64) Option {
+	return func(c *Client) {
+		c.wireBytes = counter
 	}
 }
 
@@ -297,7 +310,33 @@ func (c *Client) Put(ctx context.Context, key string, data []byte) error {
 		return fmt.Errorf("put %q: %w", key, err)
 	}
 
+	// WriteAll offers no streaming hook, so the whole body counts once on
+	// success; against a retried streaming upload's recount this is a
+	// negligible asymmetry at the small sizes Put serves.
+	if c.wireBytes != nil {
+		c.wireBytes.Add(int64(len(data)))
+	}
+
 	return nil
+}
+
+// countingReader accumulates the bytes read through it into wire, feeding
+// live upload throughput to a progress view. A nil wire counts nothing.
+type countingReader struct {
+	r    io.Reader
+	wire *atomic.Int64
+}
+
+// Read delegates to the wrapped reader, counting delivered bytes before any
+// error handling: [io.Reader] permits n > 0 alongside a non-nil error, and
+// those bytes moved.
+func (cr countingReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	if n > 0 && cr.wire != nil {
+		cr.wire.Add(int64(n))
+	}
+
+	return n, err //nolint:wrapcheck // A transparent reader wrapper.
 }
 
 // write streams r into one committed object at key. A body that errs midway
@@ -314,7 +353,7 @@ func (c *Client) write(ctx context.Context, key string, r io.Reader, opts *blob.
 		return fmt.Errorf("open writer: %w", err)
 	}
 
-	_, copyErr := io.Copy(w, r)
+	_, copyErr := io.Copy(w, countingReader{r: r, wire: c.wireBytes})
 	if copyErr != nil {
 		cancel()
 	}

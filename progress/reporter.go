@@ -46,28 +46,29 @@ type TallySource interface {
 // count the archiver sets and advances) and are independent of the object
 // tally read from source.
 type Reporter struct {
-	phaseStart  time.Time
-	start       time.Time
-	in          io.Reader
-	source      TallySource
-	rateStatus  func() (rps float64, pausedFor time.Duration)
-	remoteStats func() RemoteStats
-	sink        LogSink
-	w           io.Writer
-	now         func() time.Time
-	ttyForce    *bool
-	interrupt   func()
-	wireBytes   *atomic.Int64
-	rateLimited *atomic.Int64
-	tasks       map[*Task]struct{}
-	mode        config.ProgressMode
-	phase       string
-	taskSeq     uint64
-	interval    time.Duration
-	total       int
-	completed   int
-	mu          sync.Mutex
-	writeMu     sync.Mutex
+	phaseStart      time.Time
+	start           time.Time
+	in              io.Reader
+	source          TallySource
+	rateStatus      func() (rps float64, pausedFor time.Duration)
+	remoteStats     func() RemoteStats
+	sink            LogSink
+	w               io.Writer
+	now             func() time.Time
+	ttyForce        *bool
+	interrupt       func()
+	wireBytes       *atomic.Int64
+	uploadWireBytes *atomic.Int64
+	rateLimited     *atomic.Int64
+	tasks           map[*Task]struct{}
+	mode            config.ProgressMode
+	phase           string
+	taskSeq         uint64
+	interval        time.Duration
+	total           int
+	completed       int
+	mu              sync.Mutex
+	writeMu         sync.Mutex
 }
 
 // Option configures a [Reporter] passed to [New].
@@ -81,6 +82,7 @@ type Reporter struct {
 //   - [WithLogSink]
 //   - [WithInterrupt]
 //   - [WithWireBytes]
+//   - [WithUploadWireBytes]
 //   - [WithRateStatus]
 //   - [WithRateLimited]
 //   - [WithRemoteStats]
@@ -165,6 +167,19 @@ func WithInterrupt(fn func()) Option {
 func WithWireBytes(counter *atomic.Int64) Option {
 	return func(r *Reporter) {
 		r.wireBytes = counter
+	}
+}
+
+// WithUploadWireBytes sets the shared counter of upload bytes as they stream
+// to the remote store, which the terminal UI's throughput window samples so
+// the remote line's rate reads live while a large object is still uploading
+// rather than only when whole objects commit. The displayed remote byte total
+// stays the committed transfer tally; only the rate's source changes. A nil
+// counter keeps the rate sourced from committed remote bytes. It returns an
+// [Option].
+func WithUploadWireBytes(counter *atomic.Int64) Option {
+	return func(r *Reporter) {
+		r.uploadWireBytes = counter
 	}
 }
 
@@ -454,21 +469,23 @@ func (r *Reporter) takeTasks() []taskProgress {
 // reading that is transiently zero does not drop the readout at exactly the
 // moment it is most interesting.
 type snapshot struct {
-	phase        string
-	tasks        []taskProgress
-	tally        manifest.Tally
-	elapsed      time.Duration
-	phaseElapsed time.Duration
-	rate         float64
-	rps          float64
-	pausedFor    time.Duration
-	wireBytes    int64
-	rateLimited  int64
-	remote       RemoteStats
-	total        int
-	completed    int
-	hasRate      bool
-	hasRemote    bool
+	phase           string
+	tasks           []taskProgress
+	tally           manifest.Tally
+	elapsed         time.Duration
+	phaseElapsed    time.Duration
+	rate            float64
+	uploadRate      float64
+	rps             float64
+	pausedFor       time.Duration
+	wireBytes       int64
+	uploadWireBytes int64
+	rateLimited     int64
+	remote          RemoteStats
+	total           int
+	completed       int
+	hasRate         bool
+	hasRemote       bool
 }
 
 // hasBar reports whether the phase is determinate, so the view renders a bar and
@@ -566,22 +583,36 @@ func (r *Reporter) take() snapshot {
 		remote = r.remoteStats()
 	}
 
+	uploadRate := 0.0
+	if elapsed > 0 {
+		uploadRate = float64(remote.UploadedBytes) / elapsed.Seconds()
+	}
+
+	// The committed remote bytes stand in without an upload wire counter, the
+	// same fallback the download window gets above.
+	uploadWire := remote.UploadedBytes
+	if r.uploadWireBytes != nil {
+		uploadWire = r.uploadWireBytes.Load()
+	}
+
 	return snapshot{
-		tally:        t,
-		phase:        r.phase,
-		tasks:        r.takeTasks(),
-		elapsed:      elapsed,
-		phaseElapsed: now.Sub(r.phaseStart),
-		rate:         rate,
-		rps:          rps,
-		pausedFor:    pausedFor,
-		wireBytes:    wire,
-		rateLimited:  rateLimited,
-		remote:       remote,
-		total:        r.total,
-		completed:    r.completed,
-		hasRate:      r.rateStatus != nil,
-		hasRemote:    r.remoteStats != nil,
+		tally:           t,
+		phase:           r.phase,
+		tasks:           r.takeTasks(),
+		elapsed:         elapsed,
+		phaseElapsed:    now.Sub(r.phaseStart),
+		rate:            rate,
+		uploadRate:      uploadRate,
+		rps:             rps,
+		pausedFor:       pausedFor,
+		wireBytes:       wire,
+		uploadWireBytes: uploadWire,
+		rateLimited:     rateLimited,
+		remote:          remote,
+		total:           r.total,
+		completed:       r.completed,
+		hasRate:         r.rateStatus != nil,
+		hasRemote:       r.remoteStats != nil,
 	}
 }
 
@@ -894,10 +925,12 @@ func (r *Reporter) summaryBlock(snap snapshot) string {
 	}
 
 	// The mirror's final tally closes the block, in the same form as the live
-	// panel's remote line; the close sweep runs before this summary, so its
-	// uploads and evictions are already counted.
+	// panel's remote line minus the rate: a momentary rate is meaningless once
+	// the run has ended (the same convention as rps and paused). The close
+	// sweep runs before this summary, so its uploads and evictions are already
+	// counted.
 	if snap.hasRemote {
-		lines = append(lines, remoteReadout(snap.remote))
+		lines = append(lines, remoteReadout(snap.remote, 0, false))
 	}
 
 	return styleSummaryRule.Render(strings.Join(lines, "\n")) + "\n"

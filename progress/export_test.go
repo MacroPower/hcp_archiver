@@ -19,21 +19,23 @@ var SplitLogLines = splitLogLines
 // stay in the external package without reaching into unexported fields. Whether
 // a bar renders is derived from Total, matching production.
 type PanelSnapshot struct {
-	Phase        string
-	Tasks        []PanelTask
-	Tally        manifest.Tally
-	Elapsed      time.Duration
-	PhaseElapsed time.Duration
-	Rate         float64
-	RPS          float64
-	PausedFor    time.Duration
-	WireBytes    int64
-	RateLimited  int64
-	Remote       RemoteStats
-	Total        int
-	Completed    int
-	HasRate      bool
-	HasRemote    bool
+	Phase           string
+	Tasks           []PanelTask
+	Tally           manifest.Tally
+	Elapsed         time.Duration
+	PhaseElapsed    time.Duration
+	Rate            float64
+	UploadRate      float64
+	RPS             float64
+	PausedFor       time.Duration
+	WireBytes       int64
+	UploadWireBytes int64
+	RateLimited     int64
+	Remote          RemoteStats
+	Total           int
+	Completed       int
+	HasRate         bool
+	HasRemote       bool
 }
 
 // PanelTask mirrors one in-flight work item fed to the panel by a test.
@@ -51,21 +53,23 @@ func (ps PanelSnapshot) snap() snapshot {
 	}
 
 	return snapshot{
-		phase:        ps.Phase,
-		tasks:        tasks,
-		tally:        ps.Tally,
-		elapsed:      ps.Elapsed,
-		phaseElapsed: ps.PhaseElapsed,
-		rate:         ps.Rate,
-		rps:          ps.RPS,
-		pausedFor:    ps.PausedFor,
-		wireBytes:    ps.WireBytes,
-		rateLimited:  ps.RateLimited,
-		remote:       ps.Remote,
-		total:        ps.Total,
-		completed:    ps.Completed,
-		hasRate:      ps.HasRate,
-		hasRemote:    ps.HasRemote,
+		phase:           ps.Phase,
+		tasks:           tasks,
+		tally:           ps.Tally,
+		elapsed:         ps.Elapsed,
+		phaseElapsed:    ps.PhaseElapsed,
+		rate:            ps.Rate,
+		uploadRate:      ps.UploadRate,
+		rps:             ps.RPS,
+		pausedFor:       ps.PausedFor,
+		wireBytes:       ps.WireBytes,
+		uploadWireBytes: ps.UploadWireBytes,
+		rateLimited:     ps.RateLimited,
+		remote:          ps.Remote,
+		total:           ps.Total,
+		completed:       ps.Completed,
+		hasRate:         ps.HasRate,
+		hasRemote:       ps.HasRemote,
 	}
 }
 
@@ -81,10 +85,29 @@ func ObserveThroughput(snaps []PanelSnapshot) float64 {
 	return m.throughput(snaps[len(snaps)-1].snap())
 }
 
+// ObserveUploadThroughput feeds each snapshot to a fresh model's upload
+// throughput window in turn and returns the rate derived after the last,
+// exposing the upload wire-byte sampling to tests.
+func ObserveUploadThroughput(snaps []PanelSnapshot) float64 {
+	m := newTUIModel(nil, nil)
+	for i := range snaps {
+		m.observe(snaps[i].snap())
+	}
+
+	return m.uploadThroughput(snaps[len(snaps)-1].snap())
+}
+
 // TakeWireBytes exposes the wire-byte figure a snapshot of r carries, so tests
 // can assert both the counter path and the committed-bytes fallback.
 func TakeWireBytes(r *Reporter) int64 {
 	return r.lockedTake().wireBytes
+}
+
+// TakeUploadWireBytes exposes the upload wire-byte figure a snapshot of r
+// carries, so tests can assert both the counter path and the committed
+// remote-bytes fallback.
+func TakeUploadWireBytes(r *Reporter) int64 {
+	return r.lockedTake().uploadWireBytes
 }
 
 // RenderPanel renders the live two-line panel for ps, using a fresh model so the

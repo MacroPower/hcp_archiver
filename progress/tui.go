@@ -90,12 +90,13 @@ type tuiModel struct {
 	interrupt func()
 	// The phase of the previous tick's snapshot, so a phase change can reset the
 	// task region's high-water instead of inheriting the prior phase's peak.
-	lastPhase string
-	samples   []rateSample
-	snap      snapshot
-	width     int
-	height    int
-	tick      int
+	lastPhase     string
+	samples       []rateSample
+	uploadSamples []rateSample
+	snap          snapshot
+	width         int
+	height        int
+	tick          int
 	// The high-water line count of the task region (task rows plus the overflow
 	// line), advanced on each tick. The region is padded up to this mark so the
 	// panel holds its height as work items finish rather than shrinking, a change
@@ -226,32 +227,55 @@ func (m *tuiModel) View() tea.View {
 	return tea.NewView(m.render(snap))
 }
 
-// observe appends one throughput sample and trims the window's tail, keeping at
-// least two samples so a rate can always be derived once ticks have flowed. It
-// samples the snapshot's wire-byte figure (the shared wire counter when the
-// reporter has one, committed bytes otherwise), so the rate reads live while a
-// large object is still streaming and decays to zero only on true silence.
+// observe appends one throughput sample to each series and trims the windows'
+// tails, keeping at least two samples so a rate can always be derived once
+// ticks have flowed. Each series samples its snapshot wire-byte figure (the
+// shared wire counter when the reporter has one, committed bytes otherwise),
+// so the rates read live while a large object is still streaming and decay to
+// zero only on true silence. Without a remote the upload figure is always
+// zero and its rate never renders.
 func (m *tuiModel) observe(snap snapshot) {
-	m.samples = append(m.samples, rateSample{at: snap.elapsed, bytes: snap.wireBytes})
+	m.samples = observeInto(m.samples, snap.elapsed, snap.wireBytes)
+	m.uploadSamples = observeInto(m.uploadSamples, snap.elapsed, snap.uploadWireBytes)
+}
 
-	for len(m.samples) > 2 && m.samples[len(m.samples)-1].at-m.samples[0].at > rateWindow {
-		m.samples = m.samples[1:]
+// observeInto appends one throughput sample to samples and trims the window's
+// tail, returning the updated series.
+func observeInto(samples []rateSample, at time.Duration, bytes int64) []rateSample {
+	samples = append(samples, rateSample{at: at, bytes: bytes})
+
+	for len(samples) > 2 && samples[len(samples)-1].at-samples[0].at > rateWindow {
+		samples = samples[1:]
 	}
+
+	return samples
 }
 
 // throughput returns the download rate over the sampled window, in bytes per
 // second. Before two distinct samples exist (a fresh model, or a test render
 // with no ticks) it falls back to the snapshot's lifetime average.
 func (m *tuiModel) throughput(snap snapshot) float64 {
-	if len(m.samples) < 2 {
-		return snap.rate
+	return windowedRate(m.samples, snap.rate)
+}
+
+// uploadThroughput returns the remote upload rate over the sampled window, in
+// bytes per second, with the same lifetime-average fallback as throughput.
+func (m *tuiModel) uploadThroughput(snap snapshot) float64 {
+	return windowedRate(m.uploadSamples, snap.uploadRate)
+}
+
+// windowedRate derives a rate from the first and last samples of a window,
+// falling back to fallback before two spanning samples exist.
+func windowedRate(samples []rateSample, fallback float64) float64 {
+	if len(samples) < 2 {
+		return fallback
 	}
 
-	first, last := m.samples[0], m.samples[len(m.samples)-1]
+	first, last := samples[0], samples[len(samples)-1]
 
 	span := (last.at - first.at).Seconds()
 	if span <= 0 {
-		return snap.rate
+		return fallback
 	}
 
 	return float64(last.bytes-first.bytes) / span
@@ -370,7 +394,7 @@ func (m *tuiModel) render(snap snapshot) string {
 	lines = append(lines, m.fit(counts), m.fit(metaLine))
 
 	if snap.hasRemote {
-		lines = append(lines, m.fit("  "+remoteReadout(snap.remote)))
+		lines = append(lines, m.fit("  "+remoteReadout(snap.remote, m.uploadThroughput(snap), true)))
 	}
 
 	return strings.Join(lines, "\n")
@@ -475,10 +499,19 @@ func statusCounts(t manifest.Tally, doneWidth, erroredWidth, forbiddenWidth, ret
 // remoteReadout renders the remote-transfer tally shared by the live panel
 // and the summary block: the transferred bytes, uploads, and evictions in the
 // muted metadata tone, with the failed count riding in amber only once
-// anything has failed, the same convention as the 429 readout.
-func remoteReadout(rs RemoteStats) string {
-	out := styleMeta.Render(fmt.Sprintf(glyphCloud+" %s · uploaded %d · evicted %d",
-		humanBytes(rs.UploadedBytes), rs.Uploaded, rs.Evicted))
+// anything has failed, the same convention as the 429 readout. When showRate
+// is set the live upload rate follows the byte total — the panel shows it,
+// while the summary omits it because a momentary rate is meaningless once the
+// run has ended. The rate takes no glyph of its own: the ·-separated position
+// on the ☁ line and the bare /s suffix carry the meaning.
+func remoteReadout(rs RemoteStats, rate float64, showRate bool) string {
+	rateSeg := ""
+	if showRate {
+		rateSeg = fmt.Sprintf(" · %s/s", humanBytes(int64(rate)))
+	}
+
+	out := styleMeta.Render(fmt.Sprintf(glyphCloud+" %s%s · uploaded %d · evicted %d",
+		humanBytes(rs.UploadedBytes), rateSeg, rs.Uploaded, rs.Evicted))
 
 	if rs.Failed > 0 {
 		out += " " + styleRateLimited.Render(fmt.Sprintf("· failed %d", rs.Failed))

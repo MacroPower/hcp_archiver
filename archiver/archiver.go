@@ -68,16 +68,17 @@ var (
 //
 // Create instances with [New].
 type Archiver struct {
-	cfg           *config.Config
-	client        *tfeclient.Client
-	remote        *remote.Client
-	logger        *slog.Logger
-	w             io.Writer
-	logSink       progress.LogSink
-	cancelRun     context.CancelFunc
-	wireBytes     *atomic.Int64
-	rateLimited   *atomic.Int64
-	flushInterval time.Duration
+	cfg             *config.Config
+	client          *tfeclient.Client
+	remote          *remote.Client
+	logger          *slog.Logger
+	w               io.Writer
+	logSink         progress.LogSink
+	cancelRun       context.CancelFunc
+	wireBytes       *atomic.Int64
+	uploadWireBytes *atomic.Int64
+	rateLimited     *atomic.Int64
+	flushInterval   time.Duration
 }
 
 // gate bounds in-flight API requests with a FIFO counting semaphore,
@@ -157,11 +158,12 @@ func WithFlushInterval(d time.Duration) Option {
 // until [Archiver.Run] is called.
 func New(cfg *config.Config, opts ...Option) *Archiver {
 	a := &Archiver{
-		cfg:           cfg,
-		w:             os.Stderr,
-		wireBytes:     new(atomic.Int64),
-		rateLimited:   new(atomic.Int64),
-		flushInterval: defaultFlushInterval,
+		cfg:             cfg,
+		w:               os.Stderr,
+		wireBytes:       new(atomic.Int64),
+		uploadWireBytes: new(atomic.Int64),
+		rateLimited:     new(atomic.Int64),
+		flushInterval:   defaultFlushInterval,
 	}
 
 	for _, opt := range opts {
@@ -223,7 +225,8 @@ func (a *Archiver) Run(ctx context.Context) error {
 	// work, rather than letting a bad bucket or credential set surface as
 	// per-object failures deep into the run.
 	if a.cfg.Remote != nil {
-		a.remote, err = remote.New(ctx, remoteConfig(a.cfg.Remote))
+		a.remote, err = remote.New(ctx, remoteConfig(a.cfg.Remote),
+			remote.WithWireBytes(a.uploadWireBytes))
 		if err != nil {
 			return fmt.Errorf("build remote client: %w", err)
 		}

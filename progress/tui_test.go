@@ -376,10 +376,12 @@ func TestRenderSummary_RateLimited(t *testing.T) {
 }
 
 // remotePanel is barPanel with a remote configured and a clean transfer tally,
-// shared by the remote-readout tests.
+// shared by the remote-readout tests. The upload rate is non-zero so the
+// goldens show the panel's live rate segment with a real figure.
 func remotePanel() progress.PanelSnapshot {
 	panel := barPanel()
 	panel.HasRemote = true
+	panel.UploadRate = 3.4 * 1024 * 1024 // 3.4 MiB/s
 	panel.Remote = progress.RemoteStats{
 		UploadedBytes: 1288490188, // 1.2 GiB
 		Uploaded:      5432,
