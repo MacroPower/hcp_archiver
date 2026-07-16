@@ -1100,16 +1100,38 @@ func (e *Env) md5File(relPath string) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
+// pruneGuardFloor is the stale-key count below which the disproportion
+// guard stays out of the prune's way: steady-state prunes (a deleted
+// workspace, loose files a later seal re-shaped) are small, and a small
+// delete set is recoverable from bucket versioning even when wrong, so only
+// a mass deletion demands the extra proof.
+const pruneGuardFloor = 100
+
 // pruneRemote deletes the inventory keys the sweep saw no local file for, so
 // the mirror does not accumulate stale copies of files later sealed into
 // other forms (a restored stale loose run.json would shadow its newer roll-up
 // line) and a locally deleted subtree is forgotten remotely, consistent with
-// the ledger's "deleting .ledger forgets" stance.
+// the ledger's "deleting .ledger forgets" stance. Each pruned key is logged,
+// so a deletion is auditable rather than visible only as a count.
 //
-// Evicted surfaces are exempt by shape (see [evictedSurface]): after
-// eviction the remote copy is the only copy, so its survival must not hinge
-// on local state. As a guard against a wrong or empty root, nothing is
-// pruned when the walk saw no local file at all.
+// Evicted surfaces are exempt by shape (see [evictedSurface]), and so are
+// the bundle sidecars beside them: after eviction the sidecar is the only
+// index proving a remote-only zip's members, so a local subtree loss must
+// not cascade into deleting the proof for bytes only the bucket still holds.
+//
+// Two guards refuse the whole prune, each the fingerprint of a local tree
+// that is not the tree the mirror mirrors — where "nothing local backs it"
+// means loss, not deletion — and each counts a failure so the run exits
+// incomplete rather than reporting a clean mirror it knowingly diverged
+// from:
+//
+//   - a run whose ledger opened empty against a non-empty inventory is a
+//     fresh or wrong --output pointed at an existing mirror; restore the
+//     prefix (ledger included) before re-rooting an archive, or the
+//     mirror-only history would be deleted wholesale;
+//   - a delete set past [pruneGuardFloor] that outnumbers the keys the walk
+//     matched means the sweep is about to remove most of the mirror, which
+//     no steady-state re-shape produces.
 func (e *Env) pruneRemote(
 	ctx context.Context,
 	orgPrefix string,
@@ -1117,19 +1139,20 @@ func (e *Env) pruneRemote(
 	sweep *treeSweep,
 	counters *syncCounters,
 ) {
-	if len(sweep.keep) == 0 {
-		return
-	}
-
-	var stale []string
+	var (
+		stale   []string
+		matched int
+	)
 
 	for key := range inventory {
 		if _, kept := sweep.keep[key]; kept {
+			matched++
+
 			continue
 		}
 
 		relPath, ok := strings.CutPrefix(key, orgPrefix)
-		if !ok || evictedSurface(relPath) {
+		if !ok || evictedSurface(relPath) || isBundleSidecar(relPath) {
 			continue
 		}
 
@@ -1140,7 +1163,38 @@ func (e *Env) pruneRemote(
 		return
 	}
 
+	if !e.ledger.Tally().Resumed {
+		e.logger.LogAttrs(ctx, slog.LevelError, "sync_prune_refused",
+			slog.Int("keys", len(stale)),
+			slog.String("detail", "this run opened an empty ledger against a non-empty mirror; "+
+				"a fresh --output must not prune an existing mirror's history — restore the "+
+				"remote prefix locally (ledger included) before re-rooting the archive"),
+		)
+		counters.failed.Add(1)
+
+		return
+	}
+
+	if len(stale) > pruneGuardFloor && len(stale) > matched {
+		e.logger.LogAttrs(ctx, slog.LevelError, "sync_prune_refused",
+			slog.Int("keys", len(stale)),
+			slog.Int("matched", matched),
+			slog.String("detail", "the delete set outnumbers the mirror keys backed by local files; "+
+				"refusing a mass deletion of the mirror — if the local tree is incomplete, restore "+
+				"it from the remote prefix first"),
+		)
+		counters.failed.Add(1)
+
+		return
+	}
+
 	slices.Sort(stale)
+
+	for _, key := range stale {
+		e.logger.LogAttrs(ctx, slog.LevelInfo, "sync_prune_key",
+			slog.String("key", key),
+		)
+	}
 
 	deleted, err := e.remote.Delete(ctx, stale)
 

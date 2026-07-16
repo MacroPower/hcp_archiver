@@ -85,6 +85,16 @@ func (f syncFixture) writeDone(t *testing.T, relPath string, data []byte) {
 	f.ledger.RecordDone(relPath, manifest.SignatureOf(data))
 }
 
+// resume marks the fixture's run as resumed: at least one ledger entry
+// existed when the run opened, the state of every re-run against a real
+// archive. The prune step acts only in that state — a run that opened an
+// empty ledger against a non-empty mirror is a fresh or wrong root and
+// refuses to prune — so prune tests model it explicitly.
+func (f syncFixture) resume() {
+	f.ledger.RecordSkipped(".fixture-prior-entry")
+	f.ledger.StartRun()
+}
+
 func (f syncFixture) exists(t *testing.T, relPath string) bool {
 	t.Helper()
 
@@ -785,6 +795,7 @@ func TestSyncArchivePrunesStaleRemoteKeys(t *testing.T) {
 	const stale = "projects/prod/workspaces/api/runs/run-1/run.json"
 
 	f := newSyncFixture(t)
+	f.resume()
 
 	// The mirror holds a loose run.json from before the seal coalesced it; the
 	// local walk no longer sees it, so it must be pruned or a later restore
@@ -853,19 +864,70 @@ func TestSyncArchivePruneSurvivesLocalMetadataLoss(t *testing.T) {
 	assert.Empty(t, f.fake.Deleted())
 }
 
-func TestSyncArchiveEmptyWalkPrunesNothing(t *testing.T) {
+func TestSyncArchiveFreshLedgerRefusesPrune(t *testing.T) {
 	t.Parallel()
 
 	f := newSyncFixture(t)
 
-	// A remote copy exists but the local walk sees no file at all (a wrong or
-	// wiped root): the guard must keep the prune from emptying the mirror.
-	f.fake.SetObject(f.key("org.json"), remotetest.Object{Data: []byte("x")})
+	// The run opened an empty ledger — a fresh or wrong --output — while the
+	// mirror already holds history. Pruning would delete the mirror's only
+	// record of it, so the sweep must refuse, and refuse loudly: the run
+	// exits incomplete so a scheduled run cannot silently diverge the mirror.
+	f.fake.SetObject(f.key("projects/old/workspaces/gone/workspace.json"),
+		remotetest.Object{Data: []byte("history")})
+	f.write(t, "org.json", []byte(`{"org":"acme"}`))
 
 	stats := f.env.SyncArchive(t.Context())
 
 	assert.Zero(t, stats.Pruned)
 	assert.Empty(t, f.fake.Deleted())
+	assert.Equal(t, 1, stats.Failed, "a refused prune must mark the run incomplete")
+}
+
+func TestSyncArchivePruneRefusesMassDeletion(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	// A resumed run whose local tree lost most of its files (partial disk
+	// loss, a botched restore): the delete set outnumbers everything the walk
+	// matched, which no steady-state re-shape produces. The mirror is the
+	// disaster-recovery copy, so a mass deletion must be refused and surfaced.
+	for i := range 150 {
+		f.fake.SetObject(f.key(fmt.Sprintf("projects/p/workspaces/w/runs/run-%03d/run.json", i)),
+			remotetest.Object{Data: []byte("history")})
+	}
+
+	f.write(t, "org.json", []byte(`{"org":"acme"}`))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Pruned)
+	assert.Empty(t, f.fake.Deleted())
+	assert.Equal(t, 1, stats.Failed, "a refused prune must mark the run incomplete")
+}
+
+func TestSyncArchivePruneExemptsBundleSidecars(t *testing.T) {
+	t.Parallel()
+
+	const sidecar = "projects/prod/workspaces/api/bundles/logs.gen0001.zip.sidecar.ndjson"
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	// The workspace subtree was lost locally, taking the sidecar with it. The
+	// mirrored sidecar is now the only index proving the remote-only zip's
+	// members, so the prune must leave it — the zip it proves is exempt by
+	// shape, and a proof without its subject is worthless the other way too.
+	f.fake.SetObject(f.key(sidecar), remotetest.Object{Data: []byte(`{"name":"x"}`)})
+	f.write(t, "org.json", []byte(`{"org":"acme"}`))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Pruned)
+	assert.Empty(t, f.fake.Deleted())
+	assert.Zero(t, stats.Failed)
 }
 
 func TestSyncArchiveCanceledContextUploadsNothing(t *testing.T) {
@@ -913,6 +975,7 @@ func TestSyncArchivePruneCancellationIsNotFailure(t *testing.T) {
 	t.Parallel()
 
 	f := newSyncFixture(t)
+	f.resume()
 
 	// A stale remote key with nothing local behind it makes the prune step
 	// issue a delete; the cancellation surfaces there, after the uploads.
