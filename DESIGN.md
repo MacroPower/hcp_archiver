@@ -758,7 +758,12 @@ sweep that failed files marks the whole run incomplete (non-zero exit, like
 a dropped surface), so a scheduled run surfaces a mirror that is knowingly
 behind instead of reporting success over it; no cross-run state is persisted
 for this — the next run's sweep re-derives the gap from the store itself and
-self-heals.
+self-heals. The incomplete exit belongs to runs that finish: an interrupted
+run (ctrl+c, SIGTERM) keeps its documented clean exit even when a sweep had
+already detected failures before the interrupt landed — the interrupt is the
+operator's own act, every detection re-derives from the store, and the first
+run that completes surfaces it — so an interrupt defers the signal one
+completed run, never loses it.
 
 Before the prune, the sweep **verifies every already-evicted surface still
 answers at the store** — the one class of gap a local walk cannot see and
