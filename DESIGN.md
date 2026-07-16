@@ -278,7 +278,15 @@ Notes:
     _retries_ `errored`, `forbidden`, and anything absent from the ledger.
     `absent` is sticky (a 404 is not re-requested every run); a
     `--retry-absent` toggle forces re-probing when the operator suspects a
-    spurious 404 or a since-restored object. Resume and a clean first run are
+    spurious 404 or a since-restored object. The toggle also counts a
+    recorded absence as unsettled for the append-mostly walks' early stop:
+    most absences sit below a settled collection's newest-first boundary
+    (expired plan logs of old runs), and a boundary gated on the normal
+    settled predicate would halt before reaching any of them, leaving the
+    flag inert for exactly the entries it exists for. A retry-absent run
+    whose absences persist leaves those collections recorded unsettled, so
+    the following normal run re-pages them once (immutables skip; near
+    free) and settles them again. Resume and a clean first run are
     the same code path: a first run just starts from an empty ledger.
   - **Interrupted vs. failed** are the same to resume: both leave objects in
     `errored`/absent, and both are picked up on the next invocation. Transient
@@ -568,9 +576,11 @@ of the archive, in two modes with different semantics:
 
 - **Eviction** (upload → verify → delete local) moves the cold surfaces off
   disk: sealed bundles as each workspace seals, and org-wide
-  `config-versions/<id>.tar.gz` tarballs once the ledger proves them. Peak
-  local disk is then bounded to the search layer plus in-flight unsealed work,
-  which is what lets a 5k+ workspace org's archive run on a machine that could
+  `config-versions/<id>.tar.gz` tarballs at the close sweep, once the ledger
+  proves them. Peak local disk is then bounded to the search layer plus
+  in-flight unsealed work plus the run's still-unevicted tarballs (tarballs
+  have no mid-run eviction driver, so they accumulate until the sweep), which
+  is what lets a 5k+ workspace org's archive run on a machine that could
   never hold the whole thing at once.
 - **Sync** (incremental upload, local kept) mirrors everything else — loose
   files, roll-ups, sidecar indexes, ledger snapshots. Local disk stays the
@@ -592,8 +602,15 @@ motions:
   bundles), so eager copies would be pure churn the prune would delete. A
   semaphore at the shared concurrency ceiling bounds the burst, since the
   per-page archive fan-out is otherwise unbounded. The `.remote.json`
-  marker, written before any collector runs, also mirrors eagerly: it is
-  what an interrupted run's mirror needs to locate its evicted bundles.
+  marker also mirrors eagerly through the same motion (so its failure
+  counts into `eager_failed` like any other): it is what an interrupted
+  run's mirror needs to locate its evicted bundles. The marker is written
+  before any collector runs but after the ledger's cross-process flock is
+  held — it mutates the org root like any other write, and writing it
+  outside the single-writer exclusion would let a losing concurrent process
+  re-point a marker the surviving run then faithfully mirrors. A configured
+  remote that differs from the marker's recorded URL/prefix refuses the run
+  outright (see Migration below).
 - **At each workspace's seal boundary**: right after a workspace seals
   (bundles evicted, roll-ups coalesced), its subtree holds only its final
   search layer, and that subtree syncs — one scoped inventory listing, the
@@ -608,24 +625,39 @@ motions:
   while the cross-process flock is still held. It retries eager failures,
   migrates pre-existing archives, evicts settled tarballs and any bundle
   the seal-time eviction missed, mirrors the post-compaction ledger
-  snapshots (shards mirror only here), and prunes stale remote keys —
-  deletion reconciliation lives only here.
+  snapshots (shards mirror only here), **verifies every already-evicted
+  surface still answers at the store** (see below), and prunes stale remote
+  keys — deletion reconciliation lives only here. A failed final flush with
+  a remote configured also marks the run incomplete: the sweep deliberately
+  mirrors only the snapshots (never the replay logs) on the guarantee the
+  flush made them current, so a mirror of knowingly-stale snapshots must
+  not hide behind a clean exit.
 
 Eager failures (the as-written and seal-boundary motions) warn, count into
 the close summary's `eager_failed`, and defer to the sweep; only the close
 sweep's own failures mark the run incomplete.
 
 A run with `remote:` configured proves the store manageable at startup: a
-small probe object is written under the prefix, headed, listed, read back
-over a ranged request from a non-zero offset, and deleted before any
-collection work begins — the same motions the mirror and a later `view` of
-an evicted bundle perform — so a wrong bucket URL, credential set, or a
-store that rejects or mangles range requests fails the run immediately
-instead of surfacing as per-object failures hours into an archive (or at
-the first audit years later). The probe's metadata read doubles as the
-digest check: a store whose recorded MD5 does not match the written bytes
-fails preflight, while a store that records none simply leaves the sync
-gate's digest comparisons gating on size, as designed.
+small probe object is written under the prefix through the eviction path
+(an upload carrying recorded digests), headed, listed, read back over a
+ranged request from a non-zero offset, and deleted before any collection
+work begins — the same motions the mirror and a later `view` of an evicted
+bundle perform — so a wrong bucket URL, credential set, or a store that
+rejects or mangles range requests fails the run immediately instead of
+surfacing as per-object failures hours into an archive (or at the first
+audit years later). The probe's attributes read doubles as the digest
+check, in two parts. The recorded metadata digests must read back exactly:
+they are the currency of the eviction confirm and the sync gate, so a
+store that drops or mangles object metadata — which would silently reduce
+the custody transfer of the archive's only copies to a size comparison —
+fails preflight outright. The backend's own digest attribute is merely
+scored: one that mismatches the written bytes (an SSE-KMS-encrypted S3
+bucket's ETag is hex but is not a content MD5) marks the attribute
+untrusted for the rest of the run — the client then serves only the
+metadata digests its own writes record, so digest comparisons stay
+content-aware and size-matched files just pay one Head where a listing's
+attribute would have served — while a store that records no attribute at
+all passes unremarked, the metadata carrying the comparisons either way.
 
 Sync is always-on when `remote:` is configured; there is no separate knob
 or per-motion toggle: remote configured means the bucket converges on a
@@ -637,16 +669,30 @@ backend is resolved from one gocloud.dev bucket URL (`s3://`, `azblob://`,
 the YAML carries the URL and transfer tuning, never a secret. Evicted
 uploads stream through the backend's parted-upload path (concurrent parts
 for large state bundles), and a write that dies midway aborts rather than
-committing a truncated object; synced files are digested before upload so
-the store records a full-object MD5 later runs can compare, and evicted
-uploads record their full-object MD5 and SHA-256 as object metadata so the
-same egress-free comparison exists even where a parted upload leaves no
-backend digest. Every store operation retries a
-transient failure under a bounded doubling backoff — the same in-run
-persistence the API transport gives fetches, above whatever the provider
-SDK retries itself — while errors the store pins on the request (absent
-key, permission denial, failed precondition) surface immediately. Every
-write lands in the store's default storage class.
+committing a truncated object. Every write — synced files and evictions
+alike — records the body's full-object MD5 and SHA-256 as object metadata,
+the MD5 also checked against the streamed bytes at commit, so an
+egress-free content comparison exists even where the backend records no
+digest of its own (a parted upload, or any body past S3's 16 MiB multipart
+threshold, leaves no backend attribute). The digest ladder prefers that
+recorded metadata over the backend's own attribute, which can be an ETag
+that is no content MD5 at all (SSE-KMS); the attribute serves only as the
+fallback for objects written without metadata (an older build's, a foreign
+write), and not even that once preflight has scored it untrustworthy.
+Every store operation retries a transient failure under a bounded doubling
+backoff — the same in-run persistence the API transport gives fetches,
+above whatever the provider SDK retries itself — while errors the store
+pins on the request (absent key, permission denial, failed precondition)
+surface immediately. Two guards keep that classification honest, mirroring
+the API transport's own: a transport-level failure (a DNS blip, a dial
+fault) is never trusted as a request fault whatever code the driver
+stamped on it (azblob maps "no such host" to NotFound), so a resolver flap
+can neither settle a prune's delete as already-removed nor answer an
+eviction probe with a permanent absence; and every attempt runs under a
+stall watchdog that cancels it after a window with no progress (no byte
+moved, no object listed) and retries it as transient, so one wedged
+connection costs a window instead of hanging a worker, a seal, or the
+whole close sweep. Every write lands in the store's default storage class.
 
 The close sweep walks every regular file under the org root and classifies it
 top-down (the eager motions honor the same classification — they change when
@@ -671,18 +717,19 @@ a file first settles, never what happens to it):
 The incremental gate is driven by one upfront listing inventory of the org
 prefix (~1 request per 1000 keys, instead of a metadata probe per file) and
 degrades in order: key absent → upload; size differs → upload; size equal →
-compare the digest the inventory records against the local MD5 (this tool's
-own synced writes always record one); listing carries no digest → one Head
-for the object's recorded digest (fileblob's listings omit the digest
-its attributes carry); no digest recorded at all → trust the size match (a
-same-length content change is skipped until its size changes).
-Synced files fan out concurrently; evictions run sequentially. A synced
-file at or past a streaming threshold (32MiB) streams from disk instead of
-riding whole in memory — roll-ups grow with run history, and the sweep's
-memory must not scale with the archive's largest file — with its digests
-computed in a first pass and recorded as object metadata, so even a parted
-upload (which records no backend digest) keeps the incremental gate
-content-aware rather than size-only. Per-file
+compare the digest the inventory records against the local MD5; listing
+carries no digest → one Head for the object's recorded metadata digest
+(listings never carry metadata, and some backends' listings omit even the
+attribute — fileblob — or the attribute is distrusted — SSE-KMS); no digest
+recorded at all → trust the size match (a same-length content change to a
+foreign or older-build object is skipped until its size changes; this
+tool's own writes always record a metadata digest, so they never bottom
+out here). Synced files fan out concurrently; evictions run sequentially.
+A synced file at or past a streaming threshold (32MiB) streams from disk
+instead of riding whole in memory — roll-ups grow with run history, and
+the sweep's memory must not scale with the archive's largest file — with
+its digests computed in a first pass and recorded as object metadata, the
+same recording every smaller write gets. Per-file
 failures warn and count, never abort: local stays canonical and the next run
 re-sweeps. But because the mirror is the archive's long-term record, a close
 sweep that failed files marks the whole run incomplete (non-zero exit, like
@@ -691,24 +738,50 @@ behind instead of reporting success over it; no cross-run state is persisted
 for this — the next run's sweep re-derives the gap from the store itself and
 self-heals.
 
+Before the prune, the sweep **verifies every already-evicted surface still
+answers at the store** — the one class of gap a local walk cannot see and
+no later run can repair. A generation sidecar whose zip is no longer
+beside it, and a ledger entry recording a configuration-version tarball
+done with no local file, are the local records that the store holds those
+surfaces' only copies; the sweep checks each composed key against the
+inventory already in hand (a map lookup, no extra requests), comparing
+sizes where the ledger recorded one. A missing or diverged object — a
+re-pointed bucket, a mis-scoped lifecycle rule, a manual delete — logs an
+error naming the key and counts into the sweep's failures, so the run
+exits incomplete instead of reporting a complete mirror over a hole in the
+long-term record. Obligations are derived before the sweep's own evictions
+run, since the pre-eviction inventory cannot yet hold what this sweep is
+about to move.
+
 After the uploads, a **prune** step makes the mirror true: every inventory key
 the walk saw no local file for is deleted in a bounded fan-out, except the
 evicted surfaces
-(bundle zips, config-version tarballs), which are remote-only by design and
-exempt **by key shape alone** — not by checking the local sidecar or ledger
-entry that proved the eviction. After eviction the remote copy is the only
-copy, so its survival must never hinge on local state: a wiped `.ledger` or a
-subtree deletion that takes sidecars with it must not cascade into deleting
-the archive's only bytes. The cost is that a deliberately deleted workspace
-leaves its bundles in the bucket, to be cleaned up by hand. Without the prune
-the mirror would accumulate stale loose copies of files later sealed into
-other forms: a restored stale `runs/<id>/run.json` would shadow its newer
-roll-up line, since reads prefer loose. For the search layer the consequence
-is deliberate and mirrors the ledger's stance: deleting a subtree locally
-forgets it remotely on the next run. As a guard against a wrong or empty
-root, nothing is pruned when the walk saw no local file at all. Bucket
-versioning (or Object Lock) is the recommended backstop either way: it turns
-any surprising prune or overwrite into a recoverable event.
+(bundle zips, config-version tarballs) and the bundle sidecars beside them,
+which are exempt **by key shape alone** — not by checking the local sidecar
+or ledger entry that proved the eviction. After eviction the remote copy is
+the only copy, so its survival must never hinge on local state: a wiped
+`.ledger` or a subtree deletion that takes sidecars with it must not
+cascade into deleting the archive's only bytes — nor the mirrored sidecar,
+which after such a loss is the only index proving a remote-only zip's
+members. The cost is that a deliberately deleted workspace leaves its
+bundles and their sidecars in the bucket, to be cleaned up by hand
+together. Without the prune the mirror would accumulate stale loose copies
+of files later sealed into other forms: a restored stale
+`runs/<id>/run.json` would shadow its newer roll-up line, since reads
+prefer loose. For the search layer the consequence is deliberate and
+mirrors the ledger's stance: deleting a subtree locally forgets it remotely
+on the next run — where "deleting" means a deliberate act on a live
+archive, which two guards distinguish from loss. A run that opened an
+empty ledger against a non-empty mirror is a fresh or wrong `--output`
+pointed at an existing archive, and a delete set past a floor (100 keys)
+that outnumbers the walk-matched keys is a mass deletion no steady-state
+re-shape produces; either refuses the whole prune, logs the operator's way
+out (restore the prefix — ledger included — before re-rooting an archive),
+and counts a sweep failure so the run exits incomplete rather than
+quietly diverging the mirror. Every key a proceeding prune deletes is
+logged, so a deletion is auditable rather than visible only as a count.
+Bucket versioning (or Object Lock) is the recommended backstop either way:
+it turns any surprising prune or overwrite into a recoverable event.
 
 Bundle eviction extends verify-before-delete one hop without any cross-run
 state: every step is derived from observable facts — is the local zip
@@ -728,7 +801,11 @@ crash point self-heals on the next run:
 - **zip + sidecar + remote object** (died after upload, before the local
   delete): the Head finds the copy, size and recorded digests match the
   local bytes, and the zip is deleted without re-uploading.
-- **sidecar only** (eviction finished): nothing local to sweep; done.
+- **sidecar only** (eviction finished): nothing local to sweep, but not
+  nothing to prove — the sweep's evicted-surface verification confirms the
+  store still answers for the zip at its key every run, so a bucket-side
+  loss or a re-pointed remote surfaces at the next close instead of at the
+  first audit years later.
 
 The custody transfer is guarded at both ends, because after the local delete
 the remote copy is the archive's only copy. Before any remote traffic the
@@ -741,7 +818,11 @@ long-term record. On the remote side, an upload records the file's MD5 and
 SHA-256 as object metadata, and the confirm compares size plus every digest
 both sides carry; an object recorded by an older build carries no metadata
 and still gates on size, the strongest egress-free comparison available for
-it. A mismatch on either side warns, keeps the local file canonical, and
+it — but on the fresh-upload path, where the upload recorded both digests
+one call earlier, the confirm demands at least one back, so a store that
+silently drops object metadata (preflight's backstop) cannot reduce the
+custody transfer to a size comparison. A mismatch on either side warns,
+keeps the local file canonical, and
 never overwrites remote history at the key. Failure to evict one bundle is
 a warning, never an abort: the local zip simply stays canonical, exactly as
 if no remote were configured. Because eviction removes zips but never sidecars, generation
@@ -751,15 +832,27 @@ overwrite remote history at the same key. Tarball eviction recovers from the
 same crash points the same way; its local proof is the ledger's done entry
 and recorded signature (size and SHA-256) rather than a sidecar.
 
-Migration needs no special mode: pointing a `remote:` block at an existing
-all-local archive makes the next run's sweep upload the entire search layer
-(a one-time pass whose `sync_progress` log lines track it) and evict every
-pre-existing bundle that has a sidecar and every ledger-proven tarball.
+Migration needs no special mode in one direction only: pointing a `remote:`
+block at an existing **all-local** archive makes the next run's sweep
+upload the entire search layer (a one-time pass whose `sync_progress` log
+lines track it) and evict every pre-existing bundle that has a sidecar and
+every ledger-proven tarball. **Re-pointing** an already-mirrored archive at
+a different bucket or prefix is the opposite of no-special-mode: once
+surfaces have evicted, the recorded location holds their only copies, so a
+config that differs from the marker's recorded URL/prefix refuses the run
+outright, naming both locations and the way forward — copy the old prefix
+to the new location, then update or delete `.remote.json` as consent. The
+consent is verified, not trusted: the next close sweep's evicted-surface
+check proves the new location actually answers for every only-copy before
+the run can exit clean.
 
 Each org's root gains a small `.remote.json` marker recording a schema
 version and the read-relevant backend settings (the bucket URL and prefix);
 the version lets a future build change the marker's shape while old markers
-keep reading, and a reader refuses a marker newer than it understands.
+keep reading, and a reader refuses a marker newer than it understands, as
+well as one that parses but records no bucket URL (naming the file, so a
+damaged restore surfaces as "fix .remote.json" rather than a bare client
+error at the first evicted read years later).
 `view` reads it to serve a sealed member whose zip is no longer on disk: it
 Heads the object, parses the zip central directory over a handful of ranged reads
 (cached per session), then fetches the member's compressed span in **one**

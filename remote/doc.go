@@ -12,15 +12,22 @@
 // reads let a zip central directory be parsed and a single member fetched
 // without downloading the bundle. [Client.Preflight] round-trips a small
 // probe object through the write, head, list, ranged-read, and delete
-// motions at startup, verifying the store's recorded digest against the
-// written bytes, so a misconfigured store surfaces before any archive work
-// rather than partway through a run.
+// motions at startup: the metadata digests must read back exactly (the
+// mirror's digest comparisons depend on them, so a metadata-dropping store
+// fails the run before any archive work), while a backend digest attribute
+// that mismatches the written bytes (an SSE-KMS bucket's ETag is hex but no
+// content MD5) just downgrades the client to the metadata digests alone.
 //
 // The mirror is the archive's long-term record, so every operation retries
 // a transient store failure under a bounded doubling backoff ([WithRetry],
 // on by default) — the same in-run persistence the API transport gives
 // fetches — while errors the store pins on the request (an absent key, a
-// permission denial, a failed precondition) surface immediately.
+// permission denial, a failed precondition) surface immediately. A
+// transport-level failure (a DNS blip, a dial fault) is never trusted as a
+// request fault, whatever code the driver stamped on it, so it can neither
+// settle a delete nor answer an absence; and each attempt runs under a
+// stall watchdog ([WithStallTimeout]) that cancels it after a window with
+// no progress, so one wedged connection costs a window, not a hung worker.
 //
 // The backend is selected by [Config.URL]'s scheme, resolved through
 // [gocloud.dev/blob]: s3:// (AWS S3, or a compatible store such as MinIO,
