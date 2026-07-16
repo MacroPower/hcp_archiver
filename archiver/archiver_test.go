@@ -350,7 +350,7 @@ func TestWriteRemoteMarkerMirrorsEagerly(t *testing.T) {
 	a, env, fake := newSyncOrgFixture(t, buf)
 	st := env.Store()
 
-	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), st, "acme"))
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), env, st))
 
 	local, err := st.Exists(remote.MarkerName)
 	require.NoError(t, err)
@@ -369,12 +369,54 @@ func TestWriteRemoteMarkerMirrorFailureWarnsOnly(t *testing.T) {
 
 	fake.PutErr = assert.AnError
 
-	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), st, "acme"),
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), env, st),
 		"a marker mirror failure defers to the close sweep")
 
 	local, err := st.Exists(remote.MarkerName)
 	require.NoError(t, err)
 	assert.True(t, local, "the local marker write still succeeds")
 
-	assert.Contains(t, buf.String(), "remote_marker_sync_error")
+	assert.Contains(t, buf.String(), "eager_sync_error")
+	assert.Equal(t, 1, env.EagerFailures(),
+		"the marker's eager mirror failure counts like every other as-written upload")
+}
+
+func TestWriteRemoteMarkerRefusesRepointedRemote(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, _ := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	// The archive already records its mirror elsewhere: the configured
+	// remote must not silently take over — evicted bundles live only at the
+	// recorded location, and the marker is the sole pointer to them.
+	_, err := st.WriteBytes(remote.MarkerName,
+		[]byte(`{"url":"s3://old-bucket","prefix":"old","version":1}`+"\n"))
+	require.NoError(t, err)
+
+	err = archiver.WriteRemoteMarker(a, t.Context(), env, st)
+	require.ErrorIs(t, err, archiver.ErrRemoteRelocated)
+	assert.Contains(t, err.Error(), "s3://old-bucket",
+		"the refusal must name the recorded location the operator has to migrate from")
+
+	// Consent by clearing the marker: a marker recording nothing is
+	// rewritable, and the close sweep's evicted-surface verification still
+	// proves the new location holds every only-copy.
+	_, err = st.WriteBytes(remote.MarkerName, []byte("{}\n"))
+	require.NoError(t, err)
+
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), env, st))
+}
+
+func TestWriteRemoteMarkerSameRemoteRewrites(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, _ := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), env, st))
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), env, st),
+		"an unchanged remote config rewrites its own marker freely")
 }

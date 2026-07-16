@@ -104,6 +104,15 @@ func loadOrgRemote(root, orgName string, opts archiveOptions) (*orgRemote, error
 			remote.MarkerName, marker.Version, remote.MarkerVersion)
 	}
 
+	// A marker that parses but records no bucket ("{}" from a damaged
+	// restore, a hand-cleared file) would otherwise surface years later as a
+	// bare "bucket url is required" at the first evicted read, pointing at
+	// nothing; name the file while the reader is looking at it.
+	if marker.URL == "" {
+		return nil, fmt.Errorf("remote marker %q records no bucket url; "+
+			"restore or edit it to point at the archive's mirror", remote.MarkerName)
+	}
+
 	return &orgRemote{
 		ctx:       opts.ctx,
 		newClient: opts.newClient,

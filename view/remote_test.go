@@ -225,6 +225,19 @@ func TestOpenArchive_RemoteMarkerFromNewerBuildIsRejected(t *testing.T) {
 		"a marker schema from the future must refuse loudly, not misread")
 }
 
+func TestOpenArchive_EmptyRemoteMarkerIsRejectedByName(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+	writeFile(t, filepath.Join(root, "my-org"), ".remote.json", `{}`)
+
+	_, err := view.OpenArchive(root, view.WithContext(t.Context()))
+	require.ErrorContains(t, err, ".remote.json",
+		"a structurally-empty marker must name the file to fix, not defer to a bare"+
+			" client error at the first evicted read years later")
+	require.ErrorContains(t, err, "no bucket url")
+}
+
 func TestWorkspaceOpen_RemoteClientFailureIsRemembered(t *testing.T) {
 	t.Parallel()
 

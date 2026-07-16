@@ -784,6 +784,16 @@ func sealBoundarySkip(relPath string) bool {
 	return path.Base(path.Dir(relPath)) == manifest.LedgerDirName || isBundleZip(relPath)
 }
 
+// EagerSync mirrors one just-committed file to the remote store through the
+// as-written motion (see eagerSync): the archiver routes writes that bypass
+// the archive primitives — today only the organization's remote marker —
+// through it, so their mirror failures warn, count into
+// [Env.EagerFailures], and defer to the close sweep exactly like every
+// other eager upload.
+func (e *Env) EagerSync(ctx context.Context, relPath string, res store.WriteResult) {
+	e.eagerSync(ctx, relPath, res)
+}
+
 // eagerSync mirrors one just-committed file to the remote store, the
 // as-written motion behind the archive primitives: [Env.recordDone] calls it
 // after every ledger record, and it uploads only when a remote is configured,

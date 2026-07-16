@@ -3,16 +3,24 @@ package archiver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 
-	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 	"go.jacobcolvin.com/hcp_archiver/collect"
 	"go.jacobcolvin.com/hcp_archiver/config"
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
+
+// ErrRemoteRelocated reports a configured remote that does not match the
+// mirror location the archive's marker records. Evicted surfaces live only
+// at the recorded location, so a re-point must be an explicit migration, not
+// a config edit the run silently follows.
+var ErrRemoteRelocated = errors.New("configured remote does not match the archive's recorded mirror")
 
 // remoteConfig maps the validated configuration surface onto the remote
 // client's transport configuration — the one place the two shapes meet, so
@@ -68,12 +76,24 @@ func (a *Archiver) syncOrg(ctx context.Context, env *collect.Env, orgName string
 // writeRemoteMarker records the read-relevant remote settings at the
 // organization's archive root, so a later `view` of the archive can reach
 // the offloaded bundles without the original configuration file, then
-// mirrors it eagerly: the marker is what an interrupted run's mirror needs
-// to locate its evicted bundles, so it must not wait for the close sweep. A
-// mirror failure warns and defers to the sweep; only the local side can
-// fail the run.
-func (a *Archiver) writeRemoteMarker(ctx context.Context, st *store.Store, orgName string) error {
+// mirrors it eagerly through the environment's as-written motion: the marker
+// is what an interrupted run's mirror needs to locate its evicted bundles,
+// so it must not wait for the close sweep. A mirror failure warns, counts
+// into the eager-failure tally like every other as-written upload, and
+// defers to the sweep; only the local side can fail the run.
+//
+// It runs after [manifest.Load] acquired the organization's cross-process
+// flock — the marker is a mutation of the archive root like any other, and
+// writing it outside the single-writer exclusion would let a losing
+// concurrent process re-point a marker another run then faithfully mirrors —
+// and it refuses a re-pointed remote outright (see checkExistingMarker).
+func (a *Archiver) writeRemoteMarker(ctx context.Context, env *collect.Env, st *store.Store) error {
 	cfg := remoteConfig(a.cfg.Remote)
+
+	err := checkExistingMarker(st.Root(), cfg.Marker())
+	if err != nil {
+		return err
+	}
 
 	data, err := json.MarshalIndent(cfg.Marker(), "", "  ")
 	if err != nil {
@@ -82,17 +102,64 @@ func (a *Archiver) writeRemoteMarker(ctx context.Context, st *store.Store, orgNa
 
 	data = append(data, '\n')
 
-	err = atomicfile.WriteFile(filepath.Join(st.Root(), remote.MarkerName), data)
+	res, err := st.WriteBytes(remote.MarkerName, data)
 	if err != nil {
 		return fmt.Errorf("write remote marker: %w", err)
 	}
 
-	err = a.remote.Put(ctx, cfg.Key(orgName, remote.MarkerName), data)
-	if err != nil && ctx.Err() == nil {
-		a.logger.LogAttrs(ctx, slog.LevelWarn, "remote_marker_sync_error",
-			slog.String("org", orgName),
-			slog.String("error", err.Error()),
-		)
+	env.EagerSync(ctx, remote.MarkerName, res)
+
+	return nil
+}
+
+// checkExistingMarker refuses to overwrite a marker recording a different
+// mirror location than the one configured. After eviction the recorded
+// bucket and prefix hold the archive's only copies of its cold surfaces, and
+// the marker is the only durable pointer to them: silently re-pointing it
+// would present the new bucket as a complete mirror it can never become and
+// leave `view` unable to reach any evicted bundle. The operator's way out is
+// stated in the error: copy the old prefix to the new location, then update
+// or delete the marker as consent — the sweep's evicted-surface verification
+// still proves the new location actually holds every only-copy before the
+// run can exit clean.
+//
+// A marker that does not exist, or records nothing (a hand-cleared file, the
+// deletion consent above), passes; a marker written by a newer build refuses
+// per the versioning contract.
+func checkExistingMarker(root string, marker remote.Marker) error {
+	//nolint:gosec // The path is composed from the archive root being managed.
+	data, err := os.ReadFile(filepath.Join(root, remote.MarkerName))
+
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("read existing remote marker: %w", err)
+	}
+
+	var existing remote.Marker
+
+	err = json.Unmarshal(data, &existing)
+	if err != nil {
+		return fmt.Errorf("parse existing remote marker %q: %w", remote.MarkerName, err)
+	}
+
+	if existing.Version > remote.MarkerVersion {
+		return fmt.Errorf("existing remote marker %q is version %d, newer than this build writes (%d)",
+			remote.MarkerName, existing.Version, remote.MarkerVersion)
+	}
+
+	if existing.URL == "" {
+		return nil
+	}
+
+	if existing.URL != marker.URL || existing.Prefix != marker.Prefix {
+		return fmt.Errorf(
+			"%w: the archive records its mirror at %q prefix %q, but the configuration names %q prefix %q; "+
+				"evicted bundles live only at the recorded location — copy the old prefix to the new "+
+				"location, then update or delete %s to consent (the close sweep verifies every evicted "+
+				"surface either way)",
+			ErrRemoteRelocated, existing.URL, existing.Prefix, marker.URL, marker.Prefix, remote.MarkerName)
 	}
 
 	return nil

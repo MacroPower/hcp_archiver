@@ -83,13 +83,6 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 		envOpts = append(envOpts,
 			collect.WithRemote(a.remote, remoteConfig(a.cfg.Remote), orgName),
 		)
-
-		// The marker is written before any collector runs so even an archive
-		// interrupted mid-run records where its evicted bundles live.
-		markerErr := a.writeRemoteMarker(ctx, st, orgName)
-		if markerErr != nil {
-			return manifest.Tally{}, 0, markerErr
-		}
 	}
 
 	ledger, err := manifest.Load(
@@ -101,6 +94,25 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 	}
 
 	env := collect.NewEnv(a.client, st, ledger, envOpts...)
+
+	// The marker is written before any collector runs, so even an archive
+	// interrupted mid-run records where its evicted bundles live — but after
+	// manifest.Load acquired the cross-process flock, since it mutates the
+	// org root like any other write and must not race a run in progress.
+	if a.remote != nil {
+		markerErr := a.writeRemoteMarker(ctx, env, st)
+		if markerErr != nil {
+			closeErr := ledger.Close()
+			if closeErr != nil {
+				a.logger.LogAttrs(ctx, slog.LevelWarn, "manifest_close_error",
+					slog.String("org", orgName),
+					slog.String("error", closeErr.Error()),
+				)
+			}
+
+			return manifest.Tally{}, 0, markerErr
+		}
+	}
 
 	reporterOpts := []progress.Option{
 		progress.WithInterval(a.cfg.ProgressInterval),
