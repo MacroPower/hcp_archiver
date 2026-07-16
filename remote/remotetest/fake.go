@@ -112,6 +112,13 @@ type Fake struct {
 	DeleteErrN int
 	RangeErrN  int
 
+	// ErrCode, when set, is the [gcerrors.ErrorCode] stamped on every
+	// injected fault, so a test can model a driver-classified failure (a
+	// permission denial, a failed precondition at commit, even a driver that
+	// mistakes a transport fault for NotFound) rather than only an unknown
+	// one. A genuinely missing object still classifies NotFound regardless.
+	ErrCode gcerrors.ErrorCode
+
 	putCalls   int
 	headCalls  int
 	listCalls  int
@@ -221,10 +228,15 @@ func (f *Fake) Ranges() []Range {
 }
 
 // ErrorCode classifies the fake's errors: a missing object reports
-// [gcerrors.NotFound], everything else (the injected faults) is unknown.
+// [gcerrors.NotFound], and everything else (the injected faults) is unknown
+// unless [Fake.ErrCode] stamps a specific code.
 func (f *Fake) ErrorCode(err error) gcerrors.ErrorCode {
 	if errors.Is(err, errNotFound) {
 		return gcerrors.NotFound
+	}
+
+	if f.ErrCode != gcerrors.OK {
+		return f.ErrCode
 	}
 
 	return gcerrors.Unknown

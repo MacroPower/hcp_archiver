@@ -7,10 +7,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gocloud.dev/gcerrors"
 
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/remote/remotetest"
@@ -302,6 +306,138 @@ func TestRetryStopsOnCanceledContext(t *testing.T) {
 
 	_, ok := fake.Object("k")
 	assert.False(t, ok)
+}
+
+// TestRetryClassificationByCode pins the never-retry set: an error the store
+// pins on the request itself surfaces after exactly one attempt, while a
+// fault of the store or the path to it spends the whole retry budget. A
+// refactor that drops a code from either side of the switch fails here
+// rather than shipping invisibly.
+func TestRetryClassificationByCode(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		code         gcerrors.ErrorCode
+		wantAttempts int
+	}{
+		"permission denied surfaces immediately":   {code: gcerrors.PermissionDenied, wantAttempts: 1},
+		"failed precondition surfaces immediately": {code: gcerrors.FailedPrecondition, wantAttempts: 1},
+		"invalid argument surfaces immediately":    {code: gcerrors.InvalidArgument, wantAttempts: 1},
+		"already exists surfaces immediately":      {code: gcerrors.AlreadyExists, wantAttempts: 1},
+		"unimplemented surfaces immediately":       {code: gcerrors.Unimplemented, wantAttempts: 1},
+		"canceled surfaces immediately":            {code: gcerrors.Canceled, wantAttempts: 1},
+		"unknown retries":                          {code: gcerrors.Unknown, wantAttempts: 3},
+		"internal retries":                         {code: gcerrors.Internal, wantAttempts: 3},
+		"resource exhausted retries":               {code: gcerrors.ResourceExhausted, wantAttempts: 3},
+		"deadline exceeded retries":                {code: gcerrors.DeadlineExceeded, wantAttempts: 3},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			client, fake := newRetryClient(t, 2)
+			fake.PutErr = errors.New("injected classified failure")
+			fake.ErrCode = tc.code
+
+			err := client.Put(t.Context(), "k", []byte("x"))
+			require.Error(t, err)
+			assert.Equal(t, tc.wantAttempts, fake.PutCalls(),
+				"the classification decides whether the budget is spent")
+		})
+	}
+}
+
+// TestTransportFaultNeverSettlesNotFound models azblob's quirk of mapping a
+// "no such host" DNS failure to gcerrors.NotFound: a transport fault says
+// nothing about the object at the key, so it must classify transient and
+// never satisfy an absence check, whatever code the driver stamped on it.
+func TestTransportFaultNeverSettlesNotFound(t *testing.T) {
+	t.Parallel()
+
+	dnsErr := &net.DNSError{Err: "no such host", Name: "account.blob.core.windows.net"}
+
+	t.Run("head retries through the blip", func(t *testing.T) {
+		t.Parallel()
+
+		client, fake := newRetryClient(t, 2)
+		fake.SetObject("k", remotetest.Object{Data: []byte("abcd")})
+
+		fake.HeadErr = dnsErr
+		fake.HeadErrN = 2
+		fake.ErrCode = gcerrors.NotFound
+
+		info, err := client.Head(t.Context(), "k")
+		require.NoError(t, err, "a resolver blip must be retried, not settled as an absence")
+		assert.Equal(t, int64(4), info.Size)
+	})
+
+	t.Run("head never answers ErrNotFound for a transport fault", func(t *testing.T) {
+		t.Parallel()
+
+		client, fake := newClient(t, remote.Config{})
+		fake.SetObject("k", remotetest.Object{Data: []byte("abcd")})
+
+		fake.HeadErr = dnsErr
+		fake.ErrCode = gcerrors.NotFound
+
+		_, err := client.Head(t.Context(), "k")
+		require.Error(t, err)
+		require.NotErrorIs(t, err, remote.ErrNotFound,
+			"an eviction probe reading ErrNotFound here would re-upload or mis-settle")
+	})
+
+	t.Run("delete never counts a transport fault as removed", func(t *testing.T) {
+		t.Parallel()
+
+		client, fake := newClient(t, remote.Config{})
+		fake.SetObject("k", remotetest.Object{Data: []byte("abcd")})
+
+		fake.DeleteErr = dnsErr
+		fake.ErrCode = gcerrors.NotFound
+
+		deleted, err := client.Delete(t.Context(), []string{"k"})
+		require.Error(t, err, "a delete that never reached the store must fail, not settle")
+		assert.Zero(t, deleted)
+	})
+}
+
+// TestStallWatchdogCutsWedgedAttempt proves a wedged connection costs one
+// stall window, not a hung worker: the attempt is canceled, classifies
+// transient, and the retry succeeds.
+func TestStallWatchdogCutsWedgedAttempt(t *testing.T) {
+	t.Parallel()
+
+	fake := remotetest.New()
+
+	client, err := remote.New(t.Context(), remote.Config{},
+		remote.WithBucket(fake.Bucket()),
+		remote.WithRetry(1, 0),
+		remote.WithStallTimeout(30*time.Millisecond))
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		require.NoError(t, client.Close())
+	})
+
+	var wedged atomic.Bool
+
+	wedged.Store(true)
+
+	// The first commit blocks like a black-holed connection until its context
+	// dies; only the watchdog can end it.
+	fake.PutHook = func(ctx context.Context) {
+		if wedged.Swap(false) {
+			<-ctx.Done()
+		}
+	}
+
+	err = client.Put(t.Context(), "k", []byte("x"))
+	require.NoError(t, err, "a stalled attempt is cut and retried, not hung forever")
+
+	obj, ok := fake.Object("k")
+	require.True(t, ok)
+	assert.Equal(t, []byte("x"), obj.Data)
 }
 
 func TestHead(t *testing.T) {
