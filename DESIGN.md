@@ -711,7 +711,7 @@ numbering takes its maximum over both the `*.zip` and `*.zip.sidecar.ndjson`
 names — a zip-only scan would restart at gen0001 once bundles left disk and
 overwrite remote history at the same key. Tarball eviction recovers from the
 same crash points the same way; its local proof is the ledger's done entry
-and recorded size rather than a sidecar.
+and recorded signature (size and SHA-256) rather than a sidecar.
 
 Migration needs no special mode: pointing a `remote:` block at an existing
 all-local archive makes the next run's sweep upload the entire search layer

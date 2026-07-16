@@ -86,6 +86,9 @@ type Fake struct {
 	// model a cancellation surfacing mid-flight; the read then returns the
 	// context's error instead of serving the object.
 	HeadHook func(ctx context.Context)
+	// DeleteHook, when set, runs at the start of each delete with the call's
+	// context, serving the same mid-flight cancellation modeling as HeadHook.
+	DeleteHook func(ctx context.Context)
 	// DeleteErrKeys, when non-empty, confines DeleteErr (and DeleteErrN's
 	// budget) to the named keys, so a test can fail some of a fan-out's keys
 	// while the rest settle.
@@ -421,7 +424,16 @@ func (f *Fake) ListPaged(_ context.Context, opts *driver.ListOptions) (*driver.L
 
 // Delete removes the object at key, recording it; an absent key reports
 // not-found, per the driver contract, which the client settles as a no-op.
-func (f *Fake) Delete(_ context.Context, key string) error {
+func (f *Fake) Delete(ctx context.Context, key string) error {
+	if f.DeleteHook != nil {
+		f.DeleteHook(ctx)
+
+		err := ctx.Err()
+		if err != nil {
+			return err //nolint:wrapcheck // A faked mid-flight cancellation.
+		}
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

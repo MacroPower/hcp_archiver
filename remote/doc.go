@@ -5,13 +5,22 @@
 // state.genNNNN.zip) are write-once: once a bundle has sealed and verified
 // locally, its bytes never change, so it can move to remote object storage
 // while the grep-able search layer (loose JSON, roll-ups, sidecar indexes)
-// stays on local disk. A [Client] uploads a bundle, confirms it landed with
-// [Client.Head], and serves later reads through [Client.ReadAt], whose ranged
+// stays on local disk. A [Client] uploads a bundle with its full-object
+// digests recorded as object metadata ([Digests]), confirms it landed with
+// [Client.Head] (which serves those digests back for egress-free
+// comparison), and serves later reads through [Client.ReadAt], whose ranged
 // reads let a zip central directory be parsed and a single member fetched
 // without downloading the bundle. [Client.Preflight] round-trips a small
-// probe object through the write, head, list, and delete motions at startup,
-// so a misconfigured store surfaces before any archive work rather than
-// partway through a run.
+// probe object through the write, head, list, ranged-read, and delete
+// motions at startup, verifying the store's recorded digest against the
+// written bytes, so a misconfigured store surfaces before any archive work
+// rather than partway through a run.
+//
+// The mirror is the archive's long-term record, so every operation retries
+// a transient store failure under a bounded doubling backoff ([WithRetry],
+// on by default) — the same in-run persistence the API transport gives
+// fetches — while errors the store pins on the request (an absent key, a
+// permission denial, a failed precondition) surface immediately.
 //
 // The backend is selected by [Config.URL]'s scheme, resolved through
 // [gocloud.dev/blob]: s3:// (AWS S3, or a compatible store such as MinIO,

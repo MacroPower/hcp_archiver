@@ -804,6 +804,26 @@ func TestSyncArchiveEvictCancellationIsNotFailure(t *testing.T) {
 	assert.True(t, f.exists(t, zip), "the local bundle stays canonical for the next run")
 }
 
+func TestSyncArchivePruneCancellationIsNotFailure(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+
+	// A stale remote key with nothing local behind it makes the prune step
+	// issue a delete; the cancellation surfaces there, after the uploads.
+	f.fake.SetObject(f.key("projects/old/workspaces/gone/workspace.json"),
+		remotetest.Object{Data: []byte("stale")})
+	f.write(t, "org.json", []byte(`{"org":"acme"}`))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	f.fake.DeleteHook = func(context.Context) { cancel() }
+
+	stats := f.env.SyncArchive(ctx)
+
+	assert.Zero(t, stats.Failed, "a cancellation mid-prune is the wind-down, not a failure")
+	assert.Zero(t, stats.Pruned)
+}
+
 func TestSyncArchivePerFileFailureWarnsAndContinues(t *testing.T) {
 	t.Parallel()
 

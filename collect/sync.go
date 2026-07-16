@@ -533,12 +533,14 @@ func (e *Env) bundleSealed(relPath string) bool {
 }
 
 // classifyTarball gates a configuration-version tarball on its ledger record:
-// only a done entry whose recorded size matches the local bytes proves the
-// file, and only a proven tarball is evicted. An unproven one is neither
-// evicted nor synced — a synced copy at the eviction key could later pass a
-// proper eviction's size gate and let it delete the only proven local bytes,
-// and a ledger-declared size mismatch means the local file is suspect — so it
-// is skipped with a warning and stays local.
+// only a done entry whose recorded size matches the local bytes classifies
+// for eviction (the eviction itself then re-proves the bytes against the
+// signature's SHA-256; this check is the cheap stat-only screen). An
+// unproven one is neither evicted nor synced — a synced copy at the eviction
+// key carries the suspect bytes and could later pass a proper eviction's
+// confirm, letting it delete the only local copy, and a ledger-declared size
+// mismatch means the local file is suspect — so it is skipped with a warning
+// and stays local.
 func (e *Env) classifyTarball(ctx context.Context, relPath string) syncAction {
 	entry, ok := e.ledger.Entry(relPath)
 	if ok && entry.Status == manifest.StatusDone && entry.Signature != nil {
@@ -822,6 +824,13 @@ func (e *Env) pruneRemote(
 	counters.pruned.Add(int64(deleted))
 
 	if err != nil {
+		// A cancellation surfacing mid-prune is the wind-down, not a prune
+		// failure: the unfinished keys wait for the next run's sweep, matching
+		// the evict and sync loops' in-flight guards.
+		if ctx.Err() != nil {
+			return
+		}
+
 		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_prune_error",
 			slog.Int("keys", len(stale)),
 			slog.Int("deleted", deleted),
