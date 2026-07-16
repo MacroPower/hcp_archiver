@@ -580,10 +580,16 @@ of the archive, in two motions with different semantics:
   (re-download the prefix to restore).
 
 A run with `remote:` configured proves the store manageable at startup: a
-small probe object is written under the prefix, headed, listed, and deleted
-before any collection work begins, so a wrong bucket URL or credential set
-fails the run immediately instead of surfacing as per-object failures hours
-into an archive.
+small probe object is written under the prefix, headed, listed, read back
+over a ranged request from a non-zero offset, and deleted before any
+collection work begins — the same motions the mirror and a later `view` of
+an evicted bundle perform — so a wrong bucket URL, credential set, or a
+store that rejects or mangles range requests fails the run immediately
+instead of surfacing as per-object failures hours into an archive (or at
+the first audit years later). The probe's metadata read doubles as the
+digest check: a store whose recorded MD5 does not match the written bytes
+fails preflight, while a store that records none simply leaves the sync
+gate's digest comparisons gating on size, as designed.
 
 Sync is always-on when `remote:` is configured; there is no separate knob:
 remote configured means the bucket converges on a complete archive. Object
