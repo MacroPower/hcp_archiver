@@ -551,6 +551,36 @@ func TestSyncArchiveEvictRefusesForeignRemoteCopy(t *testing.T) {
 	assert.Equal(t, foreign, obj.Data, "the sweep never overwrites remote history at the key")
 }
 
+func TestSyncArchiveEvictDemandsRecordedDigestsBack(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t)
+
+	f.writeDone(t, tarball, []byte("proven tarball bytes"))
+
+	// The store accepts the upload but does not persist its recorded digests
+	// (a metadata-dropping S3-compatible endpoint). The confirm just recorded
+	// them one call earlier, so it must demand them back rather than let the
+	// custody transfer of the archive's only copy gate on size alone.
+	f.fake.HeadHook = func(context.Context) {
+		obj, ok := f.fake.Object(f.key(tarball))
+		if ok {
+			obj.Metadata = nil
+			obj.MD5 = nil
+			f.fake.SetObject(f.key(tarball), obj)
+		}
+	}
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Equal(t, 1, stats.Failed)
+	assert.Zero(t, stats.Evicted)
+	assert.True(t, f.exists(t, tarball),
+		"a digestless confirm keeps the local file canonical")
+}
+
 func TestSyncArchiveEvictDigestMatchSkipsReupload(t *testing.T) {
 	t.Parallel()
 

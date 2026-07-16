@@ -172,6 +172,18 @@ func (e *Env) offloadFile(ctx context.Context, relPath string) error {
 			return fmt.Errorf("confirm remote copy: %w", err)
 		}
 
+		// The upload one call earlier recorded both digests as object
+		// metadata, so this confirm demands them back before the local copy
+		// is released: a store that silently dropped them would otherwise
+		// gate the custody transfer of the archive's only copy on size
+		// alone. Only a pre-existing object (an older build's upload, found
+		// by the probe) is allowed to gate on whatever it carries.
+		if info.SHA256 == "" && len(info.MD5) == 0 {
+			return fmt.Errorf(
+				"%w: %q returned none of the digests its upload recorded (the store drops object metadata)",
+				ErrRemoteCopyMismatch, key)
+		}
+
 		e.logger.LogAttrs(ctx, slog.LevelInfo, "offload_uploaded",
 			slog.String("key", key),
 			slog.Int64("bytes", local.Size()),
