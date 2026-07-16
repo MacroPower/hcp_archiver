@@ -3,7 +3,9 @@ package collect_test
 import (
 	"context"
 	"log/slog"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,6 +14,7 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/remote/remotetest"
+	"go.jacobcolvin.com/hcp_archiver/seal"
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
@@ -203,6 +206,171 @@ func TestSyncArchiveClassification(t *testing.T) {
 			assert.Zero(t, stats.Failed)
 		})
 	}
+}
+
+// TestSyncArchiveMirrorsEveryMeaningfulFile is the mirror's completeness
+// contract: after a settled tree's sweep, the remote holds every file with
+// meaning outside this tool — one representative per store path builder, the
+// evicted cold surfaces, the remote marker, the ledger snapshots — and nothing
+// tool-internal (staging temps, the flock target, the replay logs).
+//
+// The seeds pass through the store's real path builders, and a reflection
+// sweep over [*store.Store] requires each builder to appear in a seed (or in
+// the documented non-path exemptions), so a new archive surface cannot land
+// without deciding its mirror fate here.
+func TestSyncArchiveMirrorsEveryMeaningfulFile(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	st := f.store
+
+	const (
+		project = "prod"
+		ws      = "api"
+		stack   = "net"
+	)
+
+	svCreated := time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC)
+
+	covered := make(map[string]struct{})
+
+	var mirrored []string
+
+	// Each seed writes one representative file at relPath and credits the
+	// store builders that shaped it toward the completeness sweep below.
+	seed := func(relPath string, builders ...string) string {
+		f.write(t, relPath, []byte("payload for "+relPath))
+
+		mirrored = append(mirrored, relPath)
+
+		for _, b := range builders {
+			covered[b] = struct{}{}
+		}
+
+		return relPath
+	}
+
+	// Org-level surfaces.
+	seed(st.Org(), "Org")
+	seed(st.Memberships(), "Memberships")
+	seed(st.User("user-1"), "User")
+	seed(st.GitHubAppInstallations(), "GitHubAppInstallations")
+	seed(st.RunTasks(), "RunTasks")
+	seed(st.TokenTTLPolicies(), "TokenTTLPolicies")
+	seed(st.ReservedTagKeys(), "ReservedTagKeys")
+	seed(st.TeamFile("team-1", "team.json"), "TeamFile")
+	seed(st.OAuthClientFile("oc-1", "oauth-client.json"), "OAuthClientFile")
+	seed(st.OAuthTokenFile("oc-1", "ot-1"), "OAuthTokenFile")
+	seed(st.VariableSetFile("varset-1", "variable-set.json"), "VariableSetFile")
+	seed(st.PolicySetFile("polset-1", "policy-set.json"), "PolicySetFile")
+	seed(st.Policy("pol-1", "json"), "Policy")
+	seed(st.Policy("pol-1", "sentinel"))
+	seed(st.AgentPool("apool-1"), "AgentPool")
+	seed(st.AuditTrailFile("config.json"), "AuditTrailFile")
+	seed(st.Join(st.AuditTrailDir(), "page-0001.json"), "AuditTrailDir", "Join")
+	seed(st.HYOKConfigurationFile("hyokc-1", "hyok-configuration.json"), "HYOKConfigurationFile")
+	seed(st.HYOKKeyVersionFile("hyokc-1", "keyv-1"), "HYOKKeyVersionFile")
+
+	// The private registry.
+	seed(st.RegistryModuleFile("ns", "vpc", "aws", "module.json"), "RegistryModuleFile")
+	seed(st.RegistryNoCodeModule("nocode-1"), "RegistryNoCodeModule")
+	seed(st.RegistryNoCodeModuleVariables("nocode-1"), "RegistryNoCodeModuleVariables")
+	seed(st.RegistryProviderFile("ns", "custom", "provider.json"), "RegistryProviderFile")
+	seed(st.RegistryGPGKey("ns", "key-1"), "RegistryGPGKey")
+
+	// Projects, workspaces, and their run and state history.
+	seed(st.ProjectFile(project, "project.json"), "ProjectFile", "ProjectDir")
+	seed(st.WorkspaceFile(project, ws, "workspace.json"), "WorkspaceFile", "WorkspaceDir")
+	seed(st.WorkspaceFile(project, ws, "readme.md"))
+	seed(st.StateVersionFile(project, ws, svCreated, "sv-1", "tfstate.json"),
+		"StateVersionFile", "StateVersionStem", "StateVersionDir")
+	seed(st.RunFile(project, ws, "run-1", "run.json"), "RunFile", "RunDir")
+	seed(st.RunFile(project, ws, "run-1", "plan.log"))
+	seed(st.Join(st.RollupDir(project, ws), "runs.ndjson"), "RollupDir")
+
+	// Stacks, down to the per-step artifacts.
+	seed(st.StackFile(project, stack, "stack.json"), "StackFile", "StackDir")
+	seed(st.StackConfigurationFile(project, stack, "sc-1", "configuration.json"),
+		"StackConfigurationFile")
+	seed(st.StackDeploymentGroupFile(project, stack, "sc-1", "sdg-1", "group.json"),
+		"StackDeploymentGroupFile", "StackDeploymentGroupDir")
+	seed(st.StackRunFile(project, stack, "sc-1", "sdg-1", "sr-1", "run.json"), "StackRunFile")
+	seed(st.StackStepFile(project, stack, "sc-1", "sdg-1", "sr-1", "step-1", "plan.json"),
+		"StackStepFile")
+	seed(st.StackDeploymentFile(project, stack, "production", "deployment.json"),
+		"StackDeploymentFile")
+	seed(st.StackStateFile(project, stack, "production", "42"), "StackStateFile")
+
+	// The cold surfaces reach the remote by eviction rather than sync: a
+	// sealed bundle proven by its sidecar (the sidecar itself syncs), and a
+	// configuration-version tarball proven by its done ledger entry.
+	bundleZip := seed(st.Join(st.BundleDir(project, ws), "logs.gen0001.zip"), "BundleDir")
+	seed(bundleZip + seal.SidecarSuffix)
+
+	tarball := st.ConfigVersionTarball("cv-1")
+	f.writeDone(t, tarball, []byte("payload for "+tarball))
+
+	mirrored = append(mirrored, tarball)
+	covered["ConfigVersionTarball"] = struct{}{}
+
+	// Files written outside the store's builders that still matter beyond this
+	// tool: the marker a viewer needs to reach offloaded bundles, and the
+	// ledger snapshots recording what proved each artifact.
+	seed(remote.MarkerName)
+	seed(manifest.LedgerDirName + "/snapshot.json")
+	seed(st.Join(st.WorkspaceDir(project, ws), manifest.LedgerDirName, "snapshot.json"))
+
+	// Tool-internal files carry no meaning outside this tool and stay off the
+	// mirror: staging temps a crash left behind and the per-shard replay logs.
+	// The org-root flock target is already on disk from the fixture's
+	// manifest.Load, so the sweep sees all three exclusion shapes.
+	f.write(t, "projects/.atomicfile-crash.tmp", []byte("partial write"))
+	f.write(t, manifest.LedgerDirName+"/"+manifest.LogFileName, []byte("{}"))
+	f.write(t, st.Join(st.WorkspaceDir(project, ws), manifest.LedgerDirName, manifest.LogFileName),
+		[]byte("{}"))
+
+	// The completeness sweep: every exported store method either shaped a seed
+	// above or is exempt as a non-path helper.
+	notPathBuilders := map[string]struct{}{
+		"Root":           {}, // absolute filesystem accessor
+		"AbsPath":        {}, // relative-to-absolute translation
+		"Exists":         {}, // filesystem query
+		"WriteJSON":      {}, // writer, not a path builder
+		"WriteJSONBytes": {}, // writer, not a path builder
+		"WriteBytes":     {}, // writer, not a path builder
+		"WriteReader":    {}, // writer, not a path builder
+	}
+
+	for method := range reflect.TypeFor[*store.Store]().Methods() {
+		name := method.Name
+
+		if _, exempt := notPathBuilders[name]; exempt {
+			continue
+		}
+
+		_, ok := covered[name]
+		assert.True(t, ok,
+			"store method %s shapes archive paths this inventory never seeds;"+
+				" add a seed for its files or a documented exemption", name)
+	}
+
+	stats := f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+
+	for _, relPath := range mirrored {
+		_, ok := f.fake.Object(f.key(relPath))
+		assert.True(t, ok, "meaningful file %s must be mirrored to the remote", relPath)
+	}
+
+	// Presence of every mirrored path plus this length check pins the remote
+	// key set exactly: nothing internal leaked.
+	assert.Len(t, f.fake.Keys(), len(mirrored),
+		"the remote must hold exactly the meaningful files")
+
+	assert.Equal(t, 2, stats.Evicted, "the bundle zip and the proven tarball evict")
+	assert.Equal(t, len(mirrored)-2, stats.Uploaded, "everything else syncs in place")
+	assert.False(t, f.exists(t, bundleZip), "an evicted bundle leaves disk")
+	assert.False(t, f.exists(t, tarball), "an evicted tarball leaves disk")
 }
 
 func TestSyncArchiveIncrementalGate(t *testing.T) {
