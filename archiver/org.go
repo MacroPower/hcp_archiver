@@ -72,7 +72,10 @@ func listOrgNames(ctx context.Context, client *tfeclient.Client) ([]string, erro
 // child context, drives the collectors with the parent ctx so an interrupt
 // cancels the work, and then closes the run: it writes the run record, stops
 // the goroutines, flushes the ledger a final time, and prints the summary.
-func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, error) {
+//
+// The int result is how many files the close sweep failed to mirror, so the
+// caller sees the sweep's outcome alongside the tally.
+func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, int, error) {
 	st := store.New(filepath.Join(a.cfg.OutputDir, orgName))
 	envOpts := []collect.Option{collect.WithLogger(a.logger)}
 
@@ -83,9 +86,9 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 
 		// The marker is written before any collector runs so even an archive
 		// interrupted mid-run records where its evicted bundles live.
-		err := a.writeRemoteMarker(st)
-		if err != nil {
-			return manifest.Tally{}, err
+		markerErr := a.writeRemoteMarker(st)
+		if markerErr != nil {
+			return manifest.Tally{}, 0, markerErr
 		}
 	}
 
@@ -94,7 +97,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 		manifest.WithRetryAbsent(a.cfg.RetryAbsent),
 	)
 	if err != nil {
-		return manifest.Tally{}, fmt.Errorf("load manifest: %w", err)
+		return manifest.Tally{}, 0, fmt.Errorf("load manifest: %w", err)
 	}
 
 	env := collect.NewEnv(a.client, st, ledger, envOpts...)
@@ -135,53 +138,70 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 		a.flushLoop(orgCtx, orgName, ledger)
 	}()
 
-	defer func() {
-		ledger.FinishRun()
-		cancelOrg()
-		wg.Wait()
+	// The closeRun function below settles the organization's run exactly
+	// once, recording how many files the close sweep failed to mirror. It is
+	// called explicitly on the normal path so its outcome reaches the caller,
+	// and deferred for the panic path so an unwinding run still flushes and
+	// releases the ledger; the sync.Once keeps the two from running it twice.
+	var (
+		closeOnce  sync.Once
+		syncFailed int
+	)
 
-		ferr := ledger.Flush()
-		if ferr != nil {
-			a.logFlushError(ctx, orgName, ferr)
-		}
+	closeRun := func() {
+		closeOnce.Do(func() {
+			ledger.FinishRun()
+			cancelOrg()
+			wg.Wait()
 
-		a.logFailures(ctx, orgName, ledger)
-		a.logDroppedSurfaces(ctx, orgName, ledger)
+			ferr := ledger.Flush()
+			if ferr != nil {
+				a.logFlushError(ctx, orgName, ferr)
+			}
 
-		// The close sweep runs after the final flush above, so every touched
-		// shard is compacted (its durable form is the snapshot the sweep
-		// mirrors), and before Close below, so the cross-process flock still
-		// guards the tree. An interrupted run skips it; the next run sweeps.
-		a.syncOrg(ctx, env, orgName)
+			a.logFailures(ctx, orgName, ledger)
+			a.logDroppedSurfaces(ctx, orgName, ledger)
 
-		serr := reporter.Summary()
-		if serr != nil {
-			a.logger.LogAttrs(ctx, slog.LevelWarn, "progress_summary_error",
-				slog.String("org", orgName),
-				slog.String("error", serr.Error()),
-			)
-		}
+			// The close sweep runs after the final flush above, so every touched
+			// shard is compacted (its durable form is the snapshot the sweep
+			// mirrors), and before Close below, so the cross-process flock still
+			// guards the tree. An interrupted run skips it; the next run sweeps.
+			syncFailed = a.syncOrg(ctx, env, orgName).Failed
 
-		// Release the org's cross-process ledger lock last, after the final
-		// flush above, so no other process can open the root while this run's
-		// unflushed state is still in memory.
-		cerr := ledger.Close()
-		if cerr != nil {
-			a.logger.LogAttrs(ctx, slog.LevelWarn, "manifest_close_error",
-				slog.String("org", orgName),
-				slog.String("error", cerr.Error()),
-			)
-		}
-	}()
+			serr := reporter.Summary()
+			if serr != nil {
+				a.logger.LogAttrs(ctx, slog.LevelWarn, "progress_summary_error",
+					slog.String("org", orgName),
+					slog.String("error", serr.Error()),
+				)
+			}
 
-	// Capture the final per-status counts before the deferred close runs; the
-	// collectors are done once collectOrg returns, so the tally is settled. Run
-	// uses it to tell an organization that captured nothing but failures from a
-	// clean one, since the collectors record per-object failures in the ledger
-	// and return non-nil only on cancellation.
+			// Release the org's cross-process ledger lock last, after the final
+			// flush above, so no other process can open the root while this run's
+			// unflushed state is still in memory.
+			cerr := ledger.Close()
+			if cerr != nil {
+				a.logger.LogAttrs(ctx, slog.LevelWarn, "manifest_close_error",
+					slog.String("org", orgName),
+					slog.String("error", cerr.Error()),
+				)
+			}
+		})
+	}
+
+	defer closeRun()
+
+	// Capture the final per-status counts before the close runs; the
+	// collectors are done once collectOrg returns, so the tally is settled.
+	// Run uses it to tell an organization that captured nothing but failures
+	// from a clean one, since the collectors record per-object failures in
+	// the ledger and return non-nil only on cancellation.
 	collectErr := a.collectOrg(ctx, env, reporter, orgName)
+	tally := ledger.Tally()
 
-	return ledger.Tally(), collectErr
+	closeRun()
+
+	return tally, syncFailed, collectErr
 }
 
 // orgIncomplete is the one predicate deciding whether an organization's run

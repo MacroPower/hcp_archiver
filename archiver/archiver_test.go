@@ -276,14 +276,17 @@ func TestSyncOrgCanceledContextSkipsSweep(t *testing.T) {
 	assert.NotContains(t, buf.String(), "remote_sync_complete")
 }
 
-func TestSyncOrgFailureWarnsOnly(t *testing.T) {
+func TestSyncOrgFailureWarnsAndReportsFailed(t *testing.T) {
 	t.Parallel()
 
 	buf := &bytes.Buffer{}
 	a, env, fake := newSyncOrgFixture(t, buf)
 	fake.PutErr = assert.AnError
 
-	archiver.SyncOrg(a, t.Context(), env, "acme")
+	stats := archiver.SyncOrg(a, t.Context(), env, "acme")
+
+	assert.Equal(t, 1, stats.Failed,
+		"the sweep's failures come back to the run loop, which marks the run incomplete")
 
 	out := buf.String()
 	assert.Contains(t, out, "remote_sync_complete")

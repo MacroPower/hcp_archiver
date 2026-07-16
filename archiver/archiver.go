@@ -33,11 +33,13 @@ const defaultConcurrency = collect.DefaultConcurrency
 
 var (
 	// ErrRunIncomplete reports that the run finished without archiving every
-	// organization: at least one returned a non-cancellation error or recorded
-	// only failures with nothing captured. The per-organization and per-object
-	// details are logged as the run proceeds; this sentinel lets the command exit
-	// non-zero so a scheduled run does not report success over an empty or broken
-	// archive.
+	// organization or without mirroring every file: at least one organization
+	// returned a non-cancellation error, recorded only failures with nothing
+	// captured, dropped an enumeration surface, or closed with remote sync
+	// failures leaving the mirror behind the local archive. The
+	// per-organization and per-object details are logged as the run proceeds;
+	// this sentinel lets the command exit non-zero so a scheduled run does not
+	// report success over an empty, broken, or under-mirrored archive.
 	ErrRunIncomplete = errors.New("archive run incomplete")
 
 	// ErrNoOrganizations reports that auto-discovery resolved no organizations to
@@ -185,7 +187,10 @@ func New(cfg *config.Config, opts ...Option) *Archiver {
 // the others, but leaves the run incomplete; a cancellation aborts the run and
 // is returned wrapped so the command can map it to a graceful exit. Run
 // returns nil on clean completion and [ErrRunIncomplete] when any organization
-// returned a non-cancellation error or captured nothing but failures.
+// returned a non-cancellation error, captured nothing but failures, or closed
+// with remote sync failures (the mirror is the long-term record, so a run
+// that leaves it knowingly behind must not exit clean; the next run's sweep
+// self-heals the gap).
 func (a *Archiver) Run(ctx context.Context) error {
 	err := a.cfg.Validate()
 	if err != nil {
@@ -266,7 +271,7 @@ func (a *Archiver) Run(ctx context.Context) error {
 			slog.String("org", orgName),
 		)
 
-		tally, err := a.runOrg(runCtx, orgName)
+		tally, syncFailed, err := a.runOrg(runCtx, orgName)
 		if err != nil {
 			if runCtx.Err() != nil {
 				return fmt.Errorf("archive run: %w", runCtx.Err())
@@ -282,12 +287,17 @@ func (a *Archiver) Run(ctx context.Context) error {
 			continue
 		}
 
-		if orgIncomplete(tally) {
+		// The mirror check sits beside orgIncomplete rather than inside it:
+		// the tally describes what the collectors captured, while syncFailed
+		// describes whether the close sweep got all of it mirrored — a
+		// different failure with the same consequence for a scheduled run.
+		if orgIncomplete(tally) || syncFailed > 0 {
 			a.logger.LogAttrs(runCtx, slog.LevelError, "org_archive_incomplete",
 				slog.String("org", orgName),
 				slog.Int("errored", tally.Errored),
 				slog.Int("forbidden", tally.Forbidden),
 				slog.Int("surfaces_dropped", tally.SurfacesDropped),
+				slog.Int("sync_failed", syncFailed),
 			)
 
 			incomplete = true

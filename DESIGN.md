@@ -646,7 +646,12 @@ computed in a first pass and recorded as object metadata, so even a parted
 upload (which records no backend digest) keeps the incremental gate
 content-aware rather than size-only. Per-file
 failures warn and count, never abort: local stays canonical and the next run
-re-sweeps, and sync failures never affect the run's exit code.
+re-sweeps. But because the mirror is the archive's long-term record, a close
+sweep that failed files marks the whole run incomplete (non-zero exit, like
+a dropped surface), so a scheduled run surfaces a mirror that is knowingly
+behind instead of reporting success over it; no cross-run state is persisted
+for this — the next run's sweep re-derives the gap from the store itself and
+self-heals.
 
 After the uploads, a **prune** step makes the mirror true: every inventory key
 the walk saw no local file for is deleted in a bounded fan-out, except the
