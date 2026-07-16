@@ -1138,19 +1138,30 @@ const pruneGuardFloor = 100
 // index proving a remote-only zip's members, so a local subtree loss must
 // not cascade into deleting the proof for bytes only the bucket still holds.
 //
-// Two guards refuse the whole prune, each the fingerprint of a local tree
-// that is not the tree the mirror mirrors — where "nothing local backs it"
-// means loss, not deletion — and each counts a failure so the run exits
+// Two guards refuse pruning, each the fingerprint of a local tree that is
+// not the tree the mirror mirrors — where "nothing local backs it" means
+// loss, not deletion — and each counts a failure so the run exits
 // incomplete rather than reporting a clean mirror it knowingly diverged
 // from:
 //
 //   - a run whose ledger opened empty against a non-empty inventory is a
 //     fresh or wrong --output pointed at an existing mirror; restore the
 //     prefix (ledger included) before re-rooting an archive, or the
-//     mirror-only history would be deleted wholesale;
-//   - a delete set past [pruneGuardFloor] that outnumbers the keys the walk
-//     matched means the sweep is about to remove most of the mirror, which
-//     no steady-state re-shape produces.
+//     mirror-only history would be deleted wholesale. This refuses the
+//     whole prune.
+//   - a delete set of **ledger-unknown** keys past [pruneGuardFloor] that
+//     outnumbers the keys the walk matched means most of the mirror has no
+//     local trace at all — loss, or a deliberate mass deletion that must be
+//     an explicit act. This refuses only the unknown keys.
+//
+// Provenance splits the stale set for that second guard: a key whose
+// relpath the ledger still holds an entry for is a re-shape artifact, not a
+// loss — the archive still owns the object; its loose remote copy went
+// stale because a seal coalesced or bundled it (the tool's own self-heal
+// after an interrupted run produces thousands of these at once) — so known
+// keys prune freely at any scale, and only keys the ledger has never heard
+// of (a deleted or lost subtree took its shard too) face the disproportion
+// test.
 func (e *Env) pruneRemote(
 	ctx context.Context,
 	orgPrefix string,
@@ -1159,8 +1170,9 @@ func (e *Env) pruneRemote(
 	counters *syncCounters,
 ) {
 	var (
-		stale   []string
-		matched int
+		staleKnown   []string
+		staleUnknown []string
+		matched      int
 	)
 
 	for key := range inventory {
@@ -1175,16 +1187,20 @@ func (e *Env) pruneRemote(
 			continue
 		}
 
-		stale = append(stale, key)
+		if _, known := e.ledger.Entry(relPath); known {
+			staleKnown = append(staleKnown, key)
+		} else {
+			staleUnknown = append(staleUnknown, key)
+		}
 	}
 
-	if len(stale) == 0 {
+	if len(staleKnown)+len(staleUnknown) == 0 {
 		return
 	}
 
 	if !e.ledger.Tally().Resumed {
 		e.logger.LogAttrs(ctx, slog.LevelError, "sync_prune_refused",
-			slog.Int("keys", len(stale)),
+			slog.Int("keys", len(staleKnown)+len(staleUnknown)),
 			slog.String("detail", "this run opened an empty ledger against a non-empty mirror; "+
 				"a fresh --output must not prune an existing mirror's history — restore the "+
 				"remote prefix locally (ledger included) before re-rooting the archive"),
@@ -1194,16 +1210,25 @@ func (e *Env) pruneRemote(
 		return
 	}
 
-	if len(stale) > pruneGuardFloor && len(stale) > matched {
+	stale := staleKnown
+
+	switch {
+	case len(staleUnknown) > pruneGuardFloor && len(staleUnknown) > matched:
 		e.logger.LogAttrs(ctx, slog.LevelError, "sync_prune_refused",
-			slog.Int("keys", len(stale)),
+			slog.Int("keys", len(staleUnknown)),
 			slog.Int("matched", matched),
-			slog.String("detail", "the delete set outnumbers the mirror keys backed by local files; "+
-				"refusing a mass deletion of the mirror — if the local tree is incomplete, restore "+
-				"it from the remote prefix first"),
+			slog.String("detail", "most of the mirror has no local trace (not even a ledger entry); "+
+				"refusing a mass deletion — if the local tree is incomplete, restore it from the "+
+				"remote prefix; if this is a deliberate mass deletion, remove the keys from the "+
+				"bucket by hand"),
 		)
 		counters.failed.Add(1)
 
+	default:
+		stale = append(stale, staleUnknown...)
+	}
+
+	if len(stale) == 0 {
 		return
 	}
 

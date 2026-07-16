@@ -779,15 +779,24 @@ of files later sealed into other forms: a restored stale
 prefer loose. For the search layer the consequence is deliberate and
 mirrors the ledger's stance: deleting a subtree locally forgets it remotely
 on the next run — where "deleting" means a deliberate act on a live
-archive, which two guards distinguish from loss. A run that opened an
-empty ledger against a non-empty mirror is a fresh or wrong `--output`
-pointed at an existing archive, and a delete set past a floor (100 keys)
-that outnumbers the walk-matched keys is a mass deletion no steady-state
-re-shape produces; either refuses the whole prune, logs the operator's way
-out (restore the prefix — ledger included — before re-rooting an archive),
-and counts a sweep failure so the run exits incomplete rather than
-quietly diverging the mirror. Every key a proceeding prune deletes is
-logged, so a deletion is auditable rather than visible only as a count.
+archive, which two guards distinguish from loss, and provenance
+distinguishes both from the tool's own re-shapes. A stale key whose
+relpath the ledger still holds an entry for is a re-shape artifact — the
+archive owns the object; its loose remote copy went stale because a seal
+coalesced or bundled it, and the self-heal after an interrupted run
+legitimately produces thousands at once — so ledger-known keys prune
+freely at any scale. The guards then cover what the ledger has never
+heard of: a run that opened an empty ledger against a non-empty mirror is
+a fresh or wrong `--output` pointed at an existing archive and refuses
+the whole prune (restore the prefix — ledger included — before re-rooting
+an archive); and a ledger-unknown delete set past a floor (100 keys) that
+outnumbers the walk-matched keys means most of the mirror has no local
+trace at all — loss, or a mass deletion that must be an explicit act —
+and refuses just those keys, naming both ways out (restore the prefix, or
+remove the keys from the bucket by hand). Either refusal counts a sweep
+failure so the run exits incomplete rather than quietly diverging the
+mirror. Every key a proceeding prune deletes is logged, so a deletion is
+auditable rather than visible only as a count.
 Bucket versioning (or Object Lock) is the recommended backstop either way:
 it turns any surprising prune or overwrite into a recoverable event.
 

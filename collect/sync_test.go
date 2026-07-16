@@ -908,6 +908,33 @@ func TestSyncArchivePruneRefusesMassDeletion(t *testing.T) {
 	assert.Equal(t, 1, stats.Failed, "a refused prune must mark the run incomplete")
 }
 
+func TestSyncArchivePruneAllowsMassReshape(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	// The tool's own self-heal produces a mass re-shape: an interrupted run
+	// mirrored hundreds of loose run files, the next run sealed them all into
+	// roll-ups and bundles. The ledger still holds every entry — the archive
+	// owns the objects; only their loose remote copies are stale — so the
+	// disproportion guard must not mistake the re-shape for loss, or the
+	// refusal would repeat every run forever on a healthy archive.
+	for i := range 150 {
+		relPath := fmt.Sprintf("projects/p/workspaces/w/runs/run-%03d/run.json", i)
+		f.fake.SetObject(f.key(relPath), remotetest.Object{Data: []byte("loose copy")})
+		f.ledger.RecordDone(relPath, manifest.SignatureOf([]byte("loose copy")))
+	}
+
+	f.write(t, "org.json", []byte(`{"org":"acme"}`))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Equal(t, 150, stats.Pruned,
+		"ledger-known stale keys are re-shape artifacts and prune freely at any scale")
+	assert.Zero(t, stats.Failed)
+}
+
 func TestSyncArchivePruneExemptsBundleSidecars(t *testing.T) {
 	t.Parallel()
 
