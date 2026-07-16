@@ -334,7 +334,17 @@ Notes:
     artifacts (logs, plan json, state blobs, tarballs) are never re-fetched. A
     known but still-non-terminal run is revisited so its mutable tail (status
     flips from `planning` to `applied`, late comments) is refreshed until it
-    reaches a terminal state, then frozen. Audit-trail pages are the one variant:
+    reaches a terminal state, then frozen. The early stop is fenced against
+    interruption: a walk records the collection unsettled before archiving its
+    first not-already-frozen element and re-settles it only once its work
+    finished (the true end of the listing, or an early stop whose new prefix
+    archived clean), and the ledger drains that withdrawal ahead of the entry
+    records it guards in the shard log. A re-walk killed mid-delta — even mid-
+    flush — therefore cannot leave freshly frozen entries above elements it
+    never listed with the settled flag still standing (an unlisted element
+    leaves no ledger record for the unsettled-child scan to find, so the flag
+    is the only guard); the next run re-pages the collection once and re-earns
+    the flag. Audit-trail pages are the one variant:
     they carry no per-entry id to stop at, so their high-water mark is a `Since`
     time cursor and the re-run walks forward from it, not newest-first (see the
     Audit collector).

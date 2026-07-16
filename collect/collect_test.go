@@ -704,6 +704,153 @@ func TestWalkEarlyStopsWhenFullySettled(t *testing.T) {
 	assert.Equal(t, 1, pagesRequested, "the walk halts before requesting a second page")
 
 	assert.Equal(t, r3.createdAt, ledger.HighWaterMark("runs"), "the mark advances to the newest element seen")
+
+	assert.True(t, ledger.IsCollectionSettled("runs"),
+		"a boundary-only refresh mutates nothing and leaves settlement in place")
+}
+
+func TestWalkInterruptedRewalkUnsettles(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
+
+	// A settled collection gains new elements, and the re-walk archiving them
+	// aborts before listing them all: page 1's element lands as a frozen done
+	// entry, but the older new element is never listed and leaves no ledger
+	// record. Were the stale settled flag to survive, the next run's early
+	// stop would halt at the page-1 element and strand the unlisted one
+	// forever — a silent permanent gap the seal and the remote mirror would
+	// then enshrine as complete history.
+	r4 := walkItem{relPath: "runs/r4/run.json", createdAt: base.Add(4 * time.Hour), terminal: true}
+	r3 := walkItem{relPath: "runs/r3/run.json", createdAt: base.Add(3 * time.Hour), terminal: true}
+	r2 := walkItem{relPath: "runs/r2/run.json", createdAt: base.Add(2 * time.Hour), terminal: true}
+	r1 := walkItem{relPath: "runs/r1/run.json", createdAt: base.Add(1 * time.Hour), terminal: true}
+
+	env, _, ledger := newEnv(t)
+
+	for _, it := range []walkItem{r2, r1} {
+		ledger.RecordDone(it.relPath, manifest.Signature{Hash: "prior", Size: 1})
+	}
+
+	ledger.MarkCollectionComplete("runs")
+	ledger.SetCollectionSettled("runs", true)
+
+	var mu sync.Mutex
+
+	archived := map[string]int{}
+
+	describe := func(it walkItem) collect.Item {
+		return collect.Item{
+			RelPath:   it.relPath,
+			CreatedAt: it.createdAt,
+			Terminal:  it.terminal,
+			Archive: func(ctx context.Context) error {
+				return env.Mutable(ctx, it.relPath, func(_ context.Context) (any, error) {
+					mu.Lock()
+
+					archived[it.relPath]++
+
+					mu.Unlock()
+
+					return cannedProject(), nil
+				})
+			},
+		}
+	}
+
+	// The interrupted re-walk: page 1 archives r4, page 2's fetch fails.
+	interrupted := func(_ context.Context, page int) ([]walkItem, bool, error) {
+		if page == 1 {
+			return []walkItem{r4}, true, nil
+		}
+
+		return nil, false, errors.New("listing failed")
+	}
+
+	err := collect.Walk(t.Context(), env, "runs", interrupted, describe)
+	require.Error(t, err)
+
+	assert.Equal(t, 1, archived[r4.relPath], "the interrupted walk archived the page-1 element")
+	assert.False(t, ledger.IsCollectionSettled("runs"),
+		"an interrupted mutation withdraws settlement before the next run can early-stop over the gap")
+
+	// The next run must page past r4's frozen boundary and reach the element
+	// the interruption stranded.
+	full := func(_ context.Context, page int) ([]walkItem, bool, error) {
+		if page == 1 {
+			return []walkItem{r4, r3, r2, r1}, false, nil
+		}
+
+		return nil, false, nil
+	}
+
+	require.NoError(t, collect.Walk(t.Context(), env, "runs", full, describe))
+
+	assert.Equal(t, 1, archived[r3.relPath], "the stranded element is archived by the next full walk")
+	assert.True(t, ledger.IsCollectionSettled("runs"), "the completed walk re-earns settlement")
+}
+
+func TestWalkEarlyStopResettlesAfterDelta(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
+
+	// A settled collection with one new terminal element: the walk withdraws
+	// settlement to archive it, stops at the frozen boundary below, and must
+	// re-earn the flag — otherwise every delta would force the next run to
+	// re-page the whole collection, forfeiting the incremental optimization.
+	r3 := walkItem{relPath: "runs/r3/run.json", createdAt: base.Add(3 * time.Hour), terminal: true}
+	r2 := walkItem{relPath: "runs/r2/run.json", createdAt: base.Add(2 * time.Hour), terminal: true}
+	r1 := walkItem{relPath: "runs/r1/run.json", createdAt: base.Add(1 * time.Hour), terminal: true}
+
+	env, _, ledger := newEnv(t)
+
+	for _, it := range []walkItem{r2, r1} {
+		ledger.RecordDone(it.relPath, manifest.Signature{Hash: "prior", Size: 1})
+	}
+
+	ledger.MarkCollectionComplete("runs")
+	ledger.SetCollectionSettled("runs", true)
+
+	var mu sync.Mutex
+
+	archived := map[string]int{}
+
+	pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
+		if page == 1 {
+			return []walkItem{r3, r2, r1}, false, nil
+		}
+
+		return nil, false, nil
+	}
+
+	describe := func(it walkItem) collect.Item {
+		return collect.Item{
+			RelPath:   it.relPath,
+			CreatedAt: it.createdAt,
+			Terminal:  it.terminal,
+			Archive: func(ctx context.Context) error {
+				return env.Mutable(ctx, it.relPath, func(_ context.Context) (any, error) {
+					mu.Lock()
+
+					archived[it.relPath]++
+
+					mu.Unlock()
+
+					return cannedProject(), nil
+				})
+			},
+		}
+	}
+
+	require.NoError(t, collect.Walk(t.Context(), env, "runs", pager, describe))
+
+	assert.Equal(t, 1, archived[r3.relPath], "the new element is archived")
+	assert.Equal(t, 1, archived[r2.relPath], "the frozen boundary gets its final refresh")
+	assert.NotContains(t, archived, r1.relPath, "settled history below the boundary is not re-touched")
+
+	assert.True(t, ledger.IsCollectionSettled("runs"),
+		"an early stop that archived its delta clean re-earns settlement")
 }
 
 func TestWalkRetryAbsentPiercesEarlyStop(t *testing.T) {

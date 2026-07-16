@@ -161,6 +161,19 @@ func WithHistoryLimit(count int, oldest time.Time) WalkOption {
 // every pass. On the final page it records both completion and whether this walk
 // settled the collection.
 //
+// Settlement is withdrawn before it is re-earned: the walk records the
+// collection unsettled before archiving its first not-already-frozen element,
+// and records it settled again only on the paths that finished the walk's work
+// (the true end of the listing, or an early stop whose new prefix archived
+// clean). An interrupted re-walk of a settled collection — a failed page
+// fetch, a cancellation, a kill — therefore leaves the flag false, and the
+// next run pages past the interrupted walk's new entries instead of
+// early-stopping above elements it never listed; those elements leave no
+// ledger record at all, so the flag is the only guard. The ledger orders the
+// false record ahead of the entries it guards in the shard log (see
+// [manifest.Ledger.SetCollectionSettled]), so no crash point persists the
+// entries without it.
+//
 // The errored-child gate scans the shard owning key, so it works directly for a
 // collection whose key is a path prefix of its entries; a collection cursored by
 // a synthetic id (a stack walk) passes the real archive prefix through
@@ -205,6 +218,7 @@ func Walk[T any](
 
 	sawNonTerminal := false
 	outOfBounds := false
+	unsettled := false
 	listedCount := 0
 
 	for pageNum := 1; ; pageNum++ {
@@ -220,6 +234,7 @@ func Walk[T any](
 		// gets its final refresh.
 		include := make([]Item, 0, len(items))
 		stopped := false
+		pageMutates := false
 
 		for _, listed := range items {
 			item := describe(listed)
@@ -241,6 +256,10 @@ func Walk[T any](
 
 			include = append(include, item)
 
+			if !frozen {
+				pageMutates = true
+			}
+
 			if !item.Terminal {
 				sawNonTerminal = true
 			}
@@ -251,6 +270,20 @@ func Walk[T any](
 				break
 			}
 		}
+
+		// A page about to record its first not-already-frozen element unsettles
+		// the collection first, so an abort at any later point — a failed page
+		// fetch, a cancellation, a kill mid-flush — leaves the flag false and
+		// the next run pages past the new entries instead of early-stopping
+		// above elements this walk never listed. The stale flag is the only
+		// guard against that gap: an unlisted element leaves no ledger record
+		// for the unsettled-child scan to find. A walk whose every element was
+		// already frozen mutates no boundary and leaves the flag untouched.
+		if pageMutates && !unsettled && env.ledger.IsCollectionSettled(key) {
+			env.ledger.SetCollectionSettled(key, false)
+		}
+
+		unsettled = unsettled || pageMutates
 
 		// Archive the included elements concurrently; the elements' paths are
 		// distinct, so concurrent archives never contend on one ledger entry.
@@ -268,6 +301,17 @@ func Walk[T any](
 		}
 
 		if stopped {
+			// A stop that archived new elements re-earns the settlement it
+			// withdrew above: the boundary's history was settled (the stop was
+			// allowed at all), the new prefix is archived and saw only terminal
+			// elements (the stop requires that), and the unsettled-child scan
+			// catches any of its archives that errored. Without this the next
+			// run would re-page the whole collection after every delta.
+			if unsettled {
+				env.ledger.SetCollectionSettled(key,
+					!sawNonTerminal && !env.ledger.HasUnsettledUnder(cfg.archivePrefix))
+			}
+
 			return nil
 		}
 
