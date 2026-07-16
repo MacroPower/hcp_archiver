@@ -156,7 +156,7 @@ func (e *Env) uploadFile(ctx context.Context, absPath, key string, size int64) e
 		return fmt.Errorf("open offload source: %w", err)
 	}
 
-	uploadErr := e.remote.Upload(ctx, key, f, size)
+	uploadErr := e.remote.Upload(ctx, key, f, size, remote.Digests{})
 	closeErr := f.Close()
 
 	switch {

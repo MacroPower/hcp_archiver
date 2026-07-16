@@ -33,6 +33,9 @@ func MD5Sum(data []byte) []byte {
 
 // Object is one stored object with the metadata the fake serves.
 type Object struct {
+	// Metadata is the object's recorded key-value metadata, nil when the
+	// write carried none.
+	Metadata map[string]string
 	// Data is the object's content.
 	Data []byte
 	// MD5 is the recorded full-object digest, nil when the store recorded
@@ -63,26 +66,73 @@ var errNotFound = errors.New("object does not exist")
 type Fake struct {
 	objects map[string]Object
 
-	// PutErr fails every write at its commit.
+	// PutErr fails every write at its commit; a positive PutErrN bounds it
+	// to the first n commits, modeling a transient fault that heals.
 	PutErr error
-	// HeadErr fails every attributes read.
+	// HeadErr fails every attributes read; a positive HeadErrN bounds it to
+	// the first n reads.
 	HeadErr error
-	// ListErr fails every listing page.
+	// ListErr fails every listing page; a positive ListErrN bounds it to the
+	// first n pages.
 	ListErr error
-	// DeleteErr fails every delete.
+	// DeleteErr fails every delete; a positive DeleteErrN bounds it to the
+	// first n deletes.
 	DeleteErr error
+	// RangeErr fails every ranged read at its open; a positive RangeErrN
+	// bounds it to the first n reads.
+	RangeErr error
 	// HeadHook, when set, runs at the start of each attributes read with the
 	// call's context. A test cancels a context it controls from inside it to
 	// model a cancellation surfacing mid-flight; the read then returns the
 	// context's error instead of serving the object.
 	HeadHook func(ctx context.Context)
+	// DeleteErrKeys, when non-empty, confines DeleteErr (and DeleteErrN's
+	// budget) to the named keys, so a test can fail some of a fan-out's keys
+	// while the rest settle.
+	DeleteErrKeys []string
 
-	ranges    []Range
-	deleted   []string
-	mu        sync.Mutex
-	putCalls  int
-	headCalls int
-	listCalls int
+	ranges  []Range
+	deleted []string
+	mu      sync.Mutex
+
+	// PutErrN, HeadErrN, ListErrN, DeleteErrN, and RangeErrN bound their
+	// error's blast radius to the first n calls; zero keeps the error firing
+	// on every call.
+	PutErrN    int
+	HeadErrN   int
+	ListErrN   int
+	DeleteErrN int
+	RangeErrN  int
+
+	putCalls   int
+	headCalls  int
+	listCalls  int
+	putFails   int
+	headFails  int
+	listFails  int
+	delFails   int
+	rangeFails int
+}
+
+// takeFault reports whether an armed fault fires for this call, consuming
+// one arming from its bounded budget; a zero limit arms every call. It must
+// run under the fake's mutex.
+func takeFault(err error, fired *int, limit int) bool {
+	if err == nil {
+		return false
+	}
+
+	if limit <= 0 {
+		return true
+	}
+
+	if *fired < limit {
+		*fired++
+
+		return true
+	}
+
+	return false
 }
 
 // New creates a new [Fake] holding no objects.
@@ -196,7 +246,7 @@ func (f *Fake) Attributes(ctx context.Context, key string) (*driver.Attributes, 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if f.HeadErr != nil {
+	if takeFault(f.HeadErr, &f.headFails, f.HeadErrN) {
 		return nil, f.HeadErr
 	}
 
@@ -208,19 +258,21 @@ func (f *Fake) Attributes(ctx context.Context, key string) (*driver.Attributes, 
 	}
 
 	return &driver.Attributes{
-		Size: int64(len(obj.Data)),
-		MD5:  obj.MD5,
+		Size:     int64(len(obj.Data)),
+		MD5:      obj.MD5,
+		Metadata: maps.Clone(obj.Metadata),
 	}, nil
 }
 
 // fakeWriter accumulates one write's bytes and commits them at Close.
 type fakeWriter struct {
 	//nolint:containedctx // The driver contract aborts a write via its context.
-	ctx  context.Context
-	f    *Fake
-	key  string
-	md5  []byte
-	body bytes.Buffer
+	ctx      context.Context
+	f        *Fake
+	key      string
+	md5      []byte
+	metadata map[string]string
+	body     bytes.Buffer
 }
 
 // Write buffers p into the pending object.
@@ -241,11 +293,11 @@ func (w *fakeWriter) Close() error {
 
 	w.f.putCalls++
 
-	if w.f.PutErr != nil {
+	if takeFault(w.f.PutErr, &w.f.putFails, w.f.PutErrN) {
 		return w.f.PutErr
 	}
 
-	w.f.objects[w.key] = Object{Data: w.body.Bytes(), MD5: w.md5}
+	w.f.objects[w.key] = Object{Data: w.body.Bytes(), MD5: w.md5, Metadata: maps.Clone(w.metadata)}
 
 	return nil
 }
@@ -253,11 +305,11 @@ func (w *fakeWriter) Close() error {
 // NewTypedWriter opens a write to the object at key. The committed object
 // records an MD5 digest only when the write carries one, mirroring the real
 // backends: the client's Put digests its body, while a parted Upload records
-// none.
+// one only when its caller supplies it. Metadata rides along as given.
 func (f *Fake) NewTypedWriter(
 	ctx context.Context, key, _ string, opts *driver.WriterOptions,
 ) (driver.Writer, error) {
-	return &fakeWriter{ctx: ctx, f: f, key: key, md5: opts.ContentMD5}, nil
+	return &fakeWriter{ctx: ctx, f: f, key: key, md5: opts.ContentMD5, metadata: maps.Clone(opts.Metadata)}, nil
 }
 
 // fakeReader serves one ranged read from an object's bytes.
@@ -285,6 +337,10 @@ func (f *Fake) NewRangeReader(
 ) (driver.Reader, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if takeFault(f.RangeErr, &f.rangeFails, f.RangeErrN) {
+		return nil, f.RangeErr
+	}
 
 	obj, ok := f.objects[key]
 	if !ok {
@@ -322,7 +378,7 @@ func (f *Fake) ListPaged(_ context.Context, opts *driver.ListOptions) (*driver.L
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if f.ListErr != nil {
+	if takeFault(f.ListErr, &f.listFails, f.ListErrN) {
 		return nil, f.ListErr
 	}
 
@@ -369,7 +425,8 @@ func (f *Fake) Delete(_ context.Context, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if f.DeleteErr != nil {
+	if (len(f.DeleteErrKeys) == 0 || slices.Contains(f.DeleteErrKeys, key)) &&
+		takeFault(f.DeleteErr, &f.delFails, f.DeleteErrN) {
 		return f.DeleteErr
 	}
 

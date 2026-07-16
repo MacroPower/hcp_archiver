@@ -241,7 +241,8 @@ func newSyncOrgFixture(t *testing.T, buf *bytes.Buffer) (*archiver.Archiver, *co
 	fake := remotetest.New()
 	cfg := remote.Config{Prefix: "hcp"}
 
-	client, err := remote.New(t.Context(), cfg, remote.WithBucket(fake.Bucket()))
+	client, err := remote.New(t.Context(), cfg,
+		remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0))
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(buf, nil))

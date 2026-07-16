@@ -2,7 +2,9 @@ package remote_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"testing"
@@ -14,13 +16,35 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/remote/remotetest"
 )
 
-// newClient builds a [*remote.Client] over a fresh fake store.
+// newClient builds a [*remote.Client] over a fresh fake store with in-client
+// retrying off, so a test that injects a persistent fault observes exactly one
+// attempt; retry behavior is exercised by the tests that opt back in through
+// [newRetryClient].
 func newClient(t *testing.T, cfg remote.Config) (*remote.Client, *remotetest.Fake) {
 	t.Helper()
 
 	fake := remotetest.New()
 
-	client, err := remote.New(t.Context(), cfg, remote.WithBucket(fake.Bucket()))
+	client, err := remote.New(t.Context(), cfg,
+		remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0))
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		require.NoError(t, client.Close())
+	})
+
+	return client, fake
+}
+
+// newRetryClient builds a [*remote.Client] over a fresh fake store with the
+// given retry budget and no backoff delay.
+func newRetryClient(t *testing.T, retries int) (*remote.Client, *remotetest.Fake) {
+	t.Helper()
+
+	fake := remotetest.New()
+
+	client, err := remote.New(t.Context(), remote.Config{},
+		remote.WithBucket(fake.Bucket()), remote.WithRetry(retries, 0))
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -44,14 +68,74 @@ func TestUpload(t *testing.T) {
 
 	body := []byte("sealed bundle bytes")
 	err := client.Upload(t.Context(), "acme/bundles/logs.gen0001.zip",
-		bytes.NewReader(body), int64(len(body)))
+		bytes.NewReader(body), int64(len(body)), remote.Digests{})
 	require.NoError(t, err)
 
 	obj, ok := fake.Object("acme/bundles/logs.gen0001.zip")
 	require.True(t, ok, "object should be stored")
 	assert.Equal(t, body, obj.Data)
-	assert.Nil(t, obj.MD5, "an upload records no digest; eviction's gate is existence and size")
+	assert.Nil(t, obj.MD5, "a digest-less upload records none")
+	assert.Nil(t, obj.Metadata, "a digest-less upload records no metadata")
 	assert.Equal(t, 1, fake.PutCalls())
+}
+
+func TestUploadRecordsDigests(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newClient(t, remote.Config{})
+
+	body := []byte("sealed bundle bytes")
+	digests := remote.Digests{
+		MD5:    remotetest.MD5Sum(body),
+		SHA256: "6ff0f8bff0d0f81f34f4a7cbf7ba0e11e6c2a1c6a8a44e0f7e35c17e2c2a9d42",
+	}
+
+	err := client.Upload(t.Context(), "k", bytes.NewReader(body), int64(len(body)), digests)
+	require.NoError(t, err)
+
+	obj, ok := fake.Object("k")
+	require.True(t, ok, "object should be stored")
+	assert.Equal(t, body, obj.Data)
+	assert.Equal(t, digests.MD5, obj.MD5, "the provided MD5 rides as the write's integrity check")
+	assert.Equal(t, digests.SHA256, obj.Metadata["sha256"],
+		"the SHA-256 lands in the object metadata for later egress-free comparison")
+
+	info, err := client.Head(t.Context(), "k")
+	require.NoError(t, err)
+	assert.Equal(t, digests.SHA256, info.SHA256, "Head resolves the recorded metadata digest")
+}
+
+func TestUploadRejectsWrongMD5(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newClient(t, remote.Config{})
+
+	err := client.Upload(t.Context(), "k", bytes.NewReader([]byte("body")), 4,
+		remote.Digests{MD5: remotetest.MD5Sum([]byte("other"))})
+	require.Error(t, err, "a body that does not hash to its declared MD5 must not commit")
+
+	_, ok := fake.Object("k")
+	assert.False(t, ok)
+}
+
+func TestHeadResolvesMetadataMD5(t *testing.T) {
+	t.Parallel()
+
+	// A parted upload records no backend MD5 attribute; the metadata digest
+	// the upload recorded must still resolve through Head.
+	body := []byte("parted body")
+	digest := remotetest.MD5Sum(body)
+
+	client, fake := newClient(t, remote.Config{})
+	fake.SetObject("k", remotetest.Object{
+		Data:     body,
+		Metadata: map[string]string{"md5": hex.EncodeToString(digest)},
+	})
+
+	info, err := client.Head(t.Context(), "k")
+	require.NoError(t, err)
+	assert.Equal(t, digest, info.MD5,
+		"the metadata digest backfills an absent backend attribute")
 }
 
 func TestUploadLargeBody(t *testing.T) {
@@ -66,7 +150,7 @@ func TestUploadLargeBody(t *testing.T) {
 	_, err := rand.Read(body)
 	require.NoError(t, err)
 
-	err = client.Upload(t.Context(), "big.zip", bytes.NewReader(body), int64(len(body)))
+	err = client.Upload(t.Context(), "big.zip", bytes.NewReader(body), int64(len(body)), remote.Digests{})
 	require.NoError(t, err)
 
 	obj, ok := fake.Object("big.zip")
@@ -75,7 +159,8 @@ func TestUploadLargeBody(t *testing.T) {
 }
 
 // failingReader yields a little data and then a permanent error, modeling a
-// body that dies mid-stream.
+// body that dies mid-stream. Its Seek satisfies the upload's rewindable-body
+// contract without clearing the failure.
 type failingReader struct {
 	served bool
 }
@@ -91,12 +176,16 @@ func (r *failingReader) Read(p []byte) (int, error) {
 	return 0, errors.New("injected body failure")
 }
 
+func (r *failingReader) Seek(int64, int) (int64, error) {
+	return 0, nil
+}
+
 func TestUploadAbortsOnBodyFailure(t *testing.T) {
 	t.Parallel()
 
 	client, fake := newClient(t, remote.Config{})
 
-	err := client.Upload(t.Context(), "big.zip", &failingReader{}, 4)
+	err := client.Upload(t.Context(), "big.zip", &failingReader{}, 4, remote.Digests{})
 	require.Error(t, err)
 
 	_, ok := fake.Object("big.zip")
@@ -109,11 +198,110 @@ func TestUploadCommitFailure(t *testing.T) {
 	client, fake := newClient(t, remote.Config{})
 	fake.PutErr = errors.New("injected commit failure")
 
-	err := client.Upload(t.Context(), "k", bytes.NewReader([]byte("x")), 1)
+	err := client.Upload(t.Context(), "k", bytes.NewReader([]byte("x")), 1, remote.Digests{})
 	require.Error(t, err)
 
 	_, ok := fake.Object("k")
 	assert.False(t, ok, "a failed commit stores no object")
+}
+
+func TestUploadRetriesTransientCommitFailure(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newRetryClient(t, 2)
+	fake.PutErr = errors.New("injected transient commit failure")
+	fake.PutErrN = 1
+
+	body := []byte("sealed bundle bytes")
+	err := client.Upload(t.Context(), "k", bytes.NewReader(body), int64(len(body)), remote.Digests{})
+	require.NoError(t, err, "a fault that heals within the budget must not surface")
+
+	obj, ok := fake.Object("k")
+	require.True(t, ok)
+	assert.Equal(t, body, obj.Data, "the retried attempt rewinds and re-streams the whole body")
+	assert.Equal(t, 2, fake.PutCalls())
+}
+
+func TestRetryStopsAtBudget(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newRetryClient(t, 2)
+	fake.PutErr = errors.New("injected persistent failure")
+
+	err := client.Put(t.Context(), "k", []byte("x"))
+	require.Error(t, err, "a persistent fault surfaces once the budget is spent")
+	assert.Equal(t, 3, fake.PutCalls(), "one attempt plus the configured retries")
+}
+
+func TestHeadRetriesTransientFailure(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newRetryClient(t, 2)
+	fake.SetObject("k", remotetest.Object{Data: []byte("abcd")})
+
+	fake.HeadErr = errors.New("injected transient failure")
+	fake.HeadErrN = 1
+
+	info, err := client.Head(t.Context(), "k")
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), info.Size)
+}
+
+func TestHeadNotFoundIsNeverRetried(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newRetryClient(t, 3)
+
+	_, err := client.Head(t.Context(), "missing")
+	require.ErrorIs(t, err, remote.ErrNotFound)
+	assert.Equal(t, 1, fake.HeadCalls(), "an absence settles on one response")
+}
+
+func TestListRetriesTransientFailure(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newRetryClient(t, 2)
+	fake.SetObject("p/a", remotetest.Object{Data: []byte("x")})
+
+	fake.ListErr = errors.New("injected transient failure")
+	fake.ListErrN = 1
+
+	got, err := client.List(t.Context(), "p/")
+	require.NoError(t, err)
+	assert.Len(t, got, 1, "the retried listing is one whole enumeration")
+}
+
+func TestReadAtRetriesTransientFailure(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newRetryClient(t, 2)
+	fake.SetObject("k", remotetest.Object{Data: []byte("abcdef")})
+
+	fake.RangeErr = errors.New("injected transient failure")
+	fake.RangeErrN = 1
+
+	p := make([]byte, 4)
+	n, err := client.ReadAt(t.Context(), "k", 6, p, 1)
+	require.NoError(t, err)
+	assert.Equal(t, 4, n)
+	assert.Equal(t, []byte("bcde"), p, "the retried read refills the span from its offset")
+}
+
+func TestRetryStopsOnCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newRetryClient(t, 3)
+	fake.PutErr = errors.New("injected failure")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := client.Put(ctx, "k", []byte("x"))
+	require.ErrorIs(t, err, context.Canceled,
+		"a canceled context surfaces immediately instead of burning the retry budget")
+
+	_, ok := fake.Object("k")
+	assert.False(t, ok)
 }
 
 func TestHead(t *testing.T) {
@@ -256,6 +444,38 @@ func TestDeletePartialFailure(t *testing.T) {
 	deleted, err := client.Delete(t.Context(), []string{"a"})
 	require.Error(t, err)
 	assert.Zero(t, deleted, "a failed delete must not count as removed")
+}
+
+func TestDeleteContinuesPastFailedKeys(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newClient(t, remote.Config{})
+	fake.SetObject("a", remotetest.Object{Data: []byte("x")})
+	fake.SetObject("b", remotetest.Object{Data: []byte("y")})
+	fake.SetObject("c", remotetest.Object{Data: []byte("z")})
+
+	fake.DeleteErr = errors.New("injected delete failure")
+	fake.DeleteErrKeys = []string{"b"}
+
+	deleted, err := client.Delete(t.Context(), []string{"a", "b", "c"})
+	require.Error(t, err, "the failed key still surfaces")
+	assert.Equal(t, 2, deleted, "one bad key must not strand the other stale keys")
+	assert.ElementsMatch(t, []string{"a", "c"}, fake.Deleted())
+}
+
+func TestDeleteRetriesTransientFailure(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newRetryClient(t, 2)
+	fake.SetObject("a", remotetest.Object{Data: []byte("x")})
+
+	fake.DeleteErr = errors.New("injected transient failure")
+	fake.DeleteErrN = 1
+
+	deleted, err := client.Delete(t.Context(), []string{"a"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, deleted)
+	assert.Empty(t, fake.Keys())
 }
 
 func TestDeleteEmpty(t *testing.T) {

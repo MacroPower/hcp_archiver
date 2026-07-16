@@ -46,7 +46,8 @@ func newSyncFixture(t *testing.T) syncFixture {
 	cfg := remote.Config{Prefix: syncPrefix}
 	fake := remotetest.New()
 
-	client, err := remote.New(t.Context(), cfg, remote.WithBucket(fake.Bucket()))
+	client, err := remote.New(t.Context(), cfg,
+		remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0))
 	require.NoError(t, err)
 
 	env := collect.NewEnv(nil, st, ledger,

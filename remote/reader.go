@@ -8,7 +8,11 @@ import (
 
 // ReadAt reads len(p) bytes of the object at key starting at off, in a single
 // ranged read. The size argument is the object's total length, as reported by
-// [Client.Head]; reads at or past it answer [io.EOF] without a request.
+// [Client.Head]; reads at or past it answer [io.EOF] without a request. A
+// transient failure — a request that never opened, or a body that died
+// mid-fill — reopens the range and refills p from off under the client's
+// bounded retries, so one blip does not surface as a failed screen or a
+// failed sweep.
 //
 // It honors the [io.ReaderAt] contract — a non-nil error whenever it fills
 // less than all of p, with [io.EOF] marking a read clipped by the object's
@@ -33,23 +37,31 @@ func (c *Client) ReadAt(ctx context.Context, key string, size int64, p []byte, o
 
 	want := min(int64(len(p)), size-off)
 
-	r, err := c.bucket.NewRangeReader(ctx, key, off, want, nil)
+	var n int
+
+	err := c.withRetry(ctx, func() error {
+		n = 0
+
+		r, err := c.bucket.NewRangeReader(ctx, key, off, want, nil)
+		if err != nil {
+			return err //nolint:wrapcheck // Wrapped uniformly below.
+		}
+
+		defer func() {
+			//nolint:errcheck // Read-only body; the ReadFull result is what matters.
+			_ = r.Close()
+		}()
+
+		n, err = io.ReadFull(r, p[:want])
+
+		return err //nolint:wrapcheck // Wrapped uniformly below.
+	})
 	if err != nil {
 		if isNotFound(err) {
 			return 0, fmt.Errorf("%w: %s", ErrNotFound, key)
 		}
 
-		return 0, fmt.Errorf("ranged read %q: %w", key, err)
-	}
-
-	defer func() {
-		//nolint:errcheck // Read-only body; the ReadFull result is what matters.
-		_ = r.Close()
-	}()
-
-	n, err := io.ReadFull(r, p[:want])
-	if err != nil {
-		return n, fmt.Errorf("read %q at %d: %w", key, off, err)
+		return n, fmt.Errorf("ranged read %q at %d: %w", key, off, err)
 	}
 
 	if int64(n) < int64(len(p)) {

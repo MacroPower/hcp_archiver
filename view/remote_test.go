@@ -87,7 +87,7 @@ func openRemoteWorkspace(t *testing.T) (*view.Workspace, *remotetest.Fake) {
 		view.WithRemoteFactory(func(ctx context.Context, cfg remote.Config) (*remote.Client, error) {
 			assert.Equal(t, viewURL, cfg.URL, "the marker's URL drives the client")
 
-			return remote.New(ctx, cfg, remote.WithBucket(fake.Bucket()))
+			return remote.New(ctx, cfg, remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0))
 		}),
 	)
 	require.NoError(t, err)

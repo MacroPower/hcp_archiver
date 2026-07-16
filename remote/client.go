@@ -2,10 +2,13 @@ package remote
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"gocloud.dev/blob"
 	"gocloud.dev/gcerrors"
@@ -34,23 +37,40 @@ var (
 // size so any body fits under it.
 const maxUploadParts = 10_000
 
+// Object metadata keys recording the full-object digests of an upload, the
+// mirror's egress-free comparison currency: "md5" carries the digest the
+// incremental sync gate compares where the backend's own attribute is absent
+// (a parted upload), and "sha256" the digest the eviction confirm matches
+// against the local proof that releases the only local copy.
+const (
+	metadataKeyMD5    = "md5"
+	metadataKeySHA256 = "sha256"
+)
+
 // Client reads and writes an organization's mirrored archive objects in one
 // object-store bucket: evicted cold surfaces through [Client.Upload] and the
 // synced search layer through [Client.Put], with [Client.List] and
 // [Client.Delete] serving the sync sweep's inventory and prune.
 //
+// Every operation retries a transient store failure under a bounded doubling
+// backoff (see [DefaultRetries]), mirroring the persistence the API transport
+// gives fetches, so one blip does not defer mirror work to a later run.
+//
 // A Client is safe for concurrent use; the archiver shares one across every
 // organization it archives. Create instances with [New]; a client that is no
 // longer needed releases its backend resources through [Client.Close].
 type Client struct {
-	bucket *blob.Bucket
-	cfg    Config
+	bucket     *blob.Bucket
+	cfg        Config
+	retries    int
+	retryDelay time.Duration
 }
 
 // Option configures a [Client] passed to [New].
 //
 // Options of this type:
 //   - [WithBucket]
+//   - [WithRetry]
 type Option func(*Client)
 
 // WithBucket injects the opened bucket the client calls, replacing the one
@@ -65,6 +85,19 @@ func WithBucket(bucket *blob.Bucket) Option {
 	}
 }
 
+// WithRetry sets how each store operation retries a transient failure within
+// the run: retries is the number of additional attempts after the first, and
+// delay is the wait before the first retry, doubling on each retry after that
+// (bounded by an internal cap). A zero or negative retries disables in-client
+// retrying, leaving each failure to the caller's own recovery (the next
+// sweep); a non-positive delay retries immediately. It returns an [Option].
+func WithRetry(retries int, delay time.Duration) Option {
+	return func(c *Client) {
+		c.retries = max(retries, 0)
+		c.retryDelay = delay
+	}
+}
+
 // New creates a new [Client] over cfg.
 //
 // Unless [WithBucket] supplies one, the bucket is opened from cfg's URL,
@@ -72,7 +105,11 @@ func WithBucket(bucket *blob.Bucket) Option {
 // backend authenticates through its provider's default chain. It returns
 // [ErrMissingURL] when cfg names no URL.
 func New(ctx context.Context, cfg Config, opts ...Option) (*Client, error) {
-	c := &Client{cfg: cfg}
+	c := &Client{
+		cfg:        cfg,
+		retries:    DefaultRetries,
+		retryDelay: DefaultRetryDelay,
+	}
 
 	for _, opt := range opts {
 		opt(c)
@@ -105,23 +142,95 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// Digests carries the full-object content digests an upload records with its
+// object. The MD5 doubles as the write's integrity check — the commit fails
+// unless the streamed bytes hash to it — and both digests land in the
+// object's metadata so a later probe can compare stored content against
+// local bytes without a byte of egress. Either field may be empty; only what
+// is present is checked and recorded.
+type Digests struct {
+	// SHA256 is the lowercase hex full-object SHA-256 of the body, the
+	// currency of the archive's local proofs (ledger signatures, sidecar
+	// entries).
+	SHA256 string
+	// MD5 is the raw full-object MD5 digest of the body.
+	MD5 []byte
+}
+
+// metadata renders the digests as the object metadata recorded with an
+// upload, or nil when neither digest is present.
+func (d Digests) metadata() map[string]string {
+	m := make(map[string]string, 2)
+
+	if len(d.MD5) > 0 {
+		m[metadataKeyMD5] = hex.EncodeToString(d.MD5)
+	}
+
+	if d.SHA256 != "" {
+		m[metadataKeySHA256] = d.SHA256
+	}
+
+	if len(m) == 0 {
+		return nil
+	}
+
+	return m
+}
+
 // ObjectInfo describes one stored object as observed by [Client.Head] and
 // [Client.List].
 type ObjectInfo struct {
+	// SHA256 is the lowercase hex full-object SHA-256 recorded in the
+	// object's metadata by an [Client.Upload] with [Digests], empty when none
+	// was recorded. Listings never carry metadata, so it resolves only
+	// through [Client.Head].
+	SHA256 string
 	// MD5 is the store's recorded full-object MD5 digest as raw bytes,
-	// comparable against a locally computed sum. It is nil when the store
-	// records none for the object (a parted upload on most backends). Some
-	// backends' listings omit a digest the object still carries, so a nil
-	// from [Client.List] may yet resolve through [Client.Head].
+	// comparable against a locally computed sum: the backend's own attribute
+	// when it records one, else the metadata digest an [Client.Upload] with
+	// [Digests] recorded (a parted upload carries no backend attribute on
+	// most stores). It is nil when neither exists. Some backends' listings
+	// omit a digest the object still carries, so a nil from [Client.List]
+	// may yet resolve through [Client.Head].
 	MD5 []byte
 	// Size is the object's length in bytes.
 	Size int64
 }
 
+// objectInfo maps one object's stored attributes onto [ObjectInfo],
+// resolving the digest ladder: the backend's own MD5 first, else the
+// metadata digest this tool's uploads record.
+func objectInfo(attrs *blob.Attributes) ObjectInfo {
+	info := ObjectInfo{
+		MD5:    attrs.MD5,
+		SHA256: attrs.Metadata[metadataKeySHA256],
+		Size:   attrs.Size,
+	}
+
+	if info.MD5 == nil {
+		if s := attrs.Metadata[metadataKeyMD5]; s != "" {
+			sum, err := hex.DecodeString(s)
+			if err == nil {
+				info.MD5 = sum
+			}
+		}
+	}
+
+	return info
+}
+
 // Head reads the object's metadata at key. An absent object returns
 // [ErrNotFound].
 func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
-	attrs, err := c.bucket.Attributes(ctx, key)
+	var attrs *blob.Attributes
+
+	err := c.withRetry(ctx, func() error {
+		var aerr error
+
+		attrs, aerr = c.bucket.Attributes(ctx, key)
+
+		return aerr //nolint:wrapcheck // Wrapped uniformly below.
+	})
 	if err != nil {
 		if isNotFound(err) {
 			return ObjectInfo{}, fmt.Errorf("%w: %s", ErrNotFound, key)
@@ -130,22 +239,38 @@ func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
 		return ObjectInfo{}, fmt.Errorf("head %q: %w", key, err)
 	}
 
-	return ObjectInfo{MD5: attrs.MD5, Size: attrs.Size}, nil
+	return objectInfo(attrs), nil
 }
 
-// Upload streams r to the object at key, letting the backend split a large
-// body into a concurrent parted upload; a write that dies midway is aborted
-// rather than committed truncated. The object only becomes visible at the
-// key once the final flush succeeds.
+// Upload streams body to the object at key, letting the backend split a
+// large body into a concurrent parted upload; a write that dies midway is
+// aborted rather than committed truncated, and a transient failure rewinds
+// the body and retries. The object only becomes visible at the key once the
+// final flush succeeds.
+//
+// The digests, when present, ride with the write: the MD5 is verified
+// against the streamed bytes at commit, and both digests are recorded as
+// object metadata for later egress-free comparison (see [Digests]).
 //
 // The size argument does not bound the upload — the bytes streamed are
-// whatever r yields — it only grows the part size when needed so a very
+// whatever body yields — it only grows the part size when needed so a very
 // large body still fits the backend's part-count ceiling.
-func (c *Client) Upload(ctx context.Context, key string, r io.Reader, size int64) error {
-	err := c.write(ctx, key, r, &blob.WriterOptions{
+func (c *Client) Upload(ctx context.Context, key string, body io.ReadSeeker, size int64, digests Digests) error {
+	opts := &blob.WriterOptions{
 		BufferSize:                  partSizeFor(size, c.cfg.PartSize),
 		MaxConcurrency:              c.cfg.Concurrency,
 		DisableContentTypeDetection: true,
+		ContentMD5:                  digests.MD5,
+		Metadata:                    digests.metadata(),
+	}
+
+	err := c.withRetry(ctx, func() error {
+		_, serr := body.Seek(0, io.SeekStart)
+		if serr != nil {
+			return fmt.Errorf("rewind body: %w", serr)
+		}
+
+		return c.write(ctx, key, body, opts)
 	})
 	if err != nil {
 		return fmt.Errorf("upload %q: %w", key, err)
@@ -160,10 +285,13 @@ func (c *Client) Upload(ctx context.Context, key string, r io.Reader, size int64
 // integrity check. The whole body rides in memory — the shape of the small
 // search-layer files Put serves; bulk bytes stream through [Client.Upload].
 func (c *Client) Put(ctx context.Context, key string, data []byte) error {
-	// WriteAll digests the body itself and carries the digest as the
-	// write's ContentMD5.
-	err := c.bucket.WriteAll(ctx, key, data, &blob.WriterOptions{
-		DisableContentTypeDetection: true,
+	err := c.withRetry(ctx, func() error {
+		// WriteAll digests the body itself and carries the digest as the
+		// write's ContentMD5.
+		//nolint:wrapcheck // Wrapped uniformly below.
+		return c.bucket.WriteAll(ctx, key, data, &blob.WriterOptions{
+			DisableContentTypeDetection: true,
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("put %q: %w", key, err)
@@ -206,26 +334,37 @@ func (c *Client) write(ctx context.Context, key string, r io.Reader, opts *blob.
 // List enumerates every object under prefix, keyed by full object key, at
 // roughly one request per listing page. It is the bulk inventory the sync
 // sweep gates uploads and prunes stale keys from, replacing a Head per file.
+// A transient failure mid-walk restarts the enumeration from the beginning,
+// so the returned inventory is always one whole listing, never a splice.
 func (c *Client) List(ctx context.Context, prefix string) (map[string]ObjectInfo, error) {
-	out := make(map[string]ObjectInfo)
-	iter := c.bucket.List(&blob.ListOptions{Prefix: prefix})
+	var out map[string]ObjectInfo
 
-	for {
-		obj, err := iter.Next(ctx)
-		if errors.Is(err, io.EOF) {
-			return out, nil
+	err := c.withRetry(ctx, func() error {
+		out = make(map[string]ObjectInfo)
+		iter := c.bucket.List(&blob.ListOptions{Prefix: prefix})
+
+		for {
+			obj, err := iter.Next(ctx)
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+
+			if err != nil {
+				return err //nolint:wrapcheck // Wrapped uniformly below.
+			}
+
+			if obj.IsDir {
+				continue
+			}
+
+			out[obj.Key] = ObjectInfo{MD5: obj.MD5, Size: obj.Size}
 		}
-
-		if err != nil {
-			return nil, fmt.Errorf("list %q: %w", prefix, err)
-		}
-
-		if obj.IsDir {
-			continue
-		}
-
-		out[obj.Key] = ObjectInfo{MD5: obj.MD5, Size: obj.Size}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list %q: %w", prefix, err)
 	}
+
+	return out, nil
 }
 
 // deleteConcurrency bounds how many delete requests fly at once. The
@@ -233,22 +372,64 @@ func (c *Client) List(ctx context.Context, prefix string) (map[string]ObjectInfo
 // must not serialize one round-trip per key.
 const deleteConcurrency = 16
 
+// maxDeleteErrs bounds how many per-key failures the returned error details;
+// the remainder is summarized by count, so a store-wide outage cannot render
+// thousands of identical lines into one error.
+const maxDeleteErrs = 8
+
 // Delete removes the objects at keys and returns how many keys it durably
 // settled. Deletes are idempotent: a key that does not exist settles as
-// removed and counts. An error the store reports stops the fan-out, and the
-// count reflects only the keys that settled, so a caller's tally stays
-// truthful across a partial delete.
+// removed and counts. A key whose delete fails past its retries is skipped
+// while the fan-out settles the rest — one bad key must not strand every
+// other stale key for another run — and the failures come back as one
+// joined error beside the truthful count. A context cancellation stops the
+// fan-out early, leaving the rest to the next run.
 func (c *Client) Delete(ctx context.Context, keys []string) (int, error) {
-	var deleted atomic.Int64
+	var (
+		deleted atomic.Int64
+		mu      sync.Mutex
+		errs    []error
+		failed  int
+	)
 
-	g, ctx := errgroup.WithContext(ctx)
+	var g errgroup.Group
+
 	g.SetLimit(deleteConcurrency)
 
 	for _, key := range keys {
+		if ctx.Err() != nil {
+			break
+		}
+
 		g.Go(func() error {
-			err := c.bucket.Delete(ctx, key)
-			if err != nil && !isNotFound(err) {
-				return fmt.Errorf("delete %q: %w", key, err)
+			// A cancellation mid-fan-out is the wind-down: the started worker
+			// settles nothing and leaves its key to the next run.
+			//nolint:nilerr // See above: a canceled worker settles nothing.
+			if ctx.Err() != nil {
+				return nil
+			}
+
+			err := c.withRetry(ctx, func() error {
+				derr := c.bucket.Delete(ctx, key)
+				if derr != nil && !isNotFound(derr) {
+					return derr //nolint:wrapcheck // Wrapped per key below.
+				}
+
+				return nil
+			})
+			if err != nil {
+				mu.Lock()
+
+				failed++
+				if len(errs) < maxDeleteErrs {
+					errs = append(errs, fmt.Errorf("delete %q: %w", key, err))
+				}
+
+				mu.Unlock()
+
+				// A per-key failure is collected, not returned: failing the
+				// group would strand the other stale keys.
+				return nil //nolint:nilerr // See above.
 			}
 
 			deleted.Add(1)
@@ -257,9 +438,16 @@ func (c *Client) Delete(ctx context.Context, keys []string) (int, error) {
 		})
 	}
 
-	err := g.Wait()
-	if err != nil {
-		return int(deleted.Load()), err //nolint:wrapcheck // Each worker wraps its own error.
+	//nolint:errcheck // Workers never return an error; Wait is the barrier.
+	_ = g.Wait()
+
+	if failed > 0 {
+		if failed > len(errs) {
+			errs = append(errs, fmt.Errorf("%d further deletes failed", failed-len(errs)))
+		}
+
+		return int(deleted.Load()), fmt.Errorf(
+			"%d of %d deletes failed: %w", failed, len(keys), errors.Join(errs...))
 	}
 
 	return int(deleted.Load()), nil

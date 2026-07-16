@@ -34,7 +34,8 @@ func newEvictFixture(t *testing.T) (sealFixture, *remotetest.Fake) {
 	fake := remotetest.New()
 	cfg := remote.Config{Prefix: evictPrefix}
 
-	client, err := remote.New(t.Context(), cfg, remote.WithBucket(fake.Bucket()))
+	client, err := remote.New(t.Context(), cfg,
+		remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0))
 	require.NoError(t, err)
 
 	env := collect.NewEnv(nil, st, ledger,
@@ -121,7 +122,8 @@ func TestSealWorkspace_MigratesPreexistingBundles(t *testing.T) {
 	fake := remotetest.New()
 	cfg := remote.Config{Prefix: evictPrefix}
 
-	client, err := remote.New(t.Context(), cfg, remote.WithBucket(fake.Bucket()))
+	client, err := remote.New(t.Context(), cfg,
+		remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0))
 	require.NoError(t, err)
 
 	env := collect.NewEnv(nil, f.store, f.ledger,
