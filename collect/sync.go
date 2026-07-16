@@ -614,7 +614,7 @@ func (e *Env) syncFile(
 ) {
 	needed, size, err := e.uploadNeeded(ctx, relPath, inventory)
 	if err == nil && needed {
-		err = e.putFile(ctx, relPath)
+		err = e.putFile(ctx, relPath, size)
 	}
 
 	switch {
@@ -639,9 +639,16 @@ func (e *Env) syncFile(
 	}
 }
 
-// putFile uploads one search-layer file through [remote.Client.Put], whose
-// recorded full-object digest is what later sweeps' inventories compare.
-func (e *Env) putFile(ctx context.Context, relPath string) error {
+// putFile uploads one search-layer file: small files ride whole in memory
+// through [remote.Client.Put], whose recorded full-object digest is what
+// later sweeps' inventories compare, while a file at or past the streaming
+// threshold streams from disk so the sweep's memory never scales with the
+// archive's largest roll-up.
+func (e *Env) putFile(ctx context.Context, relPath string, size int64) error {
+	if size >= e.streamThreshold {
+		return e.streamFile(ctx, relPath, size)
+	}
+
 	//nolint:gosec // The path is composed by the store from its archive root.
 	data, err := os.ReadFile(e.store.AbsPath(relPath))
 	if err != nil {
@@ -651,6 +658,38 @@ func (e *Env) putFile(ctx context.Context, relPath string) error {
 	err = e.remote.Put(ctx, e.RemoteKey(relPath), data)
 	if err != nil {
 		return fmt.Errorf("put sync source: %w", err)
+	}
+
+	return nil
+}
+
+// streamFile syncs one large file from disk in two passes: a hash pass
+// first, so the write carries the digests the incremental gate compares (a
+// parted upload records no backend digest of its own, so the metadata copy
+// is what keeps a big roll-up's gate content-aware instead of size-only),
+// then a streamed upload whose commit verifies the body against the MD5.
+func (e *Env) streamFile(ctx context.Context, relPath string, size int64) error {
+	absPath := e.store.AbsPath(relPath)
+
+	digests, err := hashFile(absPath)
+	if err != nil {
+		return fmt.Errorf("hash sync source: %w", err)
+	}
+
+	//nolint:gosec // The path is composed by the store from its archive root.
+	f, err := os.Open(absPath)
+	if err != nil {
+		return fmt.Errorf("open sync source: %w", err)
+	}
+
+	uploadErr := e.remote.Upload(ctx, e.RemoteKey(relPath), f, size, digests)
+	closeErr := f.Close()
+
+	switch {
+	case uploadErr != nil:
+		return fmt.Errorf("stream sync source: %w", uploadErr)
+	case closeErr != nil:
+		return fmt.Errorf("close sync source: %w", closeErr)
 	}
 
 	return nil
@@ -681,7 +720,13 @@ func (e *Env) uploadNeeded(
 
 	if digest == nil {
 		remoteInfo, headErr := e.remote.Head(ctx, e.RemoteKey(relPath))
-		if headErr != nil {
+
+		switch {
+		case errors.Is(headErr, remote.ErrNotFound):
+			// Listed a moment ago, gone now (a concurrent delete): the upload
+			// is needed, not an error.
+			return true, info.Size(), nil
+		case headErr != nil:
 			return false, 0, fmt.Errorf("head sync target: %w", headErr)
 		}
 

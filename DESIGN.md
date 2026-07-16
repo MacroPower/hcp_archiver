@@ -632,7 +632,13 @@ own synced writes always record one); listing carries no digest → one Head
 for the object's recorded digest (fileblob's listings omit the digest
 its attributes carry); no digest recorded at all → trust the size match (a
 same-length content change is skipped until its size changes).
-Synced files fan out concurrently; evictions run sequentially. Per-file
+Synced files fan out concurrently; evictions run sequentially. A synced
+file at or past a streaming threshold (32MiB) streams from disk instead of
+riding whole in memory — roll-ups grow with run history, and the sweep's
+memory must not scale with the archive's largest file — with its digests
+computed in a first pass and recorded as object metadata, so even a parted
+upload (which records no backend digest) keeps the incremental gate
+content-aware rather than size-only. Per-file
 failures warn and count, never abort: local stays canonical and the next run
 re-sweeps, and sync failures never affect the run's exit code.
 

@@ -30,6 +30,12 @@ const (
 	DefaultAbsentConfirmDelay = 2 * time.Second
 )
 
+// DefaultStreamThreshold is the size at which the sync sweep stops riding a
+// file whole in memory and streams it from disk instead. Roll-ups grow with
+// run history and can reach gigabytes; buffering one whole would put the
+// sweep's memory at the mercy of archive size.
+const DefaultStreamThreshold int64 = 32 << 20
+
 // DefaultConcurrency is the fixed bound on concurrent API work: the archiver
 // sizes its in-flight request gate from it, and each collection caps its
 // fan-out at it ([Env.Concurrency]). One constant serves both so the fan-out
@@ -63,6 +69,7 @@ type Env struct {
 	blobRetries        int
 	blobRetryDelay     time.Duration
 	absentConfirmDelay time.Duration
+	streamThreshold    int64
 }
 
 // Option configures an [Env] passed to [NewEnv].
@@ -72,8 +79,19 @@ type Env struct {
 //   - [WithBlobRetry]
 //   - [WithLogger]
 //   - [WithRemote]
+//   - [WithStreamThreshold]
 //   - [WithTarget]
 type Option func(*Env)
+
+// WithStreamThreshold sets the size at which the sync sweep streams a file
+// from disk instead of riding it whole in memory, overriding
+// [DefaultStreamThreshold]. A non-positive threshold streams everything.
+// It returns an [Option].
+func WithStreamThreshold(n int64) Option {
+	return func(e *Env) {
+		e.streamThreshold = n
+	}
+}
 
 // WithBlobRetry sets how [Env.Blob] retries a transient fetch or mid-stream
 // failure within the run: retries is the number of additional attempts after
@@ -146,6 +164,7 @@ func NewEnv(client *tfeclient.Client, st *store.Store, ledger *manifest.Ledger, 
 		blobRetries:        DefaultBlobRetries,
 		blobRetryDelay:     DefaultBlobRetryDelay,
 		absentConfirmDelay: DefaultAbsentConfirmDelay,
+		streamThreshold:    DefaultStreamThreshold,
 	}
 
 	for _, opt := range opts {

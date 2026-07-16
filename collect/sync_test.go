@@ -395,6 +395,55 @@ func TestSyncArchiveMirrorsEveryMeaningfulFile(t *testing.T) {
 	assert.False(t, f.exists(t, tarball), "an evicted tarball leaves disk")
 }
 
+func TestSyncArchiveStreamsLargeFiles(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	st := store.New(root)
+
+	ledger, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	cfg := remote.Config{Prefix: syncPrefix}
+	fake := remotetest.New()
+
+	client, err := remote.New(t.Context(), cfg,
+		remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0))
+	require.NoError(t, err)
+
+	// A threshold of one byte routes every synced file through the streamed
+	// path, standing in for a gigabyte-scale roll-up without the fixture.
+	env := collect.NewEnv(nil, st, ledger,
+		collect.WithRemote(client, cfg, syncOrg),
+		collect.WithLogger(slog.New(slog.DiscardHandler)),
+		collect.WithStreamThreshold(1),
+	)
+
+	const rollup = "projects/prod/workspaces/api/rollups/runs.ndjson"
+
+	data := []byte(`{"path":"runs/run-1/run.json"}` + "\n")
+	_, err = st.WriteBytes(rollup, data)
+	require.NoError(t, err)
+
+	stats := env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+	require.Equal(t, 1, stats.Uploaded)
+
+	obj, ok := fake.Object(syncPrefix + "/" + syncOrg + "/" + rollup)
+	require.True(t, ok)
+	assert.Equal(t, data, obj.Data, "the streamed upload reassembles byte for byte")
+	assert.Equal(t, remotetest.MD5Sum(data), obj.MD5,
+		"the streamed write carries the digest the incremental gate compares")
+	assert.Equal(t, manifest.SignatureOf(data).Hash, obj.Metadata["sha256"],
+		"the streamed write records its sha256 as metadata")
+
+	// The second sweep must see the streamed copy as settled: the recorded
+	// digest, not just size, drives the skip.
+	stats = env.SyncArchive(t.Context())
+	assert.Zero(t, stats.Uploaded)
+	assert.Equal(t, 1, stats.Skipped)
+}
+
 func TestSyncArchiveEvictionRecordsDigests(t *testing.T) {
 	t.Parallel()
 
