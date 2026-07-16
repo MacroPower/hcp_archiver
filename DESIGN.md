@@ -404,7 +404,11 @@ Notes:
   list endpoints (`/workspaces/:id/runs`, `/organizations/:name/runs`) from
   their own bucket of 30 requests per _minute_, documented only on the runs API
   page, so each bucket gets its own governor and a 429 in one never pauses or
-  halves the other. The runs governor paces just under the documented budget
+  halves the other. The general governor's ceiling defaults to the documented
+  30 rps and is operator-configurable (the config file's `rateLimit`) for an
+  org whose granted limit sits well below it; the governor adapts downward
+  from server feedback either way, so the knob only keeps a run from probing
+  past a known-lower budget. The runs governor paces just under the documented budget
   (29/min) and the run walk spends it carefully: pages are fetched at the
   maximum size (100) and the per-workspace count probe reads the workspace's
   advertised `RunsCount` instead of the listing. Every physical attempt pays a
@@ -1010,12 +1014,21 @@ generated from the Go type and embedded in the binary.
   empty, and with both set a workspace must satisfy both), a `runHistory`
   block bounding each workspace's archived run history
   (`count` / `age`; whichever admits more history wins; unlimited by
-  default), a `scope`
+  default), `rateLimit` (the ceiling of the client's adaptive rate governor,
+  in requests per second; default 30, HCP's documented general limit — the
+  governor adapts downward from server feedback on its own, so this is set
+  only for an org whose granted limit sits well below the default and the
+  run should not probe past it), a `scope`
   block of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
   `registryDetail`, `auditTrail`), each off by default, and a `remote`
-  block enabling offload of sealed cold bundles to a remote object store
-  (`url` required, its scheme selecting the backend — `s3://`, `azblob://`,
-  `file://`; optional `prefix`, `partSize`, `concurrency`).
+  block enabling the full remote mirror described in Remote offload and
+  full-archive sync: the bucket converges on a complete copy of the archive
+  — sealed cold bundles and settled config-version tarballs evicted off
+  disk, everything else (the search layer, roll-ups, sidecars, ledger
+  snapshots) synced incrementally with stale keys pruned — with no separate
+  per-motion knob (`url` required, its scheme selecting the backend —
+  `s3://`, `azblob://`, `file://`; optional `prefix`, `partSize`,
+  `concurrency`).
   Credentials are never in the file; each backend's provider default chain
   supplies them.
 
