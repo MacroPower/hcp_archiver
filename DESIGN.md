@@ -833,13 +833,15 @@ tarball against its ledger signature's SHA-256 — so rot that crept in after
 sealing is refused, kept local for inspection, and never becomes the
 long-term record. On the remote side, an upload records the file's MD5 and
 SHA-256 as object metadata, and the confirm compares size plus every digest
-both sides carry; an object recorded by an older build carries no metadata
-and still gates on size, the strongest egress-free comparison available for
-it — but on the fresh-upload path, where the upload recorded both digests
-one call earlier, the confirm demands at least one back, so a store that
-silently drops object metadata (preflight's backstop) cannot reduce the
-custody transfer to a size comparison. A mismatch on either side warns,
-keeps the local file canonical, and
+both sides carry. A remote copy that carries no digest at all — an older
+build's upload and this tool's own upload whose metadata a store dropped
+are indistinguishable at the probe — never releases the local bytes on its
+size match alone: the confirm escalates to reading the object back whole
+through ranged reads and hashing it against the local proof, the strongest
+verification there is, paid in one read and only in this degenerate case
+(preflight already fails stores that drop metadata consistently; the
+read-back covers per-object and intermittent dropping). A mismatch on
+either side warns, keeps the local file canonical, and
 never overwrites remote history at the key. Failure to evict one bundle is
 a warning, never an abort: the local zip simply stays canonical, exactly as
 if no remote were configured. Because eviction removes zips but never sidecars, generation

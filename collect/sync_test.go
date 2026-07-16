@@ -620,19 +620,20 @@ func TestSyncArchiveVerifiesEvictedTarballSize(t *testing.T) {
 		"an evicted tarball whose remote size diverges from its ledger signature must fail the run")
 }
 
-func TestSyncArchiveEvictDemandsRecordedDigestsBack(t *testing.T) {
+func TestSyncArchiveEvictReadsBackDigestlessCopy(t *testing.T) {
 	t.Parallel()
 
 	const tarball = "config-versions/cv-1.tar.gz"
 
 	f := newSyncFixture(t)
 
-	f.writeDone(t, tarball, []byte("proven tarball bytes"))
+	data := []byte("proven tarball bytes")
+	f.writeDone(t, tarball, data)
 
 	// The store accepts the upload but does not persist its recorded digests
-	// (a metadata-dropping S3-compatible endpoint). The confirm just recorded
-	// them one call earlier, so it must demand them back rather than let the
-	// custody transfer of the archive's only copy gate on size alone.
+	// (a metadata-dropping S3-compatible endpoint). With nothing egress-free
+	// to compare, the confirm must escalate to reading the remote bytes back
+	// and hashing them — never release the archive's only copy on size alone.
 	f.fake.HeadHook = func(context.Context) {
 		obj, ok := f.fake.Object(f.key(tarball))
 		if ok {
@@ -644,10 +645,39 @@ func TestSyncArchiveEvictDemandsRecordedDigestsBack(t *testing.T) {
 
 	stats := f.env.SyncArchive(t.Context())
 
+	assert.Zero(t, stats.Failed)
+	assert.Equal(t, 1, stats.Evicted,
+		"a read-back that matches the local proof completes the custody transfer")
+	assert.False(t, f.exists(t, tarball))
+	assert.NotEmpty(t, f.fake.Ranges(),
+		"the digestless confirm must actually read the remote bytes back")
+}
+
+func TestSyncArchiveEvictRefusesDigestlessForeignContent(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t)
+
+	local := []byte("proven tarball bytes")
+	foreign := []byte("same-length imposterX")[:len(local)]
+
+	f.writeDone(t, tarball, local)
+
+	// A same-size object with different content and no digests sits at the
+	// eviction key (a prior run's upload through a mangling proxy, a foreign
+	// write). Size screens pass; only the content read-back can catch it, and
+	// it must, or the local delete would leave wrong bytes as the archive's
+	// only copy.
+	f.fake.SetObject(f.key(tarball), remotetest.Object{Data: foreign})
+
+	stats := f.env.SyncArchive(t.Context())
+
 	assert.Equal(t, 1, stats.Failed)
 	assert.Zero(t, stats.Evicted)
 	assert.True(t, f.exists(t, tarball),
-		"a digestless confirm keeps the local file canonical")
+		"a read-back mismatch keeps the local file canonical")
 }
 
 func TestSyncArchiveEvictDigestMatchSkipsReupload(t *testing.T) {

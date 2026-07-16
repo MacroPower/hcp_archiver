@@ -173,18 +173,6 @@ func (e *Env) offloadFile(ctx context.Context, relPath string) error {
 			return fmt.Errorf("confirm remote copy: %w", err)
 		}
 
-		// The upload one call earlier recorded both digests as object
-		// metadata, so this confirm demands them back before the local copy
-		// is released: a store that silently dropped them would otherwise
-		// gate the custody transfer of the archive's only copy on size
-		// alone. Only a pre-existing object (an older build's upload, found
-		// by the probe) is allowed to gate on whatever it carries.
-		if info.SHA256 == "" && len(info.MD5) == 0 {
-			return fmt.Errorf(
-				"%w: %q returned none of the digests its upload recorded (the store drops object metadata)",
-				ErrRemoteCopyMismatch, key)
-		}
-
 		e.logger.LogAttrs(ctx, slog.LevelInfo, "offload_uploaded",
 			slog.String("key", key),
 			slog.Int64("bytes", local.Size()),
@@ -198,6 +186,27 @@ func (e *Env) offloadFile(ctx context.Context, relPath string) error {
 	err = confirmRemoteCopy(info, local.Size(), digests, key)
 	if err != nil {
 		return err
+	}
+
+	// A remote copy carrying no digest at all leaves nothing egress-free to
+	// compare, and after the delete below it is the archive's only copy, so
+	// size alone must never release the local bytes. Whether the object is an
+	// older build's upload or this tool's own upload whose metadata the store
+	// dropped (the two are indistinguishable at the probe), the confirm
+	// escalates to the strongest check there is: read the remote bytes back
+	// whole and hash them against the local proof. Eviction is rare and the
+	// egress is paid once, only in this degenerate case.
+	if info.SHA256 == "" && len(info.MD5) == 0 {
+		e.logger.LogAttrs(ctx, slog.LevelWarn, "offload_confirm_readback",
+			slog.String("key", key),
+			slog.String("detail", "the remote copy records no digest; "+
+				"reading it back whole to prove its content before the local delete"),
+		)
+
+		err = e.confirmRemoteContent(ctx, key, info.Size, digests.SHA256)
+		if err != nil {
+			return err
+		}
 	}
 
 	err = os.Remove(absPath)
@@ -266,8 +275,9 @@ func (e *Env) proveOffloadSource(relPath, absPath string) (remote.Digests, error
 // confirmRemoteCopy proves the remote object carries the proven local
 // content before the local copy is released: the sizes must match, and so
 // must every digest both sides carry. A remote object without recorded
-// digests (an upload by an older build, a foreign write) still gates on
-// size, the strongest egress-free comparison available for it.
+// digests passes this egress-free screen on size alone, and the caller then
+// escalates it to a full content read-back (see [Env.confirmRemoteContent])
+// — size is a screen here, never the custody gate.
 func confirmRemoteCopy(info remote.ObjectInfo, size int64, digests remote.Digests, key string) error {
 	switch {
 	case info.Size != size:
@@ -280,6 +290,50 @@ func confirmRemoteCopy(info remote.ObjectInfo, size int64, digests remote.Digest
 
 	case len(info.MD5) > 0 && len(digests.MD5) > 0 && !bytes.Equal(info.MD5, digests.MD5):
 		return fmt.Errorf("%w: %q records a different md5 (needs manual inspection)",
+			ErrRemoteCopyMismatch, key)
+	}
+
+	return nil
+}
+
+// confirmRemoteContent proves a digestless remote copy byte for byte: the
+// object is streamed back through ranged reads and hashed, and only a
+// SHA-256 matching the local proof lets the custody transfer proceed. It is
+// the eviction confirm's escalation path when no recorded digest exists to
+// compare — the strongest verification available, paid in one read of the
+// object.
+func (e *Env) confirmRemoteContent(ctx context.Context, key string, size int64, wantSHA256 string) error {
+	const chunk = 4 << 20
+
+	h := sha256.New()
+	buf := make([]byte, chunk)
+
+	var off int64
+
+	for off < size {
+		n, err := e.remote.ReadAt(ctx, key, size, buf, off)
+		if n > 0 {
+			h.Write(buf[:n])
+
+			off += int64(n)
+		}
+
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			return fmt.Errorf("read back remote copy %q: %w", key, err)
+		}
+	}
+
+	if off != size {
+		return fmt.Errorf("%w: %q served %d of %d bytes on read-back (needs manual inspection)",
+			ErrRemoteCopyMismatch, key, off, size)
+	}
+
+	if hex.EncodeToString(h.Sum(nil)) != wantSHA256 {
+		return fmt.Errorf("%w: %q reads back different content than the local proof (needs manual inspection)",
 			ErrRemoteCopyMismatch, key)
 	}
 
