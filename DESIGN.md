@@ -689,10 +689,18 @@ fault) is never trusted as a request fault whatever code the driver
 stamped on it (azblob maps "no such host" to NotFound), so a resolver flap
 can neither settle a prune's delete as already-removed nor answer an
 eviction probe with a permanent absence; and every attempt runs under a
-stall watchdog that cancels it after a window with no progress (no byte
-moved, no object listed) and retries it as transient, so one wedged
-connection costs a window instead of hanging a worker, a seal, or the
-whole close sweep. Every write lands in the store's default storage class.
+stall watchdog, so one wedged connection costs a bounded window instead of
+hanging a worker, a seal, or the whole close sweep. Reads and listings,
+whose progress is observable per delivered chunk or object, get a tight
+idle window; writes get that window widened by the body's size at a
+conservative floor rate (32 KiB/s), because their wire progress is
+invisible from this side of the provider SDK — a sub-threshold body is
+buffered at memory speed and transfers entirely inside the writer's
+commit — and a tight window there would cut healthy slow-link uploads
+that are moving bytes the whole time, a false failure that would repeat
+every retry and every run and permanently block the mirror's convergence.
+A cut attempt classifies transient and retries. Every write lands in the
+store's default storage class.
 
 The close sweep walks every regular file under the org root and classifies it
 top-down (the eager motions honor the same classification — they change when

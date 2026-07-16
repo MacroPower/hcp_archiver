@@ -284,7 +284,7 @@ func (c *Client) attributes(ctx context.Context, key string) (*blob.Attributes, 
 	var attrs *blob.Attributes
 
 	err := c.withRetry(ctx, func() error {
-		return c.runAttempt(ctx, func(ctx context.Context, _ func()) error {
+		return c.runAttempt(ctx, c.stallTimeout, func(ctx context.Context, _ func()) error {
 			var aerr error
 
 			attrs, aerr = c.bucket.Attributes(ctx, key)
@@ -342,7 +342,7 @@ func (c *Client) Upload(ctx context.Context, key string, body io.ReadSeeker, siz
 			return fmt.Errorf("rewind body: %w", serr)
 		}
 
-		return c.runAttempt(ctx, func(ctx context.Context, touch func()) error {
+		return c.runAttempt(ctx, c.writeWindow(size), func(ctx context.Context, touch func()) error {
 			return c.write(ctx, key, body, touch, opts)
 		})
 	})
@@ -374,7 +374,7 @@ func (c *Client) Put(ctx context.Context, key string, data []byte) error {
 		// The body streams through the shared write path rather than riding a
 		// one-shot WriteAll, so its bytes feed the stall watchdog and the wire
 		// counter exactly as an upload's do.
-		return c.runAttempt(ctx, func(ctx context.Context, touch func()) error {
+		return c.runAttempt(ctx, c.writeWindow(int64(len(data))), func(ctx context.Context, touch func()) error {
 			return c.write(ctx, key, bytes.NewReader(data), touch, opts)
 		})
 	})
@@ -453,7 +453,7 @@ func (c *Client) List(ctx context.Context, prefix string) (map[string]ObjectInfo
 	var out map[string]ObjectInfo
 
 	err := c.withRetry(ctx, func() error {
-		return c.runAttempt(ctx, func(ctx context.Context, touch func()) error {
+		return c.runAttempt(ctx, c.stallTimeout, func(ctx context.Context, touch func()) error {
 			out = make(map[string]ObjectInfo)
 			iter := c.bucket.List(&blob.ListOptions{Prefix: prefix})
 
@@ -539,7 +539,7 @@ func (c *Client) Delete(ctx context.Context, keys []string) (int, error) {
 			}
 
 			err := c.withRetry(ctx, func() error {
-				return c.runAttempt(ctx, func(ctx context.Context, _ func()) error {
+				return c.runAttempt(ctx, c.stallTimeout, func(ctx context.Context, _ func()) error {
 					derr := c.bucket.Delete(ctx, key)
 					if derr != nil && !isNotFound(derr) {
 						return derr //nolint:wrapcheck // Wrapped per key below.

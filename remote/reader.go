@@ -40,7 +40,7 @@ func (c *Client) ReadAt(ctx context.Context, key string, size int64, p []byte, o
 	var n int
 
 	err := c.withRetry(ctx, func() error {
-		return c.runAttempt(ctx, func(ctx context.Context, touch func()) error {
+		return c.runAttempt(ctx, c.stallTimeout, func(ctx context.Context, touch func()) error {
 			n = 0
 
 			r, err := c.bucket.NewRangeReader(ctx, key, off, want, nil)

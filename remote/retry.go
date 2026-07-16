@@ -26,16 +26,47 @@ const (
 	// minutes.
 	maxRetryDelay = 5 * time.Second
 
-	// DefaultStallTimeout is the default window an attempt may go without
-	// making progress — a byte moved, a listed object delivered — before the
-	// watchdog cancels it as stalled. A stalled attempt classifies transient
-	// and retries, so a wedged connection costs one window instead of hanging
-	// a worker, a seal, or the close sweep forever; the mirror gets the same
-	// defense the API transport's response-header timeout and idle-read
-	// watchdog give fetches. The window is per-progress, not per-operation,
-	// so an upload of any size stays alive as long as bytes keep moving.
+	// DefaultStallTimeout is the base window an attempt may go without
+	// observable progress — a listed object delivered, a downloaded chunk
+	// read — before the watchdog cancels it as stalled. A stalled attempt
+	// classifies transient and retries, so a wedged connection costs one
+	// window instead of hanging a worker, a seal, or the close sweep
+	// forever; the mirror gets the same defense the API transport's
+	// response-header timeout and idle-read watchdog give fetches.
+	//
+	// Writes cannot use the base window alone: their wire progress is
+	// invisible from this side of the provider SDK (a sub-threshold body is
+	// ingested into buffers at memory speed and transfers entirely inside
+	// the writer's commit; a parted upload's tail drains the same way), so a
+	// tight progress window would cut healthy-but-slow uploads that are
+	// moving bytes the whole time — a false failure that would repeat on
+	// every retry and every run, permanently blocking the mirror's
+	// convergence. A write's window is therefore widened by the body's size
+	// at [minWriteRate] (see [Client.writeWindow]): still a hard bound on a
+	// wedged connection, never a cap on a working one.
 	DefaultStallTimeout = 2 * time.Minute
 )
+
+// minWriteRate is the sustained transfer rate the write watchdog assumes no
+// healthy link falls below: a write attempt's stall window is its base
+// window plus bodySize/minWriteRate, so a link at or above this rate can
+// never be cut mid-transfer no matter the body, while a truly wedged write
+// is still bounded by the scaled deadline instead of hanging forever. The
+// floor is deliberately conservative (32 KiB/s ≈ 0.26 Mbps); a link slower
+// than that cannot sustain a mirror at all.
+const minWriteRate = 32 << 10 // bytes per second
+
+// writeWindow returns the stall window for one write attempt of size bytes:
+// the base window widened to cover transferring the whole body at
+// [minWriteRate], since everything past the SDK's buffers is unobservable
+// progress. Zero when the watchdog is disabled.
+func (c *Client) writeWindow(size int64) time.Duration {
+	if c.stallTimeout <= 0 {
+		return 0
+	}
+
+	return c.stallTimeout + time.Duration(size/minWriteRate)*time.Second
+}
 
 // errStalled marks an attempt the stall watchdog canceled: no progress
 // landed within the client's stall window. It classifies transient — the
@@ -44,13 +75,19 @@ const (
 var errStalled = errors.New("remote operation stalled")
 
 // runAttempt runs one attempt of a store operation under the stall watchdog:
-// op receives a context the watchdog cancels when the attempt goes the
-// client's stall window without calling touch, and an error from a stalled
-// attempt is wrapped with [errStalled] so it classifies transient rather
-// than as the cancellation the driver reports. A non-positive stall timeout
-// disables the watchdog.
-func (c *Client) runAttempt(ctx context.Context, op func(ctx context.Context, touch func()) error) error {
-	if c.stallTimeout <= 0 {
+// op receives a context the watchdog cancels when the attempt goes window
+// without calling touch, and an error from a stalled attempt is wrapped with
+// [errStalled] so it classifies transient rather than as the cancellation
+// the driver reports. Reads and listings pass the client's base window
+// (their progress is observable per chunk or per object); writes pass
+// [Client.writeWindow], sized so unobservable wire time can never trip it
+// on a working link. A non-positive window disables the watchdog.
+func (c *Client) runAttempt(
+	ctx context.Context,
+	window time.Duration,
+	op func(ctx context.Context, touch func()) error,
+) error {
+	if window <= 0 {
 		return op(ctx, func() {})
 	}
 
@@ -59,7 +96,7 @@ func (c *Client) runAttempt(ctx context.Context, op func(ctx context.Context, to
 
 	var stalled atomic.Bool
 
-	timer := time.AfterFunc(c.stallTimeout, func() {
+	timer := time.AfterFunc(window, func() {
 		stalled.Store(true)
 		cancel()
 	})
@@ -68,9 +105,9 @@ func (c *Client) runAttempt(ctx context.Context, op func(ctx context.Context, to
 	// Resetting an AfterFunc timer is safe from concurrent readers; a touch
 	// racing the firing at worst re-arms a timer whose context is already
 	// canceled, which changes nothing.
-	err := op(wctx, func() { timer.Reset(c.stallTimeout) })
+	err := op(wctx, func() { timer.Reset(window) })
 	if err != nil && stalled.Load() {
-		return fmt.Errorf("%w (no progress for %s): %w", errStalled, c.stallTimeout, err)
+		return fmt.Errorf("%w (no progress for %s): %w", errStalled, window, err)
 	}
 
 	return err
