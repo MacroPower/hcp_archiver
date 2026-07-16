@@ -40,21 +40,25 @@ func (c *Client) ReadAt(ctx context.Context, key string, size int64, p []byte, o
 	var n int
 
 	err := c.withRetry(ctx, func() error {
-		n = 0
+		return c.runAttempt(ctx, func(ctx context.Context, touch func()) error {
+			n = 0
 
-		r, err := c.bucket.NewRangeReader(ctx, key, off, want, nil)
-		if err != nil {
+			r, err := c.bucket.NewRangeReader(ctx, key, off, want, nil)
+			if err != nil {
+				return err //nolint:wrapcheck // Wrapped uniformly below.
+			}
+
+			defer func() {
+				//nolint:errcheck // Read-only body; the ReadFull result is what matters.
+				_ = r.Close()
+			}()
+
+			// Each delivered chunk is progress, so a large member span stays
+			// alive while it moves and a wedged body stalls out and refills.
+			n, err = io.ReadFull(countingReader{r: r, touch: touch}, p[:want])
+
 			return err //nolint:wrapcheck // Wrapped uniformly below.
-		}
-
-		defer func() {
-			//nolint:errcheck // Read-only body; the ReadFull result is what matters.
-			_ = r.Close()
-		}()
-
-		n, err = io.ReadFull(r, p[:want])
-
-		return err //nolint:wrapcheck // Wrapped uniformly below.
+		})
 	})
 	if err != nil {
 		if isNotFound(err) {

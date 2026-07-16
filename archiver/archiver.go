@@ -240,9 +240,20 @@ func (a *Archiver) Run(ctx context.Context) error {
 			}
 		}()
 
-		err = a.remote.Preflight(ctx)
-		if err != nil {
-			return fmt.Errorf("verify remote store: %w", err)
+		report, preflightErr := a.remote.Preflight(ctx)
+		if preflightErr != nil {
+			return fmt.Errorf("verify remote store: %w", preflightErr)
+		}
+
+		// An untrusted backend digest attribute (an SSE-KMS bucket's ETag is
+		// hex but no content MD5) downgrades nothing about correctness — the
+		// client serves the metadata digests this tool records instead — but
+		// size-matched files now pay one Head each, so the run notes it once.
+		if report.AttrDigestsUntrusted {
+			a.logger.LogAttrs(ctx, slog.LevelWarn, "remote_attr_digests_untrusted",
+				slog.String("detail", "the store's digest attribute does not match written bytes"+
+					" (SSE-KMS?); digest comparisons will use recorded object metadata only"),
+			)
 		}
 	}
 

@@ -1,7 +1,10 @@
 package remote
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5" //nolint:gosec // Content MD5 is the stores' integrity currency, not a security control.
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -60,11 +63,20 @@ const (
 // organization it archives. Create instances with [New]; a client that is no
 // longer needed releases its backend resources through [Client.Close].
 type Client struct {
-	bucket     *blob.Bucket
-	wireBytes  *atomic.Int64
-	cfg        Config
-	retries    int
-	retryDelay time.Duration
+	bucket       *blob.Bucket
+	wireBytes    *atomic.Int64
+	cfg          Config
+	retries      int
+	retryDelay   time.Duration
+	stallTimeout time.Duration
+
+	// The attrsUntrusted flag records that the backend's own digest attribute is not a
+	// content MD5 (an SSE-KMS-encrypted S3 bucket's ETag is hex but hashes
+	// nothing readable), as proven by [Client.Preflight]'s probe. Once set,
+	// [Client.Head] and [Client.List] serve only the metadata digests this
+	// tool's writes record, so a bogus backend digest can neither refuse an
+	// eviction confirm nor force perpetual re-uploads.
+	attrsUntrusted atomic.Bool
 }
 
 // Option configures a [Client] passed to [New].
@@ -100,6 +112,17 @@ func WithRetry(retries int, delay time.Duration) Option {
 	}
 }
 
+// WithStallTimeout sets the window an attempt may go without progress
+// before the watchdog cancels it as stalled and it retries as a transient
+// failure, overriding [DefaultStallTimeout]. A non-positive timeout disables
+// the watchdog, leaving a wedged connection to the caller's context. It
+// returns an [Option].
+func WithStallTimeout(d time.Duration) Option {
+	return func(c *Client) {
+		c.stallTimeout = d
+	}
+}
+
 // WithWireBytes sets a shared counter that accumulates upload bytes as they
 // stream to the store, so a progress view can derive live throughput while a
 // large object is still in flight. Bytes are counted as they move, so a
@@ -119,9 +142,10 @@ func WithWireBytes(counter *atomic.Int64) Option {
 // [ErrMissingURL] when cfg names no URL.
 func New(ctx context.Context, cfg Config, opts ...Option) (*Client, error) {
 	c := &Client{
-		cfg:        cfg,
-		retries:    DefaultRetries,
-		retryDelay: DefaultRetryDelay,
+		cfg:          cfg,
+		retries:      DefaultRetries,
+		retryDelay:   DefaultRetryDelay,
+		stallTimeout: DefaultStallTimeout,
 	}
 
 	for _, opt := range opts {
@@ -170,6 +194,19 @@ type Digests struct {
 	MD5 []byte
 }
 
+// DigestsOf computes the [Digests] of a body held whole in memory, the shape
+// [Client.Put] serves; streamed bodies digest as they are read instead.
+func DigestsOf(data []byte) Digests {
+	//nolint:gosec // Content MD5 is the stores' integrity currency, not a security control.
+	sum := md5.Sum(data)
+	sha := sha256.Sum256(data)
+
+	return Digests{
+		SHA256: hex.EncodeToString(sha[:]),
+		MD5:    sum[:],
+	}
+}
+
 // metadata renders the digests as the object metadata recorded with an
 // upload, or nil when neither digest is present.
 func (d Digests) metadata() map[string]string {
@@ -194,56 +231,78 @@ func (d Digests) metadata() map[string]string {
 // [Client.List].
 type ObjectInfo struct {
 	// SHA256 is the lowercase hex full-object SHA-256 recorded in the
-	// object's metadata by an [Client.Upload] with [Digests], empty when none
-	// was recorded. Listings never carry metadata, so it resolves only
-	// through [Client.Head].
+	// object's metadata by a write carrying [Digests], empty when none was
+	// recorded. Listings never carry metadata, so it resolves only through
+	// [Client.Head].
 	SHA256 string
-	// MD5 is the store's recorded full-object MD5 digest as raw bytes,
-	// comparable against a locally computed sum: the backend's own attribute
-	// when it records one, else the metadata digest an [Client.Upload] with
-	// [Digests] recorded (a parted upload carries no backend attribute on
-	// most stores). It is nil when neither exists. Some backends' listings
-	// omit a digest the object still carries, so a nil from [Client.List]
-	// may yet resolve through [Client.Head].
+	// MD5 is the recorded full-object MD5 digest as raw bytes, comparable
+	// against a locally computed sum: the metadata digest this tool's writes
+	// record when present (computed from the exact bytes streamed and checked
+	// against them at commit), else the backend's own attribute — unless the
+	// preflight probe proved that attribute is not a content MD5 (an SSE-KMS
+	// bucket's ETag, say), in which case only metadata digests are served. It
+	// is nil when nothing comparable exists. Listings carry no metadata, so a
+	// nil from [Client.List] may yet resolve through [Client.Head].
 	MD5 []byte
 	// Size is the object's length in bytes.
 	Size int64
 }
 
-// objectInfo maps one object's stored attributes onto [ObjectInfo],
-// resolving the digest ladder: the backend's own MD5 first, else the
-// metadata digest this tool's uploads record.
-func objectInfo(attrs *blob.Attributes) ObjectInfo {
+// objectInfo maps one object's stored attributes onto [ObjectInfo]. The
+// digest ladder prefers the metadata digest this tool's writes record — it
+// was computed from the exact bytes handed to the store and verified against
+// the streamed body at commit — over the backend's own attribute, which can
+// be an ETag that is no content MD5 at all (an SSE-KMS-encrypted S3 object's
+// is hex but hashes nothing readable). The attribute is used only as the
+// fallback for objects recorded without metadata (an older build's write, a
+// foreign object), and not even then once preflight has proven it untrue.
+func (c *Client) objectInfo(attrs *blob.Attributes) ObjectInfo {
 	info := ObjectInfo{
-		MD5:    attrs.MD5,
 		SHA256: attrs.Metadata[metadataKeySHA256],
 		Size:   attrs.Size,
 	}
 
-	if info.MD5 == nil {
-		if s := attrs.Metadata[metadataKeyMD5]; s != "" {
-			sum, err := hex.DecodeString(s)
-			if err == nil {
-				info.MD5 = sum
-			}
+	if s := attrs.Metadata[metadataKeyMD5]; s != "" {
+		sum, err := hex.DecodeString(s)
+		if err == nil {
+			info.MD5 = sum
 		}
+	}
+
+	if info.MD5 == nil && !c.attrsUntrusted.Load() {
+		info.MD5 = attrs.MD5
 	}
 
 	return info
 }
 
-// Head reads the object's metadata at key. An absent object returns
-// [ErrNotFound].
-func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
+// attributes reads the raw stored attributes at key under the client's
+// retries: the shared body of [Client.Head], and the preflight probe's
+// window onto the backend digest attribute before the trust ladder filters
+// it.
+func (c *Client) attributes(ctx context.Context, key string) (*blob.Attributes, error) {
 	var attrs *blob.Attributes
 
 	err := c.withRetry(ctx, func() error {
-		var aerr error
+		return c.runAttempt(ctx, func(ctx context.Context, _ func()) error {
+			var aerr error
 
-		attrs, aerr = c.bucket.Attributes(ctx, key)
+			attrs, aerr = c.bucket.Attributes(ctx, key)
 
-		return aerr //nolint:wrapcheck // Wrapped uniformly below.
+			return aerr //nolint:wrapcheck // Wrapped by the callers.
+		})
 	})
+	if err != nil {
+		return nil, err //nolint:wrapcheck // Wrapped by the callers.
+	}
+
+	return attrs, nil
+}
+
+// Head reads the object's metadata at key. An absent object returns
+// [ErrNotFound].
+func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
+	attrs, err := c.attributes(ctx, key)
 	if err != nil {
 		if isNotFound(err) {
 			return ObjectInfo{}, fmt.Errorf("%w: %s", ErrNotFound, key)
@@ -252,7 +311,7 @@ func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
 		return ObjectInfo{}, fmt.Errorf("head %q: %w", key, err)
 	}
 
-	return objectInfo(attrs), nil
+	return c.objectInfo(attrs), nil
 }
 
 // Upload streams body to the object at key, letting the backend split a
@@ -283,7 +342,9 @@ func (c *Client) Upload(ctx context.Context, key string, body io.ReadSeeker, siz
 			return fmt.Errorf("rewind body: %w", serr)
 		}
 
-		return c.write(ctx, key, body, opts)
+		return c.runAttempt(ctx, func(ctx context.Context, touch func()) error {
+			return c.write(ctx, key, body, touch, opts)
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("upload %q: %w", key, err)
@@ -292,39 +353,46 @@ func (c *Client) Upload(ctx context.Context, key string, body io.ReadSeeker, siz
 	return nil
 }
 
-// Put writes data to the object at key, recording the body's MD5 digest
-// with the object so later [Client.Head] and [Client.List] calls can compare
-// the stored content against local bytes; the digest doubles as the write's
-// integrity check. The whole body rides in memory — the shape of the small
+// Put writes data to the object at key. Like [Client.Upload], the body's
+// digests ride with the write: the MD5 is checked against the streamed bytes
+// at commit, and both digests are recorded as object metadata so later
+// [Client.Head] and [Client.List] calls can compare the stored content
+// against local bytes even where the backend records no digest of its own —
+// a body large enough to part (16 MiB on S3) leaves no backend attribute, so
+// without the metadata a same-size content change would be invisible to the
+// sync gate forever. The whole body rides in memory — the shape of the small
 // search-layer files Put serves; bulk bytes stream through [Client.Upload].
 func (c *Client) Put(ctx context.Context, key string, data []byte) error {
+	digests := DigestsOf(data)
+	opts := &blob.WriterOptions{
+		DisableContentTypeDetection: true,
+		ContentMD5:                  digests.MD5,
+		Metadata:                    digests.metadata(),
+	}
+
 	err := c.withRetry(ctx, func() error {
-		// WriteAll digests the body itself and carries the digest as the
-		// write's ContentMD5.
-		//nolint:wrapcheck // Wrapped uniformly below.
-		return c.bucket.WriteAll(ctx, key, data, &blob.WriterOptions{
-			DisableContentTypeDetection: true,
+		// The body streams through the shared write path rather than riding a
+		// one-shot WriteAll, so its bytes feed the stall watchdog and the wire
+		// counter exactly as an upload's do.
+		return c.runAttempt(ctx, func(ctx context.Context, touch func()) error {
+			return c.write(ctx, key, bytes.NewReader(data), touch, opts)
 		})
 	})
 	if err != nil {
 		return fmt.Errorf("put %q: %w", key, err)
 	}
 
-	// WriteAll offers no streaming hook, so the whole body counts once on
-	// success; against a retried streaming upload's recount this is a
-	// negligible asymmetry at the small sizes Put serves.
-	if c.wireBytes != nil {
-		c.wireBytes.Add(int64(len(data)))
-	}
-
 	return nil
 }
 
 // countingReader accumulates the bytes read through it into wire, feeding
-// live upload throughput to a progress view. A nil wire counts nothing.
+// live upload throughput to a progress view, and reports each delivered
+// chunk to the stall watchdog through touch. A nil wire counts nothing; a
+// nil touch reports nothing.
 type countingReader struct {
-	r    io.Reader
-	wire *atomic.Int64
+	r     io.Reader
+	wire  *atomic.Int64
+	touch func()
 }
 
 // Read delegates to the wrapped reader, counting delivered bytes before any
@@ -332,17 +400,23 @@ type countingReader struct {
 // those bytes moved.
 func (cr countingReader) Read(p []byte) (int, error) {
 	n, err := cr.r.Read(p)
-	if n > 0 && cr.wire != nil {
-		cr.wire.Add(int64(n))
+	if n > 0 {
+		if cr.wire != nil {
+			cr.wire.Add(int64(n))
+		}
+
+		if cr.touch != nil {
+			cr.touch()
+		}
 	}
 
 	return n, err //nolint:wrapcheck // A transparent reader wrapper.
 }
 
-// write streams r into one committed object at key. A body that errs midway
-// cancels the write before the final flush, so a truncated read can never
-// commit a truncated object under the key.
-func (c *Client) write(ctx context.Context, key string, r io.Reader, opts *blob.WriterOptions) error {
+// write streams r into one committed object at key, reporting progress to
+// touch. A body that errs midway cancels the write before the final flush,
+// so a truncated read can never commit a truncated object under the key.
+func (c *Client) write(ctx context.Context, key string, r io.Reader, touch func(), opts *blob.WriterOptions) error {
 	// The writer commits on Close unless its context is canceled first; the
 	// derived context is the abort lever for a body that fails mid-copy.
 	wctx, cancel := context.WithCancel(ctx)
@@ -353,7 +427,7 @@ func (c *Client) write(ctx context.Context, key string, r io.Reader, opts *blob.
 		return fmt.Errorf("open writer: %w", err)
 	}
 
-	_, copyErr := io.Copy(w, countingReader{r: r, wire: c.wireBytes})
+	_, copyErr := io.Copy(w, countingReader{r: r, wire: c.wireBytes, touch: touch})
 	if copyErr != nil {
 		cancel()
 	}
@@ -379,25 +453,41 @@ func (c *Client) List(ctx context.Context, prefix string) (map[string]ObjectInfo
 	var out map[string]ObjectInfo
 
 	err := c.withRetry(ctx, func() error {
-		out = make(map[string]ObjectInfo)
-		iter := c.bucket.List(&blob.ListOptions{Prefix: prefix})
+		return c.runAttempt(ctx, func(ctx context.Context, touch func()) error {
+			out = make(map[string]ObjectInfo)
+			iter := c.bucket.List(&blob.ListOptions{Prefix: prefix})
 
-		for {
-			obj, err := iter.Next(ctx)
-			if errors.Is(err, io.EOF) {
-				return nil
+			for {
+				obj, err := iter.Next(ctx)
+				if errors.Is(err, io.EOF) {
+					return nil
+				}
+
+				if err != nil {
+					return err //nolint:wrapcheck // Wrapped uniformly below.
+				}
+
+				// Each delivered object is progress: a long listing of a large
+				// mirror stays alive page after page, while a wedged page fetch
+				// stalls out and the enumeration retries whole.
+				touch()
+
+				if obj.IsDir {
+					continue
+				}
+
+				// Listings carry only the backend attribute, never metadata, so a
+				// distrusted attribute leaves the entry digestless; the sync gate
+				// then resolves the metadata digest through one Head instead of
+				// comparing against a value that is no content MD5.
+				md5sum := obj.MD5
+				if c.attrsUntrusted.Load() {
+					md5sum = nil
+				}
+
+				out[obj.Key] = ObjectInfo{MD5: md5sum, Size: obj.Size}
 			}
-
-			if err != nil {
-				return err //nolint:wrapcheck // Wrapped uniformly below.
-			}
-
-			if obj.IsDir {
-				continue
-			}
-
-			out[obj.Key] = ObjectInfo{MD5: obj.MD5, Size: obj.Size}
-		}
+		})
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list %q: %w", prefix, err)
@@ -449,12 +539,14 @@ func (c *Client) Delete(ctx context.Context, keys []string) (int, error) {
 			}
 
 			err := c.withRetry(ctx, func() error {
-				derr := c.bucket.Delete(ctx, key)
-				if derr != nil && !isNotFound(derr) {
-					return derr //nolint:wrapcheck // Wrapped per key below.
-				}
+				return c.runAttempt(ctx, func(ctx context.Context, _ func()) error {
+					derr := c.bucket.Delete(ctx, key)
+					if derr != nil && !isNotFound(derr) {
+						return derr //nolint:wrapcheck // Wrapped per key below.
+					}
 
-				return nil
+					return nil
+				})
 			})
 			if err != nil {
 				mu.Lock()
@@ -509,7 +601,11 @@ func partSizeFor(size, configured int64) int {
 	return int(configured)
 }
 
-// isNotFound reports whether the backend classifies err as "no such object".
+// isNotFound reports whether err is a store response proving no object at
+// the key. A transport-level failure never qualifies, whatever code the
+// driver stamped on it (azblob classifies DNS failures as NotFound): absence
+// is a destructive fact — a delete settles, an eviction probe re-uploads, a
+// viewer reports a missing bundle — and only the store can attest it.
 func isNotFound(err error) bool {
-	return gcerrors.Code(err) == gcerrors.NotFound
+	return gcerrors.Code(err) == gcerrors.NotFound && !isTransportError(err)
 }

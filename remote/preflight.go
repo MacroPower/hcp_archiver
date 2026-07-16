@@ -3,7 +3,7 @@ package remote
 import (
 	"bytes"
 	"context"
-	"crypto/md5" //nolint:gosec // Content MD5 is the stores' integrity currency, not a security control.
+	"encoding/hex"
 	"fmt"
 	"path"
 	"strings"
@@ -23,63 +23,95 @@ var preflightBody = []byte("hcp_archiver remote store probe\n")
 // caught by the byte comparison instead of passing by luck.
 const preflightRangeOffset = 4
 
+// PreflightReport carries what [Client.Preflight] learned about the store
+// beyond pass/fail.
+type PreflightReport struct {
+	// AttrDigestsUntrusted reports that the store's own digest attribute did
+	// not match the probe's written bytes — the shape of an SSE-KMS-encrypted
+	// S3 bucket, whose ETags are hex but are not content MD5s — so the client
+	// will serve only the metadata digests this tool's writes record for the
+	// rest of the run. Digest comparisons stay content-aware; size-matched
+	// files just pay one Head where a listing's attribute would have served.
+	AttrDigestsUntrusted bool
+}
+
 // Preflight proves the client can manage objects in the configured store by
-// round-tripping a probe under the prefix — write it, read its metadata
-// back, find it in a listing, fetch a ranged span of it, delete it — the
-// same motions an archive run's mirror and a later `view` of an evicted
-// bundle perform, so a misconfigured bucket URL or credential set surfaces
-// before any archive work begins rather than hours into it.
+// round-tripping a probe under the prefix — write it through the eviction
+// path with recorded digests, read its attributes back, find it in a
+// listing, fetch a ranged span of it, delete it — the same motions an
+// archive run's mirror and a later `view` of an evicted bundle perform, so a
+// misconfigured bucket URL or credential set surfaces before any archive
+// work begins rather than hours into it.
 //
-// The metadata read is also the digest check: the sync sweep's incremental
-// gate and the eviction confirm both compare recorded MD5s, so a store that
-// answers a digest that does not match the written bytes fails here, while a
-// store that records none (an encrypted bucket whose ETags are not MD5s)
-// passes and simply leaves those comparisons gating on size, as designed.
+// The attributes read is also the digest check, in two parts. The recorded
+// metadata digests must read back exactly: they are the currency of the
+// eviction confirm and the incremental sync gate, and a store that drops or
+// mangles object metadata would silently degrade the custody transfer of the
+// archive's only copies to a size-only comparison, so it fails preflight
+// outright. The backend's own digest attribute, by contrast, is merely
+// scored: one that mismatches the written bytes (an SSE-KMS bucket's ETag)
+// marks the attribute untrusted in the returned [PreflightReport] and the
+// client serves metadata digests alone from then on, while a store that
+// records no attribute at all passes unremarked — the metadata carries the
+// comparisons either way.
 //
 // The probe key is fixed, so a probe stranded by an interrupted run is
 // overwritten and removed by the next preflight rather than accreting.
-func (c *Client) Preflight(ctx context.Context) error {
+func (c *Client) Preflight(ctx context.Context) (PreflightReport, error) {
+	var report PreflightReport
+
 	key := strings.TrimPrefix(path.Join("/", c.cfg.Prefix, preflightName), "/")
+	digests := DigestsOf(preflightBody)
 
-	err := c.Put(ctx, key, preflightBody)
+	err := c.Upload(ctx, key, bytes.NewReader(preflightBody), int64(len(preflightBody)), digests)
 	if err != nil {
-		return fmt.Errorf("preflight: %w", err)
+		return report, fmt.Errorf("preflight: %w", err)
 	}
 
-	info, err := c.Head(ctx, key)
+	// The raw attributes, not [Client.Head]: the digest ladder would prefer
+	// the metadata digest and hide the backend attribute this probe scores.
+	attrs, err := c.attributes(ctx, key)
 	if err != nil {
-		return fmt.Errorf("preflight: %w", err)
+		return report, fmt.Errorf("preflight: head probe %q: %w", key, err)
 	}
 
-	if want := int64(len(preflightBody)); info.Size != want {
-		return fmt.Errorf("preflight: probe %q reads back %d bytes, wrote %d", key, info.Size, want)
+	if want := int64(len(preflightBody)); attrs.Size != want {
+		return report, fmt.Errorf("preflight: probe %q reads back %d bytes, wrote %d", key, attrs.Size, want)
 	}
 
-	//nolint:gosec // Content MD5 is the stores' integrity currency, not a security control.
-	if want := md5.Sum(preflightBody); info.MD5 != nil && !bytes.Equal(info.MD5, want[:]) {
-		return fmt.Errorf("preflight: probe %q records a digest that does not match the written bytes", key)
+	if attrs.Metadata[metadataKeySHA256] != digests.SHA256 ||
+		attrs.Metadata[metadataKeyMD5] != hex.EncodeToString(digests.MD5) {
+		return report, fmt.Errorf(
+			"preflight: probe %q does not return the object metadata recorded with it; "+
+				"the store drops or mangles metadata, which the mirror's digest verification depends on", key)
+	}
+
+	if attrs.MD5 != nil && !bytes.Equal(attrs.MD5, digests.MD5) {
+		c.attrsUntrusted.Store(true)
+
+		report.AttrDigestsUntrusted = true
 	}
 
 	listed, err := c.List(ctx, key)
 	if err != nil {
-		return fmt.Errorf("preflight: %w", err)
+		return report, fmt.Errorf("preflight: %w", err)
 	}
 
 	if _, ok := listed[key]; !ok {
-		return fmt.Errorf("preflight: probe %q missing from its own listing", key)
+		return report, fmt.Errorf("preflight: probe %q missing from its own listing", key)
 	}
 
 	err = c.preflightRangedRead(ctx, key)
 	if err != nil {
-		return err
+		return report, err
 	}
 
 	_, err = c.Delete(ctx, []string{key})
 	if err != nil {
-		return fmt.Errorf("preflight: %w", err)
+		return report, fmt.Errorf("preflight: %w", err)
 	}
 
-	return nil
+	return report, nil
 }
 
 // preflightRangedRead proves the store serves ranged reads faithfully: the

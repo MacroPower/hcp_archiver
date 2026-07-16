@@ -29,8 +29,10 @@ func TestPreflight(t *testing.T) {
 
 			client, fake := newClient(t, remote.Config{Prefix: tc.prefix})
 
-			err := client.Preflight(t.Context())
+			report, err := client.Preflight(t.Context())
 			require.NoError(t, err)
+			assert.False(t, report.AttrDigestsUntrusted,
+				"a store whose attribute digest matches the written bytes stays trusted")
 
 			assert.Empty(t, fake.Keys(), "the probe should not outlive the preflight")
 			assert.Equal(t, []string{tc.want}, fake.Deleted(),
@@ -52,30 +54,75 @@ func TestPreflightRangedReadFault(t *testing.T) {
 	client, fake := newClient(t, remote.Config{Prefix: "hcp"})
 	fake.RangeErr = injected
 
-	err := client.Preflight(t.Context())
+	_, err := client.Preflight(t.Context())
 	require.ErrorIs(t, err, injected,
 		"a store that cannot serve ranged reads must fail the preflight; view depends on them")
 	assert.Contains(t, err.Error(), "ranged read")
 }
 
-func TestPreflightDigestMismatch(t *testing.T) {
+func TestPreflightMetadataDropped(t *testing.T) {
 	t.Parallel()
 
 	client, fake := newClient(t, remote.Config{Prefix: "hcp"})
 
-	// Corrupt the probe's recorded digest between the write and the metadata
-	// read, modeling a store whose digests cannot be trusted; the sync gate
-	// and eviction confirm compare these, so the run must not start.
+	// Strip the probe's recorded metadata between the write and the read,
+	// modeling a store that does not persist object metadata. The eviction
+	// confirm and the incremental sync gate compare metadata digests, so such
+	// a store would silently degrade the custody transfer to size-only; the
+	// run must not start.
 	fake.HeadHook = func(context.Context) {
-		fake.SetObject("hcp/.preflight", remotetest.Object{
-			Data: []byte("hcp_archiver remote store probe\n"),
-			MD5:  remotetest.MD5Sum([]byte("other bytes")),
-		})
+		obj, ok := fake.Object("hcp/.preflight")
+		if ok {
+			obj.Metadata = nil
+			fake.SetObject("hcp/.preflight", obj)
+		}
 	}
 
-	err := client.Preflight(t.Context())
+	_, err := client.Preflight(t.Context())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "digest")
+	assert.Contains(t, err.Error(), "metadata")
+}
+
+func TestPreflightUntrustedAttributeDigest(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newClient(t, remote.Config{Prefix: "hcp"})
+
+	// Replace the probe's backend digest attribute with one that hashes
+	// nothing readable while its recorded metadata stays intact — the shape
+	// of an SSE-KMS-encrypted S3 bucket, whose ETags are hex but not content
+	// MD5s. The run proceeds; the client just stops serving attribute digests.
+	fake.HeadHook = func(context.Context) {
+		obj, ok := fake.Object("hcp/.preflight")
+		if ok {
+			obj.MD5 = remotetest.MD5Sum([]byte("other bytes"))
+			fake.SetObject("hcp/.preflight", obj)
+		}
+	}
+
+	report, err := client.Preflight(t.Context())
+	require.NoError(t, err,
+		"a bogus backend attribute must downgrade to metadata-only digests, not fail the run")
+	assert.True(t, report.AttrDigestsUntrusted)
+
+	// The downgrade must hold for the rest of the run: an object recorded
+	// without metadata (a foreign write) now serves no digest at all rather
+	// than a value that is no content MD5.
+	fake.HeadHook = nil
+	fake.SetObject("hcp/foreign.json", remotetest.Object{
+		Data: []byte("{}"),
+		MD5:  remotetest.MD5Sum([]byte("other bytes")),
+	})
+
+	info, err := client.Head(t.Context(), "hcp/foreign.json")
+	require.NoError(t, err)
+	assert.Nil(t, info.MD5, "an untrusted attribute digest must not be served")
+
+	listed, err := client.List(t.Context(), "hcp/")
+	require.NoError(t, err)
+	require.Contains(t, listed, "hcp/foreign.json")
+	assert.Nil(t, listed["hcp/foreign.json"].MD5,
+		"listings serve only the attribute, so a distrusted one leaves the entry digestless")
 }
 
 func TestPreflightStoreErrors(t *testing.T) {
@@ -87,7 +134,7 @@ func TestPreflightStoreErrors(t *testing.T) {
 		inject func(*remotetest.Fake)
 		want   string
 	}{
-		"put":    {inject: func(f *remotetest.Fake) { f.PutErr = injected }, want: "put"},
+		"upload": {inject: func(f *remotetest.Fake) { f.PutErr = injected }, want: "upload"},
 		"head":   {inject: func(f *remotetest.Fake) { f.HeadErr = injected }, want: "head"},
 		"list":   {inject: func(f *remotetest.Fake) { f.ListErr = injected }, want: "list"},
 		"delete": {inject: func(f *remotetest.Fake) { f.DeleteErr = injected }, want: "delete"},
@@ -100,7 +147,7 @@ func TestPreflightStoreErrors(t *testing.T) {
 			client, fake := newClient(t, remote.Config{Prefix: "hcp"})
 			tc.inject(fake)
 
-			err := client.Preflight(t.Context())
+			_, err := client.Preflight(t.Context())
 			require.ErrorIs(t, err, injected)
 			assert.Contains(t, err.Error(), "preflight")
 			assert.Contains(t, err.Error(), tc.want, "the message should name the motion that surfaced the fault")
