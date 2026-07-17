@@ -1104,6 +1104,41 @@ func TestSyncSubtreeFollowsSymlinkedWorkspace(t *testing.T) {
 	assert.True(t, ok)
 }
 
+func TestSyncArchiveWalksSiblingAliasedSubtreeOnce(t *testing.T) {
+	t.Parallel()
+
+	const wsFile = "projects/prod/workspaces/api/workspace.json"
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	data := []byte(`{"ws":"api"}`)
+	f.writeDone(t, wsFile, data)
+	f.fake.SetObject(f.key(wsFile),
+		remotetest.Object{Data: data, MD5: remotetest.MD5Sum(data)})
+
+	// A rename symlink an operator left beside its target: the same physical
+	// workspace reachable under two sibling names. The sweep must walk the
+	// subtree once — walked under both names, its files would sync, evict,
+	// and count twice, here a duplicate upload of the same content under the
+	// alias's remote key.
+	wsDir := filepath.Join(f.store.Root(), "projects", "prod", "workspaces")
+	require.NoError(t, os.Symlink(
+		filepath.Join(wsDir, "api"),
+		filepath.Join(wsDir, "renamed"),
+	))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Failed)
+	assert.Zero(t, stats.Pruned)
+	assert.Equal(t, 1, stats.Skipped, "the aliased subtree walks once")
+	assert.Zero(t, stats.Uploaded, "no duplicate upload under the alias key")
+
+	_, ok := f.fake.Object(f.key("projects/prod/workspaces/renamed/workspace.json"))
+	assert.False(t, ok, "the alias name mirrors nothing of its own")
+}
+
 func TestSyncArchiveCanceledContextUploadsNothing(t *testing.T) {
 	t.Parallel()
 
