@@ -88,6 +88,18 @@ type quitRequestMsg struct{}
 // other through the command goroutines and print out of order.
 type logFlushedMsg struct{}
 
+// logFeed is the view of a [LogSink] the model consumes: peek the queued
+// lines, print them, and commit them once the printing is confirmed. The
+// reporter hands the model a revocable implementation, so an abandoned
+// program cannot keep consuming a sink a later panel has taken over.
+type logFeed interface {
+	// Peek returns the queued lines without removing them, and the cursor to
+	// commit them under.
+	Peek() ([]string, uint64)
+	// Commit removes the lines the peek under cursor returned.
+	Commit(cursor uint64)
+}
+
 // tuiModel is the Bubble Tea model backing the human view on a terminal.
 //
 // It owns no counters of its own: each render pulls a fresh [snapshot] through
@@ -101,7 +113,7 @@ type tuiModel struct {
 	spin          spinner.Model
 	take          func() snapshot
 	interrupt     func()
-	drainLogs     func() []string
+	logs          logFeed
 	samples       []rateSample
 	uploadSamples []rateSample
 	snap          snapshot
@@ -119,16 +131,18 @@ type tuiModel struct {
 	sampled  bool
 	// Whether a log batch is in flight: emitted but not yet acknowledged by its
 	// [logFlushedMsg]. The next batch waits for the ack, so batches print in
-	// order.
+	// order. The cursor identifies the in-flight batch's lines, committed out
+	// of the feed only once the ack confirms they printed.
 	logsInFlight bool
+	logCursor    uint64
 }
 
 // newTUIModel creates a new [tuiModel] that renders snapshots from take, on a
-// quit key invokes interrupt before quitting, and prints the log lines
-// drainLogs yields above the panel. Any of the functions may be nil in tests
-// that only exercise rendering (a nil drainLogs simply never prints). It
-// returns a pointer so Bubble Tea passes the heavy model around by reference.
-func newTUIModel(take func() snapshot, interrupt func(), drainLogs func() []string) *tuiModel {
+// quit key invokes interrupt before quitting, and prints the log lines fed by
+// logs above the panel. Any of the arguments may be nil in tests that only
+// exercise rendering (a nil feed simply never prints). It returns a pointer
+// so Bubble Tea passes the heavy model around by reference.
+func newTUIModel(take func() snapshot, interrupt func(), logs logFeed) *tuiModel {
 	spin := spinner.New(spinner.WithSpinner(spinner.Dot))
 	spin.Style = styleSpinner
 
@@ -144,7 +158,7 @@ func newTUIModel(take func() snapshot, interrupt func(), drainLogs func() []stri
 		bar:       bar,
 		take:      take,
 		interrupt: interrupt,
-		drainLogs: drainLogs,
+		logs:      logs,
 	}
 }
 
@@ -169,9 +183,15 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case logFlushedMsg:
-		// The in-flight batch has printed; release the next one, so a burst of
-		// logging drains across acks rather than waiting for ticks.
+		// The in-flight batch has printed: commit its lines out of the feed —
+		// only now, so a program that died mid-batch leaves them queued for
+		// the sink's fallback flush instead of losing them — and release the
+		// next batch, so a burst of logging flows across acks rather than
+		// waiting for ticks.
 		m.logsInFlight = false
+		if m.logs != nil {
+			m.logs.Commit(m.logCursor)
+		}
 
 		cmd := m.flushLogs()
 
@@ -225,11 +245,11 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // quit marks the model quitting and returns the command ending the program: a
 // final log flush sequenced ahead of the quit, so lines queued at shutdown
-// print above the panel before the empty final render erases it. The flush
-// honors the in-flight ack gate like any other — with a batch still in
-// flight, printing another here could race it — and whatever stays queued is
-// not lost: the reporter's deactivation flushes the sink's residue to the
-// fallback writer once the program has stopped.
+// print above the panel — and their ack commits them — before the empty final
+// render erases it. The flush honors the in-flight ack gate like any other —
+// with a batch still in flight, printing another here could race it — and
+// whatever stays uncommitted is not lost: the reporter's deactivation flushes
+// the sink's residue to the fallback writer once the program has stopped.
 func (m *tuiModel) quit() tea.Cmd {
 	m.quitting = true
 
@@ -240,55 +260,39 @@ func (m *tuiModel) quit() tea.Cmd {
 	return tea.Quit
 }
 
-// flushLogs drains the queued log lines and returns a command printing them
-// above the panel, or nil when there is nothing to print, a batch is already
-// in flight, or the terminal size is still unknown (unwrapped lines would
-// corrupt the renderer's row accounting; the queue holds until the first size
-// message). The print is sequenced with a [logFlushedMsg] ack, so the next
-// batch waits until this one has landed and batches can never print out of
-// order.
+// flushLogs peeks the feed's queued log lines and returns a command printing
+// them above the panel, or nil when there is nothing to print, a batch is
+// already in flight, or the terminal size is still unknown (unwrapped lines
+// would corrupt the renderer's row accounting; the queue holds until the
+// first size message). Each line is hard-wrapped to the terminal width — the
+// inline renderer estimates a printed line's height from its width to scroll
+// the panel out of the way, and a line left wider than the terminal makes
+// that estimate wrong, shifting the panel's origin so every later repaint
+// draws misaligned; pre-wrapped lines make the estimate exact. The print is
+// sequenced with a [logFlushedMsg] ack, so the next batch waits until this
+// one has landed (batches can never print out of order) and the lines commit
+// out of the feed only once confirmed printed.
 func (m *tuiModel) flushLogs() tea.Cmd {
-	if m.logsInFlight || m.width <= 0 {
+	if m.logs == nil || m.logsInFlight || m.width <= 0 {
 		return nil
 	}
 
-	batch := m.logBatch()
-	if batch == "" {
-		return nil
-	}
-
-	m.logsInFlight = true
-
-	return tea.Sequence(
-		tea.Println(batch),
-		func() tea.Msg { return logFlushedMsg{} },
-	)
-}
-
-// logBatch drains the queued log lines and joins them into one print batch,
-// each line hard-wrapped to the terminal width. The wrap is what keeps the
-// inline renderer honest: it estimates a printed line's height from its width
-// to scroll the panel out of the way, and a line left wider than the terminal
-// makes that estimate wrong, shifting the panel's origin so every later
-// repaint draws misaligned. Pre-wrapped lines make the estimate exact. A nil
-// drain source or an empty queue yields the empty string.
-func (m *tuiModel) logBatch() string {
-	if m.drainLogs == nil {
-		return ""
-	}
-
-	lines := m.drainLogs()
+	lines, cursor := m.logs.Peek()
 	if len(lines) == 0 {
-		return ""
+		return nil
 	}
 
 	for i, line := range lines {
-		if m.width > 0 {
-			lines[i] = ansi.Hardwrap(line, m.width, true)
-		}
+		lines[i] = ansi.Hardwrap(line, m.width, true)
 	}
 
-	return strings.Join(lines, "\n")
+	m.logsInFlight = true
+	m.logCursor = cursor
+
+	return tea.Sequence(
+		tea.Println(strings.Join(lines, "\n")),
+		func() tea.Msg { return logFlushedMsg{} },
+	)
 }
 
 // View renders the current snapshot into an inline (non-alt-screen) view, so log

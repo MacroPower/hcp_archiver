@@ -727,21 +727,34 @@ const quitGrace = 2 * time.Second
 // from returning at all -- exactly the state the escalation exists to escape.
 // The kill's [tea.ErrProgramKilled] is mapped to a clean nil. It activates
 // the log sink for the program's lifetime so log lines queue for the panel to
-// print, and deactivates it on return, which flushes any undrained lines to
-// the sink's fallback so nothing is lost and restores the stderr path before
-// the next org logs.
+// print, and on return revokes the model's feed and deactivates the sink,
+// which flushes any uncommitted lines to the sink's fallback so nothing is
+// lost and restores the stderr path before the next org logs. The revocation
+// covers the abandonment path: a wedged program left behind may tick again
+// later, and its feed going dead is what keeps it from stealing lines a
+// successor panel now owns.
 func (r *Reporter) runTUI(ctx context.Context) error {
-	var drainLogs func() []string
+	var feed *feedGuard
 
 	if r.sink != nil {
-		drainLogs = r.sink.Drain
+		feed = &feedGuard{sink: r.sink}
 
 		r.sink.Activate()
-		defer r.sink.Deactivate()
+
+		defer func() {
+			feed.revoked.Store(true)
+			r.sink.Deactivate()
+		}()
+	}
+
+	var modelFeed logFeed
+
+	if feed != nil {
+		modelFeed = feed
 	}
 
 	program := tea.NewProgram(
-		newTUIModel(r.lockedTake, r.interrupt, drainLogs),
+		newTUIModel(r.lockedTake, r.interrupt, modelFeed),
 		tea.WithOutput(r.w),
 		tea.WithInput(r.in),
 		tea.WithoutSignalHandler(),
@@ -782,6 +795,33 @@ func (r *Reporter) runTUI(ctx context.Context) error {
 		// the goroutines stay parked either way, and hanging the run's
 		// shutdown on them is the one outcome this path exists to prevent.
 		return nil
+	}
+}
+
+// feedGuard is the revocable [logFeed] the reporter hands its panel's model.
+// Revoking turns the model's peeks and commits into no-ops: a program the
+// shutdown escalation abandoned still holds its feed and may tick again if
+// its terminal recovers, and without the guard it would keep consuming the
+// shared sink alongside the next organization's panel — two renderers
+// stealing each other's lines, the interleaving the sink exists to prevent.
+type feedGuard struct {
+	sink    LogSink
+	revoked atomic.Bool
+}
+
+// Peek returns the sink's queued lines, or nothing once revoked.
+func (g *feedGuard) Peek() ([]string, uint64) {
+	if g.revoked.Load() {
+		return nil, 0
+	}
+
+	return g.sink.Peek()
+}
+
+// Commit confirms a peeked batch printed, dropped once revoked.
+func (g *feedGuard) Commit(cursor uint64) {
+	if !g.revoked.Load() {
+		g.sink.Commit(cursor)
 	}
 }
 
