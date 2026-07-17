@@ -100,17 +100,29 @@ func TestDiscoverShardsFollowsSymlinkedDirectories(t *testing.T) {
 		gotKeys[sk] = struct{}{}
 	}
 
-	// One shard per physical .ledger directory: the p2 alias beside its
-	// p2-target and the w4 alias of p1/w1 each register once, under the
-	// first key discovery reaches. Two keys over one snapshot file would
-	// double the tally on every load, and whichever alias folded second
-	// would discard the records only the other held.
+	// Every reachable key surfaces, aliases included: the p2 alias beside its
+	// p2-target and the w4 alias of p1/w1 each appear under both keys, so a
+	// lookup through either resolves instead of re-fetching the subtree every
+	// run. Collapsing the aliases onto one shard is shardAt's job, keyed by
+	// physical identity, verified below through Load.
 	require.Equal(t, map[string]struct{}{
-		"":                          {},
-		"projects/p1/workspaces/w1": {},
-		"projects/p2/stacks/s1":     {},
-		"projects/p3/workspaces/w3": {},
+		"":                             {},
+		"projects/p1/workspaces/w1":    {},
+		"projects/p2/stacks/s1":        {},
+		"projects/p2-target/stacks/s1": {},
+		"projects/p3/workspaces/w3":    {},
+		"projects/p3/workspaces/w4":    {},
 	}, gotKeys)
+
+	l, err := Load(root)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, l.Close()) })
+
+	// Both alias keys resolve to one shard over the one physical directory.
+	require.Same(t, l.shards["projects/p2/stacks/s1"], l.shards["projects/p2-target/stacks/s1"])
+	require.Same(t, l.shards["projects/p1/workspaces/w1"], l.shards["projects/p3/workspaces/w4"])
+	require.Len(t, l.physShards, 4)
 }
 
 func TestFlushAppendsOneClassOrderedBatch(t *testing.T) {

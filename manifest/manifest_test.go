@@ -1333,3 +1333,99 @@ func TestLedger_LockExcludesConcurrentOpen(t *testing.T) {
 	// Close is idempotent, so a belt-and-braces double close is harmless.
 	require.NoError(t, second.Close())
 }
+
+func TestLoad_SymlinkAliasSharesOneShardAcrossRuns(t *testing.T) {
+	t.Parallel()
+
+	// A workspace renamed in the API (alpha -> zeta) whose operator left a
+	// rename symlink beside the old directory: the first run archived under
+	// alpha, later runs record under zeta, and both keys reach one physical
+	// .ledger directory. The alias must join alpha's shard rather than open a
+	// second one over the same snapshot file, where whichever alias folded
+	// second would overwrite the other's history after the org log carrying it
+	// was already retired.
+	root := t.TempDir()
+
+	const (
+		alphaEntry = "projects/p/workspaces/alpha/runs/r1/run.json"
+		zetaEntry  = "projects/p/workspaces/zeta/runs/r2/run.json"
+	)
+
+	first, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	first.StartRun()
+	first.RecordDone(alphaEntry, manifest.Signature{Size: 1})
+	first.FinishRun()
+	require.NoError(t, first.Flush())
+	require.NoError(t, first.Close())
+
+	wsDir := filepath.Join(root, "projects", "p", "workspaces")
+	require.NoError(t, os.Symlink(
+		filepath.Join(wsDir, "alpha"),
+		filepath.Join(wsDir, "zeta"),
+	))
+
+	second, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	second.StartRun()
+	second.RecordDone(zetaEntry, manifest.Signature{Size: 1})
+	second.FinishRun()
+	require.NoError(t, second.Flush())
+	require.NoError(t, second.Close())
+
+	third, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, third.Close()) })
+
+	assert.False(t, third.ShouldFetch(alphaEntry),
+		"the first run's record survives the aliased fold")
+	assert.False(t, third.ShouldFetch(zetaEntry),
+		"the record under the alias key resolves on reload")
+	assert.Equal(t, 2, third.Tally().Done,
+		"the shared shard's entries seed the tally once")
+}
+
+func TestLedger_RecordTimeAliasJoinsTheExistingShard(t *testing.T) {
+	t.Parallel()
+
+	// The aliased directory can also appear before any shard exists beneath
+	// it: the object files land first, so the workspace directory and its
+	// rename symlink exist while the .ledger they imply does not. A record
+	// under each key inside one run must still share a shard, resolved through
+	// the deepest existing ancestor.
+	root := t.TempDir()
+
+	wsDir := filepath.Join(root, "projects", "p", "workspaces")
+	require.NoError(t, os.MkdirAll(filepath.Join(wsDir, "alpha"), 0o755))
+	require.NoError(t, os.Symlink(
+		filepath.Join(wsDir, "alpha"),
+		filepath.Join(wsDir, "zeta"),
+	))
+
+	const (
+		alphaEntry = "projects/p/workspaces/alpha/runs/r1/run.json"
+		zetaEntry  = "projects/p/workspaces/zeta/runs/r2/run.json"
+	)
+
+	ledger, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	ledger.StartRun()
+	ledger.RecordDone(alphaEntry, manifest.Signature{Size: 1})
+	ledger.RecordDone(zetaEntry, manifest.Signature{Size: 1})
+	ledger.FinishRun()
+	require.NoError(t, ledger.Flush())
+	require.NoError(t, ledger.Close())
+
+	reloaded, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, reloaded.Close()) })
+
+	assert.False(t, reloaded.ShouldFetch(alphaEntry))
+	assert.False(t, reloaded.ShouldFetch(zetaEntry))
+	assert.Equal(t, 2, reloaded.Tally().Done)
+}

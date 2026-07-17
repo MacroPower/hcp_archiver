@@ -72,6 +72,7 @@ type Ledger struct {
 	now              func() time.Time
 	logger           *slog.Logger
 	shards           map[string]*shard
+	physShards       map[string]*shard
 	rootShard        *shard
 	counts           map[Status]int
 	cumulative       map[Status]int
@@ -153,6 +154,7 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 		now:              time.Now,
 		logger:           slog.Default(),
 		shards:           make(map[string]*shard),
+		physShards:       make(map[string]*shard),
 		counts:           make(map[Status]int),
 		cumulative:       make(map[Status]int),
 		dropped:          make(map[string]string),
@@ -173,7 +175,7 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 
 	l.lockFile = lock
 
-	l.rootShard = newShard(l.shardDir(""))
+	l.rootShard = l.shardAt(l.shardDir(""))
 	l.shards[""] = l.rootShard
 
 	dirs, err := discoverShards(root)
@@ -183,12 +185,23 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 		return nil, err
 	}
 
-	for sk, dir := range dirs {
+	// Sorted registration keeps the shard-to-first-key assignment stable across
+	// loads; each physical directory's snapshot loads once, however many alias
+	// keys reach it (see [Ledger.shardAt]).
+	loaded := make(map[*shard]struct{})
+
+	for _, sk := range slices.Sorted(maps.Keys(dirs)) {
 		sh, ok := l.shards[sk]
 		if !ok {
-			sh = newShard(dir)
+			sh = l.shardAt(dirs[sk])
 			l.shards[sk] = sh
 		}
+
+		if _, ok := loaded[sh]; ok {
+			continue
+		}
+
+		loaded[sh] = struct{}{}
 
 		err = sh.loadSnapshot()
 		if err != nil {
@@ -202,8 +215,8 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 	// every org-log record, so the org log's last-writer-wins layering keeps
 	// the newer state. The org-root shard is excluded because its log file is
 	// the org log itself, replayed below.
-	for sk, sh := range l.shards {
-		if sk == "" {
+	for _, sh := range l.physShards {
+		if sh == l.rootShard {
 			continue
 		}
 
@@ -232,8 +245,9 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 	// Validate and seed the cumulative tally from every shard's entries, so a
 	// resumed run's counts start from the prior run's settled work rather than
 	// from zero. An unrecognized status is rejected rather than seeded under a
-	// key Tally never reads, which would report a zero total.
-	for _, sh := range l.shards {
+	// key Tally never reads, which would report a zero total. The iteration is
+	// per physical shard, so an entry counts once however many keys alias it.
+	for _, sh := range l.physShards {
 		for relPath, e := range sh.entries {
 			if e == nil {
 				_ = l.Close() //nolint:errcheck // The load error takes precedence.
@@ -305,16 +319,13 @@ func (l *Ledger) shardDir(sk string) string {
 //
 // Discovery follows symlinked directories (see [readSubdirs]), so one physical
 // .ledger directory can surface under several keys — a relocation symlink
-// beside its target, say. Each physical directory registers exactly once,
-// under the first key discovery reaches; traversal order is deterministic
-// because [os.ReadDir] sorts, so the winning key is stable across loads. Two
-// shards over one snapshot file would each seed the cumulative tally from the
-// same entries, and whichever folded second would capture a snapshot missing
-// the records only the other alias replayed or recorded — after the log that
-// carried them was already retired.
+// beside its target, say. Every reachable key is returned, aliases included:
+// each key must resolve in [Ledger.lookupShard], or the subtree behind the
+// alias would re-fetch on every run. Collapsing the aliases onto one shard is
+// [Ledger.shardAt]'s job, keyed by physical identity, so two keys over one
+// snapshot file never open two shards.
 func discoverShards(root string) (map[string]string, error) {
 	out := make(map[string]string)
-	claimed := make(map[string]struct{})
 
 	add := func(dir string) error {
 		info, statErr := os.Stat(dir)
@@ -335,19 +346,6 @@ func discoverShards(root string) (map[string]string, error) {
 			return nil
 		}
 
-		phys, resolveErr := filepath.EvalSymlinks(dir)
-
-		switch {
-		case errors.Is(resolveErr, fs.ErrNotExist):
-			return nil
-		case resolveErr != nil:
-			return fmt.Errorf("resolve shard %q: %w", dir, resolveErr)
-		}
-
-		if _, ok := claimed[phys]; ok {
-			return nil
-		}
-
 		rel, relErr := filepath.Rel(root, filepath.Dir(dir))
 		if relErr != nil {
 			return fmt.Errorf("relativize shard %q: %w", dir, relErr)
@@ -358,7 +356,6 @@ func discoverShards(root string) (map[string]string, error) {
 			sk = ""
 		}
 
-		claimed[phys] = struct{}{}
 		out[sk] = dir
 
 		return nil
@@ -464,13 +461,14 @@ func entryIsDir(dir string, e fs.DirEntry) (bool, error) {
 
 // shardFor returns the shard that owns key, creating it if absent. Callers that
 // mutate must hold the write lock; a first record into a new workspace creates
-// its shard here.
+// its shard here, routed through [Ledger.shardAt] so an aliased directory joins
+// its existing shard.
 func (l *Ledger) shardFor(key string) *shard {
 	sk := shardKey(key)
 
 	sh, ok := l.shards[sk]
 	if !ok {
-		sh = newShard(l.shardDir(sk))
+		sh = l.shardAt(l.shardDir(sk))
 		l.shards[sk] = sh
 	}
 
@@ -491,11 +489,68 @@ func (l *Ledger) lookupShard(key string) (*shard, bool) {
 func (l *Ledger) shardByKey(sk string) *shard {
 	sh, ok := l.shards[sk]
 	if !ok {
-		sh = newShard(l.shardDir(sk))
+		sh = l.shardAt(l.shardDir(sk))
 		l.shards[sk] = sh
 	}
 
 	return sh
+}
+
+// shardAt returns the shard backed by the physical directory dir denotes,
+// creating it if absent. Every shard creation routes through it, so a key that
+// aliases an already-registered directory — a rename symlink an operator left
+// beside its target, say — joins the existing shard rather than opening a
+// second one over the same snapshot file. Two shards over one file would each
+// seed the cumulative tally from the same entries, and whichever folded second
+// would capture a snapshot missing the records only the other held — after the
+// log that carried them was already retired. Callers hold the write lock; the
+// resolution stats the filesystem, which costs a handful of syscalls once per
+// shard creation, not per record.
+func (l *Ledger) shardAt(dir string) *shard {
+	phys := physicalShardDir(dir)
+
+	sh, ok := l.physShards[phys]
+	if !ok {
+		sh = newShard(dir)
+		l.physShards[phys] = sh
+	}
+
+	return sh
+}
+
+// physicalShardDir resolves dir to the identity of the physical directory it
+// denotes, so two logical shard paths that reach one on-disk .ledger directory
+// map to one key. A brand-new shard's directory does not exist yet, so the
+// resolution walks up to the deepest existing ancestor, resolves that, and
+// rejoins the missing remainder — a symlinked workspace directory aliases even
+// before its .ledger is first created beneath it. A resolution fault other
+// than absence falls back to the cleaned path: the record paths that need this
+// return nothing, and the fallback risks only the alias-overwrite window this
+// resolution exists to close, never a dropped record.
+func physicalShardDir(dir string) string {
+	dir = filepath.Clean(dir)
+	probe := dir
+
+	var tail []string
+
+	for {
+		resolved, err := filepath.EvalSymlinks(probe)
+		if err == nil {
+			return filepath.Join(append([]string{resolved}, tail...)...)
+		}
+
+		if !errors.Is(err, fs.ErrNotExist) {
+			return dir
+		}
+
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return dir
+		}
+
+		tail = append([]string{filepath.Base(probe)}, tail...)
+		probe = parent
+	}
 }
 
 // walPath returns the absolute path of the ledger's single org-level log,
@@ -531,10 +586,11 @@ func (l *Ledger) replayWAL() error {
 	return nil
 }
 
-// totalEntries returns the number of entries across every shard.
+// totalEntries returns the number of entries across every physical shard, so
+// an aliased shard's entries count once.
 func (l *Ledger) totalEntries() int {
 	n := 0
-	for _, sh := range l.shards {
+	for _, sh := range l.physShards {
 		n += len(sh.entries)
 	}
 
@@ -1055,7 +1111,7 @@ func (l *Ledger) Failures() []Failure {
 
 	var out []Failure
 
-	for _, sh := range l.shards {
+	for _, sh := range l.physShards {
 		for relPath, e := range sh.entries {
 			if e.Status != StatusErrored && e.Status != StatusForbidden {
 				continue
@@ -1096,7 +1152,7 @@ func (l *Ledger) DoneEntriesUnder(prefix string) map[string]Entry {
 
 	out := make(map[string]Entry)
 
-	for _, sh := range l.shards {
+	for _, sh := range l.physShards {
 		for relPath, e := range sh.entries {
 			if e.Status == StatusDone && strings.HasPrefix(relPath, prefix) {
 				out[relPath] = cloneEntry(*e)
@@ -1127,7 +1183,7 @@ func (l *Ledger) StartRun() {
 	l.retried = 0
 	l.target = ""
 
-	for _, sh := range l.shards {
+	for _, sh := range l.physShards {
 		for _, e := range sh.entries {
 			e.counted = false
 		}
@@ -1228,7 +1284,12 @@ func (l *Ledger) Flush() error {
 		recs []walRecord
 	)
 
-	for sk, sh := range l.shards {
+	// Sorted iteration makes the batch layout deterministic: a shard reachable
+	// under several alias keys drains on its first key — the drain empties it,
+	// so later aliases see nothing dirty — and any of its tags routes back to
+	// the same physical shard on replay (see [Ledger.shardAt]).
+	for _, sk := range slices.Sorted(maps.Keys(l.shards)) {
+		sh := l.shards[sk]
 		if !sh.hasDirty() {
 			continue
 		}
@@ -1313,7 +1374,7 @@ func (l *Ledger) fold(compactAll bool) error {
 
 	var stale []*shard
 
-	for _, sh := range l.shards {
+	for _, sh := range l.physShards {
 		if sh.stale {
 			stale = append(stale, sh)
 		}
@@ -1350,7 +1411,7 @@ func (l *Ledger) fold(compactAll bool) error {
 
 	clean := true
 
-	for _, sh := range l.shards {
+	for _, sh := range l.physShards {
 		// A surviving legacy log holds the org log in place too: legacy
 		// records are older than a snapshot a fold has since written, so a
 		// reload replays them over it and only the org log's newer records
