@@ -899,6 +899,18 @@ func isConfigTarball(relPath string) bool {
 	return strings.HasPrefix(relPath, store.ConfigVersionsDirName+"/") && strings.HasSuffix(relPath, ".tar.gz")
 }
 
+// RecordOnlyLedgerPrefixes names the archive prefixes whose ledger entries
+// may legitimately outlive their local files, for the composition root to
+// declare to [manifest.WithRecordOnlyPrefixes]. It lives beside the eviction
+// predicates because eviction is the reason: an evicted configuration-version
+// tarball leaves no local file, and its ledger entry is the only local proof
+// the remote copy exists, so the subtree's absence carries no deletion
+// signal. Sealed bundles are evicted too, but each leaves its sidecar behind,
+// so a workspace subtree with evicted bundles never reads as gone.
+func RecordOnlyLedgerPrefixes() []string {
+	return []string{store.ConfigVersionsDirName}
+}
+
 // underWorkspaceSubtree reports whether relPath lives inside a workspace's
 // subtree (projects/<project>/workspaces/<workspace>/...), the scope whose
 // mirror converges at the workspace's seal boundary rather than as written.

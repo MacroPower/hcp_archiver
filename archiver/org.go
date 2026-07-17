@@ -89,6 +89,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 		st.Root(),
 		manifest.WithLogger(a.logger),
 		manifest.WithRetryAbsent(a.cfg.RetryAbsent),
+		manifest.WithRecordOnlyPrefixes(collect.RecordOnlyLedgerPrefixes()...),
 	)
 	if err != nil {
 		return manifest.Tally{}, 0, fmt.Errorf("load manifest: %w", err)

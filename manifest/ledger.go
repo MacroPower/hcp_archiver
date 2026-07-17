@@ -84,6 +84,7 @@ type Ledger struct {
 	shards           map[string]*shard
 	physShards       map[string]*shard
 	rootShard        *shard
+	recordOnly       map[string]bool
 	counts           map[Status]int
 	cumulative       map[Status]int
 	dropped          map[string]string
@@ -107,6 +108,7 @@ type Ledger struct {
 // The available options are:
 //   - [WithClock]
 //   - [WithLogger]
+//   - [WithRecordOnlyPrefixes]
 //   - [WithRetryAbsent]
 type Option func(*Ledger)
 
@@ -141,6 +143,22 @@ func WithRetryAbsent(retry bool) Option {
 	}
 }
 
+// WithRecordOnlyPrefixes names archive prefixes whose ledger entries may
+// legitimately outlive their local files: an evicted object's entry is the
+// only local proof its remote copy exists, so the prefix's subtree can be
+// sparse or absent without that absence meaning anything. The log replay
+// treats a declared prefix's shard as present and never discards its records
+// as an operator deletion (see [Load]). The declaration lives with the
+// eviction policy that motivates it and is wired in at the composition root,
+// so the two cannot drift apart silently. It returns an [Option].
+func WithRecordOnlyPrefixes(prefixes ...string) Option {
+	return func(l *Ledger) {
+		for _, p := range prefixes {
+			l.recordOnly[shardKey(p)] = true
+		}
+	}
+}
+
 // Load reads the sharded manifest under root, or starts empty when none exists.
 //
 // It first takes an exclusive cross-process lock under the org-root ledger
@@ -165,6 +183,7 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 		logger:           slog.Default(),
 		shards:           make(map[string]*shard),
 		physShards:       make(map[string]*shard),
+		recordOnly:       make(map[string]bool),
 		counts:           make(map[Status]int),
 		cumulative:       make(map[Status]int),
 		dropped:          make(map[string]string),
@@ -554,18 +573,19 @@ func (l *Ledger) walPath() string {
 // by re-walking — which is the safe direction. Only a positively absent
 // subtree discards; a stat fault surfaces as an error, matching discovery's
 // no-silent-drop policy. Org-root records always replay: their subtree is the
-// archive root itself, which holds the log being replayed. Config-version
-// records replay too: a proven tarball is evicted once its remote copy is
-// verified, so that directory is legitimately sparse and its absence carries
-// no deletion signal — the entries are the only local proof the remote copies
-// exist.
+// archive root itself, which holds the log being replayed. So do records
+// under a declared record-only prefix (see [WithRecordOnlyPrefixes]), whose
+// subtree is legitimately sparse under eviction and whose absence therefore
+// carries no deletion signal.
 func (l *Ledger) replayWAL() error {
 	recs, n, err := replayLog(l.walPath(), l.logger)
 	if err != nil {
 		return err
 	}
 
-	present := map[string]bool{"": true, configVersionsSegment: true}
+	present := map[string]bool{"": true}
+	maps.Copy(present, l.recordOnly)
+
 	discarded := make(map[string]int)
 
 	for i := range recs {

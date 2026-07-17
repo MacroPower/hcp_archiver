@@ -1406,3 +1406,43 @@ func TestLoad_DeletedSubtreeDiscardsItsLogRecords(t *testing.T) {
 	assert.Equal(t, 1, reloaded.Tally().Done,
 		"the discarded records do not seed the tally")
 }
+
+func TestLoad_RecordOnlyPrefixKeepsRecordsWithoutFiles(t *testing.T) {
+	t.Parallel()
+
+	// An evicted surface's ledger entries are the only local proof its remote
+	// copies exist: the subtree can be sparse or absent without that absence
+	// meaning anything. A declared record-only prefix therefore replays even
+	// with no directory on disk, while the same records discard when the
+	// prefix is not declared.
+	root := t.TempDir()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	first, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	first.StartRun()
+	first.RecordDone(tarball, manifest.Signature{Size: 1})
+
+	// Flush without finishing the run, as an interrupted process would have,
+	// so the record stays in the org-level log; the config-versions directory
+	// itself is never created, as full eviction would leave it.
+	require.NoError(t, first.Flush())
+	require.NoError(t, first.Close())
+
+	plain, err := manifest.Load(root)
+	require.NoError(t, err)
+	assert.True(t, plain.ShouldFetch(tarball),
+		"an undeclared prefix's records discard with the missing subtree")
+	require.NoError(t, plain.Close())
+
+	declared, err := manifest.Load(root,
+		manifest.WithRecordOnlyPrefixes("config-versions"))
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, declared.Close()) })
+
+	assert.False(t, declared.ShouldFetch(tarball),
+		"a record-only prefix's records replay without any local files")
+}
