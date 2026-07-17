@@ -2,6 +2,7 @@ package collect_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1138,6 +1139,11 @@ func TestWalkResumesIncompleteCollection(t *testing.T) {
 // the org-root shard, while the configuration entries live in a stack shard.
 const stackConfigCursorKey = "stacks/stk-1/configurations"
 
+// stackConfigArchivePrefix is the real path prefix of the scenario's
+// configuration entries, the key the prefix-aware walk stores its collection
+// flags under.
+const stackConfigArchivePrefix = "projects/p/stacks/s/configurations"
+
 // erroredChildScenario is a Walk mimicking a stack's configuration walk, whose
 // cursor key routes to a different shard than its entries, with an older
 // configuration's child left errored below a newer done boundary.
@@ -1179,8 +1185,13 @@ func newErroredChildScenario(t *testing.T) *erroredChildScenario {
 
 	ledger.RecordErrored(erroredChild, errors.New("prior boom"), true)
 
+	// The flags are seeded under both keys: a prefix-aware walk keys them on
+	// the archive prefix, while the no-prefix strand test reads them from the
+	// cursor key it defaults to.
 	ledger.MarkCollectionComplete(stackConfigCursorKey)
 	ledger.SetCollectionSettled(stackConfigCursorKey, true)
+	ledger.MarkCollectionComplete(stackConfigArchivePrefix)
+	ledger.SetCollectionSettled(stackConfigArchivePrefix, true)
 
 	archivedChild := 0
 
@@ -1237,7 +1248,7 @@ func TestWalkArchivePrefixReachesErroredChildInAnotherShard(t *testing.T) {
 	// actually holds the entries, so the walk re-pages past the done boundary and
 	// retries the older configuration's errored child.
 	err := collect.Walk(t.Context(), s.env, stackConfigCursorKey, s.pager, s.describe,
-		collect.WithArchivePrefix("projects/p/stacks/s/configurations"))
+		collect.WithArchivePrefix(stackConfigArchivePrefix))
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, *s.archivedChild, "the archive prefix reaches the errored child in the entries' shard")
@@ -1245,8 +1256,8 @@ func TestWalkArchivePrefixReachesErroredChildInAnotherShard(t *testing.T) {
 	child, ok := s.ledger.Entry(s.erroredChild)
 	require.True(t, ok)
 	assert.Equal(t, manifest.StatusDone, child.Status, "the retried child settles done")
-	assert.True(t, s.ledger.IsCollectionSettled(stackConfigCursorKey),
-		"the collection settles once no unsettled child remains")
+	assert.True(t, s.ledger.IsCollectionSettled(stackConfigArchivePrefix),
+		"the collection settles under the archive prefix once no unsettled child remains")
 }
 
 func TestWalkSyntheticCursorStrandsErroredChildWithoutArchivePrefix(t *testing.T) {
@@ -1321,9 +1332,133 @@ func TestWalkFinalPageRecomputesSettledFromArchivePrefix(t *testing.T) {
 		collect.WithArchivePrefix(archivePrefix))
 	require.NoError(t, err)
 
-	assert.True(t, ledger.IsCollectionComplete(cursorKey), "the final page marks the collection complete")
-	assert.False(t, ledger.IsCollectionSettled(cursorKey),
+	assert.True(t, ledger.IsCollectionComplete(archivePrefix), "the final page marks the collection complete")
+	assert.False(t, ledger.IsCollectionSettled(archivePrefix),
 		"an errored child under the archive prefix records the collection unsettled")
+}
+
+// walKinds reads a shard's log and returns the record kinds seen per key, so a
+// test can assert which shard a flag record was flushed to.
+func walKinds(t *testing.T, path string) map[string][]string {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	kinds := map[string][]string{}
+
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		var rec struct {
+			Kind string `json:"kind"`
+			Key  string `json:"key"`
+		}
+
+		require.NoError(t, json.Unmarshal([]byte(line), &rec))
+
+		kinds[rec.Key] = append(kinds[rec.Key], rec.Kind)
+	}
+
+	return kinds
+}
+
+func TestWalkSyntheticCursorFlagsShareTheEntriesShard(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
+
+	// The crash fence's durability order — the unsettle record ahead of the
+	// entries it guards, settlement and completion behind them — holds only
+	// within one shard's log append. A synthetic cursor key routes to the
+	// org-root shard while the entries live in the stack shard, so flags keyed
+	// on the cursor would flush in a separate append from the entries, in no
+	// guaranteed order: a crash between the two appends could durably freeze
+	// new entries under a stale settled flag, and the next run's early stop
+	// would permanently strand elements the interrupted walk never listed. The
+	// walk must therefore key the flags on the archive prefix.
+	const (
+		cursorKey     = "stacks/stk-3/configurations"
+		archivePrefix = "projects/p/stacks/s3/configurations"
+	)
+
+	cfg2 := walkItem{
+		relPath:   archivePrefix + "/cfg2/configuration.json",
+		createdAt: base.Add(2 * time.Hour),
+		terminal:  true,
+	}
+	cfg1 := walkItem{
+		relPath:   archivePrefix + "/cfg1/configuration.json",
+		createdAt: base.Add(1 * time.Hour),
+		terminal:  true,
+	}
+
+	env, st, ledger := newEnv(t)
+
+	// A page's items archive concurrently, so the recording map needs a lock.
+	var mu sync.Mutex
+
+	archived := map[string]int{}
+
+	pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
+		if page == 1 {
+			return []walkItem{cfg2, cfg1}, false, nil
+		}
+
+		return nil, false, nil
+	}
+
+	describe := func(it walkItem) collect.Item {
+		return collect.Item{
+			RelPath:   it.relPath,
+			CreatedAt: it.createdAt,
+			Terminal:  it.terminal,
+			Archive: func(ctx context.Context) error {
+				return env.Mutable(ctx, it.relPath, func(_ context.Context) (any, error) {
+					mu.Lock()
+
+					archived[it.relPath]++
+					mu.Unlock()
+
+					return cannedProject(), nil
+				})
+			},
+		}
+	}
+
+	require.NoError(t, collect.Walk(t.Context(), env, cursorKey, pager, describe,
+		collect.WithArchivePrefix(archivePrefix)))
+
+	// The flags land under the archive prefix, never under the cursor key.
+	assert.True(t, ledger.IsCollectionComplete(archivePrefix), "completion is keyed on the archive prefix")
+	assert.True(t, ledger.IsCollectionSettled(archivePrefix), "settlement is keyed on the archive prefix")
+	assert.False(t, ledger.IsCollectionComplete(cursorKey), "the cursor key carries no completion flag")
+	assert.False(t, ledger.IsCollectionSettled(cursorKey), "the cursor key carries no settled flag")
+
+	// The next walk reads the flags back from the prefix: it early-stops at the
+	// frozen cfg2 boundary and never touches cfg1's Archive again.
+	require.NoError(t, collect.Walk(t.Context(), env, cursorKey, pager, describe,
+		collect.WithArchivePrefix(archivePrefix)))
+
+	assert.Equal(t, 2, archived[cfg2.relPath], "the boundary gets its refresh, so the flags were read back")
+	assert.Equal(t, 1, archived[cfg1.relPath], "the early stop halts above settled history")
+
+	// After a flush the flag records sit in the stack shard's log next to the
+	// entries they guard; the org-root shard's log carries only the cursor's
+	// high-water mark.
+	require.NoError(t, ledger.Flush())
+
+	stackLog := st.AbsPath(st.Join("projects/p/stacks/s3", manifest.LedgerDirName, manifest.LogFileName))
+	stackKinds := walKinds(t, stackLog)
+
+	assert.Contains(t, stackKinds[archivePrefix], "completed",
+		"the completion record shares the entries' shard log")
+	assert.Contains(t, stackKinds[archivePrefix], "settled",
+		"the settled record shares the entries' shard log")
+
+	rootLog := st.AbsPath(st.Join(manifest.LedgerDirName, manifest.LogFileName))
+	rootKinds := walKinds(t, rootLog)
+
+	assert.Equal(t, []string{"watermark"}, rootKinds[cursorKey],
+		"the org-root shard holds only the cursor's high-water mark")
 }
 
 func TestWalkHistoryLimit(t *testing.T) {

@@ -86,19 +86,23 @@ func runKey(groupID string) string {
 }
 
 // configArchivePrefix is the archive-relative directory holding a stack's
-// configuration entries: the real path prefix the configurations walk gates its
-// errored-child check on, distinct from the synthetic [configKey] cursor.
+// configuration entries: the real path prefix the configurations walk keys its
+// errored-child gate and its completion and settled flags on, distinct from the
+// synthetic [configKey] cursor.
 //
 // The cursor routes to the org-root shard, but the entries live in the stack's
-// own shard, so the walk must gate on this prefix rather than the cursor for
-// [manifest.Ledger.HasUnsettledUnder] to scan the shard that holds them.
+// own shard, so the walk keys both on this prefix rather than the cursor:
+// [manifest.Ledger.HasUnsettledUnder] then scans the shard that holds the
+// entries, and the flags share that shard's log, preserving the crash fence's
+// unsettle-before-entries durability order.
 func configArchivePrefix(st *store.Store, project, stackName string) string {
 	return st.Join(st.StackDir(project, stackName), "configurations")
 }
 
 // runArchivePrefix is the archive-relative directory holding a deployment
-// group's run entries: the real path prefix the runs walk gates its
-// errored-child check on, distinct from the synthetic [runKey] cursor.
+// group's run entries: the real path prefix the runs walk keys its
+// errored-child gate and its completion and settled flags on, distinct from the
+// synthetic [runKey] cursor.
 func runArchivePrefix(st *store.Store, project, stackName, configID, groupID string) string {
 	return st.Join(st.StackDeploymentGroupDir(project, stackName, configID, groupID), "runs")
 }

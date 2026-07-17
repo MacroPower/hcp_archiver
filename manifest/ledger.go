@@ -739,7 +739,10 @@ func (l *Ledger) IsCollectionSettled(key string) bool {
 // A false write is additionally drained ahead of every entry record in its
 // shard's next log append (see [shard.drainDirty]): unsettlement guards the
 // entries a walk is about to record, so it must never become durable after
-// them.
+// them. That order holds only within one shard's log — shards flush as
+// separate appends — so a caller must key the flag to route to the same shard
+// as the entries it guards (a path prefix of them), never to a key that shards
+// elsewhere.
 func (l *Ledger) SetCollectionSettled(key string, settled bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

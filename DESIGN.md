@@ -339,7 +339,13 @@ Notes:
     first not-already-frozen element and re-settles it only once its work
     finished (the true end of the listing, or an early stop whose new prefix
     archived clean), and the ledger drains that withdrawal ahead of the entry
-    records it guards in the shard log. A re-walk killed mid-delta — even mid-
+    records it guards in the shard log. That drain order is per shard — shards
+    flush as separate appends — so the walk keys its completed/settled flags
+    on the collection's archive prefix, the path that routes to the shard
+    holding the entries; a stack walk's synthetic id cursor (which keeps only
+    the high-water mark) would otherwise route the flags to the org-root
+    shard, and a crash between the two shards' appends could persist frozen
+    entries under a stale settled flag. A re-walk killed mid-delta — even mid-
     flush — therefore cannot leave freshly frozen entries above elements it
     never listed with the settled flag still standing (an unlisted element
     leaves no ledger record for the unsettled-child scan to find, so the flag
