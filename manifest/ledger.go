@@ -892,10 +892,13 @@ func (l *Ledger) MirrorReference(key string, settled bool) {
 	}
 
 	if settled {
-		// Clear an open gate; leave an absent or already-settled one untouched so a
-		// successful reference never creates or re-dirties an entry. The cleared
-		// gate settles the walk but is kept out of the object tally.
-		if e != nil && !e.Status.Settled() {
+		// Clear an open or absence-marked gate; leave a missing or already-
+		// cleared one untouched so a reference that always succeeded never
+		// creates or re-dirties an entry. An absence-marked gate clears here
+		// once its mirrored target is restored, so the retry-absent trace
+		// retires with the absence it stood for. The cleared gate settles the
+		// walk but is kept out of the object tally.
+		if e != nil && (!e.Status.Settled() || e.Status == StatusReferenceAbsent) {
 			l.recordLocked(key, StatusReferenceCleared, clearErr)
 		}
 
@@ -911,6 +914,32 @@ func (l *Ledger) MirrorReference(key string, settled bool) {
 	}
 
 	l.recordLocked(key, StatusPending, clearErr)
+}
+
+// MirrorReferenceAbsent marks the reference gate at key settled over an
+// absence: every mirrored write settled, at least one as a confirmed 404.
+// Unlike a clear, it records even when no gate exists yet — the absence must
+// leave a trace in the referencing run's own shard, because it settled in a
+// foreign shard the run walk never scans, and a retry-absent run re-opens
+// the walk through exactly this trace (see [Ledger.HasRetryableAbsentUnder]).
+// It is idempotent: a gate already marked absent is not re-dirtied, and the
+// mark retires to [StatusReferenceCleared] once the mirrored target is
+// restored (see [Ledger.MirrorReference]).
+func (l *Ledger) MirrorReferenceAbsent(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if sh, ok := l.lookupShard(key); ok {
+		if e, ok := sh.entries[key]; ok && e.Status == StatusReferenceAbsent {
+			return
+		}
+	}
+
+	l.recordLocked(key, StatusReferenceAbsent, func(_ time.Time, ent *Entry) {
+		ent.LastError = ""
+		ent.LastErrorAt = time.Time{}
+		ent.Transient = false
+	})
 }
 
 // ReferencePending reports whether a reference gate at key exists and is
@@ -1129,7 +1158,7 @@ func (l *Ledger) hasUnsettledUnder(prefix string) bool {
 			continue
 		}
 
-		if !e.Status.Settled() || (l.retryAbsent && e.Status == StatusAbsent) {
+		if !e.Status.Settled() || l.retryableAbsence(e.Status) {
 			return true
 		}
 	}
@@ -1137,8 +1166,18 @@ func (l *Ledger) hasUnsettledUnder(prefix string) bool {
 	return false
 }
 
+// retryableAbsence reports whether status records an absence a retry-absent
+// run re-probes: a directly recorded 404, or a reference gate mirroring one
+// that settled in a foreign shard the walk never scans. The two travel
+// together — a widening that saw only the direct form left the flag blind to
+// exactly the absences a gate exists to carry across shards.
+func (l *Ledger) retryableAbsence(s Status) bool {
+	return l.retryAbsent && (s == StatusAbsent || s == StatusReferenceAbsent)
+}
+
 // HasRetryableAbsentUnder reports whether any object under prefix is
-// recorded [StatusAbsent] while retry-absent is enabled (see
+// recorded [StatusAbsent] — or carries a [StatusReferenceAbsent] gate
+// mirroring a foreign absence — while retry-absent is enabled (see
 // [WithRetryAbsent]): exactly the entries a retry-absent run exists to
 // re-probe. Skip gates over metered listings consult it, because an absent
 // object reachable only through its listing can be re-probed only if the
@@ -1160,7 +1199,7 @@ func (l *Ledger) HasRetryableAbsentUnder(prefix string) bool {
 	under := prefix + "/"
 
 	for relPath, e := range sh.entries {
-		if strings.HasPrefix(relPath, under) && e.Status == StatusAbsent {
+		if strings.HasPrefix(relPath, under) && l.retryableAbsence(e.Status) {
 			return true
 		}
 	}

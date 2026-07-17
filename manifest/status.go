@@ -2,11 +2,11 @@ package manifest
 
 // Status is the recorded outcome of archiving a single object.
 //
-// Eight states drive resume. [StatusDone], [StatusSkipped],
+// Nine states drive resume. [StatusDone], [StatusSkipped],
 // [StatusNotApplicable], and [StatusReferenceCleared] are settled and never
-// re-requested; [StatusAbsent] is settled but sticky; [StatusErrored],
-// [StatusForbidden], [StatusPending], and any object absent from the ledger are
-// retried on the next run.
+// re-requested; [StatusAbsent] and [StatusReferenceAbsent] are settled but
+// sticky; [StatusErrored], [StatusForbidden], [StatusPending], and any object
+// absent from the ledger are retried on the next run.
 type Status string
 
 const (
@@ -46,6 +46,14 @@ const (
 	// counters, keeping a recovered reference out of the user-visible
 	// not-applicable and total counts. See [Ledger.MirrorReference].
 	StatusReferenceCleared Status = "reference-cleared"
+	// StatusReferenceAbsent marks a reference gate whose mirrored cross-shard
+	// writes all settled, at least one as a confirmed absence. It is settled —
+	// a normal re-run stops retrying the gate's run — but it is the trace a
+	// retry-absent run re-opens through: the absence itself settled in a
+	// foreign shard the run walk never scans, so without this mark in the
+	// run's own shard the flag could never reach its target. See
+	// [Ledger.MirrorReferenceAbsent].
+	StatusReferenceAbsent Status = "reference-absent"
 )
 
 // statusProps records, per status, whether a normal re-run leaves it settled
@@ -59,6 +67,7 @@ var statusProps = map[Status]struct{ settled, gate bool }{
 	StatusSkipped:          {settled: true},
 	StatusNotApplicable:    {settled: true},
 	StatusReferenceCleared: {settled: true, gate: true},
+	StatusReferenceAbsent:  {settled: true, gate: true},
 	StatusErrored:          {},
 	StatusForbidden:        {},
 	StatusPending:          {gate: true},

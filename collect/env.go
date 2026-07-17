@@ -374,12 +374,32 @@ func (e *Env) MarkSurfaceDropped(surface string, cause error) {
 // outside the referencing run's own subtree (its created-by user, an event
 // actor, a config-version tarball) is still retried by the run walk when it
 // fails. The gate counts unsettled while any shared path is not yet settled,
-// using the same predicate ([Env.ShouldFetch]) the walk uses to decide retries,
-// and clears once every shared write is settled. See
-// [manifest.Ledger.MirrorReference].
+// using the same predicate ([Env.ShouldFetch]) the walk uses to decide
+// retries. Once every shared write settles, the gate clears — unless one
+// settled as a confirmed absence, which marks the gate absent instead: the
+// absence lives in a foreign shard the run walk never scans, and the mark is
+// the trace a retry-absent run re-opens the walk through. See
+// [manifest.Ledger.MirrorReference] and
+// [manifest.Ledger.MirrorReferenceAbsent].
 func (e *Env) Reference(gateKey string, sharedPaths ...string) {
-	settled := !slices.ContainsFunc(sharedPaths, e.ledger.ShouldFetch)
-	e.ledger.MirrorReference(gateKey, settled)
+	if slices.ContainsFunc(sharedPaths, e.ledger.ShouldFetch) {
+		e.ledger.MirrorReference(gateKey, false)
+
+		return
+	}
+
+	mirrorsAbsence := slices.ContainsFunc(sharedPaths, func(p string) bool {
+		entry, ok := e.ledger.Entry(p)
+
+		return ok && entry.Status == manifest.StatusAbsent
+	})
+	if mirrorsAbsence {
+		e.ledger.MirrorReferenceAbsent(gateKey)
+
+		return
+	}
+
+	e.ledger.MirrorReference(gateKey, true)
 }
 
 // SkipGatedListing reports whether a metered child listing can be skipped:

@@ -55,6 +55,7 @@ func TestStatus_ValidAndSettled(t *testing.T) {
 		"forbidden": {status: manifest.StatusForbidden, wantValid: true, wantSettled: false},
 		"pending":   {status: manifest.StatusPending, wantValid: true, wantSettled: false, wantGate: true},
 		"cleared":   {status: manifest.StatusReferenceCleared, wantValid: true, wantSettled: true, wantGate: true},
+		"refabsent": {status: manifest.StatusReferenceAbsent, wantValid: true, wantSettled: true, wantGate: true},
 		"unknown":   {status: manifest.Status("nonsense"), wantValid: false, wantSettled: false},
 	}
 
