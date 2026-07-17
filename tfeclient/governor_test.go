@@ -107,16 +107,20 @@ func TestGovernorResetHeaderParsing(t *testing.T) {
 		reset string
 		want  time.Duration
 	}{
-		"fractional seconds":       {reset: "1.5", want: 1500 * time.Millisecond},
-		"zero is no pause":         {reset: "0", want: 0},
-		"negative clamps to zero":  {reset: "-3", want: 0},
-		"huge clamps to the cap":   {reset: "3600", want: tfeclient.GovernorMaxPause},
-		"missing falls back":       {reset: "", want: tfeclient.GovernorFallbackPause},
-		"unparseable falls back":   {reset: "soon", want: tfeclient.GovernorFallbackPause},
-		"trailing junk falls back": {reset: "1.5s", want: tfeclient.GovernorFallbackPause},
-		"NaN falls back":           {reset: "NaN", want: tfeclient.GovernorFallbackPause},
-		"positive infinity back":   {reset: "+Inf", want: tfeclient.GovernorFallbackPause},
-		"negative infinity back":   {reset: "-Inf", want: tfeclient.GovernorFallbackPause},
+		"fractional seconds":      {reset: "1.5", want: 1500 * time.Millisecond},
+		"zero is no pause":        {reset: "0", want: 0},
+		"negative clamps to zero": {reset: "-3", want: 0},
+		"huge clamps to the cap":  {reset: "3600", want: tfeclient.GovernorMaxPause},
+		// A finite value big enough to overflow the int64 nanosecond
+		// conversion (e.g. an epoch-milliseconds timestamp) must clamp to the
+		// cap on every architecture, not overflow to an arch-dependent value.
+		"overflowing clamps to the cap": {reset: "1770000000000", want: tfeclient.GovernorMaxPause},
+		"missing falls back":            {reset: "", want: tfeclient.GovernorFallbackPause},
+		"unparseable falls back":        {reset: "soon", want: tfeclient.GovernorFallbackPause},
+		"trailing junk falls back":      {reset: "1.5s", want: tfeclient.GovernorFallbackPause},
+		"NaN falls back":                {reset: "NaN", want: tfeclient.GovernorFallbackPause},
+		"positive infinity back":        {reset: "+Inf", want: tfeclient.GovernorFallbackPause},
+		"negative infinity back":        {reset: "-Inf", want: tfeclient.GovernorFallbackPause},
 	}
 
 	for name, tc := range tests {

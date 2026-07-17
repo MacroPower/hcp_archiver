@@ -266,5 +266,17 @@ func parseRateLimitReset(value string) time.Duration {
 		return GovernorFallbackPause
 	}
 
-	return min(max(time.Duration(seconds*float64(time.Second)), 0), GovernorMaxPause)
+	// Clamp in float space: a finite value large enough to overflow the
+	// int64 nanosecond conversion (e.g. an epoch-milliseconds timestamp)
+	// would otherwise produce an implementation-dependent result per the Go
+	// spec (MinInt64 on amd64, MaxInt64 on arm64).
+	if seconds >= GovernorMaxPause.Seconds() {
+		return GovernorMaxPause
+	}
+
+	if seconds <= 0 {
+		return 0
+	}
+
+	return time.Duration(seconds * float64(time.Second))
 }
