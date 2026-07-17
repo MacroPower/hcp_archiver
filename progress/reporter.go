@@ -702,9 +702,10 @@ func (r *Reporter) Run(ctx context.Context, interval time.Duration) error {
 	}
 }
 
-// quitGrace is how long a ctx-canceled panel gets to process the quit request
-// and erase itself in a final render before it is killed outright, so a wedged
-// program can never hang the run's shutdown.
+// quitGrace is how long a ctx-canceled panel gets at each escalation step: to
+// process the quit request and erase itself in a final render before it is
+// killed outright, and then to unwind from the kill before it is abandoned, so
+// a wedged program can never hang the run's shutdown.
 const quitGrace = 2 * time.Second
 
 // runTUI runs the Bubble Tea panel until ctx is done or the operator quits.
@@ -714,10 +715,19 @@ const quitGrace = 2 * time.Second
 // model's final render then erases the panel, so the closing log lines and
 // summary flow on a clean tail instead of around a stale frame, which a kill
 // would strand by skipping that render. A program that fails to quit within
-// [quitGrace] is killed, and the kill's [tea.ErrProgramKilled] is mapped to a
-// clean nil. It registers the program on the log sink so log lines route
-// through the one renderer, clearing it again on return so the fallback is
-// restored before the next org logs.
+// [quitGrace] is killed, and one that ignores even the kill for another
+// [quitGrace] is abandoned along with its goroutines, returning nil.
+//
+// The program runs in a child goroutine and every escalation step is issued
+// detached, because a wedged event loop (one blocked outside its message
+// receive, say on a terminal that stopped draining writes) blocks
+// [tea.Program.Send] on the unbuffered message channel, blocks
+// [tea.Program.Kill] on the renderer handshake, and keeps [tea.Program.Run]
+// from returning at all -- exactly the state the escalation exists to escape.
+// The kill's [tea.ErrProgramKilled] is mapped to a clean nil. It registers
+// the program on the log sink so log lines route through the one renderer,
+// clearing it again on return so the fallback is restored before the next org
+// logs.
 func (r *Reporter) runTUI(ctx context.Context) error {
 	program := tea.NewProgram(
 		newTUIModel(r.lockedTake, r.interrupt),
@@ -731,35 +741,52 @@ func (r *Reporter) runTUI(ctx context.Context) error {
 		defer r.sink.SetProgram(nil)
 	}
 
-	finished := make(chan struct{})
-	defer close(finished)
+	result := make(chan error, 1)
 
 	go func() {
-		select {
-		case <-finished:
-			return
-		case <-ctx.Done():
-		}
-
-		program.Send(quitRequestMsg{})
-
-		select {
-		case <-finished:
-		case <-time.After(quitGrace):
-			program.Kill()
-		}
+		_, err := program.Run()
+		result <- err
 	}()
 
-	_, err := program.Run()
-	if err != nil {
-		if errors.Is(err, tea.ErrProgramKilled) {
-			return nil
-		}
-
-		return fmt.Errorf("run progress ui: %w", err)
+	select {
+	case err := <-result:
+		return tuiError(err)
+	case <-ctx.Done():
 	}
 
-	return nil
+	// The send is detached so the grace timer arms regardless of whether the
+	// event loop is still receiving; the kill's context cancel unblocks a
+	// pending send, so the goroutine cannot outlive the escalation.
+	go program.Send(quitRequestMsg{})
+
+	select {
+	case err := <-result:
+		return tuiError(err)
+	case <-time.After(quitGrace):
+	}
+
+	go program.Kill()
+
+	select {
+	case err := <-result:
+		return tuiError(err)
+	case <-time.After(quitGrace):
+		// Even the kill could not unwind the program (a renderer stuck in a
+		// terminal write holds it wedged past any escalation). Abandon it:
+		// the goroutines stay parked either way, and hanging the run's
+		// shutdown on them is the one outcome this path exists to prevent.
+		return nil
+	}
+}
+
+// tuiError maps the panel program's result to [Reporter.Run]'s contract: the
+// shutdown escalation's kill reads as a clean nil, anything else wraps.
+func tuiError(err error) error {
+	if err == nil || errors.Is(err, tea.ErrProgramKilled) {
+		return nil
+	}
+
+	return fmt.Errorf("run progress ui: %w", err)
 }
 
 // render writes one snapshot in the resolved mode. It reads only the snapshot

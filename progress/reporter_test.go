@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -517,6 +518,76 @@ func TestReporter_Run_PanelQuitsOnCancel(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("panel did not stop after cancel")
+	}
+}
+
+// wedgedWriter blocks every Write until release is closed, simulating a
+// terminal that stopped draining: the renderer's flush goroutine parks in the
+// write while holding the renderer mutex, wedging the program's event loop
+// outside its message receive.
+type wedgedWriter struct {
+	wrote   chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newWedgedWriter() *wedgedWriter {
+	return &wedgedWriter{
+		wrote:   make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (w *wedgedWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.wrote) })
+	<-w.release
+
+	return len(p), nil
+}
+
+func TestReporter_Run_WedgedPanelNeverHangsCancel(t *testing.T) {
+	t.Parallel()
+
+	// A wedged program blocks tea.Program.Send, Kill, and Run itself, so the
+	// shutdown path must escalate past all three and return within its grace
+	// budget rather than gate the run's close-out on the program.
+	pr, pw := io.Pipe()
+	t.Cleanup(func() {
+		assert.NoError(t, pw.Close())
+	})
+
+	w := newWedgedWriter()
+	t.Cleanup(func() { close(w.release) })
+
+	r := progress.New(w, config.ProgressModeHuman, fakeSource{},
+		progress.WithTTY(true),
+		progress.WithInput(pr),
+	)
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	done := make(chan error, 1)
+	go func() {
+		done <- r.Run(ctx, 0)
+	}()
+
+	// Wait for the renderer to park in the blocked write, so the cancel lands
+	// on a genuinely wedged program.
+	select {
+	case <-w.wrote:
+	case <-time.After(5 * time.Second):
+		t.Fatal("panel never wrote a frame")
+	}
+
+	cancel()
+
+	// The escalation budget is two quitGrace waits (quit, then kill); well
+	// past that, a hang means the shutdown gated on the wedged program.
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("wedged panel hung the run's shutdown")
 	}
 }
 
