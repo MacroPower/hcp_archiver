@@ -575,6 +575,11 @@ func TestLedger_FlushFailureKeepsStateForRetry(t *testing.T) {
 
 	path := t.TempDir()
 
+	// The workspace subtree exists before records reference it, as in a real
+	// run where the object files land first; a reload discards log records for
+	// a subtree that is gone (see TestLoad_DeletedSubtreeDiscardsItsLogRecords).
+	require.NoError(t, os.MkdirAll(filepath.Join(path, "projects", "p", "workspaces", "w"), 0o755))
+
 	ledger, err := manifest.Load(path)
 	require.NoError(t, err)
 
@@ -1068,6 +1073,10 @@ func TestLedger_HasUnsettledUnderRetryAbsent(t *testing.T) {
 
 	root := t.TempDir()
 
+	// The workspace subtree exists before records reference it, as in a real
+	// run where the object files land first.
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "projects", "p", "workspaces", "w"), 0o755))
+
 	ledger, err := manifest.Load(root)
 	require.NoError(t, err)
 
@@ -1231,6 +1240,10 @@ func TestLedger_PendingGateSurvivesReload(t *testing.T) {
 		runsPrefix = "projects/p/workspaces/w/runs"
 		gate       = runsPrefix + "/r1/run-events-actors.ref"
 	)
+
+	// The workspace subtree exists before records reference it, as in a real
+	// run where the object files land first.
+	require.NoError(t, os.MkdirAll(filepath.Join(path, "projects", "p", "workspaces", "w"), 0o755))
 
 	ledger, err := manifest.Load(path)
 	require.NoError(t, err)
@@ -1428,4 +1441,51 @@ func TestLedger_RecordTimeAliasJoinsTheExistingShard(t *testing.T) {
 	assert.False(t, reloaded.ShouldFetch(alphaEntry))
 	assert.False(t, reloaded.ShouldFetch(zetaEntry))
 	assert.Equal(t, 2, reloaded.Tally().Done)
+}
+
+func TestLoad_DeletedSubtreeDiscardsItsLogRecords(t *testing.T) {
+	t.Parallel()
+
+	// Deleting an archived subtree demands a re-archive. The subtree's shard
+	// snapshot dies with its co-located .ledger directory, but a crashed run's
+	// org-level log still names the entries, and replaying them would freeze
+	// the deletion by answering every fetch decision with a skip. The replay
+	// discards them instead, so the subtree re-fetches, while records for
+	// surviving shards replay untouched.
+	root := t.TempDir()
+
+	const (
+		wsEntry  = "projects/p/workspaces/w/runs/r1/run.json"
+		orgEntry = "org.json"
+	)
+
+	wsDir := filepath.Join(root, "projects", "p", "workspaces", "w")
+	require.NoError(t, os.MkdirAll(wsDir, 0o755))
+
+	first, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	first.StartRun()
+	first.RecordDone(wsEntry, manifest.Signature{Size: 1})
+	first.RecordDone(orgEntry, manifest.Signature{Size: 1})
+
+	// Flush without finishing the run, as an interrupted process would have:
+	// the records stay in the org-level log rather than folding into
+	// snapshots.
+	require.NoError(t, first.Flush())
+	require.NoError(t, first.Close())
+
+	require.NoError(t, os.RemoveAll(wsDir))
+
+	reloaded, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, reloaded.Close()) })
+
+	assert.True(t, reloaded.ShouldFetch(wsEntry),
+		"the deleted subtree's records discard, so it re-archives")
+	assert.False(t, reloaded.ShouldFetch(orgEntry),
+		"records for surviving shards replay")
+	assert.Equal(t, 1, reloaded.Tally().Done,
+		"the discarded records do not seed the tally")
 }

@@ -564,14 +564,55 @@ func (l *Ledger) walPath() string {
 // the record's shard tag. A shard named only by log records starts from an
 // empty snapshot; every replayed shard is marked stale so the next fold
 // captures the records durably.
+//
+// A record whose shard subtree no longer exists on disk is discarded rather
+// than replayed: deleting an archived subtree is how an operator demands a
+// re-archive, and resurrecting the subtree's entries from the log would
+// answer every fetch decision with a skip and freeze the deletion forever.
+// The discard is logged and costs a re-fetch — every log record is re-derived
+// by re-walking — which is the safe direction. Only a positively absent
+// subtree discards; a stat fault surfaces as an error, matching discovery's
+// no-silent-drop policy. Org-root records always replay: their subtree is the
+// archive root itself, which holds the log being replayed. Config-version
+// records replay too: a proven tarball is evicted once its remote copy is
+// verified, so that directory is legitimately sparse and its absence carries
+// no deletion signal — the entries are the only local proof the remote copies
+// exist.
 func (l *Ledger) replayWAL() error {
 	recs, n, err := replayLog(l.walPath(), l.logger)
 	if err != nil {
 		return err
 	}
 
+	present := map[string]bool{"": true, configVersionsSegment: true}
+	discarded := make(map[string]int)
+
 	for i := range recs {
-		sh := l.shardByKey(recs[i].Shard)
+		sk := recs[i].Shard
+
+		ok, known := present[sk]
+		if !known {
+			_, statErr := os.Stat(filepath.Join(l.root, filepath.FromSlash(sk)))
+
+			switch {
+			case statErr == nil:
+				ok = true
+			case errors.Is(statErr, fs.ErrNotExist):
+				ok = false
+			default:
+				return fmt.Errorf("stat shard subtree %q: %w", sk, statErr)
+			}
+
+			present[sk] = ok
+		}
+
+		if !ok {
+			discarded[sk]++
+
+			continue
+		}
+
+		sh := l.shardByKey(sk)
 
 		err = sh.applyRecord(&recs[i])
 		if err != nil {
@@ -579,6 +620,14 @@ func (l *Ledger) replayWAL() error {
 		}
 
 		sh.stale = true
+	}
+
+	for _, sk := range slices.Sorted(maps.Keys(discarded)) {
+		l.logger.Warn("ledger_records_discarded",
+			slog.String("shard", sk),
+			slog.Int("records", discarded[sk]),
+			slog.String("reason", "shard subtree removed; its objects re-archive"),
+		)
 	}
 
 	l.walBytes = n
