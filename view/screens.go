@@ -734,7 +734,13 @@ func countNoun(n int, singular, plural string) string {
 
 // firstLine returns the first line of s, truncated to a list-friendly width.
 func firstLine(s string) string {
-	s, _, _ = strings.Cut(s, "\n")
+	// Cut at the first CR or LF: archived text carries arbitrary user content
+	// (commit messages, variable values) with CRLF or bare-CR endings, and a
+	// stray \r in a list row moves the terminal cursor back to column 0,
+	// garbling the rendered frame.
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
 
 	const maxLen = 60
 

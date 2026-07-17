@@ -3,6 +3,7 @@ package view
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -53,4 +54,42 @@ func TestNewWorkspaceScreenCountsCoalescedRuns(t *testing.T) {
 	}
 
 	assert.Equal(t, "2 runs", runsDesc, "the count matches the coalesced run list")
+}
+
+func TestFirstLine(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		text string
+		want string
+	}{
+		"single line passes through": {
+			text: "Update infra",
+			want: "Update infra",
+		},
+		"LF cuts to the first line": {
+			text: "Update infra\nMore details",
+			want: "Update infra",
+		},
+		"CRLF leaves no trailing carriage return": {
+			text: "Update infra\r\nMore details",
+			want: "Update infra",
+		},
+		"bare CR cuts to the first line": {
+			text: "Update infra\rMore details",
+			want: "Update infra",
+		},
+		"long line truncates on a rune boundary": {
+			text: strings.Repeat("ü", 61),
+			want: strings.Repeat("ü", 60) + "…",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, firstLine(tc.text))
+		})
+	}
 }
