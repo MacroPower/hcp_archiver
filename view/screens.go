@@ -47,7 +47,7 @@ func newListScreen(name string, rows []item) *listScreen {
 		entries[i] = rows[i]
 	}
 
-	l := list.New(entries, list.NewDefaultDelegate(), 0, 0)
+	l := newThemedList(entries)
 	l.SetShowTitle(false)
 	l.DisableQuitKeybindings()
 
