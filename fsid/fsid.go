@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Canonical resolves path to the identity of the physical location it
@@ -47,36 +48,59 @@ func Canonical(path string) string {
 	}
 }
 
-// WalkFiles hands fn the logical path of every regular file beneath root,
-// following symlinked directories.
+// WalkFiles hands fn the logical path of every regular file beneath root and
+// returns the intra-tree directory aliases it declined to follow, keyed
+// alias logical path to owning logical path.
 //
-// Every physical directory is visited exactly once, under whichever name the
-// walk reaches first, so a subtree reachable both directly and through a
-// sibling symlink yields its files once, and a link cycle terminates. A file
-// reached through a followed link is reported at its logical location under
-// the link, so reported paths stay rooted beneath root. A symlink to a
-// regular file reports like the file, a dangling link is skipped, a directory
-// that vanishes mid-walk is skipped, and any other stat or walk fault
-// propagates, so a fault cannot silently hide a subtree from the caller. The
-// walk stops between entries once ctx ends.
-func WalkFiles(ctx context.Context, root string, fn func(logical string) error) error {
-	return walkFiles(ctx, root, root, make(map[string]struct{}), fn)
+// The naming rule: a file physically inside a walked tree always reports
+// under its physical name. A symlinked directory whose target the traversal
+// already owns — a rename alias beside its target, a link cycle — is not
+// followed; it is returned as an alias instead, so a caller reconciling
+// names minted before a rename can rewrite between them. Every other name in
+// the system (ledger entries, remote keys) derives from the physical layout,
+// so the walk must not let a link's name shadow it, which would depend on
+// lexical visit order. A symlinked directory whose target lies outside every
+// walked tree — an operator relocation — is followed, its files reported at
+// their logical location under the link, and its target joins the owned
+// trees.
+//
+// A symlink to a regular file reports like the file, a dangling link is
+// skipped, and any other stat or walk fault propagates, so a fault cannot
+// silently hide a subtree from the caller. The walk stops between entries
+// once ctx ends.
+func WalkFiles(ctx context.Context, root string, fn func(logical string) error) (map[string]string, error) {
+	w := &walker{aliases: make(map[string]string), fn: fn}
+
+	// The root resolves up front, so a walk rooted at a symlink (a relocated
+	// subtree walked directly) traverses its physical tree while reporting
+	// under the requested logical root.
+	err := w.walk(ctx, Canonical(root), root)
+
+	return w.aliases, err
 }
 
-// walkFiles walks the physical directory physical for [WalkFiles], reporting
-// each file at its logical location under logical. The two roots differ only
-// beneath a followed symlink, where the walk descends the link's resolved
-// target while every reported path stays under the link itself.
-//
-// Every directory registers its physical identity in visited on entry, and a
-// directory whose identity is already registered is skipped whole. The same
-// set breaks symlink cycles (see [walkSymlinked]).
-func walkFiles(
-	ctx context.Context,
-	physical, logical string,
-	visited map[string]struct{},
-	fn func(logical string) error,
-) error {
+// walker carries one [WalkFiles] traversal: the physical subtrees being
+// walked, each mapped to the logical path it reports under, and the
+// intra-tree aliases declined along the way.
+type walker struct {
+	fn      func(logical string) error
+	aliases map[string]string
+	roots   []walkRoot
+}
+
+// walkRoot pairs one walked physical subtree with the logical path its files
+// report under; the two differ only beneath a followed relocation link.
+type walkRoot struct {
+	phys    string
+	logical string
+}
+
+// walk traverses the physical directory physical, reporting each file at its
+// logical location under logical, and registers the pair so a link back into
+// this subtree reads as an alias rather than a second traversal.
+func (w *walker) walk(ctx context.Context, physical, logical string) error {
+	w.roots = append(w.roots, walkRoot{phys: physical, logical: logical})
+
 	//nolint:wrapcheck // Each fault below is wrapped with its path; the walk's own errors carry theirs.
 	return filepath.WalkDir(physical, func(p string, d fs.DirEntry, err error) error {
 		switch {
@@ -85,23 +109,6 @@ func walkFiles(
 		case ctx.Err() != nil:
 			return ctx.Err()
 		case d.IsDir():
-			resolved, rErr := filepath.EvalSymlinks(p)
-
-			switch {
-			case errors.Is(rErr, fs.ErrNotExist):
-				// The directory vanished mid-walk; nothing beneath it remains
-				// to visit.
-				return fs.SkipDir
-			case rErr != nil:
-				return fmt.Errorf("resolve directory %q: %w", p, rErr)
-			}
-
-			if _, seen := visited[resolved]; seen {
-				return fs.SkipDir
-			}
-
-			visited[resolved] = struct{}{}
-
 			return nil
 		}
 
@@ -111,28 +118,23 @@ func walkFiles(
 		}
 
 		if d.Type()&fs.ModeSymlink != 0 {
-			return walkSymlinked(ctx, p, lp, visited, fn)
+			return w.symlinked(ctx, p, lp)
 		}
 
 		if !d.Type().IsRegular() {
 			return nil
 		}
 
-		return fn(lp)
+		return w.fn(lp)
 	})
 }
 
-// walkSymlinked resolves one symlinked walk entry with [os.Stat]. A link to a
-// regular file reports like the file, a link to a directory is walked through
-// the link (each physical directory once — the recursion's root visit
-// registers it in visited, which also breaks link cycles), a dangling link
-// reads as absent, and any other stat fault surfaces.
-func walkSymlinked(
-	ctx context.Context,
-	physical, logical string,
-	visited map[string]struct{},
-	fn func(logical string) error,
-) error {
+// symlinked resolves one symlinked walk entry with [os.Stat]. A link to a
+// regular file reports like the file, a dangling link reads as absent, and
+// any other stat fault surfaces. A link to a directory splits on where the
+// target lives: inside a walked tree it records an alias (see [WalkFiles]),
+// outside it starts a nested walk through the link.
+func (w *walker) symlinked(ctx context.Context, physical, logical string) error {
 	info, err := os.Stat(physical)
 
 	switch {
@@ -141,7 +143,7 @@ func walkSymlinked(
 	case err != nil:
 		return fmt.Errorf("stat symlinked entry %q: %w", physical, err)
 	case info.Mode().IsRegular():
-		return fn(logical)
+		return w.fn(logical)
 	case !info.IsDir():
 		return nil
 	}
@@ -151,11 +153,29 @@ func walkSymlinked(
 		return fmt.Errorf("resolve symlinked directory %q: %w", physical, err)
 	}
 
-	if _, ok := visited[resolved]; ok {
+	if owner, ok := w.ownerOf(resolved); ok {
+		w.aliases[logical] = owner
+
 		return nil
 	}
 
-	return walkFiles(ctx, resolved, logical, visited, fn)
+	return w.walk(ctx, resolved, logical)
+}
+
+// ownerOf maps a resolved directory to the logical path the traversal
+// reports it under, when a subtree already being walked contains it.
+func (w *walker) ownerOf(resolved string) (string, bool) {
+	for _, r := range w.roots {
+		if resolved == r.phys {
+			return r.logical, true
+		}
+
+		if strings.HasPrefix(resolved, r.phys+string(filepath.Separator)) {
+			return filepath.Join(r.logical, resolved[len(r.phys):]), true
+		}
+	}
+
+	return "", false
 }
 
 // logicalPath translates a path reported by a physical walk rooted at

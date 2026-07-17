@@ -1139,6 +1139,77 @@ func TestSyncArchiveWalksSiblingAliasedSubtreeOnce(t *testing.T) {
 	assert.False(t, ok, "the alias name mirrors nothing of its own")
 }
 
+func TestSyncArchiveAliasSortingFirstDoesNotShadowTheRealName(t *testing.T) {
+	t.Parallel()
+
+	const wsFile = "projects/prod/workspaces/api/workspace.json"
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	data := []byte(`{"ws":"api"}`)
+	f.writeDone(t, wsFile, data)
+	f.fake.SetObject(f.key(wsFile),
+		remotetest.Object{Data: data, MD5: remotetest.MD5Sum(data)})
+
+	// A rename alias that sorts lexically before its target. The walk must
+	// still report the subtree under the physical name the ledger and remote
+	// keys use: a walk that let the alias claim it would fill the keep set
+	// with alias keys only, and the prune would delete the live mirror of
+	// every real-name key while the sweep re-uploaded it all under the alias
+	// -- a cycle that repeats every run.
+	wsDir := filepath.Join(f.store.Root(), "projects", "prod", "workspaces")
+	require.NoError(t, os.Symlink(
+		filepath.Join(wsDir, "api"),
+		filepath.Join(wsDir, "aaa"),
+	))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Failed)
+	assert.Zero(t, stats.Pruned, "the real-name mirror survives")
+	assert.Empty(t, f.fake.Deleted())
+	assert.Zero(t, stats.Uploaded, "nothing re-uploads under the alias name")
+	assert.Equal(t, 1, stats.Skipped, "the mirrored file matches under its real name")
+
+	_, ok := f.fake.Object(f.key("projects/prod/workspaces/aaa/workspace.json"))
+	assert.False(t, ok)
+}
+
+func TestSyncArchiveCreditsEvictedZipAtItsHistoricalKey(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	// An eviction that ran before a workspace rename: the sidecar walks under
+	// the physical name today, but the zip's only copy sits at the key the
+	// old name minted. The rename alias the walk declines must bridge the
+	// lookup, or every future run reports the intact only-copy as a hole and
+	// exits incomplete forever.
+	const (
+		sidecar = "projects/prod/workspaces/api/bundles/logs.gen0001.zip.sidecar.ndjson"
+		oldZip  = "projects/prod/workspaces/zeta-old/bundles/logs.gen0001.zip"
+	)
+
+	f.write(t, sidecar, []byte(`{"name":"member.json"}`))
+	f.fake.SetObject(f.key(oldZip), remotetest.Object{Data: []byte("zipbytes")})
+
+	wsDir := filepath.Join(f.store.Root(), "projects", "prod", "workspaces")
+	require.NoError(t, os.Symlink(
+		filepath.Join(wsDir, "api"),
+		filepath.Join(wsDir, "zeta-old"),
+	))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Failed, "the historical key satisfies the only-copy obligation")
+	assert.Empty(t, f.fake.Deleted(), "the old-name zip is never pruned")
+
+	_, ok := f.fake.Object(f.key(oldZip))
+	assert.True(t, ok)
+}
+
 func TestSyncArchiveCanceledContextUploadsNothing(t *testing.T) {
 	t.Parallel()
 

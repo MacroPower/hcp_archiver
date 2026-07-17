@@ -72,21 +72,61 @@ func TestWalkFilesVisitsEachPhysicalDirectoryOnce(t *testing.T) {
 
 	var got []string
 
-	require.NoError(t, fsid.WalkFiles(t.Context(), tmp, func(logical string) error {
-		rel, err := filepath.Rel(tmp, logical)
-		require.NoError(t, err)
+	aliases, err := fsid.WalkFiles(t.Context(), tmp, func(logical string) error {
+		rel, relErr := filepath.Rel(tmp, logical)
+		require.NoError(t, relErr)
 
 		got = append(got, filepath.ToSlash(rel))
 
 		return nil
-	}))
+	})
+	require.NoError(t, err)
 
 	slices.Sort(got)
 
-	// The sibling alias b contributes nothing (a's physical directory already
-	// walked), the relocated subtree reports under its link, the file link
-	// reports like its file, and the dangling link and cycle vanish quietly.
+	// The sibling alias b contributes no files (a's physical directory owns
+	// them), the relocated subtree reports under its link, the file link
+	// reports like its file, and the dangling link vanishes quietly.
 	assert.Equal(t, []string{"a/deep/f1", "c/f2", "plain", "plain-link"}, got)
+
+	// The declined intra-tree links surface as aliases: the sibling rename
+	// link maps to its target, and the cycle maps to the root that owns it.
+	assert.Equal(t, map[string]string{
+		filepath.Join(tmp, "b"):          filepath.Join(tmp, "a"),
+		filepath.Join(tmp, "a", "cycle"): tmp,
+	}, aliases)
+}
+
+func TestWalkFilesNamesArePhysicalRegardlessOfVisitOrder(t *testing.T) {
+	t.Parallel()
+
+	// A rename alias that sorts lexically BEFORE its target must not claim
+	// the subtree's files: every other name in the system (ledger entries,
+	// remote keys) derives from the physical layout, so a walk that reported
+	// the link's name would disagree with all of them — the keep set would
+	// miss every real key and the prune would delete the live mirror.
+	tmp := t.TempDir()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "target"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "target", "f"), []byte("x"), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join(tmp, "target"), filepath.Join(tmp, "0-alias")))
+
+	var got []string
+
+	aliases, err := fsid.WalkFiles(t.Context(), tmp, func(logical string) error {
+		rel, relErr := filepath.Rel(tmp, logical)
+		require.NoError(t, relErr)
+
+		got = append(got, filepath.ToSlash(rel))
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"target/f"}, got, "the physical name wins whichever sorts first")
+	assert.Equal(t, map[string]string{
+		filepath.Join(tmp, "0-alias"): filepath.Join(tmp, "target"),
+	}, aliases)
 }
 
 func TestWalkFilesStopsOnCancel(t *testing.T) {
@@ -98,6 +138,6 @@ func TestWalkFilesStopsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	err := fsid.WalkFiles(ctx, tmp, func(string) error { return nil })
+	_, err := fsid.WalkFiles(ctx, tmp, func(string) error { return nil })
 	require.ErrorIs(t, err, context.Canceled)
 }

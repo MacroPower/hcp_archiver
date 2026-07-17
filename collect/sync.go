@@ -518,7 +518,7 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 	e.syncFiles(ctx, sweep.sync, inventory, counters)
 
 	if ctx.Err() == nil {
-		e.verifyEvicted(ctx, inventory, obligations, counters)
+		e.verifyEvicted(ctx, inventory, obligations, sweep.aliases, counters)
 		e.pruneRemote(ctx, orgPrefix, inventory, sweep, counters)
 	}
 
@@ -601,14 +601,24 @@ func (e *Env) evictedObligations(
 // extra requests — comparing sizes where the ledger recorded one (a sidecar
 // records its members' digests, not the zip's, so bundles verify by
 // presence).
+//
+// An eviction that ran before a workspace rename uploaded its zip under the
+// name then in force, while the sidecar now walks under the physical name;
+// the sweep's rename aliases bridge the two, so a miss at the current key
+// retries under each alias-rewritten key before it is declared a hole. The
+// old-name copy stays prune-exempt by shape, so crediting it is safe.
 func (e *Env) verifyEvicted(
 	ctx context.Context,
 	inventory map[string]remote.ObjectInfo,
 	obligations map[string]int64,
+	aliases map[string]string,
 	counters *syncCounters,
 ) {
 	for _, relPath := range slices.Sorted(maps.Keys(obligations)) {
 		info, ok := inventory[e.RemoteKey(relPath)]
+		if !ok {
+			info, ok = e.aliasedInventoryLookup(ctx, inventory, aliases, relPath)
+		}
 
 		switch {
 		case !ok:
@@ -630,6 +640,41 @@ func (e *Env) verifyEvicted(
 			counters.failed.Add(1)
 		}
 	}
+}
+
+// aliasedInventoryLookup retries one obligation's inventory lookup under
+// every rename-alias rewriting of its path: an obligation walked at
+// owner-name relPath may have been uploaded under the alias name in force
+// when the eviction ran. A hit logs the historical key, so the credit is
+// visible in the run's record.
+func (e *Env) aliasedInventoryLookup(
+	ctx context.Context,
+	inventory map[string]remote.ObjectInfo,
+	aliases map[string]string,
+	relPath string,
+) (remote.ObjectInfo, bool) {
+	for _, alias := range slices.Sorted(maps.Keys(aliases)) {
+		owner := aliases[alias]
+
+		rest, ok := strings.CutPrefix(relPath, owner+"/")
+		if !ok {
+			continue
+		}
+
+		info, hit := inventory[e.RemoteKey(alias+"/"+rest)]
+		if !hit {
+			continue
+		}
+
+		e.logger.LogAttrs(ctx, slog.LevelInfo, "evicted_object_at_historical_key",
+			slog.String("path", relPath),
+			slog.String("key", e.RemoteKey(alias+"/"+rest)),
+		)
+
+		return info, true
+	}
+
+	return remote.ObjectInfo{}, false
 }
 
 // listInventory runs one scoped inventory listing for a sync pass, settling
@@ -661,10 +706,12 @@ func (e *Env) listInventory(
 
 // treeSweep is one classification pass over the archive tree: the files to
 // evict, the files to sync, the remote key of every file the mirror must not
-// prune, and the evicted bundles whose remote presence the sweep must
-// verify.
+// prune, the evicted bundles whose remote presence the sweep must verify,
+// and the rename-alias prefix pairs the walk declined to follow, which the
+// verification uses to credit an only-copy uploaded under a pre-rename name.
 type treeSweep struct {
 	keep        map[string]struct{}
+	aliases     map[string]string
 	evict       []string
 	sync        []string
 	suspect     []string
@@ -684,7 +731,7 @@ type treeSweep struct {
 func (e *Env) classifyTree(ctx context.Context, counters *syncCounters) (*treeSweep, error) {
 	sweep := &treeSweep{keep: make(map[string]struct{})}
 
-	err := e.walkEligible(ctx, "", func(relPath string) error {
+	aliases, err := e.walkEligible(ctx, "", func(relPath string) error {
 		sweep.keep[e.RemoteKey(relPath)] = struct{}{}
 
 		if isBundleSidecar(relPath) {
@@ -706,6 +753,8 @@ func (e *Env) classifyTree(ctx context.Context, counters *syncCounters) (*treeSw
 	if err != nil {
 		return nil, fmt.Errorf("walk archive tree: %w", err)
 	}
+
+	sweep.aliases = aliases
 
 	slices.Sort(sweep.evict)
 	slices.Sort(sweep.sync)
@@ -748,20 +797,44 @@ func (e *Env) recordEvictedZip(
 // archive when empty) and hands each regular, sync-eligible file's
 // archive-relative path to fn: the shared skeleton of the sync passes'
 // walks, owning the cancellation check, the relativization, and the
-// [syncEligible] gate. The traversal is [fsid.WalkFiles]: symlinked
-// directories are followed — a subtree an operator relocated behind a
-// symlink is a supported layout the ledger's shard discovery already reads
-// through, so the sweep must see the same tree the ledger describes — and
-// every physical directory walks once, so an aliased subtree cannot sync,
-// evict, or count twice. An error from fn, the walk, or the cancellation
+// [syncEligible] gate. The traversal is [fsid.WalkFiles]: relocation
+// symlinks are followed — a subtree an operator moved behind a symlink is a
+// supported layout the ledger's shard discovery already reads through — and
+// every file reports under its physical name, so the walked paths agree
+// with the API-derived names the ledger and remote keys use. The intra-tree
+// rename links the walk declined are returned as archive-relative alias to
+// owner prefix pairs, so a caller reconciling names minted before a rename
+// can rewrite between them. An error from fn, the walk, or the cancellation
 // propagates.
-func (e *Env) walkEligible(ctx context.Context, relPrefix string, fn func(relPath string) error) error {
+func (e *Env) walkEligible(
+	ctx context.Context,
+	relPrefix string,
+	fn func(relPath string) error,
+) (map[string]string, error) {
 	start := filepath.Join(e.store.Root(), filepath.FromSlash(relPrefix))
 
-	//nolint:wrapcheck // Callers wrap with their pass's context.
-	return fsid.WalkFiles(ctx, start, func(logical string) error {
+	aliases, err := fsid.WalkFiles(ctx, start, func(logical string) error {
 		return e.visitEligible(logical, fn)
 	})
+	if err != nil {
+		//nolint:wrapcheck // Callers wrap with their pass's context.
+		return nil, err
+	}
+
+	rel := make(map[string]string, len(aliases))
+
+	for alias, owner := range aliases {
+		aliasRel, aliasErr := filepath.Rel(e.store.Root(), alias)
+		ownerRel, ownerErr := filepath.Rel(e.store.Root(), owner)
+
+		if aliasErr != nil || ownerErr != nil {
+			return nil, fmt.Errorf("relativize alias %q: %w", alias, errors.Join(aliasErr, ownerErr))
+		}
+
+		rel[filepath.ToSlash(aliasRel)] = filepath.ToSlash(ownerRel)
+	}
+
+	return rel, nil
 }
 
 // visitEligible relativizes one regular file's logical path against the
@@ -1031,7 +1104,7 @@ func (e *Env) SyncSubtree(ctx context.Context, relPrefix string) SyncStats {
 		return counters.stats()
 	}
 
-	err := e.walkEligible(ctx, relPrefix, func(relPath string) error {
+	_, err := e.walkEligible(ctx, relPrefix, func(relPath string) error {
 		if sealBoundarySkip(relPath) {
 			return nil
 		}
@@ -1341,6 +1414,28 @@ func (e *Env) pruneRemote(
 
 		relPath, ok := strings.CutPrefix(key, orgPrefix)
 		if !ok || evictedSurface(relPath) || isBundleSidecar(relPath) {
+			continue
+		}
+
+		// A last physical fence before a key is deletable: the stat resolves
+		// through any symlink, so a live file the walk reported under another
+		// name can never lose its remote copy — deleting is the one direction
+		// doubt must not take. A key whose local presence cannot be determined
+		// is left in place and counted, so the run exits incomplete instead of
+		// clean over a prune it could not prove safe.
+		present, presentErr := e.store.Exists(relPath)
+
+		switch {
+		case presentErr != nil:
+			e.logger.LogAttrs(ctx, slog.LevelError, "sync_prune_unverifiable",
+				slog.String("key", key),
+				slog.String("error", presentErr.Error()),
+			)
+			counters.failed.Add(1)
+
+			continue
+
+		case present:
 			continue
 		}
 
