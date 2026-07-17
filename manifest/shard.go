@@ -48,6 +48,32 @@ func shardKey(key string) string {
 	}
 }
 
+// compareShardAppend orders two shard keys for a flush's per-shard log
+// appends. The shards owning objects that other shards' runs reference — the
+// org root (users) and the org-wide configuration versions — sort before every
+// workspace and stack shard, and ties break lexicographically so the order is
+// deterministic rather than map-random. A crash between appends then persists
+// only prefixes in which a referenced object's done entry is durable before the
+// run referencing it can be durably frozen behind a settled collection.
+func compareShardAppend(a, b string) int {
+	ra, rb := shardAppendRank(a), shardAppendRank(b)
+	if ra != rb {
+		return ra - rb
+	}
+
+	return strings.Compare(a, b)
+}
+
+// shardAppendRank buckets a shard key for [compareShardAppend]: the org-root
+// and config-versions shards append first, everything else after.
+func shardAppendRank(sk string) int {
+	if sk == "" || sk == configVersionsSegment {
+		return 0
+	}
+
+	return 1
+}
+
 // shard is one slice of the ledger (a workspace, a stack, the org-wide
 // configuration versions, or the org root) persisted as a compacted snapshot
 // plus an append-only log in a co-located [LedgerDirName] directory.

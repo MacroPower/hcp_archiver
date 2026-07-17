@@ -1046,6 +1046,16 @@ func (l *Ledger) LastRun() (RunRecord, bool) {
 // just finished. An append-only flush costs the recent delta rather than the
 // whole ledger, and only the shards that changed are touched. Flushes are
 // serialized, so each shard's log takes one writer at a time.
+//
+// The per-shard appends run in a deterministic dependency order (see
+// [compareShardAppend]): the shards owning cross-shard referenced objects — the
+// org root and the org-wide configuration versions — append before any
+// workspace or stack shard. A hard kill mid-flush therefore persists a prefix
+// in which a referenced object's done entry is durable before the run that
+// references it can be durably frozen; losing only the referencing shard's half
+// re-pages that collection on resume, which self-heals, whereas the reverse
+// order would strand a durably-written config-version tarball with no ledger
+// record and no code path left to re-record it.
 func (l *Ledger) Flush() error {
 	l.flushMu.Lock()
 	defer l.flushMu.Unlock()
@@ -1053,15 +1063,16 @@ func (l *Ledger) Flush() error {
 	l.mu.Lock()
 
 	type pending struct {
+		sk string
 		sh *shard
 		d  drainedState
 	}
 
 	var work []pending
 
-	for _, sh := range l.shards {
+	for sk, sh := range l.shards {
 		if sh.hasDirty() {
-			work = append(work, pending{sh: sh, d: sh.drainDirty()})
+			work = append(work, pending{sk: sk, sh: sh, d: sh.drainDirty()})
 		}
 	}
 
@@ -1069,6 +1080,10 @@ func (l *Ledger) Flush() error {
 	l.compactNext = false
 
 	l.mu.Unlock()
+
+	slices.SortFunc(work, func(a, b pending) int {
+		return compareShardAppend(a.sk, b.sk)
+	})
 
 	for i, w := range work {
 		n, err := appendLog(w.sh.logPath(), w.d.recs)

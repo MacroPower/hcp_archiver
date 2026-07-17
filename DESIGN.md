@@ -520,6 +520,17 @@ whole. A shard with no file starts empty — the ledger, not file existence, is
 the record, so deleting a `.ledger/` directory forgets that subtree's history
 and the next run re-fetches it.
 
+A flush appends each dirty shard's delta as its own fsynced write, so a hard
+kill mid-flush persists a prefix of the shards, and the append order is a
+crash-consistency surface: the shards owning cross-shard referenced objects —
+the org root (users) and the org-wide config versions — always append before
+any workspace or stack shard. A referenced object's `done` entry is therefore
+durable before the run that references it can be durably frozen behind a
+settled collection; losing only the referencing shard's half re-pages that
+collection on resume, which self-heals, whereas the reverse order would strand
+a durably-written config-version tarball with no ledger record below the
+early-stop boundary, where nothing ever re-records it.
+
 ### Sealed cold storage
 
 A **frozen** object is sealed into a local bundle. Frozen is the terminal

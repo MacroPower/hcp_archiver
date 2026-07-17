@@ -40,3 +40,46 @@ func TestDiscoverShardsWithGlobMetaInRoot(t *testing.T) {
 		"projects/p1/stacks/s1":     {},
 	}, gotKeys)
 }
+
+func TestFlushAppendsCrossShardOwnersFirst(t *testing.T) {
+	t.Parallel()
+
+	// A flush whose batch spans the config-versions shard and a workspace shard
+	// must make the config-versions delta durable first: a crash after the
+	// workspace append but before the config-versions one would durably freeze
+	// a run behind its settled collection while losing the done entry of the
+	// tarball it references, and no later run re-records a tarball below the
+	// walk's early-stop boundary. An injected append failure on the workspace
+	// shard stands in for the crash; with a map-random append order each
+	// iteration could see the workspace shard drawn first, so the loop makes a
+	// regression overwhelmingly likely to surface. The workspace entry is
+	// recorded before the tarball so a map iteration that merely follows
+	// insertion order still puts the workspace shard first without the sort.
+	for range 8 {
+		root := t.TempDir()
+
+		l, err := Load(root)
+		require.NoError(t, err)
+
+		t.Cleanup(func() { require.NoError(t, l.Close()) })
+
+		const (
+			tarball = "config-versions/cv-1.tar.gz"
+			wsRun   = "projects/p1/workspaces/w1/runs/run-1/run.json"
+		)
+
+		l.RecordDone(wsRun, Signature{})
+		l.RecordDone(tarball, Signature{})
+
+		// Occupy the workspace shard's log path with a directory so its append
+		// fails while the config-versions shard's append can still succeed.
+		wsLog := l.shardFor(wsRun).logPath()
+		require.NoError(t, os.MkdirAll(wsLog, 0o750))
+
+		require.Error(t, l.Flush())
+
+		data, err := os.ReadFile(l.shardFor(tarball).logPath())
+		require.NoError(t, err, "the config-versions delta must be durable before the workspace append")
+		require.Contains(t, string(data), "cv-1.tar.gz")
+	}
+}

@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -144,4 +145,32 @@ func TestShardDrainRecordsReplayToSameState(t *testing.T) {
 	assert.Equal(t, src.completed, dst.completed)
 	assert.Equal(t, src.settled, dst.settled)
 	assert.Equal(t, src.runCount, dst.runCount)
+}
+
+func TestCompareShardAppendOrdersCrossShardOwnersFirst(t *testing.T) {
+	t.Parallel()
+
+	// Flush appends per-shard logs in this order, and a crash between appends
+	// persists a prefix. The org-root and config-versions shards own the objects
+	// other shards' runs reference (users, config-version tarballs), so they must
+	// be durable before any workspace or stack shard can durably freeze a run
+	// that references them.
+	keys := []string{
+		"projects/p1/workspaces/w1",
+		configVersionsSegment,
+		"projects/p1/stacks/s1",
+		"",
+		"projects/p0/workspaces/w0",
+	}
+
+	slices.SortFunc(keys, compareShardAppend)
+
+	want := []string{
+		"",
+		configVersionsSegment,
+		"projects/p0/workspaces/w0",
+		"projects/p1/stacks/s1",
+		"projects/p1/workspaces/w1",
+	}
+	assert.Equal(t, want, keys)
 }
