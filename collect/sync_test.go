@@ -2,6 +2,7 @@ package collect_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -1180,7 +1181,7 @@ func TestSyncArchiveAliasSortingFirstDoesNotShadowTheRealName(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestSyncArchiveCreditsEvictedZipAtItsHistoricalKey(t *testing.T) {
+func TestSyncArchiveHealsAnEvictedZipOntoItsCurrentKey(t *testing.T) {
 	t.Parallel()
 
 	f := newSyncFixture(t)
@@ -1189,8 +1190,50 @@ func TestSyncArchiveCreditsEvictedZipAtItsHistoricalKey(t *testing.T) {
 	// An eviction that ran before a workspace rename: the sidecar walks under
 	// the physical name today, but the zip's only copy sits at the key the
 	// old name minted. The rename alias the walk declines must bridge the
-	// lookup, or every future run reports the intact only-copy as a hole and
-	// exits incomplete forever.
+	// lookup, and the credit must then converge the mirror -- a server-side
+	// copy onto the current key, the historical key released behind the
+	// confirmed copy -- so the archive stops depending on the rename link
+	// surviving on disk.
+	const (
+		sidecar = "projects/prod/workspaces/api/bundles/logs.gen0001.zip.sidecar.ndjson"
+		curZip  = "projects/prod/workspaces/api/bundles/logs.gen0001.zip"
+		oldZip  = "projects/prod/workspaces/zeta-old/bundles/logs.gen0001.zip"
+	)
+
+	f.write(t, sidecar, []byte(`{"name":"member.json"}`))
+	f.fake.SetObject(f.key(oldZip), remotetest.Object{Data: []byte("zipbytes")})
+
+	wsDir := filepath.Join(f.store.Root(), "projects", "prod", "workspaces")
+	link := filepath.Join(wsDir, "zeta-old")
+	require.NoError(t, os.Symlink(filepath.Join(wsDir, "api"), link))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	require.Zero(t, stats.Failed, "the historical key satisfies the only-copy obligation")
+
+	healed, ok := f.fake.Object(f.key(curZip))
+	require.True(t, ok, "the only-copy converges onto the current key")
+	assert.Equal(t, []byte("zipbytes"), healed.Data)
+	assert.Equal(t, []string{f.key(oldZip)}, f.fake.Deleted(),
+		"the historical key is released behind the confirmed copy")
+
+	// With the mirror converged, the rename link is no longer load-bearing:
+	// a sweep without it satisfies the obligation at the current key.
+	require.NoError(t, os.Remove(link))
+
+	stats = f.env.SyncArchive(t.Context())
+	assert.Zero(t, stats.Failed, "the healed mirror no longer needs the alias")
+}
+
+func TestSyncArchiveKeepsTheHistoricalCopyWhenTheHealFails(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	// A failed heal must not disturb custody: the credit already succeeded,
+	// the historical copy stays the only copy, and the run stays clean -- the
+	// next sweep retries the heal.
 	const (
 		sidecar = "projects/prod/workspaces/api/bundles/logs.gen0001.zip.sidecar.ndjson"
 		oldZip  = "projects/prod/workspaces/zeta-old/bundles/logs.gen0001.zip"
@@ -1198,6 +1241,8 @@ func TestSyncArchiveCreditsEvictedZipAtItsHistoricalKey(t *testing.T) {
 
 	f.write(t, sidecar, []byte(`{"name":"member.json"}`))
 	f.fake.SetObject(f.key(oldZip), remotetest.Object{Data: []byte("zipbytes")})
+
+	f.fake.CopyErr = errors.New("copy boom")
 
 	wsDir := filepath.Join(f.store.Root(), "projects", "prod", "workspaces")
 	require.NoError(t, os.Symlink(
@@ -1207,8 +1252,8 @@ func TestSyncArchiveCreditsEvictedZipAtItsHistoricalKey(t *testing.T) {
 
 	stats := f.env.SyncArchive(t.Context())
 
-	assert.Zero(t, stats.Failed, "the historical key satisfies the only-copy obligation")
-	assert.Empty(t, f.fake.Deleted(), "the old-name zip is never pruned")
+	assert.Zero(t, stats.Failed, "the credit stands; the heal retries next sweep")
+	assert.Empty(t, f.fake.Deleted(), "the only copy is never released without its replacement")
 
 	_, ok := f.fake.Object(f.key(oldZip))
 	assert.True(t, ok)

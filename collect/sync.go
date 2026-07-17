@@ -614,8 +614,10 @@ func (e *Env) evictedObligations(
 // An eviction that ran before a workspace rename uploaded its zip under the
 // name then in force, while the sidecar now walks under the physical name;
 // the sweep's rename aliases bridge the two, so a miss at the current key
-// retries under each alias-rewritten key before it is declared a hole. The
-// old-name copy stays prune-exempt by shape, so crediting it is safe.
+// retries under each alias-rewritten key before it is declared a hole. A
+// credit at a historical key is then healed onto the current name (see
+// [Env.healHistoricalKey]), so the mirror converges instead of depending on
+// the rename link forever.
 func (e *Env) verifyEvicted(
 	ctx context.Context,
 	inventory map[string]remote.ObjectInfo,
@@ -624,9 +626,11 @@ func (e *Env) verifyEvicted(
 	counters *syncCounters,
 ) {
 	for _, relPath := range slices.Sorted(maps.Keys(obligations)) {
+		var histKey string
+
 		info, ok := inventory[e.RemoteKey(relPath)]
 		if !ok {
-			info, ok = e.aliasedInventoryLookup(ctx, inventory, aliases, relPath)
+			info, histKey, ok = e.aliasedInventoryLookup(ctx, inventory, aliases, relPath)
 		}
 
 		switch {
@@ -647,6 +651,9 @@ func (e *Env) verifyEvicted(
 				slog.Int64("recorded_bytes", obligations[relPath]),
 			)
 			counters.failed.Add(1)
+
+		case histKey != "":
+			e.healHistoricalKey(ctx, histKey, relPath, info)
 		}
 	}
 }
@@ -654,14 +661,14 @@ func (e *Env) verifyEvicted(
 // aliasedInventoryLookup retries one obligation's inventory lookup under
 // every rename-alias rewriting of its path: an obligation walked at
 // owner-name relPath may have been uploaded under the alias name in force
-// when the eviction ran. A hit logs the historical key, so the credit is
-// visible in the run's record.
+// when the eviction ran. A hit logs and returns the historical key, so the
+// credit is visible in the run's record and the heal knows its source.
 func (e *Env) aliasedInventoryLookup(
 	ctx context.Context,
 	inventory map[string]remote.ObjectInfo,
 	aliases map[string]string,
 	relPath string,
-) (remote.ObjectInfo, bool) {
+) (remote.ObjectInfo, string, bool) {
 	for _, alias := range slices.Sorted(maps.Keys(aliases)) {
 		owner := aliases[alias]
 
@@ -670,20 +677,77 @@ func (e *Env) aliasedInventoryLookup(
 			continue
 		}
 
-		info, hit := inventory[e.RemoteKey(alias+"/"+rest)]
+		key := e.RemoteKey(alias + "/" + rest)
+
+		info, hit := inventory[key]
 		if !hit {
 			continue
 		}
 
 		e.logger.LogAttrs(ctx, slog.LevelInfo, "evicted_object_at_historical_key",
 			slog.String("path", relPath),
-			slog.String("key", e.RemoteKey(alias+"/"+rest)),
+			slog.String("key", key),
 		)
 
-		return info, true
+		return info, key, true
 	}
 
-	return remote.ObjectInfo{}, false
+	return remote.ObjectInfo{}, "", false
+}
+
+// healHistoricalKey converges a credited only-copy onto its current name: a
+// server-side copy from the historical key, a metadata confirm of the fresh
+// copy, and only then the historical key's delete. Until the copy lands, the
+// credit depends on the rename link surviving on disk — an operator tidying
+// the stale link away would turn an intact archive into a permanent false
+// hole — so the heal trades that standing dependency for one converged
+// object. Every step fails safe: a fault leaves the historical copy in
+// place, logs, and counts nothing, since the credit already succeeded and
+// the next sweep retries the heal.
+func (e *Env) healHistoricalKey(ctx context.Context, histKey, relPath string, info remote.ObjectInfo) {
+	dst := e.RemoteKey(relPath)
+
+	err := e.remote.Copy(ctx, histKey, dst)
+	if err == nil {
+		var head remote.ObjectInfo
+
+		head, err = e.remote.Head(ctx, dst)
+		if err == nil && head.Size != info.Size {
+			err = fmt.Errorf("healed copy holds %d bytes, want %d", head.Size, info.Size)
+		}
+	}
+
+	if err != nil {
+		if ctx.Err() == nil {
+			e.logger.LogAttrs(ctx, slog.LevelWarn, "evicted_object_heal_error",
+				slog.String("path", relPath),
+				slog.String("key", histKey),
+				slog.String("error", err.Error()),
+			)
+		}
+
+		return
+	}
+
+	// The historical copy is deleted only behind the confirmed fresh one, the
+	// same confirm-then-release order every custody transfer here follows.
+	_, err = e.remote.Delete(ctx, []string{histKey})
+	if err != nil {
+		if ctx.Err() == nil {
+			e.logger.LogAttrs(ctx, slog.LevelWarn, "evicted_object_heal_error",
+				slog.String("path", relPath),
+				slog.String("key", histKey),
+				slog.String("error", err.Error()),
+			)
+		}
+
+		return
+	}
+
+	e.logger.LogAttrs(ctx, slog.LevelInfo, "evicted_object_healed",
+		slog.String("path", relPath),
+		slog.String("from", histKey),
+	)
 }
 
 // listInventory runs one scoped inventory listing for a sync pass, settling

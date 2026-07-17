@@ -625,3 +625,30 @@ func TestDeleteEmpty(t *testing.T) {
 	require.NoError(t, err, "no keys means no requests")
 	assert.Zero(t, deleted)
 }
+
+func TestCopyDuplicatesServerSide(t *testing.T) {
+	t.Parallel()
+
+	// The sweep's rename healing converges an only-copy onto its current key
+	// without egress: the bytes and the recorded digest metadata must arrive
+	// intact, and an absent source must classify as not-found so the caller
+	// never releases an original behind a copy that did not happen.
+	body := []byte("zip bytes")
+
+	client, fake := newClient(t, remote.Config{})
+	fake.SetObject("old/key", remotetest.Object{
+		Data:     body,
+		Metadata: map[string]string{"sha256": "abc"},
+	})
+
+	require.NoError(t, client.Copy(t.Context(), "old/key", "new/key"))
+
+	obj, ok := fake.Object("new/key")
+	require.True(t, ok)
+	assert.Equal(t, body, obj.Data)
+	assert.Equal(t, "abc", obj.Metadata["sha256"], "recorded digests ride along")
+	assert.Equal(t, []remotetest.CopyRecord{{Src: "old/key", Dst: "new/key"}}, fake.Copies())
+
+	err := client.Copy(t.Context(), "gone/key", "new/key")
+	require.ErrorIs(t, err, remote.ErrNotFound)
+}

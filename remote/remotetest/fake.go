@@ -94,6 +94,9 @@ type Fake struct {
 	// DeleteHook, when set, runs at the start of each delete with the call's
 	// context, serving the same mid-flight cancellation modeling as HeadHook.
 	DeleteHook func(ctx context.Context)
+	// CopyErr fails every server-side copy; a positive CopyErrN bounds it to
+	// the first n copies.
+	CopyErr error
 	// DeleteErrKeys, when non-empty, confines DeleteErr (and DeleteErrN's
 	// budget) to the named keys, so a test can fail some of a fan-out's keys
 	// while the rest settle.
@@ -101,16 +104,18 @@ type Fake struct {
 
 	ranges  []Range
 	deleted []string
+	copies  []CopyRecord
 	mu      sync.Mutex
 
-	// PutErrN, HeadErrN, ListErrN, DeleteErrN, and RangeErrN bound their
-	// error's blast radius to the first n calls; zero keeps the error firing
-	// on every call.
+	// PutErrN, HeadErrN, ListErrN, DeleteErrN, RangeErrN, and CopyErrN bound
+	// their error's blast radius to the first n calls; zero keeps the error
+	// firing on every call.
 	PutErrN    int
 	HeadErrN   int
 	ListErrN   int
 	DeleteErrN int
 	RangeErrN  int
+	CopyErrN   int
 
 	// ErrCode, when set, is the [gcerrors.ErrorCode] stamped on every
 	// injected fault, so a test can model a driver-classified failure (a
@@ -127,6 +132,15 @@ type Fake struct {
 	listFails  int
 	delFails   int
 	rangeFails int
+	copyFails  int
+}
+
+// CopyRecord is one recorded server-side copy, source to destination.
+type CopyRecord struct {
+	// Src is the key copied from.
+	Src string
+	// Dst is the key copied to.
+	Dst string
 }
 
 // takeFault reports whether an armed fault fires for this call, consuming
@@ -225,6 +239,14 @@ func (f *Fake) Ranges() []Range {
 	defer f.mu.Unlock()
 
 	return slices.Clone(f.ranges)
+}
+
+// Copies returns the server-side copies served, in request order.
+func (f *Fake) Copies() []CopyRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return slices.Clone(f.copies)
 }
 
 // ErrorCode classifies the fake's errors: a missing object reports
@@ -475,9 +497,29 @@ func (f *Fake) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// Copy is unsupported; the client never copies.
-func (f *Fake) Copy(context.Context, string, string, *driver.CopyOptions) error {
-	return errors.ErrUnsupported
+// Copy duplicates the object at srcKey to dstKey, recording the pair; an
+// absent source reports not-found.
+func (f *Fake) Copy(_ context.Context, dstKey, srcKey string, _ *driver.CopyOptions) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if takeFault(f.CopyErr, &f.copyFails, f.CopyErrN) {
+		return f.CopyErr
+	}
+
+	obj, ok := f.objects[srcKey]
+	if !ok {
+		return fmt.Errorf("%w: %s", errNotFound, srcKey)
+	}
+
+	f.objects[dstKey] = Object{
+		Data:     slices.Clone(obj.Data),
+		MD5:      slices.Clone(obj.MD5),
+		Metadata: maps.Clone(obj.Metadata),
+	}
+	f.copies = append(f.copies, CopyRecord{Src: srcKey, Dst: dstKey})
+
+	return nil
 }
 
 // SignedURL is unsupported; the client never signs.

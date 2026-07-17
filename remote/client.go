@@ -314,6 +314,28 @@ func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
 	return c.objectInfo(attrs), nil
 }
 
+// Copy duplicates the object at srcKey to dstKey server-side: the bytes
+// never leave the backend, so a large object copies without egress or local
+// staging, and the recorded digest metadata rides along. The sweep's rename
+// healing uses it to converge an only-copy stored under a pre-rename key
+// onto the object's current name. An absent source returns [ErrNotFound].
+func (c *Client) Copy(ctx context.Context, srcKey, dstKey string) error {
+	err := c.withRetry(ctx, func() error {
+		return c.runAttempt(ctx, c.stallTimeout, func(ctx context.Context, _ func()) error {
+			return c.bucket.Copy(ctx, dstKey, srcKey, nil) //nolint:wrapcheck // Wrapped below.
+		})
+	})
+	if err != nil {
+		if isNotFound(err) {
+			return fmt.Errorf("%w: %s", ErrNotFound, srcKey)
+		}
+
+		return fmt.Errorf("copy %q to %q: %w", srcKey, dstKey, err)
+	}
+
+	return nil
+}
+
 // Upload streams body to the object at key, letting the backend split a
 // large body into a concurrent parted upload; a write that dies midway is
 // aborted rather than committed truncated, and a transient failure rewinds
