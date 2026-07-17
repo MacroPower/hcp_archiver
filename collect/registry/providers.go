@@ -34,12 +34,12 @@ func (c *Collector) collectProviders(ctx context.Context) error {
 		return c.listFailed(ctx, "providers", err)
 	}
 
-	// The providers archive concurrently, each under its own namespace/name
-	// paths; under detail each fans into per-version reads of its own, so the
-	// client's gate, not this loop, bounds the real parallelism, and the
-	// fan-out is capped at the environment's ceiling so a huge registry cannot
-	// park thousands of goroutines on the gate. An archive returns non-nil only
-	// on a cancellation, which cancels the group.
+	// The providers archive concurrently, each under its own registry-name/
+	// namespace/name paths; under detail each fans into per-version reads of
+	// its own, so the client's gate, not this loop, bounds the real
+	// parallelism, and the fan-out is capped at the environment's ceiling so a
+	// huge registry cannot park thousands of goroutines on the gate. An
+	// archive returns non-nil only on a cancellation, which cancels the group.
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(c.env.Concurrency())
 
@@ -56,7 +56,7 @@ func (c *Collector) collectProviders(ctx context.Context) error {
 // enabled and the provider is private, its versions and their platforms.
 func (c *Collector) archiveProvider(ctx context.Context, prov *tfe.RegistryProvider) error {
 	st := c.env.Store()
-	path := st.RegistryProviderFile(prov.Namespace, prov.Name, providerFile)
+	path := st.RegistryProviderFile(string(prov.RegistryName), prov.Namespace, prov.Name, providerFile)
 
 	err := c.env.Mutable(ctx, path, func(_ context.Context) (any, error) {
 		return prov, nil
@@ -137,7 +137,12 @@ func (c *Collector) archiveProviderVersion(
 	ver *tfe.RegistryProviderVersion,
 ) error {
 	st := c.env.Store()
-	versionPath := st.RegistryProviderFile(prov.Namespace, prov.Name, versionFilename(ver.Version))
+	versionPath := st.RegistryProviderFile(
+		string(prov.RegistryName),
+		prov.Namespace,
+		prov.Name,
+		versionFilename(ver.Version),
+	)
 
 	err := c.env.Mutable(ctx, versionPath, func(_ context.Context) (any, error) {
 		return ver, nil
@@ -150,7 +155,12 @@ func (c *Collector) archiveProviderVersion(
 		RegistryProviderID: pid,
 		Version:            ver.Version,
 	}
-	platformsPath := st.RegistryProviderFile(prov.Namespace, prov.Name, providerPlatformsFilename(ver.Version))
+	platformsPath := st.RegistryProviderFile(
+		string(prov.RegistryName),
+		prov.Namespace,
+		prov.Name,
+		providerPlatformsFilename(ver.Version),
+	)
 
 	fetch := func(ctx context.Context) (any, error) {
 		out, e := tfeclient.Paginate(

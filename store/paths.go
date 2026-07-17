@@ -155,14 +155,19 @@ func (s *Store) HYOKKeyVersionFile(id, kvID string) string {
 // RegistryModuleFile returns the relative path of a leaf named file under a
 // registry module's directory (e.g. module.json).
 //
-// Each of namespace, name, and provider is its own path level rather than one
+// The registry name ("private" or "public") is a path level because the API
+// keys module identity on it: a private module's namespace is the org name,
+// and when that equals a public namespace the org curates, the same
+// namespace/name/provider tuple names two distinct modules. Each of namespace,
+// name, and provider is likewise its own path level rather than one
 // hyphen-joined segment because all three legally contain hyphens, so joining
 // them would alias distinct modules onto one path (and one ledger entry); seg
 // maps "/" to "_", so the nesting is injective.
-func (s *Store) RegistryModuleFile(namespace, name, provider, file string) string {
+func (s *Store) RegistryModuleFile(registryName, namespace, name, provider, file string) string {
 	return cleanJoin(
 		"registry",
 		"modules",
+		seg(registryName),
 		seg(namespace),
 		seg(name),
 		seg(provider),
@@ -190,10 +195,20 @@ func (s *Store) RegistryNoCodeModuleVariables(id string) string {
 // RegistryProviderFile returns the relative path of a leaf named file under a
 // registry provider's directory (e.g. provider.json).
 //
-// Namespace and name are separate path levels so two providers whose hyphenated
-// namespace and name would otherwise join to the same segment stay distinct.
-func (s *Store) RegistryProviderFile(namespace, name, file string) string {
-	return cleanJoin("registry", "providers", seg(namespace), seg(name), seg(file))
+// The registry name ("private" or "public") is a path level because the API
+// keys provider identity on it, so an org's private provider and a curated
+// public one sharing the namespace/name tuple stay distinct. Namespace and
+// name are separate path levels so two providers whose hyphenated namespace
+// and name would otherwise join to the same segment stay distinct.
+func (s *Store) RegistryProviderFile(registryName, namespace, name, file string) string {
+	return cleanJoin(
+		"registry",
+		"providers",
+		seg(registryName),
+		seg(namespace),
+		seg(name),
+		seg(file),
+	)
 }
 
 // RegistryGPGKey returns the relative path of a registry GPG key file, nesting

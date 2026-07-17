@@ -304,10 +304,10 @@ func TestSyncArchiveMirrorsEveryMeaningfulFile(t *testing.T) {
 	seed(st.HYOKKeyVersionFile("hyokc-1", "keyv-1"), "HYOKKeyVersionFile")
 
 	// The private registry.
-	seed(st.RegistryModuleFile("ns", "vpc", "aws", "module.json"), "RegistryModuleFile")
+	seed(st.RegistryModuleFile("private", "ns", "vpc", "aws", "module.json"), "RegistryModuleFile")
 	seed(st.RegistryNoCodeModule("nocode-1"), "RegistryNoCodeModule")
 	seed(st.RegistryNoCodeModuleVariables("nocode-1"), "RegistryNoCodeModuleVariables")
-	seed(st.RegistryProviderFile("ns", "custom", "provider.json"), "RegistryProviderFile")
+	seed(st.RegistryProviderFile("private", "ns", "custom", "provider.json"), "RegistryProviderFile")
 	seed(st.RegistryGPGKey("ns", "key-1"), "RegistryGPGKey")
 
 	// Projects, workspaces, and their run and state history.

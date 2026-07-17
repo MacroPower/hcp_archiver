@@ -124,14 +124,18 @@ archive/<org>/
     oidc-configuration.json         # concrete AWS/GCP/Azure/Vault OIDC config
     key-versions/<kv-id>.json       # per customer-key-version status
   registry/
-    modules/<ns>/<name>/<provider>/               # nested dirs, not hyphen-joined:
-      module.json                                 #   all three segments can
-      commits.json                                #   themselves contain hyphens
-      version-<version>.json                      # per-version detail (registryDetail)
+    modules/<registry>/<ns>/<name>/<provider>/    # nested dirs, not hyphen-joined:
+      module.json                                 #   the last three segments can
+      commits.json                                #   themselves contain hyphens;
+      version-<version>.json                      #   per-version detail
+                                                   #   (registryDetail). <registry>
+                                                   #   is private|public so a
+                                                   #   curated public module cannot
+                                                   #   alias the org's private one
     no-code-modules/<id>.json                     # version pin (BETA API; via
                                                    #   module include)
     no-code-module-variables/<id>.json            # per-version variable options
-    providers/<ns>/<name>/
+    providers/<registry>/<ns>/<name>/
       provider.json
       version-<version>.json                      # + platforms-<version>.json,
       platforms-<version>.json                    #   shasums (registryDetail)

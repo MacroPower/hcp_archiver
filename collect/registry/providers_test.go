@@ -131,7 +131,12 @@ func (f *providerFixture) state() (bool, []*tfe.RegistryProviderPlatform) {
 func (f *providerFixture) versionAttrs(t *testing.T) map[string]any {
 	t.Helper()
 
-	relPath := f.store.RegistryProviderFile(providerNamespace, providerName, "version-"+providerVersion+".json")
+	relPath := f.store.RegistryProviderFile(
+		string(tfe.PrivateRegistry),
+		providerNamespace,
+		providerName,
+		"version-"+providerVersion+".json",
+	)
 
 	raw, err := os.ReadFile(f.store.AbsPath(relPath))
 	require.NoError(t, err, "%s should be written", relPath)
@@ -151,7 +156,12 @@ func (f *providerFixture) versionAttrs(t *testing.T) map[string]any {
 func (f *providerFixture) platformCount(t *testing.T) int {
 	t.Helper()
 
-	relPath := f.store.RegistryProviderFile(providerNamespace, providerName, "platforms-"+providerVersion+".json")
+	relPath := f.store.RegistryProviderFile(
+		string(tfe.PrivateRegistry),
+		providerNamespace,
+		providerName,
+		"platforms-"+providerVersion+".json",
+	)
 
 	raw, err := os.ReadFile(f.store.AbsPath(relPath))
 	require.NoError(t, err, "%s should be written", relPath)
@@ -170,7 +180,12 @@ func (f *providerFixture) platformCount(t *testing.T) int {
 func (f *providerFixture) versionModTime(t *testing.T) time.Time {
 	t.Helper()
 
-	relPath := f.store.RegistryProviderFile(providerNamespace, providerName, "version-"+providerVersion+".json")
+	relPath := f.store.RegistryProviderFile(
+		string(tfe.PrivateRegistry),
+		providerNamespace,
+		providerName,
+		"version-"+providerVersion+".json",
+	)
 
 	info, err := os.Stat(f.store.AbsPath(relPath))
 	require.NoError(t, err)

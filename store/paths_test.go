@@ -79,8 +79,10 @@ func TestStore_pathBuilders(t *testing.T) {
 			want:  "users/user-1.json",
 		},
 		"registry module file": {
-			build: func(s *store.Store) string { return s.RegistryModuleFile("ns", "vpc", "aws", "module.json") },
-			want:  "registry/modules/ns/vpc/aws/module.json",
+			build: func(s *store.Store) string {
+				return s.RegistryModuleFile("private", "ns", "vpc", "aws", "module.json")
+			},
+			want: "registry/modules/private/ns/vpc/aws/module.json",
 		},
 		"registry no-code module": {
 			build: func(s *store.Store) string { return s.RegistryNoCodeModule("nocode-1") },
@@ -91,8 +93,10 @@ func TestStore_pathBuilders(t *testing.T) {
 			want:  "registry/no-code-module-variables/nocode-1.json",
 		},
 		"registry provider file": {
-			build: func(s *store.Store) string { return s.RegistryProviderFile("ns", "aws", "provider.json") },
-			want:  "registry/providers/ns/aws/provider.json",
+			build: func(s *store.Store) string {
+				return s.RegistryProviderFile("private", "ns", "aws", "provider.json")
+			},
+			want: "registry/providers/private/ns/aws/provider.json",
 		},
 		"registry gpg key": {
 			build: func(s *store.Store) string { return s.RegistryGPGKey("ns", "ABCD1234") },
@@ -192,12 +196,24 @@ func TestStore_registryPathsDoNotCollide(t *testing.T) {
 		b string
 	}{
 		"module file": {
-			a: s.RegistryModuleFile("foo-bar", "baz", "aws", "module.json"),
-			b: s.RegistryModuleFile("foo", "bar-baz", "aws", "module.json"),
+			a: s.RegistryModuleFile("private", "foo-bar", "baz", "aws", "module.json"),
+			b: s.RegistryModuleFile("private", "foo", "bar-baz", "aws", "module.json"),
 		},
 		"provider file": {
-			a: s.RegistryProviderFile("foo-bar", "baz", "provider.json"),
-			b: s.RegistryProviderFile("foo", "bar-baz", "provider.json"),
+			a: s.RegistryProviderFile("private", "foo-bar", "baz", "provider.json"),
+			b: s.RegistryProviderFile("private", "foo", "bar-baz", "provider.json"),
+		},
+		// A private module's namespace is the org name, and public namespaces
+		// are global, so an org curating a public module under its own brand
+		// yields two distinct modules on one namespace/name/provider tuple; the
+		// registry-name level keeps them apart.
+		"module file private vs curated public": {
+			a: s.RegistryModuleFile("private", "cloudposse", "label", "null", "module.json"),
+			b: s.RegistryModuleFile("public", "cloudposse", "label", "null", "module.json"),
+		},
+		"provider file private vs curated public": {
+			a: s.RegistryProviderFile("private", "acme", "aws", "provider.json"),
+			b: s.RegistryProviderFile("public", "acme", "aws", "provider.json"),
 		},
 		"gpg key": {
 			a: s.RegistryGPGKey("foo-bar", "baz"),
@@ -259,8 +275,8 @@ func TestStore_sanitizationConfinesToRoot(t *testing.T) {
 		s.OAuthTokenFile("../../escape", "../../ot"),
 		s.HYOKKeyVersionFile("../../escape", "../../kv"),
 		s.User("../../escape"),
-		s.RegistryModuleFile("../../../etc", "..", "../..", "passwd"),
-		s.RegistryProviderFile("../../..", "../../etc", "provider.json"),
+		s.RegistryModuleFile("..", "../../../etc", "..", "../..", "passwd"),
+		s.RegistryProviderFile("..", "../../..", "../../etc", "provider.json"),
 		s.RegistryGPGKey("..", "../../../root/.ssh/authorized_keys"),
 	}
 

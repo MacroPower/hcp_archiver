@@ -33,12 +33,12 @@ func (c *Collector) collectModules(ctx context.Context) error {
 		return c.listFailed(ctx, "modules", err)
 	}
 
-	// The modules archive concurrently, each under its own namespace/name/
-	// provider paths; under detail each fans into per-version reads of its own,
-	// so the client's gate, not this loop, bounds the real parallelism, and the
-	// fan-out is capped at the environment's ceiling so a huge registry cannot
-	// park thousands of goroutines on the gate. An archive returns non-nil only
-	// on a cancellation, which cancels the group.
+	// The modules archive concurrently, each under its own registry-name/
+	// namespace/name/provider paths; under detail each fans into per-version
+	// reads of its own, so the client's gate, not this loop, bounds the real
+	// parallelism, and the fan-out is capped at the environment's ceiling so a
+	// huge registry cannot park thousands of goroutines on the gate. An
+	// archive returns non-nil only on a cancellation, which cancels the group.
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(c.env.Concurrency())
 
@@ -56,7 +56,7 @@ func (c *Collector) collectModules(ctx context.Context) error {
 // commits and per-version metadata.
 func (c *Collector) archiveModule(ctx context.Context, mod *tfe.RegistryModule) error {
 	st := c.env.Store()
-	path := st.RegistryModuleFile(mod.Namespace, mod.Name, mod.Provider, moduleFile)
+	path := st.RegistryModuleFile(string(mod.RegistryName), mod.Namespace, mod.Name, mod.Provider, moduleFile)
 
 	err := c.env.Mutable(ctx, path, func(_ context.Context) (any, error) {
 		return mod, nil
@@ -137,7 +137,13 @@ func (c *Collector) archiveNoCodeModule(
 func (c *Collector) archiveModuleDetail(ctx context.Context, mod *tfe.RegistryModule) error {
 	st := c.env.Store()
 	id := tfe.NewPrivateRegistryModuleID(c.org, mod.Name, mod.Provider)
-	commitsPath := st.RegistryModuleFile(mod.Namespace, mod.Name, mod.Provider, moduleCommitsFile)
+	commitsPath := st.RegistryModuleFile(
+		string(mod.RegistryName),
+		mod.Namespace,
+		mod.Name,
+		mod.Provider,
+		moduleCommitsFile,
+	)
 
 	fetch := func(ctx context.Context) (any, error) {
 		var out []*tfe.Commit
@@ -193,7 +199,13 @@ func (c *Collector) archiveModuleVersion(
 	version string,
 ) error {
 	st := c.env.Store()
-	path := st.RegistryModuleFile(mod.Namespace, mod.Name, mod.Provider, versionFilename(version))
+	path := st.RegistryModuleFile(
+		string(mod.RegistryName),
+		mod.Namespace,
+		mod.Name,
+		mod.Provider,
+		versionFilename(version),
+	)
 
 	fetch := func(ctx context.Context) (any, error) {
 		var out *tfe.RegistryModuleVersion
