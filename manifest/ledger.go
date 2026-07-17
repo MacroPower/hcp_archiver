@@ -26,8 +26,17 @@ const schemaVersion = 1
 // ordinary flushes only append.
 const defaultCompactThreshold = 64 << 20
 
-// ErrCorruptManifest indicates that an existing manifest could not be parsed.
-var ErrCorruptManifest = errors.New("manifest is corrupt")
+var (
+	// ErrCorruptManifest indicates that an existing manifest could not be parsed.
+	ErrCorruptManifest = errors.New("manifest is corrupt")
+
+	// ErrLegacyLayout indicates the archive carries ledger state from a
+	// pre-release layout this version no longer reads (a per-shard log beside a
+	// shard's snapshot). Loading anyway would silently drop the records such a
+	// file holds, so the load refuses and names it; deleting the file accepts a
+	// re-fetch of whatever it recorded.
+	ErrLegacyLayout = errors.New("unsupported pre-release ledger layout")
+)
 
 // document is the serialized shape of one shard's snapshot on disk. The run-level
 // fields are populated only for the org-root shard; other shards leave them zero.
@@ -147,8 +156,8 @@ func WithRetryAbsent(retry bool) Option {
 // shard whose snapshot cannot be parsed returns [ErrCorruptManifest]; a log
 // whose tail was torn by a crash is truncated at its last intact record and
 // the loss reported to the logger (see [WithLogger]), since every log record
-// is re-derived by re-walking. A per-shard log an earlier layout wrote is
-// replayed beneath the org log and retired by the next fold.
+// is re-derived by re-walking. A per-shard log a pre-release layout wrote is
+// refused with [ErrLegacyLayout] rather than read.
 func Load(root string, opts ...Option) (*Ledger, error) {
 	l := &Ledger{
 		now:              time.Now,
@@ -211,28 +220,30 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 		}
 	}
 
-	// Legacy per-shard logs replay before the org log: their records predate
-	// every org-log record, so the org log's last-writer-wins layering keeps
-	// the newer state. The org-root shard is excluded because its log file is
-	// the org log itself, replayed below.
+	// A per-shard log is a pre-release layout this ledger no longer reads.
+	// Refuse it rather than load past it: the records it holds would silently
+	// drop, and the safe direction — accepting a re-fetch — is an operator
+	// decision, taken by deleting the named file. The org-root shard is
+	// excluded because its log file is the org log itself, replayed below.
 	for _, sh := range l.physShards {
 		if sh == l.rootShard {
 			continue
 		}
 
-		err = sh.replayLegacyLog(l.logger)
-		if err != nil {
+		_, err = os.Stat(sh.logPath())
+
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			continue
+		case err != nil:
 			_ = l.Close() //nolint:errcheck // The load error takes precedence.
 
-			return nil, err
+			return nil, fmt.Errorf("stat shard log %q: %w", sh.logPath(), err)
 		}
 
-		if sh.stale {
-			// Fold the migrated records into the snapshot on the first flush,
-			// so the legacy file is retired promptly rather than lingering
-			// until the org log outgrows its threshold.
-			l.compactNext = true
-		}
+		_ = l.Close() //nolint:errcheck // The load error takes precedence.
+
+		return nil, fmt.Errorf("%w: per-shard log %q", ErrLegacyLayout, sh.logPath())
 	}
 
 	err = l.replayWAL()
@@ -559,11 +570,11 @@ func (l *Ledger) walPath() string {
 	return filepath.Join(l.shardDir(""), LogFileName)
 }
 
-// replayWAL replays the org-level log on top of every shard's loaded snapshot
-// (and any legacy per-shard log records), routing each record to its shard by
-// the record's shard tag. A shard named only by log records starts from an
-// empty snapshot; every replayed shard is marked stale so the next fold
-// captures the records durably.
+// replayWAL replays the org-level log on top of every shard's loaded
+// snapshot, routing each record to its shard by the record's shard tag. A
+// shard named only by log records starts from an empty snapshot; every
+// replayed shard is marked stale so the next fold captures the records
+// durably.
 //
 // A record whose shard subtree no longer exists on disk is discarded rather
 // than replayed: deleting an archived subtree is how an operator demands a
@@ -1415,9 +1426,7 @@ func (l *Ledger) Flush() error {
 // when every stale shard folded: replaying the full log over snapshots that
 // already account for it is idempotent (records are last-writer-wins upserts),
 // so a crash — or a shard skipped for pending dirty state — between the two
-// steps costs a redundant replay, never a lost or regressed record. A legacy
-// per-shard log is removed by its own shard's fold (see [Ledger.compactShard]),
-// under the same snapshot-first rule.
+// steps costs a redundant replay, never a lost or regressed record.
 func (l *Ledger) fold(compactAll bool) error {
 	l.mu.RLock()
 
@@ -1461,12 +1470,7 @@ func (l *Ledger) fold(compactAll bool) error {
 	clean := true
 
 	for _, sh := range l.physShards {
-		// A surviving legacy log holds the org log in place too: legacy
-		// records are older than a snapshot a fold has since written, so a
-		// reload replays them over it and only the org log's newer records
-		// re-correct the regression. The staleness clear in compactShard
-		// already trails the removal, so this is a second fence for the rule.
-		if sh.stale || sh.legacyLog != "" {
+		if sh.stale {
 			clean = false
 
 			break
@@ -1515,11 +1519,6 @@ func (l *Ledger) fold(compactAll bool) error {
 // copy holds a read lock, briefly blocking recording workers, but the marshal
 // that follows runs unlocked, so a large shard's encode does not stall writers
 // on other shards for its duration.
-//
-// A legacy per-shard log the shard replayed at load is removed here, after the
-// snapshot that accounts for it is durable: the ordering rules out a crash
-// window that would regress the shard, and the removal retires the migrated
-// file so only the org-level log remains.
 func (l *Ledger) compactShard(sh *shard) error {
 	l.mu.RLock()
 
@@ -1541,31 +1540,6 @@ func (l *Ledger) compactShard(sh *shard) error {
 	err = atomicfile.WriteFile(sh.snapshotPath(), data)
 	if err != nil {
 		return fmt.Errorf("write shard %q: %w", sh.dir, err)
-	}
-
-	l.mu.RLock()
-
-	legacy := sh.legacyLog
-
-	l.mu.RUnlock()
-
-	// The legacy log is removed before the shard stops reading stale: a failed
-	// removal leaves the shard stale, so a later fold retries the removal and
-	// the org log is never retired while the legacy log survives. The order
-	// matters because the legacy records are older than the snapshot just
-	// written — a reload replays them over it and the org log is what
-	// re-corrects the regression, so the org log must outlive every legacy
-	// log (see [Ledger.fold]'s clean check).
-	if legacy != "" {
-		err = os.Remove(legacy)
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("remove legacy shard log %q: %w", legacy, err)
-		}
-
-		l.mu.Lock()
-
-		sh.legacyLog = ""
-		l.mu.Unlock()
 	}
 
 	l.mu.Lock()

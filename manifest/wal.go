@@ -48,8 +48,7 @@ type walRecord struct {
 	Key       string     `json:"key,omitempty"`
 	// Shard names the shard the record belongs to, so a replay of the single
 	// org-level log routes it to the shard whose snapshot it folds into. The
-	// org root is the empty key and is omitted, so its records read the same as
-	// the per-shard log lines an earlier layout wrote.
+	// org root is the empty key and is omitted.
 	Shard    string `json:"shard,omitempty"`
 	RunCount int    `json:"runCount,omitempty"`
 	// Settled carries the value of a walSettled record. It is omitempty, so a

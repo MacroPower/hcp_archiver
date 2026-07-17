@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"maps"
 	"os"
 	"path"
@@ -74,7 +73,6 @@ type shard struct {
 	lastRun         *RunRecord
 	entries         map[string]*Entry
 	dir             string
-	legacyLog       string
 	runCount        int
 	runDirty        bool
 	stale           bool
@@ -108,9 +106,8 @@ func (s *shard) logPath() string {
 
 // loadSnapshot reads the shard's compacted snapshot into its in-memory state.
 // A missing snapshot is an empty start; a corrupt one returns
-// [ErrCorruptManifest]. Log records layer on top afterwards: a legacy
-// per-shard log via [shard.replayLegacyLog], then the org-level log the ledger
-// replays and routes (see [Ledger.Load]).
+// [ErrCorruptManifest]. The org-level log's records layer on top afterwards,
+// replayed and routed by the ledger (see [Ledger.Load]).
 func (s *shard) loadSnapshot() error {
 	//nolint:gosec // The shard directory is derived from the operator-chosen root.
 	data, err := os.ReadFile(s.snapshotPath())
@@ -135,35 +132,6 @@ func (s *shard) loadSnapshot() error {
 	}
 
 	s.applyDocument(&doc)
-
-	return nil
-}
-
-// replayLegacyLog replays a per-shard log an earlier layout left beside the
-// shard's snapshot, from before the ledger kept one org-level log. Its records
-// predate every org-log record, so it replays first and the org log's
-// last-writer-wins layering stays correct. A shard that replayed one is marked
-// stale and remembers the path, so the next full fold captures the records in
-// the snapshot and removes the file.
-func (s *shard) replayLegacyLog(logger *slog.Logger) error {
-	recs, n, err := replayLog(s.logPath(), logger)
-	if err != nil {
-		return err
-	}
-
-	if n == 0 {
-		return nil
-	}
-
-	for i := range recs {
-		err = s.applyRecord(&recs[i])
-		if err != nil {
-			return err
-		}
-	}
-
-	s.legacyLog = s.logPath()
-	s.stale = true
 
 	return nil
 }

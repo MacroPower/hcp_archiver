@@ -689,116 +689,33 @@ func TestLedger_SnapshotPlusLogMerge(t *testing.T) {
 	assert.Equal(t, 2, reloaded.Tally().Done)
 }
 
-func TestLoad_LegacyShardLogReplaysAndRetires(t *testing.T) {
+func TestLoad_LegacyShardLogIsRefused(t *testing.T) {
 	t.Parallel()
 
-	// An earlier layout kept one log per shard. Such a log replays beneath the
-	// org-level log (its records are older, so the org log's last-writer-wins
-	// layering keeps the newer state) and the first fold captures its records
-	// in the shard's snapshot and removes the file.
+	// A per-shard log is a pre-release layout this ledger no longer reads.
+	// Loading past it would silently drop the records it holds, so the load
+	// refuses and names the file; the operator deletes it to accept a re-fetch
+	// of whatever it recorded.
 	root := t.TempDir()
 
-	const (
-		legacyEntry = "projects/p/workspaces/w/runs/r1/run.json"
-		newerEntry  = "projects/p/workspaces/w/runs/r2/run.json"
-	)
-
 	legacyLog := filepath.Join(root, "projects", "p", "workspaces", "w", ".ledger", "log.ndjson")
-	legacyLine := `{"kind":"entry","path":"` + legacyEntry +
-		`","entry":{"firstSeen":"2026-07-08T12:00:00Z","status":"errored","attempts":1}}`
+	legacyLine := `{"kind":"entry","path":"projects/p/workspaces/w/runs/r1/run.json",` +
+		`"entry":{"firstSeen":"2026-07-08T12:00:00Z","status":"errored","attempts":1}}`
 
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyLog), 0o755))
 	require.NoError(t, os.WriteFile(legacyLog, []byte(legacyLine+"\n"), 0o600))
 
-	ledger, err := manifest.Load(root)
-	require.NoError(t, err)
+	_, err := manifest.Load(root)
+	require.ErrorIs(t, err, manifest.ErrLegacyLayout)
+	require.ErrorContains(t, err, legacyLog, "the refusal names the file to delete")
 
-	got, ok := ledger.Entry(legacyEntry)
-	require.True(t, ok, "the legacy record replays")
-	assert.Equal(t, manifest.StatusErrored, got.Status)
-
-	ledger.StartRun()
-	ledger.RecordDone(newerEntry, manifest.Signature{Size: 1})
-	ledger.FinishRun()
-	require.NoError(t, ledger.Flush())
-	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
-
-	_, statErr := os.Stat(legacyLog)
-	assert.True(t, os.IsNotExist(statErr), "the fold retires the migrated legacy log")
-
-	reloaded, err := manifest.Load(root)
-	require.NoError(t, err)
-
-	t.Cleanup(func() { require.NoError(t, reloaded.Close()) })
-
-	got, ok = reloaded.Entry(legacyEntry)
-	require.True(t, ok, "the legacy record survives the fold in the shard's snapshot")
-	assert.Equal(t, manifest.StatusErrored, got.Status)
-
-	_, ok = reloaded.Entry(newerEntry)
-	assert.True(t, ok, "the org-log record survives alongside it")
-}
-
-func TestLoad_LegacyLogRemovalFailureKeepsTheOrgLog(t *testing.T) {
-	t.Parallel()
-
-	// A legacy log that survives its shard's fold must hold the org log in
-	// place: the legacy records are older than the snapshot the fold wrote, so
-	// a reload replays them over it, and only the org log's newer records
-	// re-correct the regression. A failed removal therefore keeps the shard
-	// stale, and the fold must not retire the org log until a retry succeeds.
-	root := t.TempDir()
-
-	const entry = "projects/p/workspaces/w/runs/r1/run.json"
-
-	legacyDir := filepath.Join(root, "projects", "p", "workspaces", "w", ".ledger")
-	legacyLog := filepath.Join(legacyDir, "log.ndjson")
-	legacyLine := `{"kind":"entry","path":"` + entry +
-		`","entry":{"firstSeen":"2026-07-08T12:00:00Z","status":"errored","attempts":1}}`
-
-	require.NoError(t, os.MkdirAll(legacyDir, 0o755))
-	require.NoError(t, os.WriteFile(legacyLog, []byte(legacyLine+"\n"), 0o600))
+	// Deleting the named file is the accepted path forward, and it releases
+	// the refusal (and the lock the failed load never leaked).
+	require.NoError(t, os.Remove(legacyLog))
 
 	ledger, err := manifest.Load(root)
 	require.NoError(t, err)
-
-	ledger.StartRun()
-	ledger.RecordDone(entry, manifest.Signature{Size: 1})
-	ledger.FinishRun()
-
-	// Force only the removal to fail: swap the legacy log for a non-empty
-	// directory, so the fold's snapshot write succeeds while os.Remove answers
-	// ENOTEMPTY. The real file is restored before the retry, modeling a
-	// transient filesystem fault.
-	aside := legacyLog + ".aside"
-	require.NoError(t, os.Rename(legacyLog, aside))
-	require.NoError(t, os.MkdirAll(filepath.Join(legacyLog, "block"), 0o755))
-
-	require.Error(t, ledger.Flush(), "a blocked legacy removal must surface")
-
-	orgLog := filepath.Join(root, ".ledger", "log.ndjson")
-	_, statErr := os.Stat(orgLog)
-	require.NoError(t, statErr, "the org log survives while the legacy log does")
-
-	require.NoError(t, os.RemoveAll(legacyLog))
-	require.NoError(t, os.Rename(aside, legacyLog))
-
-	require.NoError(t, ledger.Flush(), "the retry folds and retires the legacy log")
-
-	_, statErr = os.Stat(legacyLog)
-	assert.True(t, os.IsNotExist(statErr), "the retry removes the legacy log")
-
-	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
-
-	reloaded, err := manifest.Load(root)
-	require.NoError(t, err)
-
-	t.Cleanup(func() { require.NoError(t, reloaded.Close()) })
-
-	got, ok := reloaded.Entry(entry)
-	require.True(t, ok)
-	assert.Equal(t, manifest.StatusDone, got.Status,
-		"the newer record wins; the stale legacy record cannot regress it")
+	require.NoError(t, ledger.Close())
 }
 
 func TestLoad_TornTrailingLogLineDropped(t *testing.T) {
