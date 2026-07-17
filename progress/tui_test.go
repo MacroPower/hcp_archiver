@@ -134,7 +134,8 @@ func TestRenderPanel_HeightHoldsAsTasksFinish(t *testing.T) {
 	t.Parallel()
 
 	// The panel must not shrink as work items finish; a shrinking frame corrupts
-	// it mid-log (see render). The height holds and the surviving task still shows.
+	// it mid-log (see padFrame). The height holds and the surviving task still
+	// shows.
 	frames := progress.RenderPanelFrames(0, 0, tasksPanel(5), tasksPanel(2))
 
 	assert.Equal(t, strings.Count(frames[0], "\n"), strings.Count(frames[1], "\n"),
@@ -142,12 +143,12 @@ func TestRenderPanel_HeightHoldsAsTasksFinish(t *testing.T) {
 	assert.Contains(t, ansi.Strip(frames[1]), "acme/ws-00", "remaining task still shown")
 }
 
-func TestRenderPanel_HighWaterClampsOnResizeDown(t *testing.T) {
+func TestRenderPanel_FrameClampsOnResizeDown(t *testing.T) {
 	t.Parallel()
 
-	// The reserved region is capped at what the terminal fits, so a resize to a
-	// shorter terminal pulls the high-water back down and the panel still fits
-	// without truncating a live task row.
+	// The held frame height is capped at what the terminal fits, so a resize to
+	// a shorter terminal pulls it back down and the panel still fits without
+	// truncating a live task row.
 	//
 	// Grow to peak on a tall terminal, then shrink to six rows.
 	frame := progress.RenderPanelResize(80, 20, 80, 6, tasksPanel(8), tasksPanel(1))
@@ -468,9 +469,9 @@ func TestRenderPanel_RemoteTaskLinesFitTerminalHeight(t *testing.T) {
 func TestRenderPanel_RemoteHeightHoldsOnShortTerminal(t *testing.T) {
 	t.Parallel()
 
-	// The high-water pad must respect the tighter remote budget on both of its
-	// call sites: as tasks finish on a short terminal the padded region holds
-	// the panel's height without ever outgrowing the screen.
+	// The frame pad must respect the tighter remote budget: as tasks finish on
+	// a short terminal the held height keeps the panel steady without ever
+	// outgrowing the screen.
 	peak := remotePanel()
 	peak.Tally.Target = ""
 

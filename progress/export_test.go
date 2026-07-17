@@ -151,8 +151,8 @@ func newModelAt(width, height int, take func() snapshot) *tuiModel {
 }
 
 // RenderPanelFrames drives one persistent model through snaps by ticks at the
-// given terminal size, returning each rendered frame. The model advances its
-// task-region high-water mark on each tick, so the panel holds its height across
+// given terminal size, returning each rendered frame. The model ratchets its
+// held frame height on each render, so the panel holds its height across
 // frames as it does in a live run.
 func RenderPanelFrames(width, height int, snaps ...PanelSnapshot) []string {
 	idx := 0
@@ -169,10 +169,10 @@ func RenderPanelFrames(width, height int, snaps ...PanelSnapshot) []string {
 	return frames
 }
 
-// RenderPanelResize grows a persistent model's task region to its peak at the
-// first size, then renders after resizing to the second, returning the
-// post-resize frame. It exercises the high-water cap: a shorter terminal pulls
-// the reserved region back down so the panel still fits.
+// RenderPanelResize grows a persistent model's frame to its peak at the first
+// size, then renders after resizing to the second, returning the post-resize
+// frame. It exercises the held height's clamp: a terminal too short for the
+// peak pulls the frame back down so the panel still fits.
 func RenderPanelResize(width1, height1, width2, height2 int, peak, after PanelSnapshot) string {
 	snaps := []PanelSnapshot{peak, after}
 	idx := 0
