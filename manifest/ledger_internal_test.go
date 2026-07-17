@@ -57,6 +57,7 @@ func TestDiscoverShardsFollowsSymlinkedDirectories(t *testing.T) {
 		filepath.Join(relocated, "p1", "workspaces", "w1", LedgerDirName),
 		filepath.Join(relocated, "p2-target", "stacks", "s1", LedgerDirName),
 		filepath.Join(relocated, "p3", "workspaces"),
+		filepath.Join(tmp, "w3-target", LedgerDirName),
 	} {
 		require.NoError(t, os.MkdirAll(dir, 0o750))
 	}
@@ -69,8 +70,15 @@ func TestDiscoverShardsFollowsSymlinkedDirectories(t *testing.T) {
 		filepath.Join(relocated, "p2"),
 	))
 	require.NoError(t, os.Symlink(
-		filepath.Join(relocated, "p1", "workspaces", "w1"),
+		filepath.Join(tmp, "w3-target"),
 		filepath.Join(relocated, "p3", "workspaces", "w3"),
+	))
+
+	// A leaf alias of another project's workspace: the same physical .ledger
+	// as p1/w1, reachable under a second key.
+	require.NoError(t, os.Symlink(
+		filepath.Join(relocated, "p1", "workspaces", "w1"),
+		filepath.Join(relocated, "p3", "workspaces", "w4"),
 	))
 
 	// A dangling symlink and a symlink to a file are skipped, not errors.
@@ -92,12 +100,16 @@ func TestDiscoverShardsFollowsSymlinkedDirectories(t *testing.T) {
 		gotKeys[sk] = struct{}{}
 	}
 
+	// One shard per physical .ledger directory: the p2 alias beside its
+	// p2-target and the w4 alias of p1/w1 each register once, under the
+	// first key discovery reaches. Two keys over one snapshot file would
+	// double the tally on every load, and whichever alias folded second
+	// would discard the records only the other held.
 	require.Equal(t, map[string]struct{}{
-		"":                             {},
-		"projects/p1/workspaces/w1":    {},
-		"projects/p2/stacks/s1":        {},
-		"projects/p2-target/stacks/s1": {},
-		"projects/p3/workspaces/w3":    {},
+		"":                          {},
+		"projects/p1/workspaces/w1": {},
+		"projects/p2/stacks/s1":     {},
+		"projects/p3/workspaces/w3": {},
 	}, gotKeys)
 }
 

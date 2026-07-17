@@ -302,8 +302,19 @@ func (l *Ledger) shardDir(sk string) string {
 // stacks, not the number of archived objects; and it never feeds root through a
 // glob, so an operator-chosen root containing a glob metacharacter ('*', '?',
 // '[') cannot silently hide a shard and re-archive the organization from empty.
+//
+// Discovery follows symlinked directories (see [readSubdirs]), so one physical
+// .ledger directory can surface under several keys — a relocation symlink
+// beside its target, say. Each physical directory registers exactly once,
+// under the first key discovery reaches; traversal order is deterministic
+// because [os.ReadDir] sorts, so the winning key is stable across loads. Two
+// shards over one snapshot file would each seed the cumulative tally from the
+// same entries, and whichever folded second would capture a snapshot missing
+// the records only the other alias replayed or recorded — after the log that
+// carried them was already retired.
 func discoverShards(root string) (map[string]string, error) {
 	out := make(map[string]string)
+	claimed := make(map[string]struct{})
 
 	add := func(dir string) error {
 		info, statErr := os.Stat(dir)
@@ -324,6 +335,19 @@ func discoverShards(root string) (map[string]string, error) {
 			return nil
 		}
 
+		phys, resolveErr := filepath.EvalSymlinks(dir)
+
+		switch {
+		case errors.Is(resolveErr, fs.ErrNotExist):
+			return nil
+		case resolveErr != nil:
+			return fmt.Errorf("resolve shard %q: %w", dir, resolveErr)
+		}
+
+		if _, ok := claimed[phys]; ok {
+			return nil
+		}
+
 		rel, relErr := filepath.Rel(root, filepath.Dir(dir))
 		if relErr != nil {
 			return fmt.Errorf("relativize shard %q: %w", dir, relErr)
@@ -334,6 +358,7 @@ func discoverShards(root string) (map[string]string, error) {
 			sk = ""
 		}
 
+		claimed[phys] = struct{}{}
 		out[sk] = dir
 
 		return nil
