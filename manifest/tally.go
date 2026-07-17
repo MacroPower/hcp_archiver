@@ -33,6 +33,13 @@ type Tally struct {
 	// incomplete regardless of the per-object counts, because a dropped listing
 	// records no per-object entries for the objects it never named.
 	SurfacesDropped int `json:"surfacesDropped,omitempty"`
+	// RecordsDiscarded counts the log records the load discarded because their
+	// shard's subtree no longer existed on disk: an honored delete-to-re-archive,
+	// or unexpected local loss — the ledger cannot tell which, so the count is
+	// surfaced in the summary rather than buried in a load-time log line. The
+	// discarded objects re-fetch, so a non-zero count is safe, but an operator
+	// who deleted nothing should read it as evidence of loss.
+	RecordsDiscarded int `json:"recordsDiscarded,omitempty"`
 	// Retried counts this run's in-run retries of transient fetch failures. It
 	// tallies retry attempts rather than objects, so one object retried twice
 	// counts twice, and stays per-run like BytesDownloaded: a retried fetch that

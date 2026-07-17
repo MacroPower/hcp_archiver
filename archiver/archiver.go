@@ -301,6 +301,12 @@ func (a *Archiver) Run(ctx context.Context) error {
 			continue
 		}
 
+		// A safety valve that fired at load is visible in the close lines
+		// either way the run ends: a discard is an honored deletion or
+		// evidence of loss, and an operator reads the summary, not the
+		// load-time log.
+		discarded := slog.Int("records_discarded", tally.RecordsDiscarded)
+
 		// The mirror check sits beside orgIncomplete rather than inside it:
 		// the tally describes what the collectors captured, while syncFailed
 		// describes whether the close sweep got all of it mirrored — a
@@ -312,6 +318,7 @@ func (a *Archiver) Run(ctx context.Context) error {
 				slog.Int("forbidden", tally.Forbidden),
 				slog.Int("surfaces_dropped", tally.SurfacesDropped),
 				slog.Int("sync_failed", syncFailed),
+				discarded,
 			)
 
 			incomplete = true
@@ -319,9 +326,12 @@ func (a *Archiver) Run(ctx context.Context) error {
 			continue
 		}
 
-		a.logger.LogAttrs(runCtx, slog.LevelInfo, "org_archive_finish",
-			slog.String("org", orgName),
-		)
+		finishAttrs := []slog.Attr{slog.String("org", orgName)}
+		if tally.RecordsDiscarded > 0 {
+			finishAttrs = append(finishAttrs, discarded)
+		}
+
+		a.logger.LogAttrs(runCtx, slog.LevelInfo, "org_archive_finish", finishAttrs...)
 	}
 
 	// A cancellation during the final organization has no next iteration to

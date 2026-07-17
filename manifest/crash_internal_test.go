@@ -1,14 +1,14 @@
 package manifest
 
 import (
-	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"go.jacobcolvin.com/hcp_archiver/logtest"
 )
 
 // forEachCrashPrefix drives one flush through every crash point it can tear at
@@ -48,7 +48,7 @@ func forEachCrashPrefix(
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 	}
 
-	l, err := Load(root, WithLogger(slog.New(failOnDiscard{t: t})))
+	l, err := Load(root, WithLogger(logtest.FailOn(t, "ledger_records_discarded")))
 	require.NoError(t, err)
 
 	if setup != nil {
@@ -109,7 +109,11 @@ func runTornState(
 
 	require.NoError(t, os.Truncate(filepath.Join(tornRoot, rel), offset))
 
-	l, err := Load(tornRoot, WithLogger(slog.New(failOnDiscard{t: t})))
+	// The reload runs under a guard logger: a discard here means the harness
+	// state diverged from production (a shard subtree the scenario records
+	// under went missing) and every invariant check downstream would pass
+	// vacuously on the records' absence.
+	l, err := Load(tornRoot, WithLogger(logtest.FailOn(t, "ledger_records_discarded")))
 	require.NoError(t, err, "%s: a torn log must load", label)
 
 	defer func() {
@@ -118,30 +122,6 @@ func runTornState(
 
 	check(t, label, l)
 }
-
-// failOnDiscard is a slog handler that fails the test if a reload discards
-// ledger records: a discard inside the crash harness means the harness state
-// diverged from production (a shard subtree the scenario records under went
-// missing) and every invariant check downstream would pass vacuously on the
-// records' absence. Torn-log truncation warnings are expected and pass
-// through.
-type failOnDiscard struct {
-	t *testing.T
-}
-
-func (h failOnDiscard) Enabled(context.Context, slog.Level) bool { return true }
-
-func (h failOnDiscard) Handle(_ context.Context, r slog.Record) error {
-	if r.Message == "ledger_records_discarded" {
-		h.t.Errorf("a reload discarded ledger records; the crash harness is vacuous: %s", r.Message)
-	}
-
-	return nil
-}
-
-func (h failOnDiscard) WithAttrs([]slog.Attr) slog.Handler { return h }
-
-func (h failOnDiscard) WithGroup(string) slog.Handler { return h }
 
 // fileSize returns the size of the file at path, or zero when it does not
 // exist yet.

@@ -96,6 +96,7 @@ type Ledger struct {
 	retried          int64
 	compactThreshold int64
 	walBytes         int64
+	discardedRecords int
 	mu               sync.RWMutex
 	flushMu          sync.Mutex
 	retryAbsent      bool
@@ -624,6 +625,8 @@ func (l *Ledger) replayWAL() error {
 	}
 
 	for _, sk := range slices.Sorted(maps.Keys(discarded)) {
+		l.discardedRecords += discarded[sk]
+
 		l.logger.Warn("ledger_records_discarded",
 			slog.String("shard", sk),
 			slog.Int("records", discarded[sk]),
@@ -1200,17 +1203,18 @@ func (l *Ledger) Tally() Tally {
 	defer l.mu.RUnlock()
 
 	return Tally{
-		Target:          l.target,
-		Done:            l.cumulative[StatusDone],
-		Absent:          l.cumulative[StatusAbsent],
-		Skipped:         l.cumulative[StatusSkipped],
-		Errored:         l.cumulative[StatusErrored],
-		Forbidden:       l.cumulative[StatusForbidden],
-		NotApplicable:   l.cumulative[StatusNotApplicable],
-		SurfacesDropped: len(l.dropped),
-		Retried:         l.retried,
-		BytesDownloaded: l.bytes,
-		Resumed:         l.resumed,
+		Target:           l.target,
+		Done:             l.cumulative[StatusDone],
+		Absent:           l.cumulative[StatusAbsent],
+		Skipped:          l.cumulative[StatusSkipped],
+		Errored:          l.cumulative[StatusErrored],
+		Forbidden:        l.cumulative[StatusForbidden],
+		NotApplicable:    l.cumulative[StatusNotApplicable],
+		SurfacesDropped:  len(l.dropped),
+		RecordsDiscarded: l.discardedRecords,
+		Retried:          l.retried,
+		BytesDownloaded:  l.bytes,
+		Resumed:          l.resumed,
 	}
 }
 

@@ -1405,6 +1405,8 @@ func TestLoad_DeletedSubtreeDiscardsItsLogRecords(t *testing.T) {
 		"records for surviving shards replay")
 	assert.Equal(t, 1, reloaded.Tally().Done,
 		"the discarded records do not seed the tally")
+	assert.Equal(t, 1, reloaded.Tally().RecordsDiscarded,
+		"the discard surfaces in the summary tally, not only the log")
 }
 
 func TestLoad_RecordOnlyPrefixKeepsRecordsWithoutFiles(t *testing.T) {
