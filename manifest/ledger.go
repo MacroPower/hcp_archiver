@@ -1351,7 +1351,12 @@ func (l *Ledger) fold(compactAll bool) error {
 	clean := true
 
 	for _, sh := range l.shards {
-		if sh.stale {
+		// A surviving legacy log holds the org log in place too: legacy
+		// records are older than a snapshot a fold has since written, so a
+		// reload replays them over it and only the org log's newer records
+		// re-correct the regression. The staleness clear in compactShard
+		// already trails the removal, so this is a second fence for the rule.
+		if sh.stale || sh.legacyLog != "" {
 			clean = false
 
 			break
@@ -1428,12 +1433,19 @@ func (l *Ledger) compactShard(sh *shard) error {
 		return fmt.Errorf("write shard %q: %w", sh.dir, err)
 	}
 
-	l.mu.Lock()
+	l.mu.RLock()
 
-	sh.stale = false
 	legacy := sh.legacyLog
-	l.mu.Unlock()
 
+	l.mu.RUnlock()
+
+	// The legacy log is removed before the shard stops reading stale: a failed
+	// removal leaves the shard stale, so a later fold retries the removal and
+	// the org log is never retired while the legacy log survives. The order
+	// matters because the legacy records are older than the snapshot just
+	// written — a reload replays them over it and the org log is what
+	// re-corrects the regression, so the org log must outlive every legacy
+	// log (see [Ledger.fold]'s clean check).
 	if legacy != "" {
 		err = os.Remove(legacy)
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -1445,6 +1457,11 @@ func (l *Ledger) compactShard(sh *shard) error {
 		sh.legacyLog = ""
 		l.mu.Unlock()
 	}
+
+	l.mu.Lock()
+
+	sh.stale = false
+	l.mu.Unlock()
 
 	return nil
 }
