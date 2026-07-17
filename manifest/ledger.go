@@ -697,9 +697,10 @@ func (l *Ledger) Entry(relPath string) (Entry, bool) {
 // org log — so the record would survive a crash. Custody decisions consult
 // it: an eviction may destroy a local only-copy only once the done record
 // proving the remote copy is durable, or a crash between the delete and the
-// next flush would leave neither the record nor the bytes. Callers
-// sequence it after the flush whose durability they rely on; a flush in
-// flight can report an entry durable a failed append then takes back.
+// next flush would leave neither the record nor the bytes. An entry a flush
+// has drained but not yet appended reads non-durable too (see
+// [shard.drainDirty]), so the answer is safe under any interleaving with a
+// concurrent flush.
 func (l *Ledger) EntryDurable(relPath string) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -713,9 +714,13 @@ func (l *Ledger) EntryDurable(relPath string) bool {
 		return false
 	}
 
-	_, dirty := sh.dirtyEntries[relPath]
+	if _, dirty := sh.dirtyEntries[relPath]; dirty {
+		return false
+	}
 
-	return !dirty
+	_, inflight := sh.inflightEntries[relPath]
+
+	return !inflight
 }
 
 // RecordDone records a successful fetch of relPath with its content signature.
@@ -1451,6 +1456,7 @@ func (l *Ledger) Flush() error {
 
 		for _, w := range work {
 			w.sh.stale = true
+			w.sh.ackDrained(w.d)
 		}
 
 		l.mu.Unlock()

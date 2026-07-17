@@ -178,3 +178,44 @@ func TestFlushAppendsOneClassOrderedBatch(t *testing.T) {
 	require.Equal(t, "projects/p1/workspaces/w1", recs[len(recs)-1].Shard,
 		"records carry the shard tag replay routes by")
 }
+
+func TestEntryDurableHoldsThroughTheDrainWindow(t *testing.T) {
+	t.Parallel()
+
+	// Between a flush's drain and the acknowledged append, an entry is in
+	// neither the dirty set nor the log: durability must read false through
+	// that window, or a concurrent custody check could authorize destroying
+	// local bytes whose record a failed append then takes back.
+	root := t.TempDir()
+
+	l, err := Load(root)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, l.Close()) })
+
+	const key = "config-versions/cv-1.tar.gz"
+
+	l.RecordDone(key, Signature{Size: 1})
+	require.False(t, l.EntryDurable(key), "recorded but unflushed")
+
+	l.mu.Lock()
+
+	sh, ok := l.lookupShard(key)
+	require.True(t, ok)
+
+	d := sh.drainDirty()
+
+	l.mu.Unlock()
+
+	require.False(t, l.EntryDurable(key), "drained but unacknowledged stays non-durable")
+
+	// A failed append hands the drain back; the entry is dirty again.
+	l.mu.Lock()
+	sh.restoreDirty(d)
+	l.mu.Unlock()
+
+	require.False(t, l.EntryDurable(key))
+
+	require.NoError(t, l.Flush())
+	require.True(t, l.EntryDurable(key), "the acknowledged append closes the window")
+}

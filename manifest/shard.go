@@ -69,6 +69,7 @@ type shard struct {
 	dirtySettled    map[string]struct{}
 	dirtyUnsettled  map[string]struct{}
 	dirtyEntries    map[string]struct{}
+	inflightEntries map[string]struct{}
 	dirtyWatermarks map[string]struct{}
 	lastRun         *RunRecord
 	entries         map[string]*Entry
@@ -87,6 +88,7 @@ func newShard(dir string) *shard {
 		completed:       make(map[string]bool),
 		settled:         make(map[string]bool),
 		dirtyEntries:    make(map[string]struct{}),
+		inflightEntries: make(map[string]struct{}),
 		dirtyWatermarks: make(map[string]struct{}),
 		dirtyCompleted:  make(map[string]struct{}),
 		dirtySettled:    make(map[string]struct{}),
@@ -231,6 +233,14 @@ func (s *shard) drainDirty() drainedState {
 		run:        s.runDirty,
 	}
 
+	// The drained entries stay in flight until the append that carries them
+	// is acknowledged (see [shard.ackDrained]), so a durability read between
+	// the drain and the fsync never mistakes a not-yet-written record for a
+	// durable one.
+	for k := range d.entries {
+		s.inflightEntries[k] = struct{}{}
+	}
+
 	s.dirtyEntries = make(map[string]struct{})
 	s.dirtyWatermarks = make(map[string]struct{})
 	s.dirtyCompleted = make(map[string]struct{})
@@ -315,6 +325,7 @@ func (s *shard) drainDirty() drainedState {
 func (s *shard) restoreDirty(d drainedState) {
 	for k := range d.entries {
 		s.dirtyEntries[k] = struct{}{}
+		delete(s.inflightEntries, k)
 	}
 
 	for k := range d.watermarks {
@@ -334,6 +345,15 @@ func (s *shard) restoreDirty(d drainedState) {
 	}
 
 	s.runDirty = s.runDirty || d.run
+}
+
+// ackDrained marks a drain's entries durable: the append carrying their
+// records reached the fsynced log, closing the in-flight window
+// [shard.drainDirty] opened. It runs under the owning ledger's write lock.
+func (s *shard) ackDrained(d drainedState) {
+	for k := range d.entries {
+		delete(s.inflightEntries, k)
+	}
 }
 
 // document builds a fully detached snapshot document for the shard: its maps
