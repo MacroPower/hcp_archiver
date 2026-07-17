@@ -340,7 +340,15 @@ func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string,
 	// the log paths too: while any log is unsettled the gate stays open and this
 	// re-lists to retry it, and once every log settles Done or Absent the gate
 	// clears and the list is skipped.
-	if !c.env.ShouldFetch(relPath) && !c.env.ReferencePending(logsGate) {
+	//
+	// A retry-absent run widens the gate once more: an absent log settled the
+	// gate on the run that recorded it, and the log is reachable only through
+	// this listing, so without the widening the flag would never re-probe its
+	// own target while still disabling the runs walk's early stop over it. The
+	// cost — one extra list for a run whose subtree holds any absence — is
+	// bounded per pass and converges.
+	if !c.env.ShouldFetch(relPath) && !c.env.ReferencePending(logsGate) &&
+		!c.env.HasRetryableAbsentUnder(st.RunDir(project, ws, run.ID)) {
 		return nil
 	}
 

@@ -1,6 +1,7 @@
 package workspace_test
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -327,4 +328,60 @@ func TestCollectRunsStrandsAndRecoversCreatedByAcrossWalk(t *testing.T) {
 	assert.Equal(t, manifest.StatusReferenceCleared, f.status(olderGate), "its gate clears")
 	assert.False(t, f.ledger.Collection(runsKey).HasUnsettled(), "no run has outstanding work")
 	assert.True(t, f.ledger.Collection(runsKey).Settled(), "the collection settles once every gate clears")
+}
+
+func TestArchivePolicyChecksRetryAbsentReProbesAnAbsentLog(t *testing.T) {
+	t.Parallel()
+
+	// The stranded state a normal run leaves behind an expired log: the
+	// checks file settled Done, the log recorded Absent, and the gate never
+	// materialized (a settled reference creates no entry). The log is
+	// reachable only through the metered list, so a retry-absent run must
+	// widen the skip gate or the flag can never re-probe its own target --
+	// while the very same absence keeps the runs walk re-paging forever.
+	var listHits, logHits int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/runs/run-1/policy-checks", func(w http.ResponseWriter, _ *http.Request) {
+		listHits++
+
+		writeJSONAPI(t, w, marshalJSONAPI(t, []*tfe.PolicyCheck{{ID: "pc1", Status: tfe.PolicyPasses}}))
+	})
+	mux.HandleFunc("/api/v2/policy-checks/pc1", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONAPI(t, w, marshalJSONAPI(t, &tfe.PolicyCheck{ID: "pc1", Status: tfe.PolicyPasses}))
+	})
+	mux.HandleFunc("/api/v2/policy-checks/pc1/output", func(w http.ResponseWriter, _ *http.Request) {
+		logHits++
+
+		_, werr := io.WriteString(w, "restored policy log")
+		if werr != nil {
+			return
+		}
+	})
+
+	f := newWSFixtureLedger(t, mux, []manifest.Option{manifest.WithRetryAbsent(true)})
+	st := f.store
+
+	checksPath := st.RunFile("proj", "ws", "run-1", "policy-checks.json")
+	logPath := st.RunFile("proj", "ws", "run-1", "policy-check-pc1.log")
+
+	f.preSettle(checksPath)
+	f.ledger.RecordAbsent(logPath, errors.New("resource not found"))
+
+	require.NoError(t, f.collector.ArchivePolicyChecks(t.Context(), "proj", "ws", &tfe.Run{ID: "run-1"}))
+
+	assert.Equal(t, 1, listHits, "the recorded absence re-opens the metered list under retry-absent")
+	assert.Equal(t, 1, logHits, "the absent log is re-probed")
+	assert.Equal(t, manifest.StatusDone, f.status(logPath), "the restored log is captured")
+
+	// The same stranded state without retry-absent still skips the list, so
+	// the widening costs nothing on a normal run.
+	normal := newWSFixtureLedger(t, http.NewServeMux(), nil)
+	nst := normal.store
+
+	normal.preSettle(nst.RunFile("proj", "ws", "run-1", "policy-checks.json"))
+	normal.ledger.RecordAbsent(
+		nst.RunFile("proj", "ws", "run-1", "policy-check-pc1.log"), errors.New("resource not found"))
+
+	require.NoError(t, normal.collector.ArchivePolicyChecks(t.Context(), "proj", "ws", &tfe.Run{ID: "run-1"}))
 }

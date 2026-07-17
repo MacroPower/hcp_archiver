@@ -1087,6 +1087,37 @@ func (l *Ledger) hasUnsettledUnder(prefix string) bool {
 	return false
 }
 
+// HasRetryableAbsentUnder reports whether any object under prefix is
+// recorded [StatusAbsent] while retry-absent is enabled (see
+// [WithRetryAbsent]): exactly the entries a retry-absent run exists to
+// re-probe. Skip gates over metered listings consult it, because an absent
+// object reachable only through its listing can be re-probed only if the
+// listing runs again — the gate's usual settledness reads the absence as
+// done and would leave the flag inert for its own target.
+func (l *Ledger) HasRetryableAbsentUnder(prefix string) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	if !l.retryAbsent {
+		return false
+	}
+
+	sh, ok := l.lookupShard(prefix)
+	if !ok {
+		return false
+	}
+
+	under := prefix + "/"
+
+	for relPath, e := range sh.entries {
+		if strings.HasPrefix(relPath, under) && e.Status == StatusAbsent {
+			return true
+		}
+	}
+
+	return false
+}
+
 // MarkSurfaceDropped records that the enumeration of surface failed this run
 // for a non-cancellation reason, so the run cannot know that surface's extent
 // and must not report a complete archive.

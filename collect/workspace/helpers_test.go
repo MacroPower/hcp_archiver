@@ -33,6 +33,19 @@ type wsFixture struct {
 func newWSFixture(t *testing.T, mux *http.ServeMux, opts ...workspace.Option) wsFixture {
 	t.Helper()
 
+	return newWSFixtureLedger(t, mux, nil, opts...)
+}
+
+// newWSFixtureLedger is [newWSFixture] with explicit ledger options, for tests
+// that model a retry-absent run or another non-default ledger mode.
+func newWSFixtureLedger(
+	t *testing.T,
+	mux *http.ServeMux,
+	ledgerOpts []manifest.Option,
+	opts ...workspace.Option,
+) wsFixture {
+	t.Helper()
+
 	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -45,7 +58,7 @@ func newWSFixture(t *testing.T, mux *http.ServeMux, opts ...workspace.Option) ws
 
 	st := store.New(t.TempDir())
 
-	ledger, err := manifest.Load(st.Root())
+	ledger, err := manifest.Load(st.Root(), ledgerOpts...)
 	require.NoError(t, err)
 
 	ledger.StartRun()

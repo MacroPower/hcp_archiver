@@ -390,6 +390,15 @@ func (e *Env) ReferencePending(gateKey string) bool {
 	return e.ledger.ReferencePending(gateKey)
 }
 
+// HasRetryableAbsentUnder reports whether any recorded object under the
+// archive-relative prefix is an absence a retry-absent run re-probes (see
+// [manifest.Ledger.HasRetryableAbsentUnder]). Skip gates over metered
+// listings widen on it, so an absent child reachable only through its
+// listing gets its listing back.
+func (e *Env) HasRetryableAbsentUnder(prefix string) bool {
+	return e.ledger.HasRetryableAbsentUnder(prefix)
+}
+
 // Entry returns the ledger entry recorded for relPath and whether one exists.
 // The seal phase reads it to confirm an artifact is settled before it bundles the
 // loose copy and removes it.
