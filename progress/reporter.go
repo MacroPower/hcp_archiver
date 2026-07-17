@@ -138,10 +138,11 @@ func WithInput(in io.Reader) Option {
 	}
 }
 
-// WithLogSink routes the terminal UI's log output through sink so log lines and
-// the live panel share one renderer. Without it the UI still runs, but
-// concurrent log writes to the same terminal can corrupt the panel. It returns
-// an [Option].
+// WithLogSink routes log output through the terminal UI while it runs: the
+// reporter activates sink for the panel's lifetime and the panel drains its
+// queued lines into the stream above itself, so log lines and the live panel
+// share one renderer. Without it the UI still runs, but concurrent log writes
+// to the same terminal can corrupt the panel. It returns an [Option].
 func WithLogSink(sink LogSink) Option {
 	return func(r *Reporter) {
 		r.sink = sink
@@ -724,22 +725,27 @@ const quitGrace = 2 * time.Second
 // [tea.Program.Send] on the unbuffered message channel, blocks
 // [tea.Program.Kill] on the renderer handshake, and keeps [tea.Program.Run]
 // from returning at all -- exactly the state the escalation exists to escape.
-// The kill's [tea.ErrProgramKilled] is mapped to a clean nil. It registers
-// the program on the log sink so log lines route through the one renderer,
-// clearing it again on return so the fallback is restored before the next org
-// logs.
+// The kill's [tea.ErrProgramKilled] is mapped to a clean nil. It activates
+// the log sink for the program's lifetime so log lines queue for the panel to
+// print, and deactivates it on return, which flushes any undrained lines to
+// the sink's fallback so nothing is lost and restores the stderr path before
+// the next org logs.
 func (r *Reporter) runTUI(ctx context.Context) error {
+	var drainLogs func() []string
+
+	if r.sink != nil {
+		drainLogs = r.sink.Drain
+
+		r.sink.Activate()
+		defer r.sink.Deactivate()
+	}
+
 	program := tea.NewProgram(
-		newTUIModel(r.lockedTake, r.interrupt),
+		newTUIModel(r.lockedTake, r.interrupt, drainLogs),
 		tea.WithOutput(r.w),
 		tea.WithInput(r.in),
 		tea.WithoutSignalHandler(),
 	)
-
-	if r.sink != nil {
-		r.sink.SetProgram(program)
-		defer r.sink.SetProgram(nil)
-	}
 
 	result := make(chan error, 1)
 

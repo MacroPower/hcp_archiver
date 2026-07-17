@@ -2,6 +2,7 @@ package progress_test
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,19 +27,78 @@ func TestLogWriter_Fallback(t *testing.T) {
 	assert.Equal(t, "first line\nsecond line\n", buf.String())
 }
 
-func TestLogWriter_FallbackAfterClear(t *testing.T) {
+func TestLogWriter_ActiveQueuesForDrain(t *testing.T) {
 	t.Parallel()
 
 	buf := &bytes.Buffer{}
 	w := progress.NewLogWriter(buf)
 
-	// Clearing the program (nil) keeps the fallback path, the state a run leaves
-	// behind once its TUI stops.
-	w.SetProgram(nil)
+	w.Activate()
 
-	_, err := w.Write([]byte("after\n"))
+	n, err := w.Write([]byte("a\nb\n"))
 	require.NoError(t, err)
-	assert.Equal(t, "after\n", buf.String())
+	assert.Equal(t, len("a\nb\n"), n, "the queue path never reports a short write")
+
+	_, err = w.Write([]byte("c\n"))
+	require.NoError(t, err)
+
+	assert.Empty(t, buf.String(), "active writes queue instead of reaching the fallback")
+	assert.Equal(t, []string{"a", "b", "c"}, w.Drain(), "lines drain oldest first")
+	assert.Empty(t, w.Drain(), "a drain clears the queue")
+}
+
+func TestLogWriter_DeactivateFlushesResidue(t *testing.T) {
+	t.Parallel()
+
+	// Lines queued but never drained (the panel stopped first) must reach the
+	// fallback rather than vanish, and later writes go straight through.
+	buf := &bytes.Buffer{}
+	w := progress.NewLogWriter(buf)
+
+	w.Activate()
+
+	_, err := w.Write([]byte("queued during shutdown\n"))
+	require.NoError(t, err)
+
+	w.Deactivate()
+	assert.Equal(t, "queued during shutdown\n", buf.String())
+
+	_, err = w.Write([]byte("after\n"))
+	require.NoError(t, err)
+	assert.Equal(t, "queued during shutdown\nafter\n", buf.String())
+}
+
+func TestLogWriter_DeactivateWithEmptyQueueWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	w := progress.NewLogWriter(buf)
+
+	w.Activate()
+	w.Deactivate()
+
+	assert.Empty(t, buf.String())
+}
+
+func TestLogWriter_OverflowDropsOldestAndMarks(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	w := progress.NewLogWriter(buf)
+
+	w.Activate()
+
+	over := progress.MaxQueuedLogLines + 3
+	for i := range over {
+		_, err := fmt.Fprintf(w, "line-%04d\n", i)
+		require.NoError(t, err)
+	}
+
+	lines := w.Drain()
+	require.Len(t, lines, progress.MaxQueuedLogLines+1, "capped queue plus the overflow marker")
+	assert.Equal(t, "… 3 log lines dropped", lines[0], "the marker counts the lines that gave way")
+	assert.Equal(t, "line-0003", lines[1], "the oldest lines gave way")
+	assert.Equal(t, fmt.Sprintf("line-%04d", over-1), lines[len(lines)-1], "the newest line survives")
 }
 
 func TestSplitLogLines(t *testing.T) {

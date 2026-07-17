@@ -11,8 +11,12 @@ import (
 )
 
 // SplitLogLines exposes splitLogLines so the external test package can exercise
-// the line-splitting the program path relies on.
+// the line-splitting the queue path relies on.
 var SplitLogLines = splitLogLines
+
+// MaxQueuedLogLines exposes the sink's queue bound so the overflow tests track
+// the production cap.
+const MaxQueuedLogLines = maxQueuedLogLines
 
 // PanelSnapshot are the deterministic inputs a golden test feeds to
 // [RenderPanel] and [RenderSummary]. It mirrors the internal snapshot so tests
@@ -77,7 +81,7 @@ func (ps PanelSnapshot) snap() snapshot {
 // turn and returns the rate derived after the last, exposing the wire-byte
 // sampling to tests.
 func ObserveThroughput(snaps []PanelSnapshot) float64 {
-	m := newTUIModel(nil, nil)
+	m := newTUIModel(nil, nil, nil)
 	for i := range snaps {
 		m.observe(snaps[i].snap())
 	}
@@ -89,7 +93,7 @@ func ObserveThroughput(snaps []PanelSnapshot) float64 {
 // throughput window in turn and returns the rate derived after the last,
 // exposing the upload wire-byte sampling to tests.
 func ObserveUploadThroughput(snaps []PanelSnapshot) float64 {
-	m := newTUIModel(nil, nil)
+	m := newTUIModel(nil, nil, nil)
 	for i := range snaps {
 		m.observe(snaps[i].snap())
 	}
@@ -113,7 +117,7 @@ func TakeUploadWireBytes(r *Reporter) int64 {
 // RenderPanel renders the live two-line panel for ps, using a fresh model so the
 // spinner shows its first frame.
 func RenderPanel(ps PanelSnapshot) string {
-	m := newTUIModel(nil, nil)
+	m := newTUIModel(nil, nil, nil)
 
 	return m.render(ps.snap())
 }
@@ -121,7 +125,7 @@ func RenderPanel(ps PanelSnapshot) string {
 // RenderPanelAt renders the panel after a window-size message of the given
 // dimensions, exercising the bar resize, line clipping, and task-line budget.
 func RenderPanelAt(ps PanelSnapshot, width, height int) string {
-	m := newTUIModel(nil, nil)
+	m := newTUIModel(nil, nil, nil)
 	m.Update(tea.WindowSizeMsg{Width: width, Height: height})
 
 	return m.render(ps.snap())
@@ -130,7 +134,7 @@ func RenderPanelAt(ps PanelSnapshot, width, height int) string {
 // MarqueeTick advances a fresh model's spinner tick n times and renders ps,
 // exposing the indeterminate marquee's animation to tests.
 func MarqueeTick(ps PanelSnapshot, n int) string {
-	m := newTUIModel(nil, nil)
+	m := newTUIModel(nil, nil, nil)
 	for range n {
 		m.Update(spinner.TickMsg{})
 	}
@@ -142,7 +146,7 @@ func MarqueeTick(ps PanelSnapshot, n int) string {
 // window message when width or height is set (a zero size keeps the unclipped
 // task budget, as the golden tests use).
 func newModelAt(width, height int, take func() snapshot) *tuiModel {
-	m := newTUIModel(take, nil)
+	m := newTUIModel(take, nil, nil)
 	if width > 0 || height > 0 {
 		m.Update(tea.WindowSizeMsg{Width: width, Height: height})
 	}
