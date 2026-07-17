@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"time"
 
@@ -58,9 +59,12 @@ type walRecord struct {
 //
 // Each record is one line and the terminating newline is the commit marker: a
 // crash mid-append leaves an uncommitted fragment past the final newline that
-// the next append trims (see [atomicfile.Append]) and a replay drops, so a torn
-// write loses at most the last record rather than corrupting the log. The batch
-// is written in one call and flushed to stable storage before returning.
+// the next append trims (see [atomicfile.Append]) and a replay drops. The batch
+// is written in one call and flushed to stable storage before returning, but a
+// power loss during that flush may persist its blocks out of order, so a replay
+// trusts complete lines only up to the first that fails to parse (see
+// [replayLog]): a torn write loses at most the interrupted batch's suffix, and
+// never the records committed before it.
 func appendLog(path string, recs []walRecord) (int64, error) {
 	var buf bytes.Buffer
 
@@ -82,18 +86,26 @@ func appendLog(path string, recs []walRecord) (int64, error) {
 	return int64(buf.Len()), nil
 }
 
-// replayLog reads the append-only log at path and returns its records in order
-// along with the committed log's size in bytes, or nil and zero when no log
-// exists.
+// replayLog reads the append-only log at path and returns its committed records
+// in order along with the committed log's size in bytes, or nil and zero when no
+// log exists. Recovery events (a truncated torn suffix) are reported to logger.
 //
-// Bytes after the final newline are an incomplete trailing write with no commit
-// marker and are dropped; a complete, newline-terminated line that fails to
-// parse is genuine corruption and returns [ErrCorruptManifest]. The reported
-// size excludes any such torn fragment so the shard's byte counter matches the
-// committed log on disk: the next append truncates the fragment before writing,
-// so counting it here would leave the counter permanently ahead of the file and
-// trip compaction early until the next fold reset it.
-func replayLog(path string) ([]walRecord, int64, error) {
+// The newline is each record's commit marker, but [appendLog] writes a whole
+// batch in one multi-block call, and a power loss mid-fsync may persist a later
+// block without an earlier one, so a complete line is trusted only up to the
+// first line that fails to parse. Bytes after the final newline are an
+// incomplete trailing write with no commit marker and are dropped; a complete
+// line that does not parse ends the committed log at its own start: the records
+// before it replay, and the file is truncated to that offset and flushed so the
+// surviving suffix cannot land ahead of the next append (see
+// [atomicfile.Append], which seeks to the file's last newline). Every log
+// record is re-derivable by re-walking, so the truncation costs a re-fetch of
+// the discarded delta rather than the shard's history.
+//
+// The reported size always matches the committed log left on disk, so the
+// shard's byte counter never sits ahead of the file and trips compaction early
+// before the next fold resets it.
+func replayLog(path string, logger *slog.Logger) ([]walRecord, int64, error) {
 	//nolint:gosec // The log path is derived from the operator-chosen manifest path.
 	data, err := os.ReadFile(path)
 
@@ -104,31 +116,73 @@ func replayLog(path string) ([]walRecord, int64, error) {
 		return nil, 0, fmt.Errorf("read log %q: %w", path, err)
 	}
 
-	// Split on the newline commit marker. The final element holds any bytes after
-	// the last newline: an incomplete trailing write, dropped by taking all but
-	// the last split. Its length is excluded from the committed size below.
-	lines := bytes.Split(data, []byte("\n"))
-	torn := lines[len(lines)-1]
-	lines = lines[:len(lines)-1]
+	recs := make([]walRecord, 0, bytes.Count(data, []byte("\n")))
 
-	committed := int64(len(data) - len(torn))
+	// The committed offset is the start of the next unread line. On a clean scan
+	// it lands just past the final newline, excluding any torn trailing fragment,
+	// which the next append truncates before writing.
+	var committed int64
 
-	recs := make([]walRecord, 0, len(lines))
-
-	for _, line := range lines {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
+	for committed < int64(len(data)) {
+		nl := bytes.IndexByte(data[committed:], '\n')
+		if nl < 0 {
+			break
 		}
 
-		var rec walRecord
+		line := data[committed : committed+int64(nl)]
 
-		err = json.Unmarshal(line, &rec)
-		if err != nil {
-			return nil, 0, fmt.Errorf("%w: log record: %w", ErrCorruptManifest, err)
+		if len(bytes.TrimSpace(line)) > 0 {
+			var rec walRecord
+
+			err = json.Unmarshal(line, &rec)
+			if err != nil {
+				truncErr := truncateLog(path, committed)
+				if truncErr != nil {
+					return nil, 0, truncErr
+				}
+
+				logger.Warn("ledger_log_truncated",
+					slog.String("path", path),
+					slog.Int64("committed_bytes", committed),
+					slog.Int64("discarded_bytes", int64(len(data))-committed),
+					slog.String("error", err.Error()),
+				)
+
+				return recs, committed, nil
+			}
+
+			recs = append(recs, rec)
 		}
 
-		recs = append(recs, rec)
+		committed += int64(nl) + 1
 	}
 
 	return recs, committed, nil
+}
+
+// truncateLog cuts the log at path back to size bytes and flushes the cut, so a
+// discarded torn suffix cannot resurface after a crash or shift where the next
+// append lands.
+func truncateLog(path string, size int64) error {
+	//nolint:gosec // The log path is derived from the operator-chosen manifest path.
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open log %q: %w", path, err)
+	}
+
+	opErr := f.Truncate(size)
+	if opErr == nil {
+		opErr = f.Sync()
+	}
+
+	closeErr := f.Close()
+
+	switch {
+	case opErr != nil:
+		return fmt.Errorf("truncate log %q: %w", path, opErr)
+	case closeErr != nil:
+		return fmt.Errorf("close log %q: %w", path, closeErr)
+	}
+
+	return nil
 }

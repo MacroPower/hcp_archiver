@@ -87,6 +87,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 
 	ledger, err := manifest.Load(
 		st.Root(),
+		manifest.WithLogger(a.logger),
 		manifest.WithRetryAbsent(a.cfg.RetryAbsent),
 	)
 	if err != nil {

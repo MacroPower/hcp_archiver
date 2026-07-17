@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -67,6 +68,7 @@ type document struct {
 // shard's entries.
 type Ledger struct {
 	now              func() time.Time
+	logger           *slog.Logger
 	shards           map[string]*shard
 	rootShard        *shard
 	counts           map[Status]int
@@ -90,6 +92,7 @@ type Ledger struct {
 //
 // The available options are:
 //   - [WithClock]
+//   - [WithLogger]
 //   - [WithRetryAbsent]
 type Option func(*Ledger)
 
@@ -100,6 +103,17 @@ func WithClock(now func() time.Time) Option {
 	return func(l *Ledger) {
 		if now != nil {
 			l.now = now
+		}
+	}
+}
+
+// WithLogger sets the structured logger the load path reports non-fatal
+// recovery events to (a shard log truncated at a torn suffix), overriding
+// [slog.Default]. A nil logger keeps the default. It returns an [Option].
+func WithLogger(logger *slog.Logger) Option {
+	return func(l *Ledger) {
+		if logger != nil {
+			l.logger = logger
 		}
 	}
 }
@@ -125,10 +139,14 @@ func WithRetryAbsent(retry bool) Option {
 //
 // It then discovers and loads every shard beneath root. Resume and a clean
 // first run are one code path: a first run simply finds no shards. A shard
-// whose snapshot or log cannot be parsed returns [ErrCorruptManifest].
+// whose snapshot cannot be parsed returns [ErrCorruptManifest]; a shard log
+// whose tail was torn by a crash is truncated at its last intact record and
+// the loss reported to the logger (see [WithLogger]), since every log record
+// is re-derived by re-walking.
 func Load(root string, opts ...Option) (*Ledger, error) {
 	l := &Ledger{
 		now:              time.Now,
+		logger:           slog.Default(),
 		shards:           make(map[string]*shard),
 		counts:           make(map[Status]int),
 		cumulative:       make(map[Status]int),
@@ -167,7 +185,7 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 			l.shards[sk] = sh
 		}
 
-		err = sh.load()
+		err = sh.load(l.logger)
 		if err != nil {
 			_ = l.Close() //nolint:errcheck // The load error takes precedence.
 

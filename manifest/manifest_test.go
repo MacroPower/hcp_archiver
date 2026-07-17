@@ -706,19 +706,47 @@ func TestLoad_TornTrailingLogLineDropped(t *testing.T) {
 	assert.False(t, ok, "the torn trailing record is dropped")
 }
 
-func TestLoad_CorruptLogLine(t *testing.T) {
+func TestLoad_UnparsableLogLineTruncatesTornSuffix(t *testing.T) {
 	t.Parallel()
 
 	path := t.TempDir()
 
-	// A complete, newline-terminated line that does not parse is genuine
-	// corruption, not a torn tail.
+	// A complete, newline-terminated line that does not parse marks where a
+	// power loss stopped persisting a flush batch, so the load truncates the log
+	// there instead of refusing the whole manifest: the records before it stay,
+	// the ones after it (persisted out of order) are dropped and re-derived by
+	// re-walking.
+	good := `{"kind":"entry","path":"ws/a.json","entry":{"firstSeen":"2026-07-08T12:00:00Z","status":"done","attempts":1}}`
+	garbled := string(make([]byte, 32))
+	survivor := `{"kind":"entry","path":"ws/b.json","entry":{"firstSeen":"2026-07-08T12:00:00Z","status":"done","attempts":1}}`
 	_, logFile := rootShardFiles(path)
 	require.NoError(t, os.MkdirAll(filepath.Dir(logFile), 0o755))
-	require.NoError(t, os.WriteFile(logFile, []byte("{ not json\n"), 0o600))
+	require.NoError(t, os.WriteFile(logFile,
+		[]byte(good+"\n"+garbled+"\n"+survivor+"\n"), 0o600))
 
-	_, err := manifest.Load(path)
-	require.ErrorIs(t, err, manifest.ErrCorruptManifest)
+	ledger, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	_, ok := ledger.Entry("ws/a.json")
+	assert.True(t, ok, "the record before the torn suffix is applied")
+
+	_, ok = ledger.Entry("ws/b.json")
+	assert.False(t, ok, "the record past the torn suffix is dropped")
+
+	// The truncated log keeps accepting appends at the cut: a fresh record
+	// flushes, and a reload replays both it and the surviving prefix.
+	ledger.RecordDone("ws/c.json", manifest.Signature{Size: 1})
+	require.NoError(t, ledger.Flush())
+	require.NoError(t, ledger.Close())
+
+	reloaded, err := manifest.Load(path)
+	require.NoError(t, err)
+
+	_, ok = reloaded.Entry("ws/a.json")
+	assert.True(t, ok, "the surviving prefix outlives the truncation")
+
+	_, ok = reloaded.Entry("ws/c.json")
+	assert.True(t, ok, "the post-truncation append is committed")
 }
 
 func TestLedger_ShardsPerWorkspace(t *testing.T) {

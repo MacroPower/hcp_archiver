@@ -514,7 +514,11 @@ re-serializing one monolithic document on every flush tick.
 A shard is a compacted `snapshot.json` plus an append-only `log.ndjson`.
 Recording an entry appends one newline-terminated line, so no flush re-serializes
 the whole ledger; the terminating newline is the commit marker and a torn
-trailing line is dropped on read. Compaction folds a shard's log into its
+trailing line is dropped on read. A flush batch is one multi-block write whose
+blocks a power loss may persist out of order, so replay trusts complete lines
+only up to the first that fails to parse: the log is truncated there, the loss
+is logged, and the discarded delta is re-derived by re-walking — a torn batch
+never hard-fails the load. Compaction folds a shard's log into its
 snapshot once the log passes a size floor (64MiB) and outgrows the snapshot,
 and unconditionally when the run finishes, writing the merged snapshot before
 truncating the log; an unchanged record appends no line, so a re-run's

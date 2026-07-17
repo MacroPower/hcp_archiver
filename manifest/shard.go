@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"maps"
 	"os"
 	"path"
@@ -129,10 +130,10 @@ func (s *shard) logPath() string {
 }
 
 // load reads the shard's snapshot and replays its log on top, populating its
-// in-memory state. A missing snapshot or log is an empty start; a torn trailing
-// log line is dropped; a corrupt snapshot or a complete but unparsable log line
-// returns [ErrCorruptManifest].
-func (s *shard) load() error {
+// in-memory state. A missing snapshot or log is an empty start; a torn log
+// suffix is truncated at the last intact record and reported to logger (see
+// [replayLog]); a corrupt snapshot returns [ErrCorruptManifest].
+func (s *shard) load(logger *slog.Logger) error {
 	//nolint:gosec // The shard directory is derived from the operator-chosen root.
 	data, err := os.ReadFile(s.snapshotPath())
 
@@ -159,7 +160,7 @@ func (s *shard) load() error {
 
 	s.snapshotBytes = int64(len(data))
 
-	recs, logBytes, err := replayLog(s.logPath())
+	recs, logBytes, err := replayLog(s.logPath(), logger)
 	if err != nil {
 		return err
 	}
