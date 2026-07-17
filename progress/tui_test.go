@@ -143,6 +143,33 @@ func TestRenderPanel_HeightHoldsAsTasksFinish(t *testing.T) {
 	assert.Contains(t, ansi.Strip(frames[1]), "acme/ws-00", "remaining task still shown")
 }
 
+func TestRenderPanel_FooterHoldsAsTasksFinish(t *testing.T) {
+	t.Parallel()
+
+	// The frame pads between the task region and the footer, so the counts,
+	// metadata, and remote lines hold their rows as the live task count
+	// fluctuates instead of bouncing with it.
+	frames := progress.RenderPanelFrames(0, 0, tasksPanel(5), tasksPanel(2))
+
+	assert.Equal(t, footerRow(t, frames[0]), footerRow(t, frames[1]),
+		"the counts line holds its row as tasks finish")
+}
+
+// footerRow returns the row index of a frame's status-counts line.
+func footerRow(t *testing.T, frame string) int {
+	t.Helper()
+
+	for i, line := range strings.Split(frame, "\n") {
+		if strings.Contains(ansi.Strip(line), "done") {
+			return i
+		}
+	}
+
+	t.Fatal("frame carries no counts line")
+
+	return -1
+}
+
 func TestRenderPanel_FrameClampsOnResizeDown(t *testing.T) {
 	t.Parallel()
 

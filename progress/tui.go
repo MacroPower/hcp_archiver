@@ -35,6 +35,11 @@ const (
 
 	marqueeBlock = 5 // moving block width within the indeterminate track.
 
+	// The width assumed when the terminal reports none (an output that is not
+	// a real tty cannot be sized), so the panel and the log flow still run
+	// instead of waiting forever for a real measurement.
+	fallbackWidth = 80
+
 	// Digit reserves for the per-status counts; the numbers left-align into
 	// invisible trailing pad, so the next column never moves until a count
 	// exceeds its reserve (rare, and then only once as it gains a digit). Done
@@ -212,13 +217,19 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		// Record the size to clip each line and bound the task list, and shrink
 		// the bar so the panel never wraps onto an extra line. A fresh model (as
-		// the golden tests use) keeps the full barWidth and does not clip.
+		// the golden tests use) keeps the full barWidth and does not clip. A
+		// size message reporting no width (the program's output is not a real
+		// terminal, so the size cannot be queried) falls back to the
+		// conventional 80 columns: the panel and the log flow both gate on a
+		// known width, and without the fallback they would stay dark for the
+		// whole run.
 		m.width = msg.Width
-		m.height = msg.Height
-
-		if msg.Width > 0 {
-			m.bar.SetWidth(min(barWidth, msg.Width))
+		if m.width <= 0 {
+			m.width = fallbackWidth
 		}
+
+		m.height = msg.Height
+		m.bar.SetWidth(min(barWidth, m.width))
 
 		return m, nil
 
@@ -454,48 +465,53 @@ func (m *tuiModel) render(snap snapshot) string {
 
 	budget := m.taskLineBudget(snap.hasRemote)
 
-	// Capacity: up to budget task rows plus the panel's chrome.
-	lines := make([]string, 0, budget+chromeLines(snap.hasRemote))
-	lines = append(lines, m.fit(line1.String()))
+	// The body: line one and the task region.
+	body := make([]string, 0, budget+2)
+	body = append(body, m.fit(line1.String()))
 
 	visible := min(len(snap.tasks), budget)
 	for _, task := range snap.tasks[:visible] {
-		lines = append(lines, m.fit(m.renderTask(task)))
+		body = append(body, m.fit(m.renderTask(task)))
 	}
 
 	if hidden := len(snap.tasks) - visible; hidden > 0 {
-		lines = append(lines, m.fit("  "+styleMeta.Render(fmt.Sprintf("… +%d more active", hidden))))
+		body = append(body, m.fit("  "+styleMeta.Render(fmt.Sprintf("… +%d more active", hidden))))
 	}
 
-	lines = append(lines, m.fit(counts), m.fit(metaLine))
-
+	footer := []string{m.fit(counts), m.fit(metaLine)}
 	if snap.hasRemote {
-		lines = append(lines, m.fit("  "+remoteReadout(snap.remote, m.uploadThroughput(snap), true)))
+		footer = append(footer, m.fit("  "+remoteReadout(snap.remote, m.uploadThroughput(snap), true)))
 	}
 
-	return strings.Join(m.padFrame(lines), "\n")
+	return strings.Join(m.composeFrame(body, footer), "\n")
 }
 
-// padFrame pads lines with trailing blanks up to the frame's held height and
-// ratchets that height to the current line count. The frame only ever grows
-// while the program runs — the inline renderer erases and resizes on a
-// shrinking frame, which corrupts the panel when a log line is inserted above
-// it at the same moment — so as work items finish or a phase with fewer rows
-// begins, the content compacts within a steady frame (the trailing blank rows
-// sit invisibly below the footer) instead of resizing it. Only a terminal too
-// short for the held height pulls it back down, the one resize the renderer
-// must handle anyway.
-func (m *tuiModel) padFrame(lines []string) []string {
-	m.frame = max(m.frame, len(lines))
+// composeFrame joins the body and footer into the panel's frame, padding
+// between them with blank lines up to the frame's held height and ratcheting
+// that height to the natural line count. The frame only ever grows while the
+// program runs — the inline renderer erases and resizes on a shrinking frame,
+// which corrupts the panel when a log line is inserted above it at the same
+// moment — so as work items finish or a phase with fewer rows begins, the
+// frame holds steady instead of resizing. The padding sits between the task
+// region and the footer, so the footer stays glued to the frame's last rows
+// rather than bouncing with the live task count. Only a terminal too short
+// for the held height pulls it back down, the one resize the renderer must
+// handle anyway (the task budget keeps the natural content within the screen,
+// so the clamped frame never truncates a live row).
+func (m *tuiModel) composeFrame(body, footer []string) []string {
+	m.frame = max(m.frame, len(body)+len(footer))
 	if m.height > 0 {
 		m.frame = min(m.frame, m.height)
 	}
 
-	for len(lines) < m.frame {
+	lines := make([]string, 0, m.frame)
+	lines = append(lines, body...)
+
+	for len(lines)+len(footer) < m.frame {
 		lines = append(lines, "")
 	}
 
-	return lines
+	return append(lines, footer...)
 }
 
 // chromeLines is how many non-task lines the panel renders around the task
