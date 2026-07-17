@@ -10,3 +10,7 @@ config/config.schema.json
 # Local archive output and run config.
 out/
 hcp_archiver.yaml
+
+# Agent worktrees and local git worktrees.
+.claude/
+.worktrees/
