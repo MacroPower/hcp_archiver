@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -15,13 +14,11 @@ import (
 //
 // The setup func establishes durable base state (the harness flushes it
 // whole), then mutate stages the batch under test. The harness flushes again
-// and simulates the crash model the WAL documents: shard logs append
-// sequentially in
-// [compareShardAppend] order and each append persists as a complete-line
-// prefix, so a crash leaves full appends for the shards before the torn one, a
-// prefix of the torn shard's append, and nothing for the shards after it. For
-// each such state it clones the archive root, truncates the logs accordingly,
-// reloads, and calls check with a label naming the crash point.
+// and simulates the crash model the WAL documents: the batch lands in the
+// single org-level log as one append that persists as a complete-line prefix,
+// so every crash point is a prefix of that append. For each prefix the harness
+// clones the archive root, truncates the log accordingly, reloads, and calls
+// check with a label naming the crash point.
 //
 // Invariant checks written against this harness are the referee for the
 // ledger's durability-order rules: a guard record violated by any prefix fails
@@ -44,71 +41,45 @@ func forEachCrashPrefix(
 		require.NoError(t, l.Flush())
 	}
 
-	logPaths := make(map[string]string, len(l.shards))
-	pre := make(map[string]int64, len(l.shards))
-
-	snapshotSizes := func(dst map[string]int64) {
-		for sk, sh := range l.shards {
-			logPaths[sk] = sh.logPath()
-			dst[sk] = fileSize(t, sh.logPath())
-		}
-	}
-
-	snapshotSizes(pre)
+	pre := fileSize(t, l.walPath())
 
 	mutate(l)
 	require.NoError(t, l.Flush())
 
-	post := make(map[string]int64, len(l.shards))
+	walPath := l.walPath()
+	post := fileSize(t, walPath)
 
-	snapshotSizes(post)
 	require.NoError(t, l.Close())
+	require.Greater(t, post, pre, "the mutate stage appended nothing; the scenario tests no crash window")
 
-	var grown []string
+	data, err := os.ReadFile(walPath)
+	require.NoError(t, err)
 
-	for sk := range logPaths {
-		if post[sk] > pre[sk] {
-			grown = append(grown, sk)
+	// Crash offsets within the append: nothing landed, each complete line, and
+	// the whole batch (the clean finish).
+	offsets := []int64{pre}
+
+	for off := pre; off < post; off++ {
+		if data[off] == '\n' {
+			offsets = append(offsets, off+1)
 		}
 	}
 
-	require.NotEmpty(t, grown, "the mutate stage appended nothing; the scenario tests no crash window")
-	slices.SortFunc(grown, compareShardAppend)
-
-	for i, sk := range grown {
-		data, readErr := os.ReadFile(logPaths[sk])
-		require.NoError(t, readErr)
-
-		// Crash offsets within this shard's append: nothing landed, then each
-		// complete line. The full append is covered as offset zero of the next
-		// shard, and the final shard's full append is the clean-finish state,
-		// checked once after the loop.
-		offsets := []int64{pre[sk]}
-
-		for off := pre[sk]; off < post[sk]; off++ {
-			if data[off] == '\n' && off+1 < post[sk] {
-				offsets = append(offsets, off+1)
-			}
+	for _, offset := range offsets {
+		label := "torn at " + itoa(offset-pre) + "b"
+		if offset == post {
+			label = "clean finish"
 		}
 
-		for _, offset := range offsets {
-			label := "torn " + shardLabel(sk) + " at " + itoa(offset-pre[sk]) + "b"
-			runTornState(t, root, grown, logPaths, pre, post, i, offset, label, check)
-		}
+		runTornState(t, root, walPath, offset, label, check)
 	}
-
-	runTornState(t, root, grown, logPaths, pre, post, len(grown), 0, "clean finish", check)
 }
 
-// runTornState clones root, truncates the grown logs to one crash state (full
-// appends before torn, offset bytes of torn, none after), reloads, and checks.
+// runTornState clones root, truncates the org log to one crash prefix,
+// reloads, and checks.
 func runTornState(
 	t *testing.T,
-	root string,
-	grown []string,
-	logPaths map[string]string,
-	pre, post map[string]int64,
-	torn int,
+	root, walPath string,
 	offset int64,
 	label string,
 	check func(t *testing.T, label string, torn *Ledger),
@@ -118,21 +89,10 @@ func runTornState(
 	tornRoot := t.TempDir()
 	require.NoError(t, os.CopyFS(tornRoot, os.DirFS(root)))
 
-	for j, sk := range grown {
-		size := post[sk]
+	rel, err := filepath.Rel(root, walPath)
+	require.NoError(t, err)
 
-		switch {
-		case j == torn:
-			size = offset
-		case j > torn:
-			size = pre[sk]
-		}
-
-		rel, err := filepath.Rel(root, logPaths[sk])
-		require.NoError(t, err)
-
-		require.NoError(t, os.Truncate(filepath.Join(tornRoot, rel), size))
-	}
+	require.NoError(t, os.Truncate(filepath.Join(tornRoot, rel), offset))
 
 	l, err := Load(tornRoot)
 	require.NoError(t, err, "%s: a torn log must load", label)
@@ -157,15 +117,6 @@ func fileSize(t *testing.T, path string) int64 {
 	require.NoError(t, err)
 
 	return info.Size()
-}
-
-// shardLabel names a shard key readably in a crash-point label.
-func shardLabel(sk string) string {
-	if sk == "" {
-		return "org-root"
-	}
-
-	return sk
 }
 
 // itoa formats a small offset without pulling strconv into every call site.

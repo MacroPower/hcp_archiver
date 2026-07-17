@@ -46,11 +46,48 @@ type walRecord struct {
 	Kind      walKind    `json:"kind"`
 	Path      string     `json:"path,omitempty"`
 	Key       string     `json:"key,omitempty"`
-	RunCount  int        `json:"runCount,omitempty"`
+	// Shard names the shard the record belongs to, so a replay of the single
+	// org-level log routes it to the shard whose snapshot it folds into. The
+	// org root is the empty key and is omitted, so its records read the same as
+	// the per-shard log lines an earlier layout wrote.
+	Shard    string `json:"shard,omitempty"`
+	RunCount int    `json:"runCount,omitempty"`
 	// Settled carries the value of a walSettled record. It is omitempty, so a
 	// false value replays as the zero value, which is the intended false; the
 	// walSettled kind still identifies the record.
 	Settled bool `json:"settled,omitempty"`
+}
+
+// walRecordClass ranks a record for the durability order one appended batch
+// must satisfy (see [shard.drainDirty]): collection unsettlements lead, then
+// unsettled-status entries, then settled-status entries, then the
+// collection-level skip signals (watermarks, completion, settlement), then the
+// run metadata. Merging several shards' drains into one batch stable-sorts by
+// this class, so the guard rule holds across the whole batch, not merely
+// within one shard's slice of it.
+func walRecordClass(rec *walRecord) int {
+	switch rec.Kind {
+	case walSettled:
+		if !rec.Settled {
+			return 0
+		}
+
+		return 3
+
+	case walEntry:
+		if rec.Entry != nil && !rec.Entry.Status.Settled() {
+			return 1
+		}
+
+		return 2
+
+	case walWatermark, walCompleted:
+		return 3
+	case walRun:
+		return 4
+	default:
+		return 4
+	}
 }
 
 // appendLog appends recs to the log at path as newline-terminated JSON lines,

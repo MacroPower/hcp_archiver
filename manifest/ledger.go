@@ -20,10 +20,10 @@ import (
 // schemaVersion is the on-disk manifest format version.
 const schemaVersion = 1
 
-// defaultCompactThreshold is the per-shard log size past which a flush folds the
-// log back into that shard's snapshot. It bounds a single run's log growth and
-// how much a resume replays, while staying large enough that ordinary flushes
-// only append.
+// defaultCompactThreshold is the org-level log size past which a flush folds
+// the log back into the stale shards' snapshots. It bounds a single run's log
+// growth and how much a resume replays, while staying large enough that
+// ordinary flushes only append.
 const defaultCompactThreshold = 64 << 20
 
 // ErrCorruptManifest indicates that an existing manifest could not be parsed.
@@ -47,25 +47,27 @@ type document struct {
 //
 // It guards its in-memory state with a single mutex, so record methods called
 // from many workspace workers are race-free and the live tally never drifts from
-// the recorded entries. A second mutex serializes flushes so a shard's log takes
-// one writer at a time. Across processes, an exclusive flock taken by [Load]
+// the recorded entries. A second mutex serializes flushes so the log takes one
+// writer at a time. Across processes, an exclusive flock taken by [Load]
 // and released by [Ledger.Close] (or automatically by the kernel when the
 // process dies) enforces the single writer the on-disk format assumes. Create
 // instances with [Load].
 //
-// # Sharded storage
+// # Sharded snapshots, one log
 //
 // The ledger partitions its state into per-workspace, per-stack, per-config-
 // version, and org-root shards (see [shardKey]), each persisted as a compacted
-// snapshot plus an append-only log in a co-located .ledger directory. Every entry
-// is keyed by its archive-relative path exactly as before; the path only
-// determines which shard the entry lives in, so resume, the newest-first
-// early-stop, and the watermarks are unchanged. A flush appends only the records
-// changed since the last flush to the shards that changed, and folds a shard's
-// log back into its snapshot once the log outgrows it or a run finishes, so a
-// re-run's cost tracks the workspaces it touched rather than the whole archive.
-// The per-status tally stays global to the ledger, seeded on load from every
-// shard's entries.
+// snapshot in a co-located .ledger directory. Every entry is keyed by its
+// archive-relative path exactly as before; the path only determines which
+// shard the entry lives in, so resume, the newest-first early-stop, and the
+// watermarks are unchanged. Changes since the snapshots append to a single
+// org-level log whose records carry their shard key, so one flush is one
+// fsynced append and one crash tears one prefix of the whole batch — there is
+// no shard-to-shard ordering for a crash to land between (see [Ledger.Flush]).
+// The log folds back into the stale shards' snapshots once it outgrows the
+// threshold or a run finishes, so a re-run's cost tracks the log's delta and
+// the shards it touched rather than the whole archive. The per-status tally
+// stays global to the ledger, seeded on load from every shard's entries.
 type Ledger struct {
 	now              func() time.Time
 	logger           *slog.Logger
@@ -81,6 +83,7 @@ type Ledger struct {
 	bytes            int64
 	retried          int64
 	compactThreshold int64
+	walBytes         int64
 	mu               sync.RWMutex
 	flushMu          sync.Mutex
 	retryAbsent      bool
@@ -108,7 +111,7 @@ func WithClock(now func() time.Time) Option {
 }
 
 // WithLogger sets the structured logger the load path reports non-fatal
-// recovery events to (a shard log truncated at a torn suffix), overriding
+// recovery events to (a ledger log truncated at a torn suffix), overriding
 // [slog.Default]. A nil logger keeps the default. It returns an [Option].
 func WithLogger(logger *slog.Logger) Option {
 	return func(l *Ledger) {
@@ -137,12 +140,14 @@ func WithRetryAbsent(retry bool) Option {
 // a crashed process releases it automatically (see [Ledger.Close]); a caller
 // that finishes cleanly releases it with [Ledger.Close].
 //
-// It then discovers and loads every shard beneath root. Resume and a clean
-// first run are one code path: a first run simply finds no shards. A shard
-// whose snapshot cannot be parsed returns [ErrCorruptManifest]; a shard log
+// It then discovers and loads every shard's snapshot beneath root and replays
+// the org-level log on top, routing each record to its shard. Resume and a
+// clean first run are one code path: a first run simply finds no shards. A
+// shard whose snapshot cannot be parsed returns [ErrCorruptManifest]; a log
 // whose tail was torn by a crash is truncated at its last intact record and
 // the loss reported to the logger (see [WithLogger]), since every log record
-// is re-derived by re-walking.
+// is re-derived by re-walking. A per-shard log an earlier layout wrote is
+// replayed beneath the org log and retired by the next fold.
 func Load(root string, opts ...Option) (*Ledger, error) {
 	l := &Ledger{
 		now:              time.Now,
@@ -185,12 +190,43 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 			l.shards[sk] = sh
 		}
 
-		err = sh.load(l.logger)
+		err = sh.loadSnapshot()
 		if err != nil {
 			_ = l.Close() //nolint:errcheck // The load error takes precedence.
 
 			return nil, err
 		}
+	}
+
+	// Legacy per-shard logs replay before the org log: their records predate
+	// every org-log record, so the org log's last-writer-wins layering keeps
+	// the newer state. The org-root shard is excluded because its log file is
+	// the org log itself, replayed below.
+	for sk, sh := range l.shards {
+		if sk == "" {
+			continue
+		}
+
+		err = sh.replayLegacyLog(l.logger)
+		if err != nil {
+			_ = l.Close() //nolint:errcheck // The load error takes precedence.
+
+			return nil, err
+		}
+
+		if sh.stale {
+			// Fold the migrated records into the snapshot on the first flush,
+			// so the legacy file is retired promptly rather than lingering
+			// until the org log outgrows its threshold.
+			l.compactNext = true
+		}
+	}
+
+	err = l.replayWAL()
+	if err != nil {
+		_ = l.Close() //nolint:errcheck // The load error takes precedence.
+
+		return nil, err
 	}
 
 	// Validate and seed the cumulative tally from every shard's entries, so a
@@ -422,6 +458,52 @@ func (l *Ledger) lookupShard(key string) (*shard, bool) {
 	sh, ok := l.shards[shardKey(key)]
 
 	return sh, ok
+}
+
+// shardByKey returns the shard for an already-resolved shard key, creating it
+// if absent. The WAL replay uses it: a record's shard tag is the shard key
+// itself, not an entry key for [shardKey] to route.
+func (l *Ledger) shardByKey(sk string) *shard {
+	sh, ok := l.shards[sk]
+	if !ok {
+		sh = newShard(l.shardDir(sk))
+		l.shards[sk] = sh
+	}
+
+	return sh
+}
+
+// walPath returns the absolute path of the ledger's single org-level log,
+// which lives beside the org-root shard's snapshot.
+func (l *Ledger) walPath() string {
+	return filepath.Join(l.shardDir(""), LogFileName)
+}
+
+// replayWAL replays the org-level log on top of every shard's loaded snapshot
+// (and any legacy per-shard log records), routing each record to its shard by
+// the record's shard tag. A shard named only by log records starts from an
+// empty snapshot; every replayed shard is marked stale so the next fold
+// captures the records durably.
+func (l *Ledger) replayWAL() error {
+	recs, n, err := replayLog(l.walPath(), l.logger)
+	if err != nil {
+		return err
+	}
+
+	for i := range recs {
+		sh := l.shardByKey(recs[i].Shard)
+
+		err = sh.applyRecord(&recs[i])
+		if err != nil {
+			return err
+		}
+
+		sh.stale = true
+	}
+
+	l.walBytes = n
+
+	return nil
 }
 
 // totalEntries returns the number of entries across every shard.
@@ -788,13 +870,13 @@ func (l *Ledger) IsCollectionSettled(key string) bool {
 // is how a walk that reaches a still-running element forces the next run to
 // re-page the collection until that element settles.
 //
-// A false write is additionally drained ahead of every entry record in its
-// shard's next log append (see [shard.drainDirty]): unsettlement guards the
-// entries a walk is about to record, so it must never become durable after
-// them. That order holds only within one shard's log — shards flush as
-// separate appends — so a caller must key the flag to route to the same shard
-// as the entries it guards (a path prefix of them), never to a key that shards
-// elsewhere.
+// A false write is additionally drained ahead of every entry record in the
+// next flushed batch (see [shard.drainDirty] and [walRecordClass]):
+// unsettlement guards the entries a walk is about to record, so it must never
+// become durable after them. The batch lands in the single org-level log, so
+// the order holds across shards; keying the flag on a path prefix of the
+// entries it guards remains right so [Ledger.HasUnsettledUnder] scans the
+// shard that owns them.
 func (l *Ledger) SetCollectionSettled(key string, settled bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -1093,21 +1175,20 @@ func (l *Ledger) LastRun() (RunRecord, bool) {
 // Flush persists the state recorded since the last flush durably, so a hard kill
 // loses at most that batch.
 //
-// It appends each changed shard's delta to that shard's append-only log, then
-// folds a log back into its snapshot when the log has outgrown it or a run has
-// just finished. An append-only flush costs the recent delta rather than the
-// whole ledger, and only the shards that changed are touched. Flushes are
-// serialized, so each shard's log takes one writer at a time.
+// Every changed shard's delta merges into one batch appended to the single
+// org-level log with one fsync, then the log folds back into the shards'
+// snapshots when it has outgrown the threshold or a run has just finished. An
+// append-only flush costs the recent delta rather than the whole ledger.
+// Flushes are serialized, so the log takes one writer at a time.
 //
-// The per-shard appends run in a deterministic dependency order (see
-// [compareShardAppend]): the shards owning cross-shard referenced objects — the
-// org root and the org-wide configuration versions — append before any
-// workspace or stack shard. A hard kill mid-flush therefore persists a prefix
-// in which a referenced object's done entry is durable before the run that
-// references it can be durably frozen; losing only the referencing shard's half
-// re-pages that collection on resume, which self-heals, whereas the reverse
-// order would strand a durably-written config-version tarball with no ledger
-// record and no code path left to re-record it.
+// One log is one fsync domain, so a hard kill mid-flush persists a
+// complete-line prefix of the whole batch (see [replayLog]) and the batch's
+// class order (see [walRecordClass]) is a total durability order across every
+// shard: a guard record is durable before any skip signal it stands behind,
+// and a cross-shard proof (a config-version tarball's done entry) is durable
+// before the collection settlement that could freeze its referencing run,
+// because entries always precede settlements. There is no shard-to-shard
+// append order left to reason about, and nothing to tear between.
 func (l *Ledger) Flush() error {
 	l.flushMu.Lock()
 	defer l.flushMu.Unlock()
@@ -1115,17 +1196,28 @@ func (l *Ledger) Flush() error {
 	l.mu.Lock()
 
 	type pending struct {
-		sk string
 		sh *shard
 		d  drainedState
 	}
 
-	var work []pending
+	var (
+		work []pending
+		recs []walRecord
+	)
 
 	for sk, sh := range l.shards {
-		if sh.hasDirty() {
-			work = append(work, pending{sk: sk, sh: sh, d: sh.drainDirty()})
+		if !sh.hasDirty() {
+			continue
 		}
+
+		d := sh.drainDirty()
+
+		for i := range d.recs {
+			d.recs[i].Shard = sk
+		}
+
+		work = append(work, pending{sh: sh, d: d})
+		recs = append(recs, d.recs...)
 	}
 
 	compactAll := l.compactNext
@@ -1133,22 +1225,24 @@ func (l *Ledger) Flush() error {
 
 	l.mu.Unlock()
 
-	slices.SortFunc(work, func(a, b pending) int {
-		return compareShardAppend(a.sk, b.sk)
+	// Merging the shards' drains re-establishes the class order across the
+	// whole batch; the sort is stable, so each shard's within-class ordering
+	// (sorted keys) is preserved and the batch layout stays deterministic.
+	slices.SortStableFunc(recs, func(a, b walRecord) int {
+		return walRecordClass(&a) - walRecordClass(&b)
 	})
 
-	for i, w := range work {
-		n, err := appendLog(w.sh.logPath(), w.d.recs)
+	if len(recs) > 0 {
+		n, err := appendLog(l.walPath(), recs)
 		if err != nil {
-			// The drained records never reached the log; put them and every
-			// not-yet-appended shard's records back so a retry re-appends them
-			// rather than dropping the delta. Restore a pending compaction request
-			// too, so a finished run still folds its shards' logs into their
-			// snapshots on the retry rather than leaving them uncompacted.
+			// The drained records never reached the log; put them back so a
+			// retry re-appends them rather than dropping the delta. Restore a
+			// pending compaction request too, so a finished run still folds on
+			// the retry rather than leaving the log unfolded.
 			l.mu.Lock()
 
-			for _, rem := range work[i:] {
-				rem.sh.restoreDirty(rem.d)
+			for _, w := range work {
+				w.sh.restoreDirty(w.d)
 			}
 
 			if compactAll {
@@ -1157,43 +1251,68 @@ func (l *Ledger) Flush() error {
 
 			l.mu.Unlock()
 
-			return fmt.Errorf("append shard log %q: %w", w.sh.dir, err)
+			return fmt.Errorf("append ledger log: %w", err)
 		}
 
 		l.mu.Lock()
 
-		w.sh.logBytes += n
+		l.walBytes += n
+
+		for _, w := range work {
+			w.sh.stale = true
+		}
+
 		l.mu.Unlock()
 	}
 
+	if compactAll || l.walBytes > l.compactThreshold {
+		err := l.fold(compactAll)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// fold captures every stale shard's state in its snapshot and, once no shard
+// lags the log, resets the log, so the snapshots alone reflect the ledger.
+//
+// Snapshots are written before the log is removed, and the log is removed only
+// when every stale shard folded: replaying the full log over snapshots that
+// already account for it is idempotent (records are last-writer-wins upserts),
+// so a crash — or a shard skipped for pending dirty state — between the two
+// steps costs a redundant replay, never a lost or regressed record. A legacy
+// per-shard log is removed by its own shard's fold (see [Ledger.compactShard]),
+// under the same snapshot-first rule.
+func (l *Ledger) fold(compactAll bool) error {
 	l.mu.RLock()
 
-	var toCompact []*shard
+	var stale []*shard
 
 	for _, sh := range l.shards {
-		outgrown := sh.logBytes > l.compactThreshold && sh.logBytes > sh.snapshotBytes
-		if (compactAll && sh.logBytes > 0) || outgrown {
-			toCompact = append(toCompact, sh)
+		if sh.stale {
+			stale = append(stale, sh)
 		}
 	}
 
 	l.mu.RUnlock()
 
-	var compactErrs []error
+	var errs []error
 
-	for _, sh := range toCompact {
+	for _, sh := range stale {
 		err := l.compactShard(sh)
 		if err != nil {
-			compactErrs = append(compactErrs, err)
+			errs = append(errs, err)
 		}
 	}
 
-	if len(compactErrs) > 0 {
-		// A finished run's compact-all request was consumed above; a shard that
-		// failed to fold would otherwise drop it and keep its log until the log
-		// independently outgrew the threshold. Restore the request, mirroring the
-		// append-failure path, so a later flush retries the fold. The other shards
-		// were still attempted, so one shard's failure does not strand the rest.
+	if len(errs) > 0 {
+		// A finished run's compact-all request was consumed by the caller; a
+		// shard that failed to fold would otherwise drop it and keep the log
+		// until it independently outgrew the threshold. Restore the request so
+		// a later flush retries the fold. The other shards were still
+		// attempted, so one shard's failure does not strand the rest.
 		if compactAll {
 			l.mu.Lock()
 
@@ -1201,28 +1320,68 @@ func (l *Ledger) Flush() error {
 			l.mu.Unlock()
 		}
 
-		return fmt.Errorf("compact shards: %w", errors.Join(compactErrs...))
+		return fmt.Errorf("compact shards: %w", errors.Join(errs...))
 	}
+
+	l.mu.RLock()
+
+	clean := true
+
+	for _, sh := range l.shards {
+		if sh.stale {
+			clean = false
+
+			break
+		}
+	}
+
+	l.mu.RUnlock()
+
+	if !clean {
+		// A shard re-dirtied mid-fold was skipped; its logged records are not
+		// yet in a snapshot, so the log stays until a later flush folds it.
+		if compactAll {
+			l.mu.Lock()
+
+			l.compactNext = true
+			l.mu.Unlock()
+		}
+
+		return nil
+	}
+
+	err := os.Remove(l.walPath())
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("truncate ledger log: %w", err)
+	}
+
+	l.mu.Lock()
+
+	l.walBytes = 0
+	l.mu.Unlock()
 
 	return nil
 }
 
-// compactShard folds one shard's append-only log back into its snapshot: it
-// writes the shard's full document via an atomic temp-and-rename, then removes
-// the log, so the snapshot alone reflects the shard and its log starts empty.
+// compactShard captures one shard's replayed and logged state in its snapshot
+// via an atomic temp-and-rename, so the snapshot alone reflects the shard.
 //
-// It compacts only a shard with no pending dirty state, so the snapshot it
-// writes reflects exactly what the log already holds. The snapshot is written
-// before the log is removed, so a crash between the two replays the log's
-// records onto a snapshot that already accounts for them rather than losing or
-// regressing an entry. A shard re-dirtied since the last drain (a worker
-// recorded during the flush) is skipped and folded on a later flush, once its
-// newest state has reached the log; without that guard the snapshot could
-// capture an in-memory status the log does not yet carry, and a crash before the
-// log removal would replay the stale log record over the newer snapshot.
-// Building the detached snapshot copy holds a read lock, briefly blocking
-// recording workers, but the marshal that follows runs unlocked, so a large
-// shard's encode no longer stalls writers on other shards for its duration.
+// It folds only a shard with no pending dirty state, so the snapshot it writes
+// reflects exactly what the log already holds. A shard re-dirtied since the
+// last drain (a worker recorded during the flush) is skipped and folded on a
+// later flush, once its newest state has reached the log; without that guard
+// the snapshot could capture an in-memory status the log does not yet carry,
+// and a crash before the log reset would replay the stale log record over the
+// newer snapshot. Such a skip leaves the shard stale, which also holds the
+// org-level log in place (see [Ledger.fold]). Building the detached snapshot
+// copy holds a read lock, briefly blocking recording workers, but the marshal
+// that follows runs unlocked, so a large shard's encode does not stall writers
+// on other shards for its duration.
+//
+// A legacy per-shard log the shard replayed at load is removed here, after the
+// snapshot that accounts for it is durable: the ordering rules out a crash
+// window that would regress the shard, and the removal retires the migrated
+// file so only the org-level log remains.
 func (l *Ledger) compactShard(sh *shard) error {
 	l.mu.RLock()
 
@@ -1246,23 +1405,23 @@ func (l *Ledger) compactShard(sh *shard) error {
 		return fmt.Errorf("write shard %q: %w", sh.dir, err)
 	}
 
-	// The snapshot now reflects the shard. Record its size before removing the
-	// log, so the accounting stays correct even if the removal below fails and the
-	// fold is retried on a later flush.
 	l.mu.Lock()
 
-	sh.snapshotBytes = int64(len(data))
+	sh.stale = false
+	legacy := sh.legacyLog
 	l.mu.Unlock()
 
-	err = os.Remove(sh.logPath())
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("truncate shard log %q: %w", sh.dir, err)
+	if legacy != "" {
+		err = os.Remove(legacy)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("remove legacy shard log %q: %w", legacy, err)
+		}
+
+		l.mu.Lock()
+
+		sh.legacyLog = ""
+		l.mu.Unlock()
 	}
-
-	l.mu.Lock()
-
-	sh.logBytes = 0
-	l.mu.Unlock()
 
 	return nil
 }

@@ -49,16 +49,18 @@
 //
 // The ledger is partitioned into per-workspace, per-stack, per-config-version,
 // and org-root shards, each persisted as a compacted snapshot (snapshot.json)
-// plus an append-only log (log.ndjson) in a co-located .ledger directory. A
-// flush at a bounded cadence and on shutdown appends only the records changed
-// since the last flush to the shards that changed, so its cost is the recent
-// delta across the touched shards rather than the whole ledger, and folds a
-// shard's log back into its snapshot once that log outgrows it or a run finishes.
-// A load discovers every shard beneath the root and, per shard, reads the
-// snapshot and replays the log on top; a torn log suffix — a fragment past the
-// final newline commit marker, or a batch whose blocks a power loss persisted
-// out of order — is truncated at the last intact record, so a hard kill loses
-// at most the last unflushed batch, never the ledger itself. The ledger also
+// in a co-located .ledger directory. Changes since the snapshots append to one
+// org-level log (the org root's log.ndjson) whose records carry their shard
+// key: a flush at a bounded cadence and on shutdown is one fsynced append of
+// the recent delta, so one crash tears one prefix of one batch and there is no
+// shard-to-shard append order to reason about. The log folds back into the
+// stale shards' snapshots once it outgrows a threshold or a run finishes. A
+// load discovers every shard beneath the root, reads the snapshots, and
+// replays the log on top, routing records by their shard key; a torn log
+// suffix — a fragment past the final newline commit marker, or a batch whose
+// blocks a power loss persisted out of order — is truncated at the last intact
+// record, so a hard kill loses at most the last unflushed batch, never the
+// ledger itself. The ledger also
 // guards the single mutex-protected tally that both the run summary and the
 // live progress reporter read, so the reported counts and the ledger's own
 // tally can never drift apart (the on-disk copy trails only by the last

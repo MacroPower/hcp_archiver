@@ -147,30 +147,35 @@ func TestShardDrainRecordsReplayToSameState(t *testing.T) {
 	assert.Equal(t, src.runCount, dst.runCount)
 }
 
-func TestCompareShardAppendOrdersCrossShardOwnersFirst(t *testing.T) {
+func TestWALRecordClassOrdersGuardsBeforeSkipSignals(t *testing.T) {
 	t.Parallel()
 
-	// Flush appends per-shard logs in this order, and a crash between appends
-	// persists a prefix. The org-root and config-versions shards own the objects
-	// other shards' runs reference (users, config-version tarballs), so they must
-	// be durable before any workspace or stack shard can durably freeze a run
-	// that references them.
-	keys := []string{
-		"projects/p1/workspaces/w1",
-		configVersionsSegment,
-		"projects/p1/stacks/s1",
-		"",
-		"projects/p0/workspaces/w0",
+	// The class rank is the batch's total durability order: unsettlements lead,
+	// unsettled entries precede settled ones, and the collection-level skip
+	// signals trail everything they summarize.
+	pending := Entry{Status: StatusPending}
+	done := Entry{Status: StatusDone}
+
+	recs := []walRecord{
+		{Kind: walRun},
+		{Kind: walSettled, Key: "k", Settled: true},
+		{Kind: walCompleted, Key: "k"},
+		{Kind: walWatermark, Key: "k"},
+		{Kind: walEntry, Path: "b", Entry: &done},
+		{Kind: walEntry, Path: "a", Entry: &pending},
+		{Kind: walSettled, Key: "k"},
 	}
 
-	slices.SortFunc(keys, compareShardAppend)
+	slices.SortStableFunc(recs, func(a, b walRecord) int {
+		return walRecordClass(&a) - walRecordClass(&b)
+	})
 
-	want := []string{
-		"",
-		configVersionsSegment,
-		"projects/p0/workspaces/w0",
-		"projects/p1/stacks/s1",
-		"projects/p1/workspaces/w1",
+	classes := make([]int, len(recs))
+	for i := range recs {
+		classes[i] = walRecordClass(&recs[i])
 	}
-	assert.Equal(t, want, keys)
+
+	assert.Equal(t, []int{0, 1, 2, 3, 3, 3, 4}, classes)
+	assert.False(t, recs[0].Settled, "the unsettlement guard leads")
+	assert.Equal(t, "a", recs[1].Path, "the pending entry precedes the done entry")
 }

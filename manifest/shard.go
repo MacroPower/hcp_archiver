@@ -16,13 +16,14 @@ import (
 )
 
 // LedgerDirName is the directory, co-located with the subtree it indexes, that
-// holds a shard's snapshot and log.
+// holds a shard's snapshot; the org root's additionally holds the ledger's log.
 const LedgerDirName = ".ledger"
 
 // snapshotFileName is a shard's compacted state.
 const snapshotFileName = "snapshot.json"
 
-// LogFileName is a shard's append-only log of changes since its snapshot.
+// LogFileName is the ledger's append-only log of changes since the snapshots,
+// kept in the org-root shard's directory.
 const LogFileName = "log.ndjson"
 
 // configVersionsSegment is the archive path segment, and the shard key, for the
@@ -50,35 +51,11 @@ func shardKey(key string) string {
 	}
 }
 
-// compareShardAppend orders two shard keys for a flush's per-shard log
-// appends. The shards owning objects that other shards' runs reference — the
-// org root (users) and the org-wide configuration versions — sort before every
-// workspace and stack shard, and ties break lexicographically so the order is
-// deterministic rather than map-random. A crash between appends then persists
-// only prefixes in which a referenced object's done entry is durable before the
-// run referencing it can be durably frozen behind a settled collection.
-func compareShardAppend(a, b string) int {
-	ra, rb := shardAppendRank(a), shardAppendRank(b)
-	if ra != rb {
-		return ra - rb
-	}
-
-	return strings.Compare(a, b)
-}
-
-// shardAppendRank buckets a shard key for [compareShardAppend]: the org-root
-// and config-versions shards append first, everything else after.
-func shardAppendRank(sk string) int {
-	if sk == "" || sk == configVersionsSegment {
-		return 0
-	}
-
-	return 1
-}
-
 // shard is one slice of the ledger (a workspace, a stack, the org-wide
 // configuration versions, or the org root) persisted as a compacted snapshot
-// plus an append-only log in a co-located [LedgerDirName] directory.
+// in a co-located [LedgerDirName] directory. Changes since the snapshot live
+// in the ledger's single org-level log (see [Ledger.Flush]), tagged with the
+// shard's key so a replay routes them back.
 //
 // It holds the entries, watermarks, and completion flags whose keys route to it
 // (see [shardKey]); the org-root shard additionally carries the run-level
@@ -98,10 +75,10 @@ type shard struct {
 	lastRun         *RunRecord
 	entries         map[string]*Entry
 	dir             string
-	logBytes        int64
-	snapshotBytes   int64
+	legacyLog       string
 	runCount        int
 	runDirty        bool
+	stale           bool
 }
 
 // newShard creates an empty shard rooted at dir.
@@ -130,11 +107,12 @@ func (s *shard) logPath() string {
 	return filepath.Join(s.dir, LogFileName)
 }
 
-// load reads the shard's snapshot and replays its log on top, populating its
-// in-memory state. A missing snapshot or log is an empty start; a torn log
-// suffix is truncated at the last intact record and reported to logger (see
-// [replayLog]); a corrupt snapshot returns [ErrCorruptManifest].
-func (s *shard) load(logger *slog.Logger) error {
+// loadSnapshot reads the shard's compacted snapshot into its in-memory state.
+// A missing snapshot is an empty start; a corrupt one returns
+// [ErrCorruptManifest]. Log records layer on top afterwards: a legacy
+// per-shard log via [shard.replayLegacyLog], then the org-level log the ledger
+// replays and routes (see [Ledger.Load]).
+func (s *shard) loadSnapshot() error {
 	//nolint:gosec // The shard directory is derived from the operator-chosen root.
 	data, err := os.ReadFile(s.snapshotPath())
 
@@ -142,7 +120,7 @@ func (s *shard) load(logger *slog.Logger) error {
 
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		// No snapshot yet; the log alone, if any, is replayed below.
+		// No snapshot yet; any log records replay onto the empty state.
 	case err != nil:
 		return fmt.Errorf("read snapshot %q: %w", s.snapshotPath(), err)
 	default:
@@ -159,11 +137,23 @@ func (s *shard) load(logger *slog.Logger) error {
 
 	s.applyDocument(&doc)
 
-	s.snapshotBytes = int64(len(data))
+	return nil
+}
 
-	recs, logBytes, err := replayLog(s.logPath(), logger)
+// replayLegacyLog replays a per-shard log an earlier layout left beside the
+// shard's snapshot, from before the ledger kept one org-level log. Its records
+// predate every org-log record, so it replays first and the org log's
+// last-writer-wins layering stays correct. A shard that replayed one is marked
+// stale and remembers the path, so the next full fold captures the records in
+// the snapshot and removes the file.
+func (s *shard) replayLegacyLog(logger *slog.Logger) error {
+	recs, n, err := replayLog(s.logPath(), logger)
 	if err != nil {
 		return err
+	}
+
+	if n == 0 {
+		return nil
 	}
 
 	for i := range recs {
@@ -173,7 +163,8 @@ func (s *shard) load(logger *slog.Logger) error {
 		}
 	}
 
-	s.logBytes = logBytes
+	s.legacyLog = s.logPath()
+	s.stale = true
 
 	return nil
 }

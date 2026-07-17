@@ -416,7 +416,7 @@ const (
 // tarballs are evicted through [Env.OffloadFile] (the bundle case is a
 // backstop for seal-time eviction: a workspace filtered out of later runs, a
 // prior failure, a remote newly pointed at an old archive). The ledger flock
-// target and the per-shard log.ndjson are never uploaded — a stale remote log
+// target and the ledger's log.ndjson are never uploaded — a stale remote log
 // replayed onto a restored tree could resurrect old ledger state; the
 // post-compaction snapshot.json is the durable record. Everything else syncs
 // incrementally, gated by one upfront listing inventory: an absent key or a
@@ -713,7 +713,7 @@ func (e *Env) walkEligible(ctx context.Context, relPrefix string, fn func(relPat
 
 // syncEligible reports whether a file belongs to the mirror at all. Staging
 // temps are partial writes a crash left behind; the ledger's flock target
-// carries meaning only as a kernel lock; and the per-shard replay log is
+// carries meaning only as a kernel lock; and the ledger's replay log is
 // dangerous to mirror — a stale remote log.ndjson restored over a newer
 // snapshot would replay resurrected ledger state. None is uploaded or
 // protected from pruning.

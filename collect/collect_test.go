@@ -1337,28 +1337,33 @@ func TestWalkFinalPageRecomputesSettledFromArchivePrefix(t *testing.T) {
 		"an errored child under the archive prefix records the collection unsettled")
 }
 
-// walKinds reads a shard's log and returns the record kinds seen per key, so a
-// test can assert which shard a flag record was flushed to.
-func walKinds(t *testing.T, path string) map[string][]string {
+// walLine is one parsed org-log record, reduced to the fields a placement
+// assertion needs.
+type walLine struct {
+	Kind  string `json:"kind"`
+	Key   string `json:"key"`
+	Shard string `json:"shard"`
+}
+
+// walLines reads the org-level ledger log and returns its records per key, so
+// a test can assert which shard a flag record was tagged with.
+func walLines(t *testing.T, path string) map[string][]walLine {
 	t.Helper()
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 
-	kinds := map[string][]string{}
+	lines := map[string][]walLine{}
 
 	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
-		var rec struct {
-			Kind string `json:"kind"`
-			Key  string `json:"key"`
-		}
+		var rec walLine
 
 		require.NoError(t, json.Unmarshal([]byte(line), &rec))
 
-		kinds[rec.Key] = append(kinds[rec.Key], rec.Kind)
+		lines[rec.Key] = append(lines[rec.Key], rec)
 	}
 
-	return kinds
+	return lines
 }
 
 func TestWalkSyntheticCursorFlagsShareTheEntriesShard(t *testing.T) {
@@ -1441,24 +1446,28 @@ func TestWalkSyntheticCursorFlagsShareTheEntriesShard(t *testing.T) {
 	assert.Equal(t, 2, archived[cfg2.relPath], "the boundary gets its refresh, so the flags were read back")
 	assert.Equal(t, 1, archived[cfg1.relPath], "the early stop halts above settled history")
 
-	// After a flush the flag records sit in the stack shard's log next to the
-	// entries they guard; the org-root shard's log carries only the cursor's
-	// high-water mark.
+	// After a flush the flag records carry the stack shard's tag, routing them
+	// back to the shard that owns the entries they guard; the cursor key leaves
+	// only its high-water mark, tagged for the org root.
 	require.NoError(t, ledger.Flush())
 
-	stackLog := st.AbsPath(st.Join("projects/p/stacks/s3", manifest.LedgerDirName, manifest.LogFileName))
-	stackKinds := walKinds(t, stackLog)
+	orgLog := st.AbsPath(st.Join(manifest.LedgerDirName, manifest.LogFileName))
+	lines := walLines(t, orgLog)
 
-	assert.Contains(t, stackKinds[archivePrefix], "completed",
-		"the completion record shares the entries' shard log")
-	assert.Contains(t, stackKinds[archivePrefix], "settled",
-		"the settled record shares the entries' shard log")
+	kinds := make([]string, 0, len(lines[archivePrefix]))
 
-	rootLog := st.AbsPath(st.Join(manifest.LedgerDirName, manifest.LogFileName))
-	rootKinds := walKinds(t, rootLog)
+	for _, rec := range lines[archivePrefix] {
+		kinds = append(kinds, rec.Kind)
+		assert.Equal(t, "projects/p/stacks/s3", rec.Shard,
+			"the %s record is tagged with the entries' shard", rec.Kind)
+	}
 
-	assert.Equal(t, []string{"watermark"}, rootKinds[cursorKey],
-		"the org-root shard holds only the cursor's high-water mark")
+	assert.Contains(t, kinds, "completed", "the completion record is logged under the archive prefix")
+	assert.Contains(t, kinds, "settled", "the settled record is logged under the archive prefix")
+
+	require.Len(t, lines[cursorKey], 1, "the cursor key holds only its high-water mark")
+	assert.Equal(t, "watermark", lines[cursorKey][0].Kind)
+	assert.Empty(t, lines[cursorKey][0].Shard, "the cursor's watermark is tagged for the org root")
 }
 
 func TestWalkHistoryLimit(t *testing.T) {

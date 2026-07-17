@@ -101,45 +101,56 @@ func TestDiscoverShardsFollowsSymlinkedDirectories(t *testing.T) {
 	}, gotKeys)
 }
 
-func TestFlushAppendsCrossShardOwnersFirst(t *testing.T) {
+func TestFlushAppendsOneClassOrderedBatch(t *testing.T) {
 	t.Parallel()
 
-	// A flush whose batch spans the config-versions shard and a workspace shard
-	// must make the config-versions delta durable first: a crash after the
-	// workspace append but before the config-versions one would durably freeze
-	// a run behind its settled collection while losing the done entry of the
-	// tarball it references, and no later run re-records a tarball below the
-	// walk's early-stop boundary. An injected append failure on the workspace
-	// shard stands in for the crash; with a map-random append order each
-	// iteration could see the workspace shard drawn first, so the loop makes a
-	// regression overwhelmingly likely to surface. The workspace entry is
-	// recorded before the tarball so a map iteration that merely follows
-	// insertion order still puts the workspace shard first without the sort.
-	for range 8 {
-		root := t.TempDir()
+	// A flush spanning several shards lands as one batch in the single
+	// org-level log — one fsync domain, so a crash tears a prefix of the whole
+	// batch rather than between shards — and the batch is class-ordered: every
+	// entry precedes every collection settlement, so a tarball proof in one
+	// shard is always durable before the settlement that could freeze its
+	// referencing run in another.
+	root := t.TempDir()
 
-		l, err := Load(root)
-		require.NoError(t, err)
+	l, err := Load(root)
+	require.NoError(t, err)
 
-		t.Cleanup(func() { require.NoError(t, l.Close()) })
+	t.Cleanup(func() { require.NoError(t, l.Close()) })
 
-		const (
-			tarball = "config-versions/cv-1.tar.gz"
-			wsRun   = "projects/p1/workspaces/w1/runs/run-1/run.json"
-		)
+	const (
+		tarball = "config-versions/cv-1.tar.gz"
+		prefix  = "projects/p1/workspaces/w1/runs"
+		wsRun   = prefix + "/run-1/run.json"
+	)
 
-		l.RecordDone(wsRun, Signature{})
-		l.RecordDone(tarball, Signature{})
+	l.RecordDone(wsRun, Signature{})
+	l.RecordDone(tarball, Signature{})
+	l.MarkCollectionComplete(prefix)
+	l.SetCollectionSettled(prefix, true)
 
-		// Occupy the workspace shard's log path with a directory so its append
-		// fails while the config-versions shard's append can still succeed.
-		wsLog := l.shardFor(wsRun).logPath()
-		require.NoError(t, os.MkdirAll(wsLog, 0o750))
+	require.NoError(t, l.Flush())
 
-		require.Error(t, l.Flush())
+	_, err = os.Stat(l.shardFor(wsRun).logPath())
+	require.ErrorIs(t, err, os.ErrNotExist, "no per-shard log is written")
 
-		data, err := os.ReadFile(l.shardFor(tarball).logPath())
-		require.NoError(t, err, "the config-versions delta must be durable before the workspace append")
-		require.Contains(t, string(data), "cv-1.tar.gz")
+	data, err := os.ReadFile(l.walPath())
+	require.NoError(t, err)
+
+	recs, _, err := replayLog(l.walPath(), l.logger)
+	require.NoError(t, err)
+	require.Len(t, recs, 4)
+
+	lastClass := 0
+
+	for i := range recs {
+		class := walRecordClass(&recs[i])
+		require.GreaterOrEqual(t, class, lastClass, "batch classes are non-decreasing: %s", string(data))
+
+		lastClass = class
 	}
+
+	require.Equal(t, walEntry, recs[0].Kind)
+	require.Equal(t, walSettled, recs[3].Kind, "the settlement trails every entry")
+	require.Equal(t, "projects/p1/workspaces/w1", recs[len(recs)-1].Shard,
+		"records carry the shard tag replay routes by")
 }

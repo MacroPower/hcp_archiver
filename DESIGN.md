@@ -343,13 +343,12 @@ Notes:
     first not-already-frozen element and re-settles it only once its work
     finished (the true end of the listing, or an early stop whose new prefix
     archived clean), and the ledger drains that withdrawal ahead of the entry
-    records it guards in the shard log. That drain order is per shard — shards
-    flush as separate appends — so the walk keys its completed/settled flags
-    on the collection's archive prefix, the path that routes to the shard
-    holding the entries; a stack walk's synthetic id cursor (which keeps only
-    the high-water mark) would otherwise route the flags to the org-root
-    shard, and a crash between the two shards' appends could persist frozen
-    entries under a stale settled flag. A re-walk killed mid-delta — even mid-
+    records it guards in the flushed batch, which lands whole in the single
+    org-level log — one fsync domain, so the order holds across shards. The
+    walk still keys its completed/settled flags on the collection's archive
+    prefix (a stack walk's synthetic id cursor keeps only the high-water mark)
+    so the errored-child gate scans the shard that owns the entries. A re-walk
+    killed mid-delta — even mid-
     flush — therefore cannot leave freshly frozen entries above elements it
     never listed with the settled flag still standing (an unlisted element
     leaves no ledger record for the unsettled-child scan to find, so the flag
@@ -514,30 +513,31 @@ re-serializing one monolithic document on every flush tick.
 A shard is a compacted `snapshot.json` plus an append-only `log.ndjson`.
 Recording an entry appends one newline-terminated line, so no flush re-serializes
 the whole ledger; the terminating newline is the commit marker and a torn
-trailing line is dropped on read. A flush batch is one multi-block write whose
-blocks a power loss may persist out of order, so replay trusts complete lines
-only up to the first that fails to parse: the log is truncated there, the loss
-is logged, and the discarded delta is re-derived by re-walking — a torn batch
-never hard-fails the load. Compaction folds a shard's log into its
-snapshot once the log passes a size floor (64MiB) and outgrows the snapshot,
-and unconditionally when the run finishes, writing the merged snapshot before
-truncating the log; an unchanged record appends no line, so a re-run's
-archive-then-stop boundary adds nothing. Each shard commits through the same
-temp-write-and-atomic-rename as every other file, so a shard that exists is
-whole. A shard with no file starts empty — the ledger, not file existence, is
-the record, so deleting a `.ledger/` directory forgets that subtree's history
-and the next run re-fetches it.
-
-A flush appends each dirty shard's delta as its own fsynced write, so a hard
-kill mid-flush persists a prefix of the shards, and the append order is a
-crash-consistency surface: the shards owning cross-shard referenced objects —
-the org root (users) and the org-wide config versions — always append before
-any workspace or stack shard. A referenced object's `done` entry is therefore
-durable before the run that references it can be durably frozen behind a
-settled collection; losing only the referencing shard's half re-pages that
-collection on resume, which self-heals, whereas the reverse order would strand
-a durably-written config-version tarball with no ledger record below the
-early-stop boundary, where nothing ever re-records it.
+trailing line is dropped on read. Every shard's delta merges into one batch
+appended to a single org-level log (the org root's `log.ndjson`, records tagged
+with their shard key), so a flush is one fsynced write and a hard kill tears
+one complete-line prefix of one batch — there is no shard-to-shard append
+order for a crash to land between. The batch itself is a total durability
+order: collection unsettlements lead, unsettled entries precede settled ones,
+and the collection-level skip signals (watermarks, completion, settlement)
+trail everything they summarize, so a guard is always durable before any
+record that could stop a future run from retrying the work it stands for, and
+a cross-shard proof (a config-version tarball's `done` entry) is durable
+before the settlement that could freeze its referencing run. A flush batch is
+one multi-block write whose blocks a power loss may persist out of order, so
+replay trusts complete lines only up to the first that fails to parse: the log
+is truncated there, the loss is logged, and the discarded delta is re-derived
+by re-walking — a torn batch never hard-fails the load. Compaction folds the
+log into the stale shards' snapshots once it passes a size floor (64MiB), and
+unconditionally when the run finishes, writing every merged snapshot before
+resetting the log (replaying a fully folded log is an idempotent no-op, so a
+crash between the two costs a redundant replay); an unchanged record appends
+no line, so a re-run's archive-then-stop boundary adds nothing. Each snapshot
+commits through the same temp-write-and-atomic-rename as every other file, so
+a shard that exists is whole. A shard with no file starts empty — the ledger,
+not file existence, is the record, so deleting a `.ledger/` directory forgets
+that subtree's history (its unfolded log records, if any, replay and are
+folded back on the next run's close).
 
 ### Sealed cold storage
 

@@ -582,14 +582,15 @@ func TestLedger_FlushFailureKeepsStateForRetry(t *testing.T) {
 	ledger.RecordDone("projects/p/workspaces/w/runs/r/run.json", manifest.Signature{Size: 1})
 	ledger.RecordDone("org.json", manifest.Signature{Size: 2})
 
-	// A read-only root makes every shard's log append fail; the delta a flush
-	// drained up front must be restored rather than dropped.
-	require.NoError(t, os.Chmod(path, 0o500))
-	require.Error(t, ledger.Flush(), "an append into a read-only root must fail")
+	// A read-only ledger directory makes the org log's append fail; the delta a
+	// flush drained up front must be restored rather than dropped.
+	ledgerDir := filepath.Join(path, manifest.LedgerDirName)
+	require.NoError(t, os.Chmod(ledgerDir, 0o500))
+	require.Error(t, ledger.Flush(), "an append into a read-only ledger directory must fail")
 
 	// A retry after the write barrier lifts must re-append the same delta, so
 	// the records the failed flush drained are still there to persist.
-	require.NoError(t, os.Chmod(path, 0o755))
+	require.NoError(t, os.Chmod(ledgerDir, 0o755))
 	require.NoError(t, ledger.Flush())
 
 	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
@@ -681,6 +682,56 @@ func TestLedger_SnapshotPlusLogMerge(t *testing.T) {
 	_, ok = reloaded.Entry("b")
 	assert.True(t, ok, "the logged object survives")
 	assert.Equal(t, 2, reloaded.Tally().Done)
+}
+
+func TestLoad_LegacyShardLogReplaysAndRetires(t *testing.T) {
+	t.Parallel()
+
+	// An earlier layout kept one log per shard. Such a log replays beneath the
+	// org-level log (its records are older, so the org log's last-writer-wins
+	// layering keeps the newer state) and the first fold captures its records
+	// in the shard's snapshot and removes the file.
+	root := t.TempDir()
+
+	const (
+		legacyEntry = "projects/p/workspaces/w/runs/r1/run.json"
+		newerEntry  = "projects/p/workspaces/w/runs/r2/run.json"
+	)
+
+	legacyLog := filepath.Join(root, "projects", "p", "workspaces", "w", ".ledger", "log.ndjson")
+	legacyLine := `{"kind":"entry","path":"` + legacyEntry +
+		`","entry":{"firstSeen":"2026-07-08T12:00:00Z","status":"errored","attempts":1}}`
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyLog), 0o755))
+	require.NoError(t, os.WriteFile(legacyLog, []byte(legacyLine+"\n"), 0o600))
+
+	ledger, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	got, ok := ledger.Entry(legacyEntry)
+	require.True(t, ok, "the legacy record replays")
+	assert.Equal(t, manifest.StatusErrored, got.Status)
+
+	ledger.StartRun()
+	ledger.RecordDone(newerEntry, manifest.Signature{Size: 1})
+	ledger.FinishRun()
+	require.NoError(t, ledger.Flush())
+	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
+
+	_, statErr := os.Stat(legacyLog)
+	assert.True(t, os.IsNotExist(statErr), "the fold retires the migrated legacy log")
+
+	reloaded, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, reloaded.Close()) })
+
+	got, ok = reloaded.Entry(legacyEntry)
+	require.True(t, ok, "the legacy record survives the fold in the shard's snapshot")
+	assert.Equal(t, manifest.StatusErrored, got.Status)
+
+	_, ok = reloaded.Entry(newerEntry)
+	assert.True(t, ok, "the org-log record survives alongside it")
 }
 
 func TestLoad_TornTrailingLogLineDropped(t *testing.T) {
@@ -794,7 +845,7 @@ func TestLedger_ShardsPerWorkspace(t *testing.T) {
 	assert.Equal(t, 3, reloaded.Tally().Done)
 }
 
-func TestLedger_FlushTouchesOnlyChangedShards(t *testing.T) {
+func TestLedger_FoldRewritesOnlyChangedShards(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -808,9 +859,17 @@ func TestLedger_FlushTouchesOnlyChangedShards(t *testing.T) {
 	ledger.FinishRun()
 	require.NoError(t, ledger.Flush())
 
-	// A resumed run that records only into ws1 leaves ws2's shard untouched: only
-	// the shard that changed grows a log.
+	// A resumed run that records only into ws1 leaves ws2's shard untouched:
+	// mid-run flushes append the delta to the org log only, and the finished
+	// run's fold rewrites only the snapshots the log made stale.
 	require.NoError(t, ledger.Close(), "release the lock as a finished process would")
+
+	ws1Snap := filepath.Join(root, "projects", "p", "workspaces", "ws1", ".ledger", "snapshot.json")
+	ws2Snap := filepath.Join(root, "projects", "p", "workspaces", "ws2", ".ledger", "snapshot.json")
+	orgLog := filepath.Join(root, ".ledger", "log.ndjson")
+
+	ws2Before, err := os.ReadFile(ws2Snap)
+	require.NoError(t, err)
 
 	resumed, err := manifest.Load(root)
 	require.NoError(t, err)
@@ -819,14 +878,28 @@ func TestLedger_FlushTouchesOnlyChangedShards(t *testing.T) {
 	resumed.RecordErrored("projects/p/workspaces/ws1/runs/r2/run.json", errors.New("boom"), true)
 	require.NoError(t, resumed.Flush())
 
-	ws1Log := filepath.Join(root, "projects", "p", "workspaces", "ws1", ".ledger", "log.ndjson")
-	ws2Log := filepath.Join(root, "projects", "p", "workspaces", "ws2", ".ledger", "log.ndjson")
+	data, err := os.ReadFile(orgLog)
+	require.NoError(t, err, "a mid-run flush appends the delta to the org log")
+	assert.Contains(t, string(data), "r2/run.json")
 
-	_, statErr := os.Stat(ws1Log)
-	require.NoError(t, statErr, "the touched workspace's shard grows a log")
+	ws1Before, err := os.ReadFile(ws1Snap)
+	require.NoError(t, err)
+	assert.NotContains(t, string(ws1Before), "r2/run.json", "a mid-run flush rewrites no snapshot")
 
-	_, statErr = os.Stat(ws2Log)
-	assert.True(t, os.IsNotExist(statErr), "the untouched workspace's shard is not rewritten")
+	resumed.FinishRun()
+	require.NoError(t, resumed.Flush())
+	require.NoError(t, resumed.Close(), "release the lock as a finished process would")
+
+	ws1After, err := os.ReadFile(ws1Snap)
+	require.NoError(t, err)
+	assert.Contains(t, string(ws1After), "r2/run.json", "the fold captures the delta in the stale shard")
+
+	ws2After, err := os.ReadFile(ws2Snap)
+	require.NoError(t, err)
+	assert.Equal(t, string(ws2Before), string(ws2After), "the untouched workspace's snapshot is not rewritten")
+
+	_, statErr := os.Stat(orgLog)
+	assert.True(t, os.IsNotExist(statErr), "the finished run's fold resets the org log")
 }
 
 func TestLedger_SettledSurvivesLogRoundTrip(t *testing.T) {
