@@ -324,8 +324,23 @@ func (a *Archiver) Run(ctx context.Context) error {
 		)
 	}
 
-	// Every organization was tried; a non-cancellation failure of one does not
-	// abort the rest, but it must not be reported as a clean run either.
+	// A cancellation during the final organization has no next iteration to
+	// reach the top-of-loop guard, so the finished loop is classified once
+	// more here.
+	return runOutcome(runCtx, incomplete)
+}
+
+// runOutcome classifies the finished organization loop. A cancellation wins
+// over an incomplete tally: failure counts accumulated before an interrupt
+// landed describe an aborted run, not a finished-but-broken one, so the run
+// keeps the graceful cancellation exit the command maps to a clean status.
+// Otherwise every organization was tried, and a non-cancellation failure of
+// any of them must not be reported as a clean run.
+func runOutcome(ctx context.Context, incomplete bool) error {
+	if ctx.Err() != nil {
+		return fmt.Errorf("archive run: %w", ctx.Err())
+	}
+
 	if incomplete {
 		return ErrRunIncomplete
 	}

@@ -16,6 +16,8 @@ var (
 	LogFailures = (*Archiver).logFailures
 	// OrgIncomplete exposes orgIncomplete for tests.
 	OrgIncomplete = orgIncomplete
+	// RunOutcome exposes runOutcome for tests.
+	RunOutcome = runOutcome
 	// FilterProjects exposes filterProjects for tests.
 	FilterProjects = filterProjects
 	// FilterWorkspaces exposes filterWorkspaces for tests.

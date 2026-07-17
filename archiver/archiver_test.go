@@ -90,6 +90,58 @@ func TestOrgIncomplete(t *testing.T) {
 	}
 }
 
+func TestRunOutcome(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		canceled   bool
+		incomplete bool
+		err        error
+	}{
+		"clean loop returns nil": {},
+		"incomplete loop reports the incomplete run": {
+			incomplete: true,
+			err:        archiver.ErrRunIncomplete,
+		},
+		"cancellation returns the context error": {
+			canceled: true,
+			err:      context.Canceled,
+		},
+		"cancellation wins over pre-interrupt failures": {
+			// An interrupt during the final organization's close sweep keeps
+			// the graceful cancellation exit even when the sweep had already
+			// counted failures before the interrupt landed.
+			canceled:   true,
+			incomplete: true,
+			err:        context.Canceled,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := t.Context()
+			if tc.canceled {
+				var cancel context.CancelFunc
+
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			err := archiver.RunOutcome(ctx, tc.incomplete)
+
+			if tc.err != nil {
+				require.ErrorIs(t, err, tc.err)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestNew(t *testing.T) {
 	t.Parallel()
 
