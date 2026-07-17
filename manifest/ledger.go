@@ -326,8 +326,10 @@ func discoverShards(root string) (map[string]string, error) {
 }
 
 // readSubdirs returns the immediate subdirectory names of dir, or nil when dir
-// does not exist. A read error other than a missing directory is returned so a
-// permission or filesystem fault does not silently hide shards below it.
+// does not exist. Symlinks are resolved so a project or workspace directory an
+// operator relocated behind a symlink still surfaces the shards beneath it. A
+// read error other than a missing directory is returned so a permission or
+// filesystem fault does not silently hide shards below it.
 func readSubdirs(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 
@@ -341,12 +343,44 @@ func readSubdirs(dir string) ([]string, error) {
 	names := make([]string, 0, len(entries))
 
 	for _, e := range entries {
-		if e.IsDir() {
+		isDir, err := entryIsDir(dir, e)
+		if err != nil {
+			return nil, err
+		}
+
+		if isDir {
 			names = append(names, e.Name())
 		}
 	}
 
 	return names, nil
+}
+
+// entryIsDir reports whether e names a directory, resolving a symlinked entry
+// with [os.Stat]: [os.ReadDir] does not follow symlinks, so a directory an
+// operator relocated behind a symlink would otherwise read as a non-directory,
+// hiding every shard beneath it and re-archiving (then overwriting) the
+// subtree's ledger history. A dangling link reads as no directory; any other
+// stat fault is surfaced, matching discovery's no-silent-drop policy.
+func entryIsDir(dir string, e fs.DirEntry) (bool, error) {
+	if e.IsDir() {
+		return true, nil
+	}
+
+	if e.Type()&fs.ModeSymlink == 0 {
+		return false, nil
+	}
+
+	info, err := os.Stat(filepath.Join(dir, e.Name()))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("stat %q: %w", filepath.Join(dir, e.Name()), err)
+	}
+
+	return info.IsDir(), nil
 }
 
 // shardFor returns the shard that owns key, creating it if absent. Callers that

@@ -41,6 +41,66 @@ func TestDiscoverShardsWithGlobMetaInRoot(t *testing.T) {
 	}, gotKeys)
 }
 
+func TestDiscoverShardsFollowsSymlinkedDirectories(t *testing.T) {
+	t.Parallel()
+
+	// An operator can relocate a large subtree to another volume and leave a
+	// symlink in its place. Discovery must follow the link: skipping it hides
+	// every shard beneath, re-archives the subtree from empty, and the next
+	// compaction overwrites the pre-existing snapshots.
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "archive")
+	relocated := filepath.Join(tmp, "relocated")
+
+	for _, dir := range []string{
+		filepath.Join(root, LedgerDirName),
+		filepath.Join(relocated, "p1", "workspaces", "w1", LedgerDirName),
+		filepath.Join(relocated, "p2-target", "stacks", "s1", LedgerDirName),
+		filepath.Join(relocated, "p3", "workspaces"),
+	} {
+		require.NoError(t, os.MkdirAll(dir, 0o750))
+	}
+
+	// The whole projects level lives behind one symlink, a single project is a
+	// symlink itself, and a workspace directory is a symlinked leaf.
+	require.NoError(t, os.Symlink(relocated, filepath.Join(root, "projects")))
+	require.NoError(t, os.Symlink(
+		filepath.Join(relocated, "p2-target"),
+		filepath.Join(relocated, "p2"),
+	))
+	require.NoError(t, os.Symlink(
+		filepath.Join(relocated, "p1", "workspaces", "w1"),
+		filepath.Join(relocated, "p3", "workspaces", "w3"),
+	))
+
+	// A dangling symlink and a symlink to a file are skipped, not errors.
+	require.NoError(t, os.Symlink(
+		filepath.Join(tmp, "gone"),
+		filepath.Join(relocated, "dangling"),
+	))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "note.txt"), []byte("x"), 0o600))
+	require.NoError(t, os.Symlink(
+		filepath.Join(tmp, "note.txt"),
+		filepath.Join(relocated, "not-a-dir"),
+	))
+
+	got, err := discoverShards(root)
+	require.NoError(t, err)
+
+	gotKeys := make(map[string]struct{}, len(got))
+	for sk := range got {
+		gotKeys[sk] = struct{}{}
+	}
+
+	require.Equal(t, map[string]struct{}{
+		"":                             {},
+		"projects/p1/workspaces/w1":    {},
+		"projects/p2/stacks/s1":        {},
+		"projects/p2-target/stacks/s1": {},
+		"projects/p3/workspaces/w3":    {},
+	}, gotKeys)
+}
+
 func TestFlushAppendsCrossShardOwnersFirst(t *testing.T) {
 	t.Parallel()
 
