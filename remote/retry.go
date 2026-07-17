@@ -45,6 +45,13 @@ const (
 	// at [minWriteRate] (see [Client.writeWindow]): still a hard bound on a
 	// wedged connection, never a cap on a working one.
 	DefaultStallTimeout = 2 * time.Minute
+
+	// DefaultServerCopyCap is the source size at and above which
+	// [Client.Copy] streams the bytes instead of asking the backend for a
+	// server-side copy: S3's single-request CopyObject rejects sources of
+	// 5 GiB and up, and would do so identically on every retry and every
+	// run, permanently blocking a heal's convergence for a large bundle.
+	DefaultServerCopyCap = 5 << 30
 )
 
 // minWriteRate is the sustained transfer rate the write watchdog assumes no

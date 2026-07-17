@@ -63,12 +63,13 @@ const (
 // organization it archives. Create instances with [New]; a client that is no
 // longer needed releases its backend resources through [Client.Close].
 type Client struct {
-	bucket       *blob.Bucket
-	wireBytes    *atomic.Int64
-	cfg          Config
-	retries      int
-	retryDelay   time.Duration
-	stallTimeout time.Duration
+	bucket        *blob.Bucket
+	wireBytes     *atomic.Int64
+	cfg           Config
+	retries       int
+	retryDelay    time.Duration
+	stallTimeout  time.Duration
+	serverCopyCap int64
 
 	// The attrsUntrusted flag records that the backend's own digest attribute is not a
 	// content MD5 (an SSE-KMS-encrypted S3 bucket's ETag is hex but hashes
@@ -84,6 +85,8 @@ type Client struct {
 // Options of this type:
 //   - [WithBucket]
 //   - [WithRetry]
+//   - [WithServerCopyCap]
+//   - [WithStallTimeout]
 //   - [WithWireBytes]
 type Option func(*Client)
 
@@ -134,6 +137,17 @@ func WithWireBytes(counter *atomic.Int64) Option {
 	}
 }
 
+// WithServerCopyCap sets the source size at and above which [Client.Copy]
+// streams the bytes through the client instead of asking the backend for a
+// server-side copy, overriding [DefaultServerCopyCap]. A backend whose
+// single-request copy ceiling differs from S3's can be matched here; a
+// non-positive cap streams every copy. It returns an [Option].
+func WithServerCopyCap(size int64) Option {
+	return func(c *Client) {
+		c.serverCopyCap = size
+	}
+}
+
 // New creates a new [Client] over cfg.
 //
 // Unless [WithBucket] supplies one, the bucket is opened from cfg's URL,
@@ -142,10 +156,11 @@ func WithWireBytes(counter *atomic.Int64) Option {
 // [ErrMissingURL] when cfg names no URL.
 func New(ctx context.Context, cfg Config, opts ...Option) (*Client, error) {
 	c := &Client{
-		cfg:          cfg,
-		retries:      DefaultRetries,
-		retryDelay:   DefaultRetryDelay,
-		stallTimeout: DefaultStallTimeout,
+		cfg:           cfg,
+		retries:       DefaultRetries,
+		retryDelay:    DefaultRetryDelay,
+		stallTimeout:  DefaultStallTimeout,
+		serverCopyCap: DefaultServerCopyCap,
 	}
 
 	for _, opt := range opts {
@@ -314,17 +329,34 @@ func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
 	return c.objectInfo(attrs), nil
 }
 
-// Copy duplicates the object at srcKey to dstKey server-side: the bytes
-// never leave the backend, so a large object copies without egress or local
-// staging, and the recorded digest metadata rides along. The sweep's rename
-// healing uses it to converge an only-copy stored under a pre-rename key
-// onto the object's current name. An absent source returns [ErrNotFound].
+// Copy duplicates the object at srcKey to dstKey. A source below the
+// server-copy cap copies server-side — the bytes never leave the backend and
+// the recorded digest metadata rides along — while a source at or past it
+// streams through the client instead (see [DefaultServerCopyCap]), since the
+// backend's single-request copy would reject it identically forever. The
+// sweep's rename healing uses it to converge an only-copy stored under a
+// pre-rename key onto the object's current name. An absent source returns
+// [ErrNotFound].
 func (c *Client) Copy(ctx context.Context, srcKey, dstKey string) error {
-	err := c.withRetry(ctx, func() error {
-		return c.runAttempt(ctx, c.stallTimeout, func(ctx context.Context, _ func()) error {
-			return c.bucket.Copy(ctx, dstKey, srcKey, nil) //nolint:wrapcheck // Wrapped below.
+	attrs, err := c.attributes(ctx, srcKey)
+	if err != nil {
+		if isNotFound(err) {
+			return fmt.Errorf("%w: %s", ErrNotFound, srcKey)
+		}
+
+		return fmt.Errorf("copy %q to %q: %w", srcKey, dstKey, err)
+	}
+
+	if c.serverCopyCap > 0 && attrs.Size < c.serverCopyCap {
+		err = c.withRetry(ctx, func() error {
+			return c.runAttempt(ctx, c.stallTimeout, func(ctx context.Context, _ func()) error {
+				return c.bucket.Copy(ctx, dstKey, srcKey, nil) //nolint:wrapcheck // Wrapped below.
+			})
 		})
-	})
+	} else {
+		err = c.streamCopy(ctx, srcKey, dstKey, attrs)
+	}
+
 	if err != nil {
 		if isNotFound(err) {
 			return fmt.Errorf("%w: %s", ErrNotFound, srcKey)
@@ -334,6 +366,36 @@ func (c *Client) Copy(ctx context.Context, srcKey, dstKey string) error {
 	}
 
 	return nil
+}
+
+// streamCopy copies srcKey to dstKey by streaming the bytes through the
+// client, for sources the backend's single-request copy cannot carry. It
+// costs egress, unlike the server-side path, but an oversized heal runs it
+// once and converges permanently. The source's recorded digest metadata
+// rides to the destination, and its MD5 — when recorded — is re-verified
+// against the streamed bytes at commit.
+func (c *Client) streamCopy(ctx context.Context, srcKey, dstKey string, attrs *blob.Attributes) error {
+	opts := &blob.WriterOptions{
+		BufferSize:                  partSizeFor(attrs.Size, c.cfg.PartSize),
+		MaxConcurrency:              c.cfg.Concurrency,
+		DisableContentTypeDetection: true,
+		ContentMD5:                  c.objectInfo(attrs).MD5,
+		Metadata:                    attrs.Metadata,
+	}
+
+	//nolint:wrapcheck // The caller wraps with both keys.
+	return c.withRetry(ctx, func() error {
+		return c.runAttempt(ctx, c.writeWindow(attrs.Size), func(ctx context.Context, touch func()) error {
+			r, err := c.bucket.NewReader(ctx, srcKey, nil)
+			if err != nil {
+				return err //nolint:wrapcheck // Wrapped by the caller.
+			}
+
+			defer r.Close() //nolint:errcheck // The write's own error decides the attempt.
+
+			return c.write(ctx, dstKey, r, touch, opts)
+		})
+	})
 }
 
 // Upload streams body to the object at key, letting the backend split a

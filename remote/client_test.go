@@ -24,13 +24,13 @@ import (
 // retrying off, so a test that injects a persistent fault observes exactly one
 // attempt; retry behavior is exercised by the tests that opt back in through
 // [newRetryClient].
-func newClient(t *testing.T, cfg remote.Config) (*remote.Client, *remotetest.Fake) {
+func newClient(t *testing.T, cfg remote.Config, opts ...remote.Option) (*remote.Client, *remotetest.Fake) {
 	t.Helper()
 
 	fake := remotetest.New()
 
 	client, err := remote.New(t.Context(), cfg,
-		remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0))
+		append([]remote.Option{remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0)}, opts...)...)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -651,4 +651,28 @@ func TestCopyDuplicatesServerSide(t *testing.T) {
 
 	err := client.Copy(t.Context(), "gone/key", "new/key")
 	require.ErrorIs(t, err, remote.ErrNotFound)
+}
+
+func TestCopyStreamsPastTheServerCopyCap(t *testing.T) {
+	t.Parallel()
+
+	// A source at or past the backend's single-request copy ceiling would be
+	// rejected identically on every retry and every run, permanently blocking
+	// a heal's convergence; the client must stream it instead. The fake
+	// records server-side copies, so an empty record proves the stream path.
+	body := []byte("bigger than the tiny cap")
+
+	client, fake := newClient(t, remote.Config{}, remote.WithServerCopyCap(8))
+	fake.SetObject("old/key", remotetest.Object{
+		Data:     body,
+		Metadata: map[string]string{"sha256": "abc"},
+	})
+
+	require.NoError(t, client.Copy(t.Context(), "old/key", "new/key"))
+
+	obj, ok := fake.Object("new/key")
+	require.True(t, ok)
+	assert.Equal(t, body, obj.Data)
+	assert.Equal(t, "abc", obj.Metadata["sha256"], "metadata rides the streamed copy too")
+	assert.Empty(t, fake.Copies(), "an oversized source never attempts the server-side copy")
 }
