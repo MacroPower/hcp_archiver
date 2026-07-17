@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -366,16 +367,18 @@ func mkdirAllSynced(dir string, mode fs.FileMode) error {
 // the hot path taken by every write after the first into a directory. Otherwise
 // it scans upward from dir collecting the levels that do not yet exist (exactly
 // the ones [os.MkdirAll] creates), creates them in one MkdirAll call (keeping its
-// race, mode, and ENOTDIR handling), then chmods and flushes each scanned level.
-// The chmod lands mode exactly: MkdirAll masks it by the process umask, so
-// without it a permissive [WithDirMode] would be silently narrowed, unlike the
-// file path in stage and Append which chmod for the same reason. The parents are
-// flushed unconditionally, even one a concurrent creator won the race to make,
-// because the dentry still needs flushing from this process and a redundant
-// fsync (or chmod to the same mode) is harmless. The deepest created directory
-// is then flushed for its own inode: no level below it makes it a parent-sync
-// target, so without this its just-chmodded mode would rely on a later write's
-// syncDir to become durable, leaving the error path uncovered.
+// race, mode, and ENOTDIR handling), then chmods and flushes each scanned level
+// shallowest-first, so each level's chmod happens before the parent-sync issued
+// for the level below it flushes that mode to stable storage. The chmod lands
+// mode exactly: MkdirAll masks it by the process umask, so without it a
+// permissive [WithDirMode] would be silently narrowed, unlike the file path in
+// stage and Append which chmod for the same reason. The parents are flushed
+// unconditionally, even one a concurrent creator won the race to make, because
+// the dentry still needs flushing from this process and a redundant fsync (or
+// chmod to the same mode) is harmless. The deepest created directory is then
+// flushed for its own inode: no level below it makes it a parent-sync target,
+// so without this its just-chmodded mode would rely on a later write's syncDir
+// to become durable, leaving the error path uncovered.
 func mkdirAllSync(dir string, mode fs.FileMode, sync func(string) error) error {
 	info, err := os.Stat(dir)
 	if err == nil && info.IsDir() {
@@ -412,7 +415,12 @@ func mkdirAllSync(dir string, mode fs.FileMode, sync func(string) error) error {
 		return fmt.Errorf("create parent directory %q: %w", dir, err)
 	}
 
-	for _, level := range missing {
+	// Walk the created levels shallowest-first: the sync of a level's parent is
+	// issued while processing the level below it, so chmodding shallow levels
+	// before deep ones puts every intermediate level's chmod ahead of the fsync
+	// that flushes its inode. Deepest-first would invert that order, leaving the
+	// intermediate modes non-durable.
+	for _, level := range slices.Backward(missing) {
 		err = os.Chmod(level, mode)
 		if err != nil {
 			return fmt.Errorf("chmod created directory %q: %w", level, err)

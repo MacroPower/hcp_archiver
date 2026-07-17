@@ -246,6 +246,10 @@ func TestMkdirAllSync_flushesEveryCreatedAncestor(t *testing.T) {
 	// The parent of every created level is flushed exactly once, so each new
 	// directory's dentry is durable, and the deepest created directory is flushed
 	// for its own inode too, so its mode is durable without a later write's sync.
+	// The order matters: levels are processed shallowest-first, so each created
+	// level is chmodded before the deeper level's parent-sync flushes its inode;
+	// deepest-first would fsync the intermediate levels before their chmods,
+	// leaving the just-set modes non-durable across a crash.
 	want := []string{
 		root,
 		filepath.Join(root, "a"),
@@ -253,8 +257,8 @@ func TestMkdirAllSync_flushesEveryCreatedAncestor(t *testing.T) {
 		filepath.Join(root, "a", "b", "c"),
 		target,
 	}
-	assert.ElementsMatch(t, want, synced,
-		"each created level's parent is flushed, plus the deepest directory itself")
+	assert.Equal(t, want, synced,
+		"each created level's parent is flushed shallowest-first, plus the deepest directory itself")
 
 	info, err := os.Stat(target)
 	require.NoError(t, err)
