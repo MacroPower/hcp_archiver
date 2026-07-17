@@ -760,10 +760,14 @@ prune a mass deletion of live content. The classification ladder:
    upload failure, a remote newly pointed at an old archive);
 5. `bundles/*.zip` without a sidecar: skip (unverified orphan; never upload);
 6. `config-versions/*.tar.gz` recorded done with the ledger signature's size
-   matching the local bytes: evict; otherwise skip with a warning (an
-   unproven tarball is never synced either, because a synced copy at the
-   eviction key could later pass a proper eviction's size gate and let it
-   delete the only proven local bytes);
+   matching the local bytes: evict; with no settled ledger entry: skip with a
+   warning (an unproven tarball is never synced either, because a synced copy
+   at the eviction key could later pass a proper eviction's size gate and let
+   it delete the only proven local bytes); recorded done but with the local
+   bytes contradicting the signature's size: stay local the same way, but log
+   an error and count a sweep failure — the proven record now disagrees with
+   the file backing it, so the run must exit incomplete rather than clean
+   over a corrupt, unmirrorable only-copy;
 7. everything else: sync incrementally.
 
 The incremental gate is driven by one upfront listing inventory of the org

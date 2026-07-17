@@ -397,8 +397,8 @@ func (e *Env) uploadFile(ctx context.Context, absPath, key string, size int64, d
 type syncAction int
 
 const (
-	// Leave the file alone: an unverified orphan zip or an unproven
-	// tarball, kept local and never uploaded.
+	// Leave the file alone: an unverified orphan zip or a tarball with no
+	// settled ledger entry, kept local and never uploaded.
 	actionSkip syncAction = iota
 	// Offload the file and remove it locally: a sealed bundle or a settled
 	// configuration-version tarball.
@@ -406,6 +406,11 @@ const (
 	// Upload the file if the remote copy is absent or differs, keeping the
 	// local copy canonical.
 	actionSync
+	// Keep the file local like a skip, but count a sweep failure: a done
+	// tarball whose local bytes contradict the ledger signature that settled
+	// it is corrupt, and a run that exited clean over it would hide an
+	// unmirrorable only-copy from the operator forever.
+	actionSuspect
 )
 
 // SyncArchive mirrors the organization's archive tree to the remote store; it
@@ -415,7 +420,10 @@ const (
 // bundles with their sidecar beside them and settled configuration-version
 // tarballs are evicted through [Env.OffloadFile] (the bundle case is a
 // backstop for seal-time eviction: a workspace filtered out of later runs, a
-// prior failure, a remote newly pointed at an old archive). The ledger flock
+// prior failure, a remote newly pointed at an old archive). A done tarball
+// whose local bytes contradict their ledger signature is suspect: it is
+// neither evicted nor synced, and it counts a sweep failure so the run exits
+// incomplete rather than clean over a corrupt only-copy. The ledger flock
 // target and the ledger's log.ndjson are never uploaded — a stale remote log
 // replayed onto a restored tree could resurrect old ledger state; the
 // post-compaction snapshot.json is the durable record. Everything else syncs
@@ -459,6 +467,15 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 		counters.failed.Add(1)
 
 		return counters.stats()
+	}
+
+	// A suspect cold surface (a done tarball whose local bytes contradict the
+	// ledger signature that settled them) stays local and unmirrored; each
+	// counts a sweep failure so the run exits incomplete over it, exactly as
+	// the eviction gate's refusal of size-preserving rot already does.
+	for range sweep.suspect {
+		counters.failed.Add(1)
+		e.remoteTally.fail()
 	}
 
 	// The presence obligations are derived before any of this sweep's
@@ -627,6 +644,7 @@ type treeSweep struct {
 	keep        map[string]struct{}
 	evict       []string
 	sync        []string
+	suspect     []string
 	evictedZips []string
 }
 
@@ -660,6 +678,8 @@ func (e *Env) classifyTree(ctx context.Context) (*treeSweep, error) {
 			sweep.evict = append(sweep.evict, relPath)
 		case actionSync:
 			sweep.sync = append(sweep.sync, relPath)
+		case actionSuspect:
+			sweep.suspect = append(sweep.suspect, relPath)
 		case actionSkip:
 		}
 
@@ -671,6 +691,7 @@ func (e *Env) classifyTree(ctx context.Context) (*treeSweep, error) {
 
 	slices.Sort(sweep.evict)
 	slices.Sort(sweep.sync)
+	slices.Sort(sweep.suspect)
 	slices.Sort(sweep.evictedZips)
 
 	return sweep, nil
@@ -858,26 +879,48 @@ func (e *Env) bundleSealed(relPath string) bool {
 // classifyTarball gates a configuration-version tarball on its ledger record:
 // only a done entry whose recorded size matches the local bytes classifies
 // for eviction (the eviction itself then re-proves the bytes against the
-// signature's SHA-256; this check is the cheap stat-only screen). An
-// unproven one is neither evicted nor synced — a synced copy at the eviction
-// key carries the suspect bytes and could later pass a proper eviction's
-// confirm, letting it delete the only local copy, and a ledger-declared size
-// mismatch means the local file is suspect — so it is skipped with a warning
-// and stays local.
+// signature's SHA-256; this check is the cheap stat-only screen). Neither of
+// the other outcomes is evicted or synced — a synced copy at the eviction key
+// carries unproven bytes and could later pass a proper eviction's confirm,
+// letting it delete the only local copy — but they differ in weight: a
+// tarball with no settled entry at all skips with a warning, while a done
+// entry whose signature the local bytes contradict marks the file suspect
+// (see [actionSuspect]) — the ledger's proven record now disagrees with the
+// file backing it, the same rot the eviction gate refuses when the size is
+// preserved, so it must count against the run instead of exiting clean over
+// a corrupt, unmirrorable only-copy.
 func (e *Env) classifyTarball(ctx context.Context, relPath string) syncAction {
 	entry, ok := e.ledger.Entry(relPath)
-	if ok && entry.Status == manifest.StatusDone && entry.Signature != nil {
-		info, err := os.Stat(e.store.AbsPath(relPath))
-		if err == nil && info.Size() == entry.Signature.Size {
-			return actionEvict
-		}
+	if !ok || entry.Status != manifest.StatusDone || entry.Signature == nil {
+		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_tarball_unproven",
+			slog.String("path", relPath),
+		)
+
+		return actionSkip
 	}
 
-	e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_tarball_unproven",
+	info, err := os.Stat(e.store.AbsPath(relPath))
+	if err != nil {
+		e.logger.LogAttrs(ctx, slog.LevelError, "sync_tarball_suspect",
+			slog.String("path", relPath),
+			slog.Int64("recorded_bytes", entry.Signature.Size),
+			slog.String("error", err.Error()),
+		)
+
+		return actionSuspect
+	}
+
+	if info.Size() == entry.Signature.Size {
+		return actionEvict
+	}
+
+	e.logger.LogAttrs(ctx, slog.LevelError, "sync_tarball_suspect",
 		slog.String("path", relPath),
+		slog.Int64("recorded_bytes", entry.Signature.Size),
+		slog.Int64("local_bytes", info.Size()),
 	)
 
-	return actionSkip
+	return actionSuspect
 }
 
 // isBundleZip reports a sealed-bundle zip: a .zip directly under a bundles/

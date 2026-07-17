@@ -140,6 +140,7 @@ func TestSyncArchiveClassification(t *testing.T) {
 		wantRemote  bool
 		wantLocal   bool
 		wantEvicted bool
+		wantFailed  int
 	}{
 		"a staging temp is never uploaded": {
 			relPath:   "projects/.atomicfile-123.tmp",
@@ -186,14 +187,15 @@ func TestSyncArchiveClassification(t *testing.T) {
 			relPath:   "config-versions/cv-2.tar.gz",
 			wantLocal: true,
 		},
-		"a tarball whose size mismatches its signature stays local": {
+		"a tarball whose size mismatches its signature stays local and fails the sweep": {
 			seed: func(t *testing.T, f syncFixture) {
 				t.Helper()
 				f.ledger.RecordDone("config-versions/cv-3.tar.gz",
 					manifest.Signature{Hash: "h", Size: 999})
 			},
-			relPath:   "config-versions/cv-3.tar.gz",
-			wantLocal: true,
+			relPath:    "config-versions/cv-3.tar.gz",
+			wantLocal:  true,
+			wantFailed: 1,
 		},
 		"an org metadata file syncs": {
 			relPath:    "org.json",
@@ -237,7 +239,8 @@ func TestSyncArchiveClassification(t *testing.T) {
 				assert.Zero(t, stats.Evicted)
 			}
 
-			assert.Zero(t, stats.Failed)
+			assert.Equal(t, tc.wantFailed, stats.Failed,
+				"a suspect only-copy counts; every other outcome stays clean")
 		})
 	}
 }
@@ -1610,6 +1613,20 @@ func TestRemoteTallyFailureMotions(t *testing.T) {
 				// all; the refusal still counts, matching the pass's Failed.
 				f.writeDone(t, "config-versions/cv-1.tar.gz", []byte("proven tarball bytes"))
 				f.write(t, "config-versions/cv-1.tar.gz", []byte("rotted tarball bytes"))
+
+				stats := f.env.SyncArchive(t.Context())
+				require.Equal(t, 1, stats.Failed)
+			},
+		},
+		"a suspect tarball caught by the size screen": {
+			run: func(t *testing.T, f syncFixture) {
+				t.Helper()
+
+				// Rot that changed the byte count is caught one step earlier
+				// than the proof gate, by the classification's stat screen; it
+				// must weigh the same as rot the proof gate catches.
+				f.writeDone(t, "config-versions/cv-1.tar.gz", []byte("proven tarball bytes"))
+				f.write(t, "config-versions/cv-1.tar.gz", []byte("truncated"))
 
 				stats := f.env.SyncArchive(t.Context())
 				require.Equal(t, 1, stats.Failed)
