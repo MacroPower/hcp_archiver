@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -282,38 +283,49 @@ func (s *shard) drainDirty() drainedState {
 	d.recs = make([]walRecord, 0,
 		len(d.unsettled)+len(d.entries)+len(d.watermarks)+len(d.completed)+len(d.settled)+1)
 
-	// A collection's unsettlement leads every entry in the batch. The log is
-	// replayed as a prefix after a crash (a torn tail drops), so the order
-	// within one append is a durability order: were the unsettle record to
-	// trail the entries, a crash between them would persist freshly frozen
-	// entries under a stale settled flag, and the next walk's early stop
-	// would halt above elements the interrupted walk never listed. Leading,
-	// the record is durable before any entry it guards; a settlement earned
-	// later in the same batch still lands after the entries as usual.
-	for key := range d.unsettled {
+	// The batch is a durability order: the log is replayed as a prefix after a
+	// crash (a torn tail truncates), so within one append every guard must
+	// precede every record that could act as a skip signal for it. The rule,
+	// applied by class: collection unsettlements lead, then unsettled-status
+	// entries, then settled-status entries, then the collection-level skip
+	// signals (watermarks, completion, settlement). Each class iterates in
+	// sorted key order so the layout is deterministic rather than map-random.
+	//
+	// The entry split is what makes a same-batch guard safe: a settled entry
+	// can be a skip signal for unsettled work drained beside it (run-events
+	// recorded done while its actors gate is still pending, say), and were the
+	// two to land in map order, a tear between them could persist the skip
+	// signal without the guard. Unsettled-first, every prefix that contains a
+	// settled entry also contains every guard drained with it; the reverse
+	// tear only loses a skip signal, which costs a retry.
+	for _, key := range slices.Sorted(maps.Keys(d.unsettled)) {
 		d.recs = append(d.recs, walRecord{Kind: walSettled, Key: key})
 	}
 
-	for relPath := range d.entries {
-		e := s.entries[relPath]
-		if e == nil {
-			continue
+	entryPaths := slices.Sorted(maps.Keys(d.entries))
+
+	for _, settled := range []bool{false, true} {
+		for _, relPath := range entryPaths {
+			e := s.entries[relPath]
+			if e == nil || e.Status.Settled() != settled {
+				continue
+			}
+
+			cp := cloneEntry(*e)
+
+			d.recs = append(d.recs, walRecord{Kind: walEntry, Path: relPath, Entry: &cp})
 		}
-
-		cp := cloneEntry(*e)
-
-		d.recs = append(d.recs, walRecord{Kind: walEntry, Path: relPath, Entry: &cp})
 	}
 
-	for key := range d.watermarks {
+	for _, key := range slices.Sorted(maps.Keys(d.watermarks)) {
 		d.recs = append(d.recs, walRecord{Kind: walWatermark, Key: key, At: s.watermarks[key]})
 	}
 
-	for key := range d.completed {
+	for _, key := range slices.Sorted(maps.Keys(d.completed)) {
 		d.recs = append(d.recs, walRecord{Kind: walCompleted, Key: key})
 	}
 
-	for key := range d.settled {
+	for _, key := range slices.Sorted(maps.Keys(d.settled)) {
 		// A key drained unsettled whose value is still false already leads the
 		// batch; re-appending it here would only duplicate the line.
 		if _, led := d.unsettled[key]; led && !s.settled[key] {
