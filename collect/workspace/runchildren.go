@@ -98,15 +98,16 @@ func (c *Collector) archiveConfigurationVersion(ctx context.Context, project, ws
 // either derived file is still unsettled, and splits it into config-version.json
 // and config-version-ingress.json.
 //
-// One read feeds both files, so a read failure is routed through each path's
-// self-gating Object: a settled path is left untouched, an unsettled one records
-// the error so a re-run retries.
+// One read feeds both files, so it runs confirmed (a 404 is re-probed before it
+// is believed) and a failure is routed through each path's self-gating
+// recordErrored: a settled path is left untouched, an unsettled one records the
+// outcome so a re-run retries.
 func (c *Collector) archiveConfigVersionRecord(ctx context.Context, cvPath, ingPath, cvID string) error {
 	if !c.env.ShouldFetch(cvPath) && !c.env.ShouldFetch(ingPath) {
 		return nil
 	}
 
-	cv, err := doRead(ctx, c, cvPath,
+	cv, err := readConfirmed(ctx, c, cvPath,
 		func(ctx context.Context, tc *tfe.Client) (*tfe.ConfigurationVersion, error) {
 			return tc.ConfigurationVersions.ReadWithOptions(ctx, cvID, &tfe.ConfigurationVersionReadOptions{
 				Include: []tfe.ConfigVerIncludeOpt{tfe.ConfigVerIngressAttributes},
@@ -259,8 +260,9 @@ func (c *Collector) archiveComments(ctx context.Context, project, ws string, run
 // live only in the list include, not on the run, so a settled re-walk that
 // skipped the read could never re-derive them. So the read is gated on the union
 // of run-events.json being unsettled and a run-scoped actors reference gate being
-// open, and runs via the non-self-gating doRead: it re-derives the actors even
-// after run-events.json is Done, and the gate clears once every actor is captured.
+// open, and runs via the non-self-gating readConfirmed: it re-derives the actors
+// even after run-events.json is Done, and the gate clears once every actor is
+// captured.
 //
 // The events file settles Done last, after the actor writes and the gate, so this
 // skip signal is never persisted ahead of the writes it stands in for. A crash
@@ -278,7 +280,7 @@ func (c *Collector) archiveRunEvents(ctx context.Context, project, ws string, ru
 		return nil
 	}
 
-	events, err := doRead(ctx, c, eventsPath,
+	events, err := readConfirmed(ctx, c, eventsPath,
 		func(ctx context.Context, tc *tfe.Client) ([]*tfe.RunEvent, error) {
 			l, e := tc.RunEvents.List(ctx, runID, &tfe.RunEventListOptions{
 				Include: []tfe.RunEventIncludeOpt{tfe.RunEventActor, tfe.RunEventComment},
@@ -420,7 +422,7 @@ func (c *Collector) archiveTFPolicyOutcomes(ctx context.Context, project, ws str
 		return nil
 	}
 
-	evaluated, err := doRead(ctx, c, outPath, func(ctx context.Context, tc *tfe.Client) (*tfe.Run, error) {
+	evaluated, err := readConfirmed(ctx, c, outPath, func(ctx context.Context, tc *tfe.Client) (*tfe.Run, error) {
 		return tc.Runs.ReadWithOptions(ctx, runID, &tfe.RunReadOptions{
 			Include: []tfe.RunIncludeOpt{tfe.RunTFPolicyEvaluation},
 		})

@@ -154,15 +154,18 @@ func (c *Collector) object(ctx context.Context, relPath string, value any) error
 }
 
 // recordErrored funnels a read failure that feeds an immutable object into the
-// ledger through the self-gating [collect.Env.Object], so a settled path is left
-// untouched (never regressed done->errored) while an unsettled one records the
-// error with the client's transient classification and a re-run retries. It is
-// how a shared read that splits into several derived files reports its failure
-// without inventing a settled state or aborting the run walk.
+// ledger through the self-gating [collect.Env.RecordFailure], so a settled path
+// is left untouched (never regressed done->errored) while an unsettled one
+// records the outcome under the client's classification and a re-run retries.
+// It is how a shared read that splits into several derived files reports its
+// failure without inventing a settled state or aborting the run walk.
+//
+// A terminal cause (a 404) settles the derived paths absent, so every read
+// whose failure lands here must carry the in-run confirmation itself — run it
+// through [readConfirmed] or [paginateAll] — since no primitive's own
+// confirming re-probe stands between the read and the recorded outcome.
 func (c *Collector) recordErrored(ctx context.Context, relPath string, cause error) error {
-	return wrapArchive(relPath, c.env.Object(ctx, relPath, func(context.Context) (any, error) {
-		return nil, cause
-	}))
+	return wrapArchive(relPath, c.env.RecordFailure(ctx, relPath, cause))
 }
 
 // mutable archives a value already in hand as one mutable file at relPath.
@@ -212,19 +215,44 @@ func doRead[T any](
 	return out, nil
 }
 
+// readConfirmed runs read through [doRead] with the terminal-confirmation
+// semantics of the archive primitives (see [collect.Confirmed]): a 404 is
+// re-probed once before it is believed. The shared reads that split into
+// several derived files use it because their failures reach the ledger through
+// [Collector.recordErrored] rather than a primitive's own confirmed fetch;
+// without it a single eventual-consistency 404 would settle the derived paths
+// absent. A read that feeds a primitive directly uses [doRead], which the
+// primitive confirms itself.
+func readConfirmed[T any](
+	ctx context.Context,
+	c *Collector,
+	relPath string,
+	read func(context.Context, *tfe.Client) (T, error),
+) (T, error) {
+	//nolint:wrapcheck // Confirmed is transparent; doRead wraps with the path context.
+	return collect.Confirmed(ctx, c.env, func(ctx context.Context) (T, error) {
+		return doRead(ctx, c, relPath, read)
+	})
+}
+
 // paginateAll accumulates every page of a paginated list into one slice through
-// the shared client.
+// the shared client, re-probing a terminal first answer once (see
+// [collect.Confirmed]) because its callers report a failure through
+// [Collector.recordErrored], outside any primitive's own confirming re-probe.
 func paginateAll[T any](
 	ctx context.Context,
 	c *Collector,
 	list func(context.Context, *tfe.Client, tfe.ListOptions) ([]T, *tfe.Pagination, error),
 ) ([]T, error) {
-	items, err := tfeclient.Paginate(ctx, c.env.Client(), list)
-	if err != nil {
-		return nil, fmt.Errorf("paginate: %w", err)
-	}
+	//nolint:wrapcheck // Confirmed is transparent; the closure wraps the paginate error.
+	return collect.Confirmed(ctx, c.env, func(ctx context.Context) ([]T, error) {
+		items, err := tfeclient.Paginate(ctx, c.env.Client(), list)
+		if err != nil {
+			return nil, fmt.Errorf("paginate: %w", err)
+		}
 
-	return items, nil
+		return items, nil
+	})
 }
 
 // logBlob streams a log opened through open into an immutable blob at relPath.

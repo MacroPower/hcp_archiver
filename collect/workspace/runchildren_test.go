@@ -183,6 +183,103 @@ func TestArchiveConfigurationVersionTarballAbsent(t *testing.T) {
 	assert.False(t, exists, "an absent tarball writes no file")
 }
 
+func TestArchiveConfigurationVersionRecordAbsenceBlip(t *testing.T) {
+	t.Parallel()
+
+	// An eventual-consistency 404 on a just-listed configuration version must not
+	// settle the derived files absent from one response: the shared record read
+	// carries the same confirming re-probe as the archive primitives, so the
+	// second answer wins and the split archives normally.
+	cv := &tfe.ConfigurationVersion{
+		ID:                "cv-4",
+		IngressAttributes: &tfe.IngressAttributes{ID: "ia-4", CommitSHA: "0ddba11"},
+	}
+
+	var hits int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/configuration-versions/cv-4", func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		if hits == 1 {
+			w.WriteHeader(http.StatusNotFound)
+
+			return
+		}
+
+		writeJSONAPI(t, w, marshalJSONAPI(t, cv))
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+
+	f.preSettle(st.ConfigVersionTarball("cv-4"))
+
+	run := &tfe.Run{ID: "run-4", ConfigurationVersion: &tfe.ConfigurationVersion{ID: "cv-4"}}
+	require.NoError(t, f.collector.ArchiveConfigurationVersion(t.Context(), "proj", "ws", run))
+
+	assert.Equal(t, 2, hits, "the 404 is re-probed once before it is believed")
+	f.attrs(t, st.RunFile("proj", "ws", "run-4", "config-version.json"), "configuration-versions", "cv-4")
+	f.attrs(t, st.RunFile("proj", "ws", "run-4", "config-version-ingress.json"), "ingress-attributes", "ia-4")
+}
+
+func TestArchiveConfigurationVersionRecordAbsent(t *testing.T) {
+	t.Parallel()
+
+	// A repeated 404 is a confirmed absence: both derived files settle absent in
+	// one run, and recording the outcome replays no extra probe.
+	var hits int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/configuration-versions/cv-5", func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+
+	f.preSettle(st.ConfigVersionTarball("cv-5"))
+
+	run := &tfe.Run{ID: "run-5", ConfigurationVersion: &tfe.ConfigurationVersion{ID: "cv-5"}}
+	require.NoError(t, f.collector.ArchiveConfigurationVersion(t.Context(), "proj", "ws", run))
+
+	assert.Equal(t, 2, hits, "one confirming re-probe, and the recording adds none")
+	assert.Equal(t, manifest.StatusAbsent, f.status(st.RunFile("proj", "ws", "run-5", "config-version.json")))
+	assert.Equal(t, manifest.StatusAbsent, f.status(st.RunFile("proj", "ws", "run-5", "config-version-ingress.json")))
+}
+
+func TestArchivePolicyChecksListAbsenceBlip(t *testing.T) {
+	t.Parallel()
+
+	// The policy-check list reports its failure through the direct-recording path
+	// rather than a primitive's confirmed fetch, so the list itself must re-probe
+	// a 404 before believing it: one blip then a clean answer archives the checks
+	// instead of settling policy-checks.json absent.
+	var hits int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/runs/run-6/policy-checks", func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		if hits == 1 {
+			w.WriteHeader(http.StatusNotFound)
+
+			return
+		}
+
+		writeJSONAPI(t, w, marshalJSONAPI(t, []*tfe.PolicyCheck{}))
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+
+	run := &tfe.Run{ID: "run-6"}
+	require.NoError(t, f.collector.ArchivePolicyChecks(t.Context(), "proj", "ws", run))
+
+	assert.Equal(t, 2, hits, "the 404 is re-probed once before it is believed")
+	assert.Equal(t, manifest.StatusDone, f.status(st.RunFile("proj", "ws", "run-6", "policy-checks.json")))
+}
+
 func TestArchivePlanJSON(t *testing.T) {
 	t.Parallel()
 

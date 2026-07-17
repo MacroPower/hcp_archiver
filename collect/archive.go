@@ -306,6 +306,20 @@ func fetchConfirmed[T any](ctx context.Context, e *Env, fetch func(context.Conte
 	return fetch(ctx)
 }
 
+// Confirmed runs fetch with the terminal-confirmation semantics of the archive
+// primitives: an error that classifies terminal (a 404) is re-probed once after
+// the absent-confirm delay (see [WithAbsentConfirm]) before it is believed. It
+// suits a shared read performed outside the primitives — one whose value splits
+// into several derived files — so the cause later recorded through
+// [Env.RecordFailure] has already survived the in-run re-probe that guards a
+// settled absence.
+//
+// It is a package-level function rather than an [*Env] method because methods
+// cannot be generic.
+func Confirmed[T any](ctx context.Context, e *Env, fetch func(context.Context) (T, error)) (T, error) {
+	return fetchConfirmed(ctx, e, fetch)
+}
+
 // archiveJSON runs fetch, serializes and writes the value, and records the
 // object, the shared body of [Env.Object] and [Env.Mutable].
 func (e *Env) archiveJSON(ctx context.Context, relPath string, fetch func(context.Context) (any, error)) error {
@@ -380,6 +394,23 @@ func (e *Env) recordDone(ctx context.Context, relPath string, res store.WriteRes
 	}
 
 	e.eagerSync(ctx, relPath, res)
+}
+
+// RecordFailure records cause as the outcome of the object at relPath without
+// running a fetch, for a shared read performed outside the primitives whose
+// value splits into several derived files. It self-gates like [Env.Object], so
+// a settled path is left untouched (never regressed done->absent or
+// done->errored), and classifies cause the same way: a terminal cause records
+// the object absent — settled and sticky — so the caller must have run the
+// read through [Confirmed] and let it re-probe the 404 in-run first; a denial
+// records the object forbidden; anything else records it errored so a re-run
+// retries. Only a cancellation of ctx propagates.
+func (e *Env) RecordFailure(ctx context.Context, relPath string, cause error) error {
+	if !e.ledger.ShouldFetch(relPath) {
+		return nil
+	}
+
+	return e.fail(ctx, relPath, cause)
 }
 
 // fail maps a fetch error onto a ledger status, the one place the client's
