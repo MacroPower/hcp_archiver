@@ -744,7 +744,11 @@ store's default storage class.
 
 The close sweep walks every regular file under the org root and classifies it
 top-down (the eager motions honor the same classification — they change when
-a file first settles, never what happens to it):
+a file first settles, never what happens to it). The walk follows symlinked
+directories, matching ledger shard discovery: a subtree an operator relocated
+behind a symlink stays part of the mirror rather than reading as deleted —
+which would otherwise turn every mirrored key beneath it stale and hand the
+prune a mass deletion of live content. The classification ladder:
 
 1. an atomicfile staging temp: skip (a crash's partial write);
 2. `.ledger/lock`: skip (meaningful only as a kernel flock target);

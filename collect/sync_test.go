@@ -987,6 +987,92 @@ func TestSyncArchivePruneExemptsBundleSidecars(t *testing.T) {
 	assert.Zero(t, stats.Failed)
 }
 
+func TestSyncArchiveFollowsSymlinkedDirectories(t *testing.T) {
+	t.Parallel()
+
+	const (
+		wsFile  = "projects/prod/workspaces/api/workspace.json"
+		runFile = "projects/prod/workspaces/api/runs/run-1/run.json"
+	)
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	// The mirrored state of a prior run: both workspace files uploaded and
+	// recorded in the ledger.
+	for _, relPath := range []string{wsFile, runFile} {
+		data := []byte(`{"path":"` + relPath + `"}`)
+		f.writeDone(t, relPath, data)
+		f.fake.SetObject(f.key(relPath),
+			remotetest.Object{Data: data, MD5: remotetest.MD5Sum(data)})
+	}
+
+	// The operator relocates projects/ to another volume and leaves a symlink,
+	// the layout ledger shard discovery already follows. The sweep must see
+	// the same tree the ledger describes, or every mirrored key beneath the
+	// link reads as stale and the prune mass-deletes live mirror content.
+	root := f.store.Root()
+	relocated := filepath.Join(t.TempDir(), "relocated")
+	require.NoError(t, os.Rename(filepath.Join(root, "projects"), relocated))
+	require.NoError(t, os.Symlink(relocated, filepath.Join(root, "projects")))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Failed)
+	assert.Zero(t, stats.Pruned, "a relocated subtree's mirrored keys must not read as stale")
+	assert.Empty(t, f.fake.Deleted())
+	assert.Equal(t, 2, stats.Skipped, "the walk reaches both mirrored files through the link")
+}
+
+func TestSyncArchiveSymlinkLeafShapes(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+
+	// A symlink to a regular file mirrors like the file; a dangling link
+	// reads as absent, not as a walk error that would abort the sweep.
+	data := []byte(`{"org":"acme"}`)
+	target := filepath.Join(t.TempDir(), "org.json")
+	require.NoError(t, os.WriteFile(target, data, 0o600))
+
+	root := f.store.Root()
+	require.NoError(t, os.Symlink(target, filepath.Join(root, "org.json")))
+	require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "gone"),
+		filepath.Join(root, "dangling.json")))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	require.Zero(t, stats.Failed)
+	assert.Equal(t, 1, stats.Uploaded)
+
+	obj, ok := f.fake.Object(f.key("org.json"))
+	require.True(t, ok, "a symlinked file mirrors at the link's archive path")
+	assert.Equal(t, data, obj.Data)
+}
+
+func TestSyncSubtreeFollowsSymlinkedWorkspace(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	f.write(t, wsSubtree+"/workspace.json", []byte(`{"ws":"api"}`))
+
+	// The workspace directory itself is relocated behind a symlink: the walk
+	// root is then a link, which the seal-boundary sync must still read
+	// through or the subtree never mirrors at all.
+	root := f.store.Root()
+	target := filepath.Join(t.TempDir(), "api")
+	require.NoError(t, os.Rename(filepath.Join(root, filepath.FromSlash(wsSubtree)), target))
+	require.NoError(t, os.Symlink(target, filepath.Join(root, filepath.FromSlash(wsSubtree))))
+
+	stats := f.env.SyncSubtree(t.Context(), wsSubtree)
+
+	require.Zero(t, stats.Failed)
+	assert.Equal(t, 1, stats.Uploaded, "a leaf-symlinked workspace still mirrors at its seal boundary")
+
+	_, ok := f.fake.Object(f.key(wsSubtree + "/workspace.json"))
+	assert.True(t, ok)
+}
+
 func TestSyncArchiveCanceledContextUploadsNothing(t *testing.T) {
 	t.Parallel()
 
