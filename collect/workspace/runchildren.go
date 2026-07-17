@@ -259,10 +259,11 @@ func (c *Collector) archiveComments(ctx context.Context, project, ws string, run
 // the runs walk's retry gate (it scans only the run's own shard), and the actors
 // live only in the list include, not on the run, so a settled re-walk that
 // skipped the read could never re-derive them. So the read is gated on the union
-// of run-events.json being unsettled and a run-scoped actors reference gate being
-// open, and runs via the non-self-gating readConfirmed: it re-derives the actors
-// even after run-events.json is Done, and the gate clears once every actor is
-// captured.
+// of run-events.json being unsettled, a run-scoped actors reference gate being
+// open, and a retry-absent re-probe pending beneath the run (the shared
+// [collect.Env.SkipGatedListing] predicate), and runs via the non-self-gating
+// readConfirmed: it re-derives the actors even after run-events.json is Done,
+// and the gate clears once every actor is captured.
 //
 // The events file settles Done last, after the actor writes and the gate, so this
 // skip signal is never persisted ahead of the writes it stands in for. A crash
@@ -276,7 +277,7 @@ func (c *Collector) archiveRunEvents(ctx context.Context, project, ws string, ru
 	actorsGate := st.RunFile(project, ws, run.ID, "run-events-actors.ref")
 	runID := run.ID
 
-	if !c.env.ShouldFetch(eventsPath) && !c.env.ReferencePending(actorsGate) {
+	if c.env.SkipGatedListing(eventsPath, actorsGate, st.RunDir(project, ws, run.ID)) {
 		return nil
 	}
 
@@ -336,19 +337,10 @@ func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string,
 	// not re-list every already-archived run each pass. The checks file settles
 	// Done even with a log still errored, because logBlob records the failure and
 	// returns nil, so ShouldFetch(policy-checks.json) alone would skip the list and
-	// strand the errored log forever. Gate the skip on a run-scoped reference over
-	// the log paths too: while any log is unsettled the gate stays open and this
-	// re-lists to retry it, and once every log settles Done or Absent the gate
-	// clears and the list is skipped.
-	//
-	// A retry-absent run widens the gate once more: an absent log settled the
-	// gate on the run that recorded it, and the log is reachable only through
-	// this listing, so without the widening the flag would never re-probe its
-	// own target while still disabling the runs walk's early stop over it. The
-	// cost — one extra list for a run whose subtree holds any absence — is
-	// bounded per pass and converges.
-	if !c.env.ShouldFetch(relPath) && !c.env.ReferencePending(logsGate) &&
-		!c.env.HasRetryableAbsentUnder(st.RunDir(project, ws, run.ID)) {
+	// strand the errored log forever. The shared predicate widens the skip on the
+	// run-scoped log gate and on retry-absent re-probes (an absent log is
+	// reachable only through this listing); see [collect.Env.SkipGatedListing].
+	if c.env.SkipGatedListing(relPath, logsGate, st.RunDir(project, ws, run.ID)) {
 		return nil
 	}
 

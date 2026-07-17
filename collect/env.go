@@ -382,21 +382,19 @@ func (e *Env) Reference(gateKey string, sharedPaths ...string) {
 	e.ledger.MirrorReference(gateKey, settled)
 }
 
-// ReferencePending reports whether the reference gate at gateKey exists and is
-// still unsettled. A split-read that re-derives a cross-shard write's source
-// consults it to force the read while the gate is open (the run-event actors,
-// whose hydrated objects live only in the list include).
-func (e *Env) ReferencePending(gateKey string) bool {
-	return e.ledger.ReferencePending(gateKey)
-}
-
-// HasRetryableAbsentUnder reports whether any recorded object under the
-// archive-relative prefix is an absence a retry-absent run re-probes (see
-// [manifest.Ledger.HasRetryableAbsentUnder]). Skip gates over metered
-// listings widen on it, so an absent child reachable only through its
-// listing gets its listing back.
-func (e *Env) HasRetryableAbsentUnder(prefix string) bool {
-	return e.ledger.HasRetryableAbsentUnder(prefix)
+// SkipGatedListing reports whether a metered child listing can be skipped:
+// its list file is settled, the reference gate over the children it derives
+// is not pending, and no recorded absence beneath subtreePrefix awaits a
+// retry-absent re-probe (see [manifest.Ledger.HasRetryableAbsentUnder]).
+//
+// The three clauses travel together as one named predicate because every
+// gate that composed them by hand was a place to forget one: a forgotten
+// retry-absent clause left the flag inert for exactly the absences only the
+// listing could reach, while the walk above kept re-paging on their account.
+func (e *Env) SkipGatedListing(listPath, gateKey, subtreePrefix string) bool {
+	return !e.ledger.ShouldFetch(listPath) &&
+		!e.ledger.ReferencePending(gateKey) &&
+		!e.ledger.HasRetryableAbsentUnder(subtreePrefix)
 }
 
 // Entry returns the ledger entry recorded for relPath and whether one exists.
