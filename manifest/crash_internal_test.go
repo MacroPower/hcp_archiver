@@ -195,11 +195,11 @@ func TestCrashPrefix_UnsettleGuardLeadsItsEntries(t *testing.T) {
 	forEachCrashPrefix(t,
 		func(l *Ledger) {
 			l.RecordDone(oldEntry, Signature{Size: 1})
-			l.MarkCollectionComplete(prefix)
-			l.SetCollectionSettled(prefix, true)
+			l.Collection(prefix).MarkComplete()
+			l.Collection(prefix).SetSettled(true)
 		},
 		func(l *Ledger) {
-			l.SetCollectionSettled(prefix, false)
+			l.Collection(prefix).SetSettled(false)
 			l.RecordDone(newEntry, Signature{Size: 1})
 		},
 		func(t *testing.T, label string, torn *Ledger) {
@@ -209,7 +209,7 @@ func TestCrashPrefix_UnsettleGuardLeadsItsEntries(t *testing.T) {
 				return // The guarded entry is not durable, so the stale flag is harmless.
 			}
 
-			require.False(t, torn.IsCollectionSettled(prefix),
+			require.False(t, torn.Collection(prefix).Settled(),
 				"%s: a frozen entry is durable under a stale settled flag", label)
 		},
 	)
@@ -232,13 +232,13 @@ func TestCrashPrefix_SettleTrailsItsEntries(t *testing.T) {
 		func(l *Ledger) {
 			l.RecordDone(first, Signature{Size: 1})
 			l.RecordDone(second, Signature{Size: 1})
-			l.MarkCollectionComplete(prefix)
-			l.SetCollectionSettled(prefix, true)
+			l.Collection(prefix).MarkComplete()
+			l.Collection(prefix).SetSettled(true)
 		},
 		func(t *testing.T, label string, torn *Ledger) {
 			t.Helper()
 
-			if !torn.IsCollectionSettled(prefix) {
+			if !torn.Collection(prefix).Settled() {
 				return
 			}
 
@@ -269,13 +269,13 @@ func TestCrashPrefix_ReferencedProofPrecedesItsFreeze(t *testing.T) {
 		func(l *Ledger) {
 			l.RecordDone(tarball, Signature{Size: 1})
 			l.RecordDone(run, Signature{Size: 1})
-			l.MarkCollectionComplete(prefix)
-			l.SetCollectionSettled(prefix, true)
+			l.Collection(prefix).MarkComplete()
+			l.Collection(prefix).SetSettled(true)
 		},
 		func(t *testing.T, label string, torn *Ledger) {
 			t.Helper()
 
-			if _, ok := torn.Entry(run); !ok || !torn.IsCollectionSettled(prefix) {
+			if _, ok := torn.Entry(run); !ok || !torn.Collection(prefix).Settled() {
 				return // The run is not durably frozen, so a lost proof is re-recorded.
 			}
 

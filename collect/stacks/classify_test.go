@@ -107,24 +107,6 @@ func TestGenerationName(t *testing.T) {
 	}
 }
 
-func TestCollectionKeys(t *testing.T) {
-	t.Parallel()
-
-	assert.Equal(t,
-		"stacks/st-abc/configurations",
-		stacks.ConfigKeyForTest("st-abc"),
-	)
-	assert.Equal(t,
-		"stack-deployment-groups/sdg-xyz/runs",
-		stacks.RunKeyForTest("sdg-xyz"),
-	)
-	assert.NotEqual(t,
-		stacks.ConfigKeyForTest("st-abc"),
-		stacks.ConfigKeyForTest("st-def"),
-		"distinct stacks must map to distinct configuration cursors",
-	)
-}
-
 func TestArchivePrefixes(t *testing.T) {
 	t.Parallel()
 
@@ -142,15 +124,11 @@ func TestArchivePrefixes(t *testing.T) {
 	assert.True(t, strings.HasPrefix(cfgFile, configPrefix+"/"), "a config entry sits under the configurations prefix")
 	assert.True(t, strings.HasPrefix(stepFile, configPrefix+"/"), "a nested step sits under the configurations prefix")
 
-	// The runs prefix nests the group's run entries and their steps, and routes to
-	// the stack shard rather than the org-root shard the runKey cursor targets.
+	// The runs prefix nests the group's run entries and their steps, so the
+	// collection handle opened on it routes every flag to the stack shard.
 	runPrefix := stacks.RunArchivePrefixForTest(st, "proj", "mystack", "cfg-1", "grp-1")
 
 	assert.Equal(t, "projects/proj/stacks/mystack/configurations/cfg-1/deployment-groups/grp-1/runs", runPrefix)
 	assert.True(t, strings.HasPrefix(runFile, runPrefix+"/"), "a run entry sits under the runs prefix")
 	assert.True(t, strings.HasPrefix(stepFile, runPrefix+"/"), "a run's step sits under the runs prefix")
-
-	// The prefixes differ from their synthetic cursors, which is the whole point.
-	assert.NotEqual(t, stacks.ConfigKeyForTest("st-abc"), configPrefix, "the config prefix is not the config cursor")
-	assert.NotEqual(t, stacks.RunKeyForTest("sdg-xyz"), runPrefix, "the run prefix is not the run cursor")
 }

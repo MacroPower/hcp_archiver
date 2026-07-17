@@ -662,8 +662,8 @@ func TestWalkEarlyStopsWhenFullySettled(t *testing.T) {
 		ledger.RecordDone(it.relPath, manifest.Signature{Hash: "prior", Size: 1})
 	}
 
-	ledger.MarkCollectionComplete("runs")
-	ledger.SetCollectionSettled("runs", true)
+	ledger.Collection("runs").MarkComplete()
+	ledger.Collection("runs").SetSettled(true)
 
 	archived := map[string]int{}
 
@@ -693,7 +693,7 @@ func TestWalkEarlyStopsWhenFullySettled(t *testing.T) {
 		}
 	}
 
-	err := collect.Walk(t.Context(), env, "runs", pager, describe)
+	err := collect.Walk(t.Context(), env, env.Collection("runs"), pager, describe)
 	require.NoError(t, err)
 
 	// Only r3, the newest boundary, is refreshed; the walk halts before touching
@@ -704,9 +704,14 @@ func TestWalkEarlyStopsWhenFullySettled(t *testing.T) {
 
 	assert.Equal(t, 1, pagesRequested, "the walk halts before requesting a second page")
 
-	assert.Equal(t, r3.createdAt, ledger.HighWaterMark("runs"), "the mark advances to the newest element seen")
+	assert.Equal(
+		t,
+		r3.createdAt,
+		ledger.Collection("runs").HighWaterMark(),
+		"the mark advances to the newest element seen",
+	)
 
-	assert.True(t, ledger.IsCollectionSettled("runs"),
+	assert.True(t, ledger.Collection("runs").Settled(),
 		"a boundary-only refresh mutates nothing and leaves settlement in place")
 }
 
@@ -733,8 +738,8 @@ func TestWalkInterruptedRewalkUnsettles(t *testing.T) {
 		ledger.RecordDone(it.relPath, manifest.Signature{Hash: "prior", Size: 1})
 	}
 
-	ledger.MarkCollectionComplete("runs")
-	ledger.SetCollectionSettled("runs", true)
+	ledger.Collection("runs").MarkComplete()
+	ledger.Collection("runs").SetSettled(true)
 
 	var mu sync.Mutex
 
@@ -768,11 +773,11 @@ func TestWalkInterruptedRewalkUnsettles(t *testing.T) {
 		return nil, false, errors.New("listing failed")
 	}
 
-	err := collect.Walk(t.Context(), env, "runs", interrupted, describe)
+	err := collect.Walk(t.Context(), env, env.Collection("runs"), interrupted, describe)
 	require.Error(t, err)
 
 	assert.Equal(t, 1, archived[r4.relPath], "the interrupted walk archived the page-1 element")
-	assert.False(t, ledger.IsCollectionSettled("runs"),
+	assert.False(t, ledger.Collection("runs").Settled(),
 		"an interrupted mutation withdraws settlement before the next run can early-stop over the gap")
 
 	// The next run must page past r4's frozen boundary and reach the element
@@ -785,10 +790,10 @@ func TestWalkInterruptedRewalkUnsettles(t *testing.T) {
 		return nil, false, nil
 	}
 
-	require.NoError(t, collect.Walk(t.Context(), env, "runs", full, describe))
+	require.NoError(t, collect.Walk(t.Context(), env, env.Collection("runs"), full, describe))
 
 	assert.Equal(t, 1, archived[r3.relPath], "the stranded element is archived by the next full walk")
-	assert.True(t, ledger.IsCollectionSettled("runs"), "the completed walk re-earns settlement")
+	assert.True(t, ledger.Collection("runs").Settled(), "the completed walk re-earns settlement")
 }
 
 func TestWalkEarlyStopResettlesAfterDelta(t *testing.T) {
@@ -810,8 +815,8 @@ func TestWalkEarlyStopResettlesAfterDelta(t *testing.T) {
 		ledger.RecordDone(it.relPath, manifest.Signature{Hash: "prior", Size: 1})
 	}
 
-	ledger.MarkCollectionComplete("runs")
-	ledger.SetCollectionSettled("runs", true)
+	ledger.Collection("runs").MarkComplete()
+	ledger.Collection("runs").SetSettled(true)
 
 	var mu sync.Mutex
 
@@ -844,13 +849,13 @@ func TestWalkEarlyStopResettlesAfterDelta(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, collect.Walk(t.Context(), env, "runs", pager, describe))
+	require.NoError(t, collect.Walk(t.Context(), env, env.Collection("runs"), pager, describe))
 
 	assert.Equal(t, 1, archived[r3.relPath], "the new element is archived")
 	assert.Equal(t, 1, archived[r2.relPath], "the frozen boundary gets its final refresh")
 	assert.NotContains(t, archived, r1.relPath, "settled history below the boundary is not re-touched")
 
-	assert.True(t, ledger.IsCollectionSettled("runs"),
+	assert.True(t, ledger.Collection("runs").Settled(),
 		"an early stop that archived its delta clean re-earns settlement")
 }
 
@@ -887,8 +892,8 @@ func TestWalkRetryAbsentPiercesEarlyStop(t *testing.T) {
 			}
 
 			ledger.RecordAbsent(absentChild, errors.New("404"))
-			ledger.MarkCollectionComplete("runs")
-			ledger.SetCollectionSettled("runs", true)
+			ledger.Collection("runs").MarkComplete()
+			ledger.Collection("runs").SetSettled(true)
 
 			reprobes := 0
 			pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
@@ -920,7 +925,7 @@ func TestWalkRetryAbsentPiercesEarlyStop(t *testing.T) {
 				}
 			}
 
-			require.NoError(t, collect.Walk(t.Context(), env, "runs", pager, describe))
+			require.NoError(t, collect.Walk(t.Context(), env, env.Collection("runs"), pager, describe))
 
 			if retryAbsent {
 				assert.Equal(t, 1, reprobes,
@@ -952,7 +957,7 @@ func TestWalkPagesPastNonTerminalBoundary(t *testing.T) {
 
 	// The collection completed a prior walk, so the old early-stop would fire at
 	// the newer boundary; settled is unset, so the fix keeps paging.
-	ledger.MarkCollectionComplete("runs")
+	ledger.Collection("runs").MarkComplete()
 
 	// A page's items archive concurrently, so the recording map needs a lock.
 	var mu sync.Mutex
@@ -985,7 +990,7 @@ func TestWalkPagesPastNonTerminalBoundary(t *testing.T) {
 		}
 	}
 
-	err := collect.Walk(t.Context(), env, "runs", pager, describe)
+	err := collect.Walk(t.Context(), env, env.Collection("runs"), pager, describe)
 	require.NoError(t, err)
 
 	// The walk pages past the newer terminal boundary and revisits the older
@@ -995,8 +1000,8 @@ func TestWalkPagesPastNonTerminalBoundary(t *testing.T) {
 
 	// Seeing a non-terminal element leaves the collection unsettled, so the next
 	// run re-pages until it finishes.
-	assert.False(t, ledger.IsCollectionSettled("runs"), "an in-flight run keeps the collection unsettled")
-	assert.True(t, ledger.IsCollectionComplete("runs"), "reaching the final page still marks completion")
+	assert.False(t, ledger.Collection("runs").Settled(), "an in-flight run keeps the collection unsettled")
+	assert.True(t, ledger.Collection("runs").Complete(), "reaching the final page still marks completion")
 }
 
 func TestWalkReachesErroredChildBelowBoundary(t *testing.T) {
@@ -1021,10 +1026,10 @@ func TestWalkReachesErroredChildBelowBoundary(t *testing.T) {
 
 	ledger.RecordErrored(erroredChild, errors.New("prior boom"), true)
 
-	ledger.MarkCollectionComplete("runs")
+	ledger.Collection("runs").MarkComplete()
 	// The steady-state hole: a prior all-terminal walk recorded settled even
 	// though a child stayed errored. The start gate closes it.
-	ledger.SetCollectionSettled("runs", true)
+	ledger.Collection("runs").SetSettled(true)
 
 	archivedChild := 0
 
@@ -1063,7 +1068,7 @@ func TestWalkReachesErroredChildBelowBoundary(t *testing.T) {
 		}
 	}
 
-	err := collect.Walk(t.Context(), env, "runs", pager, describe)
+	err := collect.Walk(t.Context(), env, env.Collection("runs"), pager, describe)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, archivedChild, "the errored child below the done boundary is reached and retried")
@@ -1074,7 +1079,7 @@ func TestWalkReachesErroredChildBelowBoundary(t *testing.T) {
 
 	// With the child fixed, the completing walk records the collection settled
 	// again, so a later run may early-stop.
-	assert.True(t, ledger.IsCollectionSettled("runs"), "the collection settles once no unsettled child remains")
+	assert.True(t, ledger.Collection("runs").Settled(), "the collection settles once no unsettled child remains")
 }
 
 func TestWalkResumesIncompleteCollection(t *testing.T) {
@@ -1126,27 +1131,22 @@ func TestWalkResumesIncompleteCollection(t *testing.T) {
 		}
 	}
 
-	err := collect.Walk(t.Context(), env, "runs", pager, describe)
+	err := collect.Walk(t.Context(), env, env.Collection("runs"), pager, describe)
 	require.NoError(t, err)
 
 	// The walk does not stop at the newest already-done boundary; it pages all
 	// the way down and reaches the un-archived older tail.
 	assert.Equal(t, 1, archived[r1.relPath], "the un-archived older tail is reached and archived")
-	assert.True(t, ledger.IsCollectionComplete("runs"), "reaching the final page marks the collection complete")
+	assert.True(t, ledger.Collection("runs").Complete(), "reaching the final page marks the collection complete")
 }
 
-// stackConfigCursorKey is a synthetic stack-configuration cursor: it routes to
-// the org-root shard, while the configuration entries live in a stack shard.
-const stackConfigCursorKey = "stacks/stk-1/configurations"
-
-// stackConfigArchivePrefix is the real path prefix of the scenario's
-// configuration entries, the key the prefix-aware walk stores its collection
-// flags under.
+// stackConfigArchivePrefix is the archive prefix of the scenario's
+// configuration entries, the collection identity the walk opens its ledger
+// handle on.
 const stackConfigArchivePrefix = "projects/p/stacks/s/configurations"
 
-// erroredChildScenario is a Walk mimicking a stack's configuration walk, whose
-// cursor key routes to a different shard than its entries, with an older
-// configuration's child left errored below a newer done boundary.
+// erroredChildScenario is a Walk mimicking a stack's configuration walk, with
+// an older configuration's child left errored below a newer done boundary.
 type erroredChildScenario struct {
 	env           *collect.Env
 	ledger        *manifest.Ledger
@@ -1185,13 +1185,8 @@ func newErroredChildScenario(t *testing.T) *erroredChildScenario {
 
 	ledger.RecordErrored(erroredChild, errors.New("prior boom"), true)
 
-	// The flags are seeded under both keys: a prefix-aware walk keys them on
-	// the archive prefix, while the no-prefix strand test reads them from the
-	// cursor key it defaults to.
-	ledger.MarkCollectionComplete(stackConfigCursorKey)
-	ledger.SetCollectionSettled(stackConfigCursorKey, true)
-	ledger.MarkCollectionComplete(stackConfigArchivePrefix)
-	ledger.SetCollectionSettled(stackConfigArchivePrefix, true)
+	ledger.Collection(stackConfigArchivePrefix).MarkComplete()
+	ledger.Collection(stackConfigArchivePrefix).SetSettled(true)
 
 	archivedChild := 0
 
@@ -1239,40 +1234,26 @@ func newErroredChildScenario(t *testing.T) *erroredChildScenario {
 	}
 }
 
-func TestWalkArchivePrefixReachesErroredChildInAnotherShard(t *testing.T) {
+func TestWalkGateReachesErroredChildUnderPrefix(t *testing.T) {
 	t.Parallel()
 
 	s := newErroredChildScenario(t)
 
-	// The archive prefix points the errored-child gate at the stack shard that
-	// actually holds the entries, so the walk re-pages past the done boundary and
-	// retries the older configuration's errored child.
-	err := collect.Walk(t.Context(), s.env, stackConfigCursorKey, s.pager, s.describe,
-		collect.WithArchivePrefix(stackConfigArchivePrefix))
+	// The handle's gate scans the collection prefix, the directory that holds
+	// the entries, so an errored child below a done boundary suppresses the
+	// early stop: the walk re-pages past the boundary and retries it. Before
+	// the handle owned the keying, a synthetic cursor could point the gate at
+	// the empty org-root shard and strand the child forever.
+	err := collect.Walk(t.Context(), s.env, s.env.Collection(stackConfigArchivePrefix), s.pager, s.describe)
 	require.NoError(t, err)
 
-	assert.Equal(t, 1, *s.archivedChild, "the archive prefix reaches the errored child in the entries' shard")
+	assert.Equal(t, 1, *s.archivedChild, "the gate reaches the errored child under the prefix")
 
 	child, ok := s.ledger.Entry(s.erroredChild)
 	require.True(t, ok)
 	assert.Equal(t, manifest.StatusDone, child.Status, "the retried child settles done")
-	assert.True(t, s.ledger.IsCollectionSettled(stackConfigArchivePrefix),
-		"the collection settles under the archive prefix once no unsettled child remains")
-}
-
-func TestWalkSyntheticCursorStrandsErroredChildWithoutArchivePrefix(t *testing.T) {
-	t.Parallel()
-
-	s := newErroredChildScenario(t)
-
-	// Without the override the gate scans the org-root shard the synthetic cursor
-	// routes to, not the stack shard holding the entries, so the done boundary
-	// early-stops and the older errored child stays stranded. This is the default
-	// the override exists to close.
-	err := collect.Walk(t.Context(), s.env, stackConfigCursorKey, s.pager, s.describe)
-	require.NoError(t, err)
-
-	assert.Zero(t, *s.archivedChild, "without an archive prefix the errored child is not reached")
+	assert.True(t, s.ledger.Collection(stackConfigArchivePrefix).Settled(),
+		"the collection settles once no unsettled child remains")
 }
 
 func TestWalkFinalPageRecomputesSettledFromArchivePrefix(t *testing.T) {
@@ -1281,12 +1262,9 @@ func TestWalkFinalPageRecomputesSettledFromArchivePrefix(t *testing.T) {
 	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
 
 	// A first full walk reaches the final page, where it recomputes the settled
-	// flag. That recompute must consult the archive prefix, not the synthetic
-	// cursor: an errored child under the prefix (in the stack shard) must record
-	// the collection unsettled so the next run re-walks it. A recompute keyed on
-	// the cursor would scan the empty org-root shard and wrongly record settled.
+	// flag from the collection's own gate: an errored child under the prefix
+	// must record the collection unsettled so the next run re-walks it.
 	const (
-		cursorKey     = "stacks/stk-2/configurations"
 		archivePrefix = "projects/p/stacks/s2/configurations"
 		erroredChild  = archivePrefix + "/cfg1/json-schemas.json"
 	)
@@ -1328,12 +1306,11 @@ func TestWalkFinalPageRecomputesSettledFromArchivePrefix(t *testing.T) {
 		}
 	}
 
-	err := collect.Walk(t.Context(), env, cursorKey, pager, describe,
-		collect.WithArchivePrefix(archivePrefix))
+	err := collect.Walk(t.Context(), env, env.Collection(archivePrefix), pager, describe)
 	require.NoError(t, err)
 
-	assert.True(t, ledger.IsCollectionComplete(archivePrefix), "the final page marks the collection complete")
-	assert.False(t, ledger.IsCollectionSettled(archivePrefix),
+	assert.True(t, ledger.Collection(archivePrefix).Complete(), "the final page marks the collection complete")
+	assert.False(t, ledger.Collection(archivePrefix).Settled(),
 		"an errored child under the archive prefix records the collection unsettled")
 }
 
@@ -1429,26 +1406,25 @@ func TestWalkSyntheticCursorFlagsShareTheEntriesShard(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, collect.Walk(t.Context(), env, cursorKey, pager, describe,
-		collect.WithArchivePrefix(archivePrefix)))
+	require.NoError(t, collect.Walk(t.Context(), env, env.Collection(archivePrefix), pager, describe))
 
-	// The flags land under the archive prefix, never under the cursor key.
-	assert.True(t, ledger.IsCollectionComplete(archivePrefix), "completion is keyed on the archive prefix")
-	assert.True(t, ledger.IsCollectionSettled(archivePrefix), "settlement is keyed on the archive prefix")
-	assert.False(t, ledger.IsCollectionComplete(cursorKey), "the cursor key carries no completion flag")
-	assert.False(t, ledger.IsCollectionSettled(cursorKey), "the cursor key carries no settled flag")
+	// Every piece of collection state keys on the prefix the handle was opened
+	// on.
+	assert.True(t, ledger.Collection(archivePrefix).Complete(), "completion is keyed on the prefix")
+	assert.True(t, ledger.Collection(archivePrefix).Settled(), "settlement is keyed on the prefix")
+	assert.Equal(t, cfg2.createdAt, ledger.Collection(archivePrefix).HighWaterMark(),
+		"the high-water mark is keyed on the prefix")
 
 	// The next walk reads the flags back from the prefix: it early-stops at the
 	// frozen cfg2 boundary and never touches cfg1's Archive again.
-	require.NoError(t, collect.Walk(t.Context(), env, cursorKey, pager, describe,
-		collect.WithArchivePrefix(archivePrefix)))
+	require.NoError(t, collect.Walk(t.Context(), env, env.Collection(archivePrefix), pager, describe))
 
 	assert.Equal(t, 2, archived[cfg2.relPath], "the boundary gets its refresh, so the flags were read back")
 	assert.Equal(t, 1, archived[cfg1.relPath], "the early stop halts above settled history")
 
-	// After a flush the flag records carry the stack shard's tag, routing them
-	// back to the shard that owns the entries they guard; the cursor key leaves
-	// only its high-water mark, tagged for the org root.
+	// After a flush every collection record — flags and high-water mark alike —
+	// carries the stack shard's tag, routing it back to the shard that owns the
+	// entries it describes.
 	require.NoError(t, ledger.Flush())
 
 	orgLog := st.AbsPath(st.Join(manifest.LedgerDirName, manifest.LogFileName))
@@ -1462,12 +1438,9 @@ func TestWalkSyntheticCursorFlagsShareTheEntriesShard(t *testing.T) {
 			"the %s record is tagged with the entries' shard", rec.Kind)
 	}
 
-	assert.Contains(t, kinds, "completed", "the completion record is logged under the archive prefix")
-	assert.Contains(t, kinds, "settled", "the settled record is logged under the archive prefix")
-
-	require.Len(t, lines[cursorKey], 1, "the cursor key holds only its high-water mark")
-	assert.Equal(t, "watermark", lines[cursorKey][0].Kind)
-	assert.Empty(t, lines[cursorKey][0].Shard, "the cursor's watermark is tagged for the org root")
+	assert.Contains(t, kinds, "completed", "the completion record is logged under the prefix")
+	assert.Contains(t, kinds, "settled", "the settled record is logged under the prefix")
+	assert.Contains(t, kinds, "watermark", "the high-water mark is logged under the prefix")
 }
 
 func TestWalkHistoryLimit(t *testing.T) {
@@ -1543,7 +1516,7 @@ func TestWalkHistoryLimit(t *testing.T) {
 				}
 			}
 
-			err := collect.Walk(t.Context(), env, "runs", pager, describe,
+			err := collect.Walk(t.Context(), env, env.Collection("runs"), pager, describe,
 				collect.WithHistoryLimit(tc.count, tc.oldest))
 			require.NoError(t, err)
 
@@ -1557,9 +1530,9 @@ func TestWalkHistoryLimit(t *testing.T) {
 			// the seal phase can bundle it; only a walk that reached the true end
 			// also records settlement, which keeps the early stop disabled for a
 			// bounded walk so a later wider limit still pages down.
-			assert.True(t, ledger.IsCollectionComplete("runs"),
+			assert.True(t, ledger.Collection("runs").Complete(),
 				"a fully-walked slice records completion whether or not it is bounded")
-			assert.Equal(t, tc.wantSettled, ledger.IsCollectionSettled("runs"),
+			assert.Equal(t, tc.wantSettled, ledger.Collection("runs").Settled(),
 				"only a walk that reaches the collection's true end records settlement")
 		})
 	}
@@ -1575,7 +1548,7 @@ func TestWalkPropagatesPageError(t *testing.T) {
 		return nil, false, wantErr
 	}
 
-	err := collect.Walk(t.Context(), env, "runs", pager, func(walkItem) collect.Item {
+	err := collect.Walk(t.Context(), env, env.Collection("runs"), pager, func(walkItem) collect.Item {
 		return collect.Item{}
 	})
 	require.ErrorIs(t, err, wantErr)
@@ -1633,7 +1606,7 @@ func TestWalkArchivesPageItemsConcurrently(t *testing.T) {
 		}
 	}
 
-	err := collect.Walk(t.Context(), env, "runs", pager, describe)
+	err := collect.Walk(t.Context(), env, env.Collection("runs"), pager, describe)
 	require.NoError(t, err)
 }
 

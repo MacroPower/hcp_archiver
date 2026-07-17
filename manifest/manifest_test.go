@@ -147,7 +147,7 @@ func TestLedger_RoundTrip(t *testing.T) {
 	ledger.RecordForbidden("github-app-installations.json", errors.New("forbidden: team tokens not supported"))
 	ledger.RecordSkipped("ws/deferred.json")
 	ledger.RecordNotApplicable("ws/ssh-keys.json")
-	ledger.AdvanceHighWaterMark("state-versions", now)
+	ledger.Collection("state-versions").AdvanceHighWaterMark(now)
 	ledger.AddBytes(1024)
 
 	summary := ledger.FinishRun()
@@ -164,7 +164,7 @@ func TestLedger_RoundTrip(t *testing.T) {
 
 	assert.Equal(t, 1, reloaded.RunCount())
 	assert.Equal(t, now, reloaded.LastRunAt())
-	assert.Equal(t, now, reloaded.HighWaterMark("state-versions"))
+	assert.Equal(t, now, reloaded.Collection("state-versions").HighWaterMark())
 
 	done, ok := reloaded.Entry("ws/state.json")
 	require.True(t, ok)
@@ -273,14 +273,14 @@ func TestLedger_HighWaterMarkMonotonic(t *testing.T) {
 	early := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	late := time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
 
-	ledger.AdvanceHighWaterMark("runs", late)
-	assert.Equal(t, late, ledger.HighWaterMark("runs"))
+	ledger.Collection("runs").AdvanceHighWaterMark(late)
+	assert.Equal(t, late, ledger.Collection("runs").HighWaterMark())
 
 	// An earlier value never moves the mark backward.
-	ledger.AdvanceHighWaterMark("runs", early)
-	assert.Equal(t, late, ledger.HighWaterMark("runs"))
+	ledger.Collection("runs").AdvanceHighWaterMark(early)
+	assert.Equal(t, late, ledger.Collection("runs").HighWaterMark())
 
-	assert.True(t, ledger.HighWaterMark("unset").IsZero())
+	assert.True(t, ledger.Collection("unset").HighWaterMark().IsZero())
 }
 
 func TestLedger_TallyMatchesRecords(t *testing.T) {
@@ -513,7 +513,7 @@ func TestLedger_ConcurrentRecords(t *testing.T) {
 				path := filepath.Join("ws", string(rune('a'+w)), string(rune('0'+i%10)))
 				ledger.RecordDone(path, manifest.Signature{Size: int64(i)})
 				ledger.AddBytes(1)
-				ledger.AdvanceHighWaterMark("runs", time.Unix(int64(i), 0))
+				ledger.Collection("runs").AdvanceHighWaterMark(time.Unix(int64(i), 0))
 
 				_ = ledger.Tally()
 				_ = ledger.ShouldFetch(path)
@@ -915,7 +915,7 @@ func TestLedger_SettledSurvivesLogRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	ledger.StartRun()
-	ledger.SetCollectionSettled("runs", true)
+	ledger.Collection("runs").SetSettled(true)
 	require.NoError(t, ledger.Flush())
 
 	// The true value is durable on its own before the flip, so the final false is
@@ -924,16 +924,16 @@ func TestLedger_SettledSurvivesLogRoundTrip(t *testing.T) {
 
 	afterTrue, err := manifest.Load(path)
 	require.NoError(t, err)
-	assert.True(t, afterTrue.IsCollectionSettled("runs"), "settled=true persists through the log")
+	assert.True(t, afterTrue.Collection("runs").Settled(), "settled=true persists through the log")
 
-	ledger.SetCollectionSettled("runs", false)
+	ledger.Collection("runs").SetSettled(false)
 	require.NoError(t, ledger.Flush())
 
 	require.NoError(t, afterTrue.Close(), "release the lock as a finished process would")
 
 	reloaded, err := manifest.Load(path)
 	require.NoError(t, err)
-	assert.False(t, reloaded.IsCollectionSettled("runs"),
+	assert.False(t, reloaded.Collection("runs").Settled(),
 		"a logged settled=false replays as false, re-widening the walk")
 }
 
@@ -948,7 +948,7 @@ func TestLedger_SettledSurvivesCompaction(t *testing.T) {
 	require.NoError(t, err)
 
 	ledger.StartRun()
-	ledger.SetCollectionSettled("runs", true)
+	ledger.Collection("runs").SetSettled(true)
 	ledger.FinishRun()
 	require.NoError(t, ledger.Flush())
 
@@ -964,7 +964,7 @@ func TestLedger_SettledSurvivesCompaction(t *testing.T) {
 
 	reloaded, err := manifest.Load(path)
 	require.NoError(t, err)
-	assert.True(t, reloaded.IsCollectionSettled("runs"), "settled survives compaction into the snapshot")
+	assert.True(t, reloaded.Collection("runs").Settled(), "settled survives compaction into the snapshot")
 }
 
 func TestLedger_HasUnsettledUnderPrefixIsolation(t *testing.T) {
@@ -989,14 +989,14 @@ func TestLedger_HasUnsettledUnderPrefixIsolation(t *testing.T) {
 	ledger.RecordDone(runsKey+"/r1/run.json", manifest.Signature{Size: 1})
 	ledger.RecordDone(svKey+"/sv.meta.json", manifest.Signature{Size: 1})
 
-	assert.True(t, ledger.HasUnsettledUnder(runsKey), "the errored run child is unsettled under runs")
-	assert.False(t, ledger.HasUnsettledUnder(svKey), "the state-versions collection has only settled work")
-	assert.False(t, ledger.HasUnsettledUnder(otherKey), "a prefix with no entries is settled")
+	assert.True(t, ledger.Collection(runsKey).HasUnsettled(), "the errored run child is unsettled under runs")
+	assert.False(t, ledger.Collection(svKey).HasUnsettled(), "the state-versions collection has only settled work")
+	assert.False(t, ledger.Collection(otherKey).HasUnsettled(), "a prefix with no entries is settled")
 
 	// A forbidden state-version child flips its collection to unsettled without
 	// touching the runs prefix.
 	ledger.RecordForbidden(svKey+"/sv2.tfstate.json", errors.New("forbidden"))
-	assert.True(t, ledger.HasUnsettledUnder(svKey), "the forbidden state-version child is unsettled")
+	assert.True(t, ledger.Collection(svKey).HasUnsettled(), "the forbidden state-version child is unsettled")
 }
 
 func TestLedger_HasUnsettledUnderRetryAbsent(t *testing.T) {
@@ -1016,7 +1016,7 @@ func TestLedger_HasUnsettledUnderRetryAbsent(t *testing.T) {
 
 	normal, err := manifest.Load(root)
 	require.NoError(t, err)
-	assert.False(t, normal.HasUnsettledUnder(runsKey),
+	assert.False(t, normal.Collection(runsKey).HasUnsettled(),
 		"a recorded absence is settled for a normal run")
 	require.NoError(t, normal.Close())
 
@@ -1025,7 +1025,7 @@ func TestLedger_HasUnsettledUnderRetryAbsent(t *testing.T) {
 	// absent children the flag exists to re-probe.
 	retry, err := manifest.Load(root, manifest.WithRetryAbsent(true))
 	require.NoError(t, err)
-	assert.True(t, retry.HasUnsettledUnder(runsKey),
+	assert.True(t, retry.Collection(runsKey).HasUnsettled(),
 		"a recorded absence is unsettled under retry-absent")
 	require.NoError(t, retry.Close())
 }
@@ -1050,11 +1050,11 @@ func TestLedger_HasUnsettledUnderMatchesDeepDescendant(t *testing.T) {
 	ledger.RecordDone(configPrefix+"/cfg1/configuration.json", manifest.Signature{Size: 1})
 	ledger.RecordErrored(deepChild, errors.New("boom"), true)
 
-	assert.True(t, ledger.HasUnsettledUnder(configPrefix),
+	assert.True(t, ledger.Collection(configPrefix).HasUnsettled(),
 		"a deeply nested errored child is caught by the shallow configurations prefix")
 }
 
-func TestLedger_HasUnsettledUnderIgnoresSyntheticCursor(t *testing.T) {
+func TestLedger_HasUnsettledScopedToItsPrefix(t *testing.T) {
 	t.Parallel()
 
 	ledger, err := manifest.Load(t.TempDir())
@@ -1062,13 +1062,14 @@ func TestLedger_HasUnsettledUnderIgnoresSyntheticCursor(t *testing.T) {
 
 	ledger.StartRun()
 
-	// A stack walk's cursor key is an id, not a path prefix of the entries it
-	// routes past, so it matches nothing and reports settled: the documented
-	// scoping that keeps stacks at today's behavior.
+	// The gate scans only entries beneath the handle's own prefix, so an
+	// unsettled child in one collection never holds a sibling collection open.
 	ledger.RecordErrored("projects/p/stacks/s/configurations/c/config.json", errors.New("boom"), true)
 
-	assert.False(t, ledger.HasUnsettledUnder("stacks/stk-123/configurations"),
-		"a synthetic id cursor is not a prefix of any entry")
+	assert.True(t, ledger.Collection("projects/p/stacks/s/configurations").HasUnsettled(),
+		"the owning collection sees its errored child")
+	assert.False(t, ledger.Collection("projects/p/stacks/other/configurations").HasUnsettled(),
+		"a sibling collection does not")
 }
 
 func TestLedger_MirrorReferenceGate(t *testing.T) {
@@ -1091,7 +1092,7 @@ func TestLedger_MirrorReferenceGate(t *testing.T) {
 	_, ok := ledger.Entry(gate)
 	assert.False(t, ok, "a settled reference against an absent gate creates no entry")
 	assert.False(t, ledger.ReferencePending(gate))
-	assert.False(t, ledger.HasUnsettledUnder(runsPrefix))
+	assert.False(t, ledger.Collection(runsPrefix).HasUnsettled())
 
 	// An unsettled foreign write opens the gate as pending: unsettled, but not a
 	// failure. HasUnsettledUnder now sees outstanding work under the runs prefix
@@ -1102,7 +1103,7 @@ func TestLedger_MirrorReferenceGate(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, manifest.StatusPending, entry.Status)
 	assert.True(t, ledger.ReferencePending(gate))
-	assert.True(t, ledger.HasUnsettledUnder(runsPrefix),
+	assert.True(t, ledger.Collection(runsPrefix).HasUnsettled(),
 		"a pending gate makes its run unsettled under the runs prefix")
 
 	// A pending gate never inflates the error tally, the total, or the failure
@@ -1128,7 +1129,7 @@ func TestLedger_MirrorReferenceGate(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, manifest.StatusReferenceCleared, entry.Status)
 	assert.False(t, ledger.ReferencePending(gate))
-	assert.False(t, ledger.HasUnsettledUnder(runsPrefix), "a cleared gate settles the runs prefix")
+	assert.False(t, ledger.Collection(runsPrefix).HasUnsettled(), "a cleared gate settles the runs prefix")
 
 	// A cleared gate is a ledger-only proxy, not a real object, so it stays out
 	// of the tally's object counters just as the pending gate did: a recovered
@@ -1186,7 +1187,7 @@ func TestLedger_PendingGateSurvivesReload(t *testing.T) {
 	entry, ok := reloaded.Entry(gate)
 	require.True(t, ok)
 	assert.Equal(t, manifest.StatusPending, entry.Status)
-	assert.True(t, reloaded.HasUnsettledUnder(runsPrefix), "a pending gate re-widens the walk on resume")
+	assert.True(t, reloaded.Collection(runsPrefix).HasUnsettled(), "a pending gate re-widens the walk on resume")
 }
 
 func TestLedger_DroppedSurfaces(t *testing.T) {

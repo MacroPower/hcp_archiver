@@ -345,9 +345,10 @@ Notes:
     archived clean), and the ledger drains that withdrawal ahead of the entry
     records it guards in the flushed batch, which lands whole in the single
     org-level log — one fsync domain, so the order holds across shards. The
-    walk still keys its completed/settled flags on the collection's archive
-    prefix (a stack walk's synthetic id cursor keeps only the high-water mark)
-    so the errored-child gate scans the shard that owns the entries. A re-walk
+    walk drives all of a collection's ledger state (flags, gate, high-water
+    mark) through one handle keyed on the collection's archive prefix, so the
+    errored-child gate scans the shard that owns the entries and there is no
+    cursor-shaped key left to route a flag elsewhere. A re-walk
     killed mid-delta — even mid-
     flush — therefore cannot leave freshly frozen entries above elements it
     never listed with the settled flag still standing (an unlisted element

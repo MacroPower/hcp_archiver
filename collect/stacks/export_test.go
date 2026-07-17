@@ -28,16 +28,6 @@ func GenerationNameForTest(generation int) string {
 	return generationName(generation)
 }
 
-// ConfigKeyForTest exposes [configKey] to the external test package.
-func ConfigKeyForTest(stackID string) string {
-	return configKey(stackID)
-}
-
-// RunKeyForTest exposes [runKey] to the external test package.
-func RunKeyForTest(groupID string) string {
-	return runKey(groupID)
-}
-
 // ConfigArchivePrefixForTest exposes [configArchivePrefix] to the external test
 // package.
 func ConfigArchivePrefixForTest(st *store.Store, project, stackName string) string {

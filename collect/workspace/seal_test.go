@@ -58,8 +58,8 @@ func (f sealFixture) exists(relPath string) bool {
 }
 
 func (f sealFixture) markComplete(project, ws string) {
-	f.ledger.MarkCollectionComplete(f.store.Join(f.store.WorkspaceDir(project, ws), "runs"))
-	f.ledger.MarkCollectionComplete(f.store.StateVersionDir(project, ws))
+	f.ledger.Collection(f.store.Join(f.store.WorkspaceDir(project, ws), "runs")).MarkComplete()
+	f.ledger.Collection(f.store.StateVersionDir(project, ws)).MarkComplete()
 }
 
 // rollupContent reads back the byte-for-byte content of the oldest line a

@@ -206,7 +206,7 @@ func (c *Collector) frozenRunArtifacts(project, ws string) ([]seal.Member, error
 	st := c.env.Store()
 	runsKey := st.Join(st.WorkspaceDir(project, ws), "runs")
 
-	if !c.env.IsCollectionComplete(runsKey) {
+	if !c.env.Collection(runsKey).Complete() {
 		return nil, nil
 	}
 
@@ -246,7 +246,7 @@ func (c *Collector) frozenStateArtifacts(project, ws string) ([]seal.Member, err
 	st := c.env.Store()
 	svKey := st.StateVersionDir(project, ws)
 
-	if !c.env.IsCollectionComplete(svKey) {
+	if !c.env.Collection(svKey).Complete() {
 		return nil, nil
 	}
 
@@ -283,7 +283,7 @@ func (c *Collector) frozenMetadata(project, ws string) (map[string][]seal.Member
 	out := make(map[string][]seal.Member)
 
 	runsKey := st.Join(st.WorkspaceDir(project, ws), "runs")
-	if c.env.IsCollectionComplete(runsKey) {
+	if c.env.Collection(runsKey).Complete() {
 		runIDs, err := subdirs(st.AbsPath(runsKey))
 		if err != nil {
 			return nil, err
@@ -314,7 +314,7 @@ func (c *Collector) frozenMetadata(project, ws string) (map[string][]seal.Member
 	}
 
 	svKey := st.StateVersionDir(project, ws)
-	if c.env.IsCollectionComplete(svKey) {
+	if c.env.Collection(svKey).Complete() {
 		names, err := stateMetaFiles(st.AbsPath(svKey))
 		if err != nil {
 			return nil, err

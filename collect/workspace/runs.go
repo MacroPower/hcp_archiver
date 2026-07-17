@@ -76,7 +76,7 @@ func (c *Collector) collectRuns(ctx context.Context, project string, ws *tfe.Wor
 		}
 	}
 
-	return wrapArchive(key, collect.Walk(ctx, c.env, key, pager, describe,
+	return wrapArchive(key, collect.Walk(ctx, c.env, c.env.Collection(key), pager, describe,
 		collect.WithHistoryLimit(c.runHistoryCount, c.runHistoryOldest)))
 }
 

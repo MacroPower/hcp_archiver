@@ -43,7 +43,6 @@ type Pager[T any] func(ctx context.Context, page int) (items []T, hasNext bool, 
 // walkConfig holds the resolved settings for one [Walk].
 type walkConfig struct {
 	historyOldest time.Time
-	archivePrefix string
 	historyCount  int
 }
 
@@ -71,38 +70,8 @@ func (c *walkConfig) withinBounds(idx int, createdAt time.Time) bool {
 // WalkOption configures a [Walk].
 //
 // Options of this type:
-//   - [WithArchivePrefix]
 //   - [WithHistoryLimit]
 type WalkOption func(*walkConfig)
-
-// WithArchivePrefix sets the archive-relative path prefix under which the
-// collection's entries live, the key of the walk's errored-child gate and its
-// completion and settled flags when that prefix differs from the cursor key.
-//
-// A collection whose cursor key is itself a path prefix of its entries, such as
-// a workspace's runs (projects/.../runs) or state versions, needs no override:
-// the walk keys everything on the key directly. A collection cursored by a
-// synthetic id whose entries live elsewhere, such as a stack's configurations
-// or a deployment group's runs (keyed on an id but archived under
-// projects/.../stacks/...), passes the real prefix here for two reasons: the
-// errored-child gate ([manifest.Ledger.HasUnsettledUnder]) scans the shard that
-// actually holds the entries and can find an errored or forbidden child left
-// below a done boundary, and the completion and settled flags share that
-// shard's log, which keeps the crash fence's durability order between a
-// settlement withdrawal and the entries it guards (see
-// [manifest.Ledger.SetCollectionSettled]). The id-shaped cursor would route
-// both to the org-root shard, whose log is synced separately from the entries'
-// shard in no guaranteed order, so a crash between the two appends could
-// persist freshly frozen entries under a stale settled flag. Only the
-// high-water mark stays on the cursor key. An empty prefix keeps the default
-// (the cursor key). It returns a [WalkOption].
-func WithArchivePrefix(prefix string) WalkOption {
-	return func(c *walkConfig) {
-		if prefix != "" {
-			c.archivePrefix = prefix
-		}
-	}
-}
 
 // WithHistoryLimit bounds the walk to the collection's recent history: an
 // element is within the limit while it sits among the newest count listed
@@ -131,7 +100,7 @@ func WithHistoryLimit(count int, oldest time.Time) WalkOption {
 // ordered collection (state versions, runs, per-run children, config versions).
 //
 // It pages through page newest-first, and for each element: advances the
-// collection's high-water mark under key toward the element's CreatedAt, archives
+// collection's high-water mark toward the element's CreatedAt, archives
 // the element, and, once it archives an element that was already recorded done
 // and is now terminal, stops. It archives that boundary element before stopping
 // so a run that has just transitioned from running to finished still gets the
@@ -150,13 +119,13 @@ func WithHistoryLimit(count int, oldest time.Time) WalkOption {
 // stranding it:
 //
 //   - the collection was walked to its end in a prior run
-//     ([manifest.Ledger.IsCollectionComplete]), so an interrupted first walk's
+//     ([manifest.Collection.Complete]), so an interrupted first walk's
 //     un-archived older tail is not mistaken for settled history;
 //   - the newest full walk saw only terminal elements
-//     ([manifest.Ledger.IsCollectionSettled]), which carries a still-running run
+//     ([manifest.Collection.Settled]), which carries a still-running run
 //     (recorded done, so invisible to a status scan) across passes; and
 //   - no errored or forbidden child sits below the boundary
-//     ([manifest.Ledger.HasUnsettledUnder]), which forces a full re-walk while
+//     ([manifest.Collection.HasUnsettled]), which forces a full re-walk while
 //     any such child exists.
 //
 // A non-terminal element seen mid-pass suppresses the stop for that pass too, so
@@ -177,20 +146,19 @@ func WithHistoryLimit(count int, oldest time.Time) WalkOption {
 // fetch, a cancellation, a kill — therefore leaves the flag false, and the
 // next run pages past the interrupted walk's new entries instead of
 // early-stopping above elements it never listed; those elements leave no
-// ledger record at all, so the flag is the only guard. The ledger orders the
-// false record ahead of the entries it guards in the shard log (see
-// [manifest.Ledger.SetCollectionSettled]), so no crash point persists the
-// entries without it. That ordering holds within a single shard's log append,
-// so the walk keys the flag on the archive prefix — the prefix that routes to
-// the shard holding the entries — never on a cursor key that shards elsewhere.
+// ledger record at all, so the flag is the only guard. The ledger drains the
+// false record ahead of the entries it guards in the flushed batch (see
+// [manifest.Collection.SetSettled]), so no crash point persists the entries
+// without it.
 //
-// The errored-child gate and the completion and settled flags are all keyed on
-// the archive prefix, which defaults to key and so works directly for a
-// collection whose key is a path prefix of its entries; a collection cursored
-// by a synthetic id (a stack walk) passes the real archive prefix through
-// [WithArchivePrefix] so the gate and the flags live in the shard that actually
-// holds the entries. Only the high-water mark stays keyed on key, the cursor's
-// stable identity.
+// The col handle carries every piece of the collection's ledger state —
+// completion, settlement, the errored-child gate, and the high-water mark —
+// keyed on the collection's archive prefix, so the flags live in the shard
+// that owns the entries by construction (see [manifest.Collection] and
+// [Env.Collection]). A collection listed through a synthetic cursor (a
+// stack's configurations, a deployment group's runs) simply opens the handle
+// on the directory its entries archive into; the cursor id names nothing in
+// the ledger.
 //
 // A history limit ([WithHistoryLimit]) bounds the walk to the newest slice of
 // the collection: the first listed element outside every configured bound ends
@@ -215,28 +183,18 @@ func WithHistoryLimit(count int, oldest time.Time) WalkOption {
 func Walk[T any](
 	ctx context.Context,
 	env *Env,
-	key string,
+	col *manifest.Collection,
 	page Pager[T],
 	describe func(T) Item,
 	opts ...WalkOption,
 ) error {
-	cfg := walkConfig{archivePrefix: key}
+	var cfg walkConfig
+
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
-	// The completion and settled flags are keyed on the archive prefix so they
-	// live in the shard whose log holds the entries they guard: the ledger's
-	// unsettle-before-entries drain order is per shard, and a synthetic cursor
-	// key would route the flags to the org-root shard, letting a crash between
-	// the two shards' log appends persist entries under a stale settled flag.
-	// The prefix defaults to key, so the two coincide for every collection
-	// whose key is a genuine path prefix of its entries.
-	flagKey := cfg.archivePrefix
-
-	earlyStopAllowed := env.ledger.IsCollectionComplete(flagKey) &&
-		env.ledger.IsCollectionSettled(flagKey) &&
-		!env.ledger.HasUnsettledUnder(cfg.archivePrefix)
+	earlyStopAllowed := col.Complete() && col.Settled() && !col.HasUnsettled()
 
 	sawNonTerminal := false
 	outOfBounds := false
@@ -246,7 +204,7 @@ func Walk[T any](
 	for pageNum := 1; ; pageNum++ {
 		items, hasNext, err := page(ctx, pageNum)
 		if err != nil {
-			return fmt.Errorf("list %q page %d: %w", key, pageNum, err)
+			return fmt.Errorf("list %q page %d: %w", col.Prefix(), pageNum, err)
 		}
 
 		// Decide the page's boundary in listing order first: include each element
@@ -271,7 +229,7 @@ func Walk[T any](
 
 			listedCount++
 
-			env.ledger.AdvanceHighWaterMark(key, item.CreatedAt)
+			col.AdvanceHighWaterMark(item.CreatedAt)
 
 			entry, ok := env.ledger.Entry(item.RelPath)
 			frozen := ok && entry.Status == manifest.StatusDone && item.Terminal
@@ -301,8 +259,8 @@ func Walk[T any](
 		// guard against that gap: an unlisted element leaves no ledger record
 		// for the unsettled-child scan to find. A walk whose every element was
 		// already frozen mutates no boundary and leaves the flag untouched.
-		if pageMutates && !unsettled && env.ledger.IsCollectionSettled(flagKey) {
-			env.ledger.SetCollectionSettled(flagKey, false)
+		if pageMutates && !unsettled && col.Settled() {
+			col.SetSettled(false)
 		}
 
 		unsettled = unsettled || pageMutates
@@ -330,8 +288,7 @@ func Walk[T any](
 			// catches any of its archives that errored. Without this the next
 			// run would re-page the whole collection after every delta.
 			if unsettled {
-				env.ledger.SetCollectionSettled(flagKey,
-					!sawNonTerminal && !env.ledger.HasUnsettledUnder(cfg.archivePrefix))
+				col.SetSettled(!sawNonTerminal && !col.HasUnsettled())
 			}
 
 			return nil
@@ -342,9 +299,8 @@ func Walk[T any](
 		// against a misbehaving pager that keeps advertising a next page over an
 		// empty one, which would otherwise spin this loop with no progress.
 		if len(items) == 0 {
-			env.ledger.MarkCollectionComplete(flagKey)
-			env.ledger.SetCollectionSettled(flagKey,
-				!sawNonTerminal && !env.ledger.HasUnsettledUnder(cfg.archivePrefix))
+			col.MarkComplete()
+			col.SetSettled(!sawNonTerminal && !col.HasUnsettled())
 
 			return nil
 		}
@@ -357,15 +313,14 @@ func Walk[T any](
 		// needs both completion and settlement, so a later wider limit still pages
 		// down into the tail rather than mistaking it for settled history.
 		if outOfBounds {
-			env.ledger.MarkCollectionComplete(flagKey)
+			col.MarkComplete()
 
 			return nil
 		}
 
 		if !hasNext {
-			env.ledger.MarkCollectionComplete(flagKey)
-			env.ledger.SetCollectionSettled(flagKey,
-				!sawNonTerminal && !env.ledger.HasUnsettledUnder(cfg.archivePrefix))
+			col.MarkComplete()
+			col.SetSettled(!sawNonTerminal && !col.HasUnsettled())
 
 			return nil
 		}

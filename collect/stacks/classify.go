@@ -73,36 +73,19 @@ func generationName(generation int) string {
 	return strconv.Itoa(generation)
 }
 
-// configKey derives the high-water-mark key for a stack's configuration walk
-// from the stack id, keeping each stack's incremental cursor distinct.
-func configKey(stackID string) string {
-	return "stacks/" + stackID + "/configurations"
-}
-
-// runKey derives the high-water-mark key for a deployment group's run walk from
-// the group id, keeping each group's incremental cursor distinct.
-func runKey(groupID string) string {
-	return "stack-deployment-groups/" + groupID + "/runs"
-}
-
 // configArchivePrefix is the archive-relative directory holding a stack's
-// configuration entries: the real path prefix the configurations walk keys its
-// errored-child gate and its completion and settled flags on, distinct from the
-// synthetic [configKey] cursor.
-//
-// The cursor routes to the org-root shard, but the entries live in the stack's
-// own shard, so the walk keys both on this prefix rather than the cursor:
-// [manifest.Ledger.HasUnsettledUnder] then scans the shard that holds the
-// entries, and the flags share that shard's log, preserving the crash fence's
-// unsettle-before-entries durability order.
+// configuration entries, the collection identity its walk opens the ledger
+// handle on ([collect.Env.Collection]): the flags, the errored-child gate,
+// and the high-water mark all key on it, so they live in the stack shard that
+// owns the entries.
 func configArchivePrefix(st *store.Store, project, stackName string) string {
 	return st.Join(st.StackDir(project, stackName), "configurations")
 }
 
 // runArchivePrefix is the archive-relative directory holding a deployment
-// group's run entries: the real path prefix the runs walk keys its
-// errored-child gate and its completion and settled flags on, distinct from the
-// synthetic [runKey] cursor.
+// group's run entries, the collection identity its walk opens the ledger
+// handle on, so an errored step artifact below a done run boundary stays
+// visible to the gate.
 func runArchivePrefix(st *store.Store, project, stackName, configID, groupID string) string {
 	return st.Join(st.StackDeploymentGroupDir(project, stackName, configID, groupID), "runs")
 }

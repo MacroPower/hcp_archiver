@@ -108,7 +108,7 @@ func newAuditFixture(t *testing.T, pages map[int]trailPage) auditFixture {
 
 // watermark reads the trail walk's Since cursor.
 func (f auditFixture) watermark() time.Time {
-	return f.ledger.HighWaterMark(f.store.AuditTrailDir())
+	return f.ledger.Collection(f.store.AuditTrailDir()).HighWaterMark()
 }
 
 // pageIDs decodes the archived page file written for the since cursor and page
@@ -263,7 +263,7 @@ func TestCollectTrailsDropsEventsAtOrBeforeSubSecondWatermark(t *testing.T) {
 		}, nextPage: 0},
 	})
 
-	f.ledger.AdvanceHighWaterMark(f.store.AuditTrailDir(), mark)
+	f.ledger.Collection(f.store.AuditTrailDir()).AdvanceHighWaterMark(mark)
 
 	require.NoError(t, f.collector.CollectTrails(t.Context()))
 
@@ -337,7 +337,7 @@ func TestCollectTrailsResumeAppendsOnlyNewerEvents(t *testing.T) {
 		}, nextPage: 0},
 	})
 
-	f2.ledger.AdvanceHighWaterMark(f2.store.AuditTrailDir(), base)
+	f2.ledger.Collection(f2.store.AuditTrailDir()).AdvanceHighWaterMark(base)
 
 	require.NoError(t, f2.collector.CollectTrails(t.Context()))
 
@@ -450,7 +450,7 @@ func (f *resumeFixture) run(t *testing.T) {
 
 // watermark reads the trail walk's Since cursor.
 func (f *resumeFixture) watermark() time.Time {
-	return f.ledger.HighWaterMark(f.store.AuditTrailDir())
+	return f.ledger.Collection(f.store.AuditTrailDir()).HighWaterMark()
 }
 
 func TestCollectTrailsResumeDoesNotStepPastAnUnpersistedEvent(t *testing.T) {

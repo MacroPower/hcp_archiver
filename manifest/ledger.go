@@ -654,7 +654,7 @@ func (l *Ledger) RecordNotApplicable(relPath string) {
 // own subtree: its created-by user and each event actor into users/<id>.json,
 // and a config-version tarball into config-versions/<id>.tar.gz. A local write of
 // one that fails records an errored entry in that foreign shard, invisible to the
-// run walk's retry gate ([Ledger.HasUnsettledUnder] scans only the run's own
+// run walk's retry gate ([Collection.HasUnsettled] scans only the run's own
 // shard), so nothing would ever retry it and the object stays uncaptured. A gate
 // under the run's own prefix makes that outstanding work visible to the walk
 // without moving the foreign write out of its org-global location.
@@ -782,7 +782,7 @@ func (l *Ledger) recordLocked(relPath string, status Status, mutate func(now tim
 //
 // The same keyed store holds both the newest CreatedAt archived for an
 // append-mostly collection and the audit trail's Since cursor.
-func (l *Ledger) HighWaterMark(key string) time.Time {
+func (l *Ledger) highWaterMark(key string) time.Time {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
@@ -796,7 +796,7 @@ func (l *Ledger) HighWaterMark(key string) time.Time {
 
 // AdvanceHighWaterMark advances the watermark for key toward t, keeping the
 // later of the two so the mark only ever moves forward.
-func (l *Ledger) AdvanceHighWaterMark(key string, t time.Time) {
+func (l *Ledger) advanceHighWaterMark(key string, t time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -815,7 +815,7 @@ func (l *Ledger) AdvanceHighWaterMark(key string, t time.Time) {
 // interrupted first walk (which leaves a newest-first prefix archived and an
 // older tail missing) is not mistaken for a complete collection. A re-run may
 // stop early at the newest already-archived element only once this is true.
-func (l *Ledger) IsCollectionComplete(key string) bool {
+func (l *Ledger) isCollectionComplete(key string) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
@@ -833,7 +833,7 @@ func (l *Ledger) IsCollectionComplete(key string) bool {
 //
 // It is sticky: an append-mostly collection only grows at its newest end, so
 // once its tail is fully archived that tail stays archived.
-func (l *Ledger) MarkCollectionComplete(key string) {
+func (l *Ledger) markCollectionComplete(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -847,10 +847,10 @@ func (l *Ledger) MarkCollectionComplete(key string) {
 //
 // Unlike completion it is not sticky. It is false until a full walk records it,
 // and a later walk that reaches a still-running element flips it back to false
-// (see [Ledger.SetCollectionSettled]), so a collection with work still in flight
+// (see [Collection.SetSettled]), so a collection with work still in flight
 // re-pages in full rather than stopping at a done boundary that a later,
 // out-of-order element sits behind.
-func (l *Ledger) IsCollectionSettled(key string) bool {
+func (l *Ledger) isCollectionSettled(key string) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
@@ -875,9 +875,9 @@ func (l *Ledger) IsCollectionSettled(key string) bool {
 // unsettlement guards the entries a walk is about to record, so it must never
 // become durable after them. The batch lands in the single org-level log, so
 // the order holds across shards; keying the flag on a path prefix of the
-// entries it guards remains right so [Ledger.HasUnsettledUnder] scans the
+// entries it guards remains right so [Collection.HasUnsettled] scans the
 // shard that owns them.
-func (l *Ledger) SetCollectionSettled(key string, settled bool) {
+func (l *Ledger) setCollectionSettled(key string, settled bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -895,9 +895,7 @@ func (l *Ledger) SetCollectionSettled(key string, settled bool) {
 //
 // It scans the shard that owns prefix, so a collection's walk can tell whether
 // an errored or forbidden child left below its newest done boundary still needs
-// reaching. A prefix whose shard holds no such child returns false, which
-// includes a synthetic cursor key that is not a genuine path prefix of any
-// entry (a stack walk's id cursor).
+// reaching. A prefix whose shard holds no such child returns false.
 //
 // Under retry-absent (see [WithRetryAbsent]) a recorded absence counts as
 // unsettled too, mirroring [Ledger.ShouldFetch]: most absences live below a
@@ -908,7 +906,7 @@ func (l *Ledger) SetCollectionSettled(key string, settled bool) {
 // predicate keeps a retry-absent run's collections recorded unsettled while
 // absences remain, so the following normal run re-pages them once and then
 // settles them again.
-func (l *Ledger) HasUnsettledUnder(prefix string) bool {
+func (l *Ledger) hasUnsettledUnder(prefix string) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 

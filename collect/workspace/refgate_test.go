@@ -262,7 +262,7 @@ func TestArchiveRunChildrenCreatedByStrandsAndRecovers(t *testing.T) {
 
 	assert.Equal(t, manifest.StatusErrored, f.status(userPath), "the foreign user write failed")
 	assert.Equal(t, manifest.StatusPending, f.status(gate), "the reference gate mirrors the failed write")
-	assert.True(t, f.ledger.HasUnsettledUnder(runsKey),
+	assert.True(t, f.ledger.Collection(runsKey).HasUnsettled(),
 		"the gate makes the stranded user visible to the runs walk's retry gate")
 
 	// Pass 2: clear the obstacle; the user is captured and the gate clears.
@@ -272,7 +272,7 @@ func TestArchiveRunChildrenCreatedByStrandsAndRecovers(t *testing.T) {
 	alice := f.attrs(t, userPath, "users", "user-1")
 	assert.Equal(t, "alice", alice["username"])
 	assert.Equal(t, manifest.StatusReferenceCleared, f.status(gate), "the gate clears once the user settles")
-	assert.False(t, f.ledger.HasUnsettledUnder(runsKey), "the run has no outstanding work once captured")
+	assert.False(t, f.ledger.Collection(runsKey).HasUnsettled(), "the run has no outstanding work once captured")
 }
 
 func TestCollectRunsStrandsAndRecoversCreatedByAcrossWalk(t *testing.T) {
@@ -315,8 +315,8 @@ func TestCollectRunsStrandsAndRecoversCreatedByAcrossWalk(t *testing.T) {
 
 	assert.Equal(t, manifest.StatusPending, f.status(olderGate),
 		"the older, non-boundary run's gate is left open")
-	assert.True(t, f.ledger.HasUnsettledUnder(runsKey), "the open gate keeps the collection with work to do")
-	assert.False(t, f.ledger.IsCollectionSettled(runsKey),
+	assert.True(t, f.ledger.Collection(runsKey).HasUnsettled(), "the open gate keeps the collection with work to do")
+	assert.False(t, f.ledger.Collection(runsKey).Settled(),
 		"a pending gate withholds settlement, so the next walk re-pages past the boundary")
 
 	// Pass 2: clear the obstacle; the re-walk reaches the older run and recovers it.
@@ -325,6 +325,6 @@ func TestCollectRunsStrandsAndRecoversCreatedByAcrossWalk(t *testing.T) {
 
 	assert.Equal(t, manifest.StatusDone, f.status(st.User("user-1")), "the older run's user is captured")
 	assert.Equal(t, manifest.StatusReferenceCleared, f.status(olderGate), "its gate clears")
-	assert.False(t, f.ledger.HasUnsettledUnder(runsKey), "no run has outstanding work")
-	assert.True(t, f.ledger.IsCollectionSettled(runsKey), "the collection settles once every gate clears")
+	assert.False(t, f.ledger.Collection(runsKey).HasUnsettled(), "no run has outstanding work")
+	assert.True(t, f.ledger.Collection(runsKey).Settled(), "the collection settles once every gate clears")
 }

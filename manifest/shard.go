@@ -30,14 +30,13 @@ const LogFileName = "log.ndjson"
 // org-wide configuration-version objects, which key to their own shard.
 const configVersionsSegment = "config-versions"
 
-// shardKey routes an archive-relative key (an object's path or an append-mostly
-// collection's high-water-mark key) to the shard that owns it.
+// shardKey routes an archive-relative key (an object's path or a collection's
+// archive prefix) to the shard that owns it.
 //
 // A workspace or stack subtree keys to its own shard so the shard stays scoped
 // to one bounded slice of the tree; the org-wide configuration versions key to
-// theirs; everything else (org-level objects, and the stack and audit cursors,
-// whose keys are id- rather than path-shaped) keys to the org-root shard, the
-// empty key.
+// theirs; everything else (org-level objects and org-level collection
+// prefixes) keys to the org-root shard, the empty key.
 func shardKey(key string) string {
 	segs := strings.Split(key, "/")
 

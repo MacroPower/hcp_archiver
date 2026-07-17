@@ -117,9 +117,9 @@ func TestArchiveRunStepsListingFailurePersists(t *testing.T) {
 		"a dropped steps listing records a persisted errored marker")
 
 	runsPrefix := stacks.RunArchivePrefixForTest(st, "proj", "stack", "sc-1", "sdg-1")
-	assert.True(t, f.ledger.HasUnsettledUnder(runsPrefix),
+	assert.True(t, f.ledger.Collection(runsPrefix).HasUnsettled(),
 		"the errored marker holds the runs walk's errored-child gate open")
-	assert.True(t, f.ledger.HasUnsettledUnder(stacks.ConfigArchivePrefixForTest(st, "proj", "stack")),
+	assert.True(t, f.ledger.Collection(stacks.ConfigArchivePrefixForTest(st, "proj", "stack")).HasUnsettled(),
 		"the errored marker holds the configurations walk's errored-child gate open")
 
 	// A later pass whose listing succeeds settles the marker so the walks can
@@ -130,7 +130,7 @@ func TestArchiveRunStepsListingFailurePersists(t *testing.T) {
 
 	assert.Equal(t, manifest.StatusNotApplicable, f.status(marker),
 		"a successful listing settles the marker")
-	assert.False(t, f.ledger.HasUnsettledUnder(runsPrefix))
+	assert.False(t, f.ledger.Collection(runsPrefix).HasUnsettled())
 
 	exists, err := st.Exists(marker)
 	require.NoError(t, err)
@@ -174,7 +174,7 @@ func TestArchiveConfigurationGroupsListingFailurePersists(t *testing.T) {
 	marker := st.Join(groupsDir, stacks.ListingLeafForTest)
 	assert.Equal(t, manifest.StatusErrored, f.status(marker),
 		"a dropped groups listing records a persisted errored marker")
-	assert.True(t, f.ledger.HasUnsettledUnder(stacks.ConfigArchivePrefixForTest(st, "proj", "stack")),
+	assert.True(t, f.ledger.Collection(stacks.ConfigArchivePrefixForTest(st, "proj", "stack")).HasUnsettled(),
 		"the errored marker holds the configurations walk's errored-child gate open")
 
 	healthy.Store(true)
@@ -183,7 +183,7 @@ func TestArchiveConfigurationGroupsListingFailurePersists(t *testing.T) {
 
 	assert.Equal(t, manifest.StatusNotApplicable, f.status(marker),
 		"a successful listing settles the marker")
-	assert.False(t, f.ledger.HasUnsettledUnder(stacks.ConfigArchivePrefixForTest(st, "proj", "stack")))
+	assert.False(t, f.ledger.Collection(stacks.ConfigArchivePrefixForTest(st, "proj", "stack")).HasUnsettled())
 }
 
 func TestArchiveGroupRunsWalkFailurePersists(t *testing.T) {
@@ -217,7 +217,7 @@ func TestArchiveGroupRunsWalkFailurePersists(t *testing.T) {
 	marker := st.Join(runsPrefix, stacks.ListingLeafForTest)
 	assert.Equal(t, manifest.StatusErrored, f.status(marker),
 		"a dropped runs walk records a persisted errored marker")
-	assert.True(t, f.ledger.HasUnsettledUnder(runsPrefix),
+	assert.True(t, f.ledger.Collection(runsPrefix).HasUnsettled(),
 		"the errored marker holds the errored-child gates open")
 
 	healthy.Store(true)
@@ -226,5 +226,5 @@ func TestArchiveGroupRunsWalkFailurePersists(t *testing.T) {
 
 	assert.Equal(t, manifest.StatusNotApplicable, f.status(marker),
 		"a completed runs walk settles the marker")
-	assert.False(t, f.ledger.HasUnsettledUnder(runsPrefix))
+	assert.False(t, f.ledger.Collection(runsPrefix).HasUnsettled())
 }

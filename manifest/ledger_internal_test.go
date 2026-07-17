@@ -125,8 +125,8 @@ func TestFlushAppendsOneClassOrderedBatch(t *testing.T) {
 
 	l.RecordDone(wsRun, Signature{})
 	l.RecordDone(tarball, Signature{})
-	l.MarkCollectionComplete(prefix)
-	l.SetCollectionSettled(prefix, true)
+	l.Collection(prefix).MarkComplete()
+	l.Collection(prefix).SetSettled(true)
 
 	require.NoError(t, l.Flush())
 

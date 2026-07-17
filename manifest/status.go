@@ -35,7 +35,7 @@ const (
 	// StatusPending marks a run-scoped reference gate: a ledger-only proxy under a
 	// run's own prefix that mirrors whether a cross-shard write the run depends on
 	// (its created-by user, an event actor, a config-version tarball) has settled.
-	// It is unsettled but not a failure, so [Ledger.HasUnsettledUnder] retries the
+	// It is unsettled but not a failure, so [Collection.HasUnsettled] retries the
 	// run while the foreign write remains outstanding, yet it never inflates the
 	// error tally or the failure list. See [Ledger.MirrorReference].
 	StatusPending Status = "pending"

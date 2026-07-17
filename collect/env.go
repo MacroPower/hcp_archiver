@@ -390,19 +390,6 @@ func (e *Env) ReferencePending(gateKey string) bool {
 	return e.ledger.ReferencePending(gateKey)
 }
 
-// HighWaterMark returns the recorded watermark for key, or the zero time when
-// none is set. The audit collector reads its forward Since cursor through this.
-func (e *Env) HighWaterMark(key string) time.Time {
-	return e.ledger.HighWaterMark(key)
-}
-
-// AdvanceHighWaterMark advances the watermark for key toward t, keeping the
-// later of the two. The audit collector advances its Since cursor through this;
-// [Walk] advances an append-mostly collection's mark itself.
-func (e *Env) AdvanceHighWaterMark(key string, t time.Time) {
-	e.ledger.AdvanceHighWaterMark(key, t)
-}
-
 // Entry returns the ledger entry recorded for relPath and whether one exists.
 // The seal phase reads it to confirm an artifact is settled before it bundles the
 // loose copy and removes it.
@@ -410,11 +397,14 @@ func (e *Env) Entry(relPath string) (manifest.Entry, bool) {
 	return e.ledger.Entry(relPath)
 }
 
-// IsCollectionComplete reports whether the append-mostly collection under key was
-// walked to its end, so the seal phase bundles a collection's cold artifacts only
-// once its tail is fully archived.
-func (e *Env) IsCollectionComplete(key string) bool {
-	return e.ledger.IsCollectionComplete(key)
+// Collection returns the ledger handle for the collection whose entries live
+// under archivePrefix (see [manifest.Collection]): its completion and settled
+// flags, high-water mark, and unsettled-child gate, all keyed on the prefix so
+// they share the shard that owns the entries. [Walk] drives one; the seal
+// phase reads completion through one before bundling a collection's cold
+// artifacts; the audit collector keeps its Since cursor on one.
+func (e *Env) Collection(archivePrefix string) *manifest.Collection {
+	return e.ledger.Collection(archivePrefix)
 }
 
 // ShouldFetch reports whether the current pass still needs to fetch the object

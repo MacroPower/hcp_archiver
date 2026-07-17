@@ -117,7 +117,8 @@ func (c *Collector) collectConfig(ctx context.Context) error {
 func (c *Collector) collectTrails(ctx context.Context) error {
 	st := c.env.Store()
 	key := st.AuditTrailDir()
-	since := c.env.HighWaterMark(key)
+	col := c.env.Collection(key)
+	since := col.HighWaterMark()
 
 	var newest time.Time
 
@@ -190,7 +191,7 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 	}
 
 	if !newest.IsZero() {
-		c.env.AdvanceHighWaterMark(key, newest)
+		col.AdvanceHighWaterMark(newest)
 	}
 
 	return nil

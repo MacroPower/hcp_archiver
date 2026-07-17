@@ -85,9 +85,9 @@ func TestCollectRunsHonorsRunHistoryLimit(t *testing.T) {
 	_, ok := f.ledger.Entry("projects/proj/workspaces/ws/runs/run-1/run.json")
 	assert.False(t, ok, "the run outside every bound is not archived")
 
-	assert.True(t, f.ledger.IsCollectionComplete("projects/proj/workspaces/ws/runs"),
+	assert.True(t, f.ledger.Collection("projects/proj/workspaces/ws/runs").Complete(),
 		"a limit-stopped walk records completion so the seal phase can bundle the slice")
-	assert.False(t, f.ledger.IsCollectionSettled("projects/proj/workspaces/ws/runs"),
+	assert.False(t, f.ledger.Collection("projects/proj/workspaces/ws/runs").Settled(),
 		"but withholds settlement so a wider limit still pages down into the tail")
 }
 

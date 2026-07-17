@@ -71,7 +71,7 @@ func (c *Collector) collectStateVersions(
 		}
 	}
 
-	return wrapArchive(key, collect.Walk(ctx, c.env, key, pager, describe))
+	return wrapArchive(key, collect.Walk(ctx, c.env, c.env.Collection(key), pager, describe))
 }
 
 // archiveStateVersion archives one state version: the raw state blob, the

@@ -38,14 +38,13 @@ func (c *Collector) collectConfigurations(ctx context.Context, project string, s
 		}
 	}
 
-	// The cursor key is a synthetic stack id, but the entries live under the
-	// stack's configurations directory; pass that real prefix so the errored-child
-	// gate and the collection flags live in the stack shard rather than the
-	// org-root shard the id routes to.
-	archivePrefix := configArchivePrefix(c.env.Store(), project, stack.Name)
+	// The listing pages by stack id, but the collection's identity in the
+	// ledger is the directory its entries archive into: the handle keys the
+	// flags, the gate, and the high-water mark on that prefix, so they share
+	// the stack shard that owns the entries.
+	col := c.env.Collection(configArchivePrefix(c.env.Store(), project, stack.Name))
 
-	err := collect.Walk(ctx, c.env, configKey(stack.ID), pager, describe,
-		collect.WithArchivePrefix(archivePrefix))
+	err := collect.Walk(ctx, c.env, col, pager, describe)
 	if err != nil {
 		return fmt.Errorf("walk stack configurations: %w", err)
 	}
@@ -223,14 +222,14 @@ func (c *Collector) collectRuns(ctx context.Context, project, stackName, configI
 		}
 	}
 
-	// The cursor key is a synthetic group id; the entries live under the group's
-	// runs directory. Pass that prefix so the errored-child gate reaches a step
-	// artifact left errored below a done run boundary and the collection flags
+	// The listing pages by group id, but the collection's identity in the
+	// ledger is the group's runs directory: the handle keys the flags, the
+	// gate, and the high-water mark on that prefix, so an errored step
+	// artifact below a done run boundary is visible to the gate and the flags
 	// share the entries' shard.
-	archivePrefix := runArchivePrefix(c.env.Store(), project, stackName, configID, groupID)
+	col := c.env.Collection(runArchivePrefix(c.env.Store(), project, stackName, configID, groupID))
 
-	err := collect.Walk(ctx, c.env, runKey(groupID), pager, describe,
-		collect.WithArchivePrefix(archivePrefix))
+	err := collect.Walk(ctx, c.env, col, pager, describe)
 	if err != nil {
 		return fmt.Errorf("walk stack deployment runs: %w", err)
 	}
