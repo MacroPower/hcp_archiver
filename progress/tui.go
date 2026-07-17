@@ -50,12 +50,17 @@ const (
 	countForbiddenWidth = 4
 	countRetriedWidth   = 4
 
-	// The metadata readouts pad to the width of the status column above them
-	// (its label plus digit reserve), so the panel's closing two lines align as
-	// one grid. The request-rate readout closes the line and needs no pad.
-	metaBytesWidth   = len("done ") + countDoneWidth
-	metaRateWidth    = len("errored ") + countErroredWidth
-	metaElapsedWidth = len("forbidden ") + countForbiddenWidth
+	// Column reserves of the footer grid, keyed by the counts row that leads
+	// it: each column is as wide as that row's label plus its digit reserve,
+	// and the metadata and remote rows pad their cells to the same reserves,
+	// so the footer's rows read as one grid. Cells past the last column (the
+	// amber 429, paused, and failed readouts) trail the grid unpadded, ordered
+	// stable-first, so a transient readout vanishing never shifts one that
+	// stays.
+	colDoneWidth      = len("done ") + countDoneWidth
+	colErroredWidth   = len("errored ") + countErroredWidth
+	colForbiddenWidth = len("forbidden ") + countForbiddenWidth
+	colRetriedWidth   = len("retried ") + countRetriedWidth
 )
 
 // maxTaskLines caps how many in-flight work items the panel lists, so a wide
@@ -434,35 +439,35 @@ func (m *tuiModel) render(snap snapshot) string {
 
 	t := snap.tally
 
-	// The metadata line mirrors the counts line above it: each readout sits
+	// The metadata row mirrors the counts row above it: each readout is a cell
 	// under a status column, led by its own glyph and padded to that column's
-	// width, so the panel's two closing lines read as one grid.
-	meta := fmt.Sprintf("%s %-*s %s %-*s %s %-*s",
-		glyphBytes, metaBytesWidth, theme.HumanBytes(t.BytesDownloaded),
-		glyphRate, metaRateWidth, theme.HumanBytes(int64(m.throughput(snap)))+"/s",
-		glyphElapsed, metaElapsedWidth, snap.elapsed.Round(time.Second).String(),
-	)
-
-	// The request-rate readout shows the adaptive governor moving: the rate it
-	// currently admits. During a rate-limit cooldown an amber paused readout
-	// follows (a cooldown parks every in-flight request, so without it the
-	// panel would just look stuck), and once any rate limiting has been
-	// observed the amber 429 total rides along too, so a slowed rate carries
-	// its own explanation.
-	if snap.hasRate {
-		meta += fmt.Sprintf(" "+glyphRPS+" %.0f/s", snap.rps)
+	// reserve, so the footer's rows read as one grid.
+	metaCells := []string{
+		cell(styleMeta, glyphBytes, theme.HumanBytes(t.BytesDownloaded), colDoneWidth),
+		cell(styleMeta, glyphRate, theme.HumanBytes(int64(m.throughput(snap)))+"/s", colErroredWidth),
+		cell(styleMeta, glyphElapsed, snap.elapsed.Round(time.Second).String(), colForbiddenWidth),
 	}
 
-	counts := "  " + statusCounts(t, countDoneWidth, countErroredWidth, countForbiddenWidth, countRetriedWidth)
-
-	metaLine := "  " + styleMeta.Render(meta)
-	if snap.hasRate && snap.pausedFor > 0 {
-		metaLine += " " + styleRateLimited.Render("· paused "+compactDuration(snap.pausedFor))
+	// The request-rate cell shows the adaptive governor moving: the rate it
+	// currently admits. Once any rate limiting has been observed the amber 429
+	// total trails the grid for the rest of the run, and during a cooldown an
+	// amber paused readout follows it (a cooldown parks every in-flight
+	// request, so without it the panel would just look stuck) — transient
+	// last, so the paused cell vanishing never shifts the 429 total.
+	if snap.hasRate {
+		metaCells = append(metaCells, cell(styleMeta, glyphRPS, fmt.Sprintf("%.0f/s", snap.rps), colRetriedWidth))
 	}
 
 	if snap.rateLimited > 0 {
-		metaLine += " " + styleRateLimited.Render(fmt.Sprintf("· 429s %d", snap.rateLimited))
+		metaCells = append(metaCells, cell(styleRateLimited, glyph429, fmt.Sprintf("429s %d", snap.rateLimited), 0))
 	}
+
+	if snap.hasRate && snap.pausedFor > 0 {
+		metaCells = append(metaCells, cell(styleRateLimited, glyphPaused, "paused "+compactDuration(snap.pausedFor), 0))
+	}
+
+	counts := "  " + statusCounts(t, true)
+	metaLine := "  " + strings.Join(metaCells, " ")
 
 	budget := m.taskLineBudget(snap.hasRemote)
 
@@ -593,41 +598,64 @@ func (m *tuiModel) fit(line string) string {
 	return ansi.Truncate(line, m.width, "")
 }
 
-// statusCounts renders the styled done/errored/forbidden/retried counts shared
-// by the live panel and the summary block, each count led by its status glyph.
-// The width arguments left-pad each count so the live panel's columns stay put
-// as values grow; pass zero widths for the summary's tight spacing.
-func statusCounts(t manifest.Tally, doneWidth, erroredWidth, forbiddenWidth, retriedWidth int) string {
-	return fmt.Sprintf("%s %s %s %s",
-		styleDone.Render(fmt.Sprintf(theme.GlyphOK+" done %-*d", doneWidth, t.Done)),
-		styleErrored.Render(fmt.Sprintf(theme.GlyphError+" errored %-*d", erroredWidth, t.Errored)),
-		styleForbidden.Render(fmt.Sprintf(theme.GlyphBlocked+" forbidden %-*d", forbiddenWidth, t.Forbidden)),
-		styleRetried.Render(fmt.Sprintf(theme.GlyphRetry+" retried %-*d", retriedWidth, t.Retried)),
-	)
+// cell renders one glyph-led cell of the footer grid: the glyph, a space, and
+// the text padded into the column's reserve, so the next cell starts on a
+// grid boundary however the value inside grows. A zero width keeps the cell
+// tight — the form the trailing amber readouts and the summary block's
+// compact rows use.
+func cell(style lipgloss.Style, glyph, text string, width int) string {
+	return style.Render(fmt.Sprintf("%s %-*s", glyph, width, text))
 }
 
-// remoteReadout renders the remote-transfer tally shared by the live panel
-// and the summary block: the transferred bytes, uploads, and evictions in the
-// muted metadata tone, with the failed count riding in amber only once
-// anything has failed, the same convention as the 429 readout. When showRate
-// is set the live upload rate follows the byte total — the panel shows it,
-// while the summary omits it because a momentary rate is meaningless once the
-// run has ended. The rate takes no glyph of its own: the ·-separated position
-// on the ☁ line and the bare /s suffix carry the meaning.
-func remoteReadout(rs RemoteStats, rate float64, showRate bool) string {
-	rateSeg := ""
-	if showRate {
-		rateSeg = fmt.Sprintf(" · %s/s", theme.HumanBytes(int64(rate)))
+// statusCounts renders the styled done/errored/forbidden/retried counts shared
+// by the live panel and the summary block, each count a glyph-led cell. Padded
+// cells hold the live panel's grid columns still as values grow; the summary
+// passes padded false for its tight spacing.
+func statusCounts(t manifest.Tally, padded bool) string {
+	var w [4]int
+
+	if padded {
+		w = [4]int{colDoneWidth, colErroredWidth, colForbiddenWidth, colRetriedWidth}
 	}
 
-	out := styleMeta.Render(fmt.Sprintf(glyphCloud+" %s%s · uploaded %d · evicted %d",
-		theme.HumanBytes(rs.UploadedBytes), rateSeg, rs.Uploaded, rs.Evicted))
+	return strings.Join([]string{
+		cell(styleDone, theme.GlyphOK, fmt.Sprintf("done %d", t.Done), w[0]),
+		cell(styleErrored, theme.GlyphError, fmt.Sprintf("errored %d", t.Errored), w[1]),
+		cell(styleForbidden, theme.GlyphBlocked, fmt.Sprintf("forbidden %d", t.Forbidden), w[2]),
+		cell(styleRetried, theme.GlyphRetry, fmt.Sprintf("retried %d", t.Retried), w[3]),
+	}, " ")
+}
+
+// remoteReadout renders the remote-transfer row shared by the live panel and
+// the summary block: the transferred bytes, upload rate, uploads, and
+// evictions as muted cells, with the failed count trailing in amber only once
+// anything has failed, the same convention as the 429 readout. On the live
+// panel the cells pad to the grid's column reserves and the upload rate rides
+// under the download rate; the summary keeps the cells tight and omits the
+// rate, because a momentary rate is meaningless once the run has ended.
+func remoteReadout(rs RemoteStats, rate float64, live bool) string {
+	var w [4]int
+
+	if live {
+		w = [4]int{colDoneWidth, colErroredWidth, colForbiddenWidth, colRetriedWidth}
+	}
+
+	cells := []string{cell(styleMeta, glyphCloud, theme.HumanBytes(rs.UploadedBytes), w[0])}
+
+	if live {
+		cells = append(cells, cell(styleMeta, glyphRate, theme.HumanBytes(int64(rate))+"/s", w[1]))
+	}
+
+	cells = append(cells,
+		cell(styleMeta, glyphUploaded, fmt.Sprintf("uploaded %d", rs.Uploaded), w[2]),
+		cell(styleMeta, glyphEvicted, fmt.Sprintf("evicted %d", rs.Evicted), w[3]),
+	)
 
 	if rs.Failed > 0 {
-		out += " " + styleRateLimited.Render(fmt.Sprintf("· failed %d", rs.Failed))
+		cells = append(cells, cell(styleRateLimited, theme.GlyphError, fmt.Sprintf("failed %d", rs.Failed), 0))
 	}
 
-	return out
+	return strings.Join(cells, " ")
 }
 
 // compactDuration formats d for the eta column: bare seconds under a minute,

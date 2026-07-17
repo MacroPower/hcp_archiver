@@ -362,10 +362,10 @@ func TestRenderSummary(t *testing.T) {
 func TestRenderPanel_RateStatus(t *testing.T) {
 	t.Parallel()
 
-	// The adaptive request-rate readout rides in the metadata segment; during
-	// a cooldown the amber paused readout follows it, and once any rate
-	// limiting has been observed the amber 429 total rides along too, so a
-	// slowed rate carries its own explanation.
+	// The adaptive request-rate cell closes the metadata row's grid; once any
+	// rate limiting has been observed the amber 429 total trails the grid,
+	// and during a cooldown the amber paused readout follows it (transient
+	// last), so a slowed rate carries its own explanation.
 	panel := barPanel()
 	panel.HasRate = true
 	panel.RPS = 12
@@ -430,8 +430,8 @@ func TestRenderPanel_Remote(t *testing.T) {
 func TestRenderPanel_RemoteFailed(t *testing.T) {
 	t.Parallel()
 
-	// Once any remote motion has failed the amber failed segment rides at the
-	// end of the readout, the same convention as the 429 total.
+	// Once any remote motion has failed the amber failed cell trails the
+	// row's grid, the same convention as the 429 total.
 	panel := remotePanel()
 	panel.Remote.Failed = 3
 

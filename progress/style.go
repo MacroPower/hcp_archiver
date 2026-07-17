@@ -6,20 +6,29 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/theme"
 )
 
-// Metadata glyphs leading the panel's closing readouts, mirroring the status
-// glyphs above them so the panel's last two lines read as one grid. They are
-// panel-specific (no other surface prints these readouts), so they live here
-// rather than in the shared [theme] vocabulary.
+// Metadata glyphs leading the cells of the panel's footer grid, mirroring the
+// status glyphs on the counts row so the footer's rows read as one grid. They
+// are panel-specific (no other surface prints these readouts), so they live
+// here rather than in the shared [theme] vocabulary. The arrows draw from two
+// families the terminal renders as one set: the dashed arrows (⇠⇡⇢⇣) carry
+// byte movement, and the paired arrows with their bar (⇉⇇⇥) carry request
+// flow — requests streaming out, the server pushing back with 429s, and a
+// cooldown stopping the flow at a bar.
 const (
-	glyphBytes   = "⇣"
-	glyphRate    = "⇢"
-	glyphElapsed = "◷"
-	glyphRPS     = "⇉"
+	glyphBytes    = "⇣"
+	glyphRate     = "⇢"
+	glyphElapsed  = "◷"
+	glyphRPS      = "⇉"
+	glyph429      = "⇇"
+	glyphPaused   = "⇥"
+	glyphUploaded = "⇡"
+	glyphEvicted  = "⇠"
 )
 
-// glyphCloud leads the remote-transfer readout. U+2601 renders one or two
-// cells depending on the terminal; the readout is a free-form ·-separated
-// line joining no grid, so the ambiguity is deliberately tolerated.
+// glyphCloud leads the remote-transfer row. U+2601 renders one or two cells
+// depending on the terminal; a double-cell render shifts the row's remaining
+// columns one cell right of the grid above, a drift tolerated as the row
+// keeps its own cell rhythm and stays the frame's last line.
 const glyphCloud = "☁"
 
 // Surface styles mapping the panel's roles onto the shared [theme] tokens, so

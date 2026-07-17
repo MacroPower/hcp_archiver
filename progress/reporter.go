@@ -974,6 +974,10 @@ func (r *Reporter) summaryBlock(snap snapshot) string {
 		title += " (resumed)"
 	}
 
+	// The meta line is the block's one prose line: outcome facts that carry no
+	// glyphs and join no grid, so a mid-dot separates them. Everywhere else
+	// the panel and summary compose glyph-led cells, and the separator would
+	// break that convention.
 	meta := fmt.Sprintf(
 		"absent %d · skipped %d · n/a %d · total %d · %s · %s",
 		t.Absent,
@@ -986,9 +990,9 @@ func (r *Reporter) summaryBlock(snap snapshot) string {
 
 	lines := []string{
 		glyph + " " + styleSummaryHead.Render(title),
-		// Zero widths keep the summary's counts tight; the live panel pads them
-		// so its columns hold still.
-		statusCounts(t, 0, 0, 0, 0),
+		// Unpadded cells keep the summary's counts tight; the live panel pads
+		// them so its columns hold still.
+		statusCounts(t, false),
 		styleMeta.Render(meta),
 	}
 
