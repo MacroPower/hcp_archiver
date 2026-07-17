@@ -1495,3 +1495,61 @@ func TestLedger_EntryDurableTracksTheFlushLifecycle(t *testing.T) {
 	require.NoError(t, ledger.Flush())
 	assert.True(t, ledger.EntryDurable(tarball), "the retried flush lands it")
 }
+
+func TestLoad_AliasTaggedRecordsSurviveTheLinkRemoval(t *testing.T) {
+	t.Parallel()
+
+	// A rename link sorting before its target claims the flush's shard tag
+	// for every drained record. Removing the link later -- the tidying the
+	// mirror heal makes safe -- must not read as a subtree deletion: the
+	// records' own paths still name the surviving physical shard.
+	root := t.TempDir()
+
+	const (
+		oldEntry = "projects/p/workspaces/web/runs/r1/run.json"
+		newEntry = "projects/p/workspaces/web/runs/r2/run.json"
+	)
+
+	wsDir := filepath.Join(root, "projects", "p", "workspaces")
+	link := filepath.Join(wsDir, "api")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(wsDir, "web"), 0o755))
+
+	// A first run folds a snapshot into the workspace's .ledger, so the next
+	// load's discovery registers the shard -- under both names once the
+	// rename link exists beside it.
+	first, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	first.StartRun()
+	first.RecordDone(oldEntry, manifest.Signature{Size: 1})
+	first.FinishRun()
+	require.NoError(t, first.Flush())
+	require.NoError(t, first.Close())
+
+	require.NoError(t, os.Symlink(filepath.Join(wsDir, "web"), link))
+
+	// The second run drains under the lexically first registered key -- the
+	// alias -- and is interrupted before any fold, leaving the org log the
+	// only durable copy of its record, tagged with the alias name.
+	second, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	second.StartRun()
+	second.RecordDone(newEntry, manifest.Signature{Size: 1})
+	require.NoError(t, second.Flush())
+	require.NoError(t, second.Close())
+
+	require.NoError(t, os.Remove(link))
+
+	reloaded, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, reloaded.Close()) })
+
+	assert.False(t, reloaded.ShouldFetch(newEntry),
+		"the alias-tagged record replays through its payload's surviving shard")
+	assert.False(t, reloaded.ShouldFetch(oldEntry))
+	assert.Zero(t, reloaded.Tally().RecordsDiscarded,
+		"nothing was deleted, so nothing discards")
+}

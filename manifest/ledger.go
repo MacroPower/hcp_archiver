@@ -578,6 +578,13 @@ func (l *Ledger) walPath() string {
 // under a declared record-only prefix (see [WithRecordOnlyPrefixes]), whose
 // subtree is legitimately sparse under eviction and whose absence therefore
 // carries no deletion signal.
+//
+// The shard tag is one name for the shard, not the only one: a flush drains
+// under the lexically first registered key, which can be a rename alias
+// whose link the operator later removes while the physical subtree lives on.
+// A record whose tag path is gone therefore falls back to the shard key its
+// own payload routes to before it is discarded — an operator deletion still
+// discards, because then both names are gone.
 func (l *Ledger) replayWAL() error {
 	recs, n, err := replayLog(l.walPath(), l.logger)
 	if err != nil {
@@ -590,26 +597,13 @@ func (l *Ledger) replayWAL() error {
 	discarded := make(map[string]int)
 
 	for i := range recs {
-		sk := recs[i].Shard
-
-		ok, known := present[sk]
-		if !known {
-			_, statErr := os.Stat(filepath.Join(l.root, filepath.FromSlash(sk)))
-
-			switch {
-			case statErr == nil:
-				ok = true
-			case errors.Is(statErr, fs.ErrNotExist):
-				ok = false
-			default:
-				return fmt.Errorf("stat shard subtree %q: %w", sk, statErr)
-			}
-
-			present[sk] = ok
+		sk, ok, presErr := l.replayShardKey(&recs[i], present)
+		if presErr != nil {
+			return presErr
 		}
 
 		if !ok {
-			discarded[sk]++
+			discarded[recs[i].Shard]++
 
 			continue
 		}
@@ -637,6 +631,54 @@ func (l *Ledger) replayWAL() error {
 	l.walBytes = n
 
 	return nil
+}
+
+// replayShardKey resolves the shard key one log record replays under: its
+// tag when the tag's subtree survives, the key its own payload routes to
+// when only the tag path is gone (a removed rename link), or ok=false when
+// both are gone and the record discards as a deliberate deletion. The
+// present map memoizes subtree checks across the replay.
+func (l *Ledger) replayShardKey(rec *walRecord, present map[string]bool) (string, bool, error) {
+	sk := rec.Shard
+
+	ok, err := l.subtreePresent(sk, present)
+	if err != nil || ok {
+		return sk, ok, err
+	}
+
+	fb := recordShardKey(rec)
+	if fb == sk {
+		return sk, false, nil
+	}
+
+	ok, err = l.subtreePresent(fb, present)
+
+	return fb, ok, err
+}
+
+// subtreePresent reports whether the shard key's subtree exists on disk,
+// memoizing into present. A stat fault other than absence surfaces, matching
+// discovery's no-silent-drop policy.
+func (l *Ledger) subtreePresent(sk string, present map[string]bool) (bool, error) {
+	ok, known := present[sk]
+	if known {
+		return ok, nil
+	}
+
+	_, statErr := os.Stat(filepath.Join(l.root, filepath.FromSlash(sk)))
+
+	switch {
+	case statErr == nil:
+		ok = true
+	case errors.Is(statErr, fs.ErrNotExist):
+		ok = false
+	default:
+		return false, fmt.Errorf("stat shard subtree %q: %w", sk, statErr)
+	}
+
+	present[sk] = ok
+
+	return ok, nil
 }
 
 // totalEntries returns the number of entries across every physical shard, so

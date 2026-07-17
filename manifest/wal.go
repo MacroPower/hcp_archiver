@@ -57,6 +57,24 @@ type walRecord struct {
 	Settled bool `json:"settled,omitempty"`
 }
 
+// recordShardKey derives the shard key a record's own payload routes to: the
+// fallback identity a replay consults when the record's shard tag names a
+// path that no longer exists (a rename alias whose link the operator has
+// since removed) while the payload's physical subtree survives. A run record
+// carries no path and belongs to the org root.
+func recordShardKey(rec *walRecord) string {
+	switch rec.Kind {
+	case walEntry:
+		return shardKey(rec.Path)
+	case walWatermark, walCompleted, walSettled:
+		return shardKey(rec.Key)
+	case walRun:
+		return ""
+	default:
+		return ""
+	}
+}
+
 // walRecordClass ranks a record for the durability order one appended batch
 // must satisfy (see [shard.drainDirty]): collection unsettlements lead, then
 // unsettled-status entries, then settled-status entries, then the skip
