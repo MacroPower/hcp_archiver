@@ -124,6 +124,10 @@ linters:
           msg: >-
             symlink resolution and tree walks define physical identity; use
             the fsid package, which owns the archive's aliasing rules
+        - pattern: ^lipgloss\.Color$
+          msg: >-
+            raw colors fork the palette; use the theme package, which owns
+            the terminal design system
 
     misspell:
       locale: US
@@ -242,6 +246,10 @@ linters:
           - forbidigo
       - path: fsid/
         text: "use the fsid package"
+        linters:
+          - forbidigo
+      - path: theme/
+        text: "use the theme package"
         linters:
           - forbidigo
       - path: _test\.go
