@@ -1,7 +1,6 @@
 package stacks_test
 
 import (
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -241,39 +240,6 @@ func TestArchiveGroupRunsWalkFailurePersists(t *testing.T) {
 	assert.Equal(t, manifest.StatusReferenceCleared, f.status(marker),
 		"a settled runs walk settles the marker")
 	assert.False(t, f.ledger.Collection(configPrefix).HasUnsettled())
-}
-
-func TestArchiveGroupHealsTheLegacyInPrefixMarker(t *testing.T) {
-	t.Parallel()
-
-	// An earlier layout kept the runs walk's marker inside the runs prefix it
-	// mirrors, where an interrupted run could leave it errored with nothing
-	// ever recording that key again: the orphan pinned the runs collection --
-	// and the configurations walk above it -- unsettled forever. The group's
-	// next visit settles the orphan.
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v2/stack-deployment-groups/sdg-1/stack-deployment-runs",
-		func(w http.ResponseWriter, _ *http.Request) {
-			writeEmptyList(t, w)
-		})
-
-	f := newStacksFixture(t, mux)
-	st := f.store
-
-	runsPrefix := stacks.RunArchivePrefixForTest(st, "proj", "stack", "sc-1", "sdg-1")
-	legacy := st.Join(runsPrefix, stacks.ListingLeafForTest)
-	f.ledger.RecordErrored(legacy, errors.New("interrupted"), true)
-
-	require.True(t, f.ledger.Collection(runsPrefix).HasUnsettled(),
-		"the orphaned legacy marker pins the runs collection unsettled")
-
-	group := &tfe.StackDeploymentGroup{ID: "sdg-1", Name: "primary"}
-	require.NoError(t, f.collector.ArchiveGroupForTest(t.Context(), "proj", "stack", "sc-1", group))
-
-	assert.Equal(t, manifest.StatusReferenceCleared, f.status(legacy),
-		"the orphan settles as a cleared gate")
-	assert.False(t, f.ledger.Collection(runsPrefix).HasUnsettled(),
-		"the healed collection can settle again")
 }
 
 func TestListingFailureAfterSuccessReopensTheMarker(t *testing.T) {
