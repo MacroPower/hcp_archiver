@@ -19,6 +19,7 @@ import (
 
 	"go.jacobcolvin.com/hcp_archiver/config"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/theme"
 )
 
 // TallySource supplies the live counters the reporter renders.
@@ -932,7 +933,7 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 	if snap.hasRemote {
 		fmt.Fprintf(&b, " remoteUploaded=%d remoteUploadedBytes=%s remoteEvicted=%d remoteFailed=%d",
 			snap.remote.Uploaded,
-			humanBytes(snap.remote.UploadedBytes),
+			theme.HumanBytes(snap.remote.UploadedBytes),
 			snap.remote.Evicted,
 			snap.remote.Failed,
 		)
@@ -941,9 +942,9 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 	fmt.Fprintf(
 		&b,
 		" bytes=%s elapsed=%s rate=%s/s\n",
-		humanBytes(t.BytesDownloaded),
+		theme.HumanBytes(t.BytesDownloaded),
 		snap.elapsed.Round(time.Second),
-		humanBytes(int64(snap.rate)),
+		theme.HumanBytes(int64(snap.rate)),
 	)
 
 	return b.String()
@@ -959,13 +960,13 @@ func (r *Reporter) humanLine(snap snapshot, summary bool) string {
 func (r *Reporter) summaryBlock(snap snapshot) string {
 	t := snap.tally
 
-	glyph := styleDone.Render(glyphDone)
+	glyph := styleDone.Render(theme.GlyphOK)
 
 	switch {
 	case t.Errored > 0:
-		glyph = styleErrored.Render(glyphErrored)
+		glyph = styleErrored.Render(theme.GlyphError)
 	case t.Forbidden > 0:
-		glyph = styleForbidden.Render(glyphForbidden)
+		glyph = styleForbidden.Render(theme.GlyphBlocked)
 	}
 
 	title := "archive complete"
@@ -979,7 +980,7 @@ func (r *Reporter) summaryBlock(snap snapshot) string {
 		t.Skipped,
 		t.NotApplicable,
 		t.Total(),
-		humanBytes(t.BytesDownloaded),
+		theme.HumanBytes(t.BytesDownloaded),
 		snap.elapsed.Round(time.Second),
 	)
 
@@ -1132,23 +1133,4 @@ func (r *Reporter) writeJSON(snap snapshot, summary bool) error {
 	}
 
 	return nil
-}
-
-// humanBytes renders a byte count in binary (IEC) units to one decimal place.
-func humanBytes(n int64) string {
-	const unit = 1024
-
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-
-	div, exp := int64(unit), 0
-	for m := n / unit; m >= unit; m /= unit {
-		div *= unit
-		exp++
-	}
-
-	units := [...]string{"KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
-
-	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), units[exp])
 }

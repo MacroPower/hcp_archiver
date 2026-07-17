@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/theme"
 )
 
 // Fixed column widths that keep the panel from reflowing as values change. Every
@@ -437,8 +438,8 @@ func (m *tuiModel) render(snap snapshot) string {
 	// under a status column, led by its own glyph and padded to that column's
 	// width, so the panel's two closing lines read as one grid.
 	meta := fmt.Sprintf("%s %-*s %s %-*s %s %-*s",
-		glyphBytes, metaBytesWidth, humanBytes(t.BytesDownloaded),
-		glyphRate, metaRateWidth, humanBytes(int64(m.throughput(snap)))+"/s",
+		glyphBytes, metaBytesWidth, theme.HumanBytes(t.BytesDownloaded),
+		glyphRate, metaRateWidth, theme.HumanBytes(int64(m.throughput(snap)))+"/s",
 		glyphElapsed, metaElapsedWidth, snap.elapsed.Round(time.Second).String(),
 	)
 
@@ -598,10 +599,10 @@ func (m *tuiModel) fit(line string) string {
 // as values grow; pass zero widths for the summary's tight spacing.
 func statusCounts(t manifest.Tally, doneWidth, erroredWidth, forbiddenWidth, retriedWidth int) string {
 	return fmt.Sprintf("%s %s %s %s",
-		styleDone.Render(fmt.Sprintf(glyphDone+" done %-*d", doneWidth, t.Done)),
-		styleErrored.Render(fmt.Sprintf(glyphErrored+" errored %-*d", erroredWidth, t.Errored)),
-		styleForbidden.Render(fmt.Sprintf(glyphForbidden+" forbidden %-*d", forbiddenWidth, t.Forbidden)),
-		styleRetried.Render(fmt.Sprintf(glyphRetried+" retried %-*d", retriedWidth, t.Retried)),
+		styleDone.Render(fmt.Sprintf(theme.GlyphOK+" done %-*d", doneWidth, t.Done)),
+		styleErrored.Render(fmt.Sprintf(theme.GlyphError+" errored %-*d", erroredWidth, t.Errored)),
+		styleForbidden.Render(fmt.Sprintf(theme.GlyphBlocked+" forbidden %-*d", forbiddenWidth, t.Forbidden)),
+		styleRetried.Render(fmt.Sprintf(theme.GlyphRetry+" retried %-*d", retriedWidth, t.Retried)),
 	)
 }
 
@@ -616,11 +617,11 @@ func statusCounts(t manifest.Tally, doneWidth, erroredWidth, forbiddenWidth, ret
 func remoteReadout(rs RemoteStats, rate float64, showRate bool) string {
 	rateSeg := ""
 	if showRate {
-		rateSeg = fmt.Sprintf(" · %s/s", humanBytes(int64(rate)))
+		rateSeg = fmt.Sprintf(" · %s/s", theme.HumanBytes(int64(rate)))
 	}
 
 	out := styleMeta.Render(fmt.Sprintf(glyphCloud+" %s%s · uploaded %d · evicted %d",
-		humanBytes(rs.UploadedBytes), rateSeg, rs.Uploaded, rs.Evicted))
+		theme.HumanBytes(rs.UploadedBytes), rateSeg, rs.Uploaded, rs.Evicted))
 
 	if rs.Failed > 0 {
 		out += " " + styleRateLimited.Render(fmt.Sprintf("· failed %d", rs.Failed))
