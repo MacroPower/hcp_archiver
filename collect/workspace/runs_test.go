@@ -20,21 +20,22 @@ func TestRunTerminal(t *testing.T) {
 		status tfe.RunStatus
 		want   bool
 	}{
-		"applied is terminal":                {status: tfe.RunApplied, want: true},
-		"planned and finished is terminal":   {status: tfe.RunPlannedAndFinished, want: true},
-		"discarded is terminal":              {status: tfe.RunDiscarded, want: true},
-		"errored is terminal":                {status: tfe.RunErrored, want: true},
-		"canceled is terminal":               {status: tfe.RunCanceled, want: true},
-		"policy soft failed is not terminal": {status: tfe.RunPolicySoftFailed, want: false},
-		"force canceled is terminal":         {status: tfe.RunStatus("force_canceled"), want: true},
-		"pending is not terminal":            {status: tfe.RunPending, want: false},
-		"planning is not terminal":           {status: tfe.RunPlanning, want: false},
-		"planned is not terminal":            {status: tfe.RunPlanned, want: false},
-		"applying is not terminal":           {status: tfe.RunApplying, want: false},
-		"planned and saved is not terminal":  {status: tfe.RunPlannedAndSaved, want: false},
-		"confirmed is not terminal":          {status: tfe.RunConfirmed, want: false},
-		"empty status is not terminal":       {status: tfe.RunStatus(""), want: false},
-		"unknown status is not terminal":     {status: tfe.RunStatus("surprise"), want: false},
+		"applied is terminal":               {status: tfe.RunApplied, want: true},
+		"planned and finished is terminal":  {status: tfe.RunPlannedAndFinished, want: true},
+		"discarded is terminal":             {status: tfe.RunDiscarded, want: true},
+		"errored is terminal":               {status: tfe.RunErrored, want: true},
+		"canceled is terminal":              {status: tfe.RunCanceled, want: true},
+		"policy soft failed is terminal":    {status: tfe.RunPolicySoftFailed, want: true},
+		"policy override is not terminal":   {status: tfe.RunPolicyOverride, want: false},
+		"force canceled is terminal":        {status: tfe.RunStatus("force_canceled"), want: true},
+		"pending is not terminal":           {status: tfe.RunPending, want: false},
+		"planning is not terminal":          {status: tfe.RunPlanning, want: false},
+		"planned is not terminal":           {status: tfe.RunPlanned, want: false},
+		"applying is not terminal":          {status: tfe.RunApplying, want: false},
+		"planned and saved is not terminal": {status: tfe.RunPlannedAndSaved, want: false},
+		"confirmed is not terminal":         {status: tfe.RunConfirmed, want: false},
+		"empty status is not terminal":      {status: tfe.RunStatus(""), want: false},
+		"unknown status is not terminal":    {status: tfe.RunStatus("surprise"), want: false},
 	}
 
 	for name, tc := range tests {

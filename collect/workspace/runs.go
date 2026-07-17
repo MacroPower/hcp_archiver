@@ -110,7 +110,12 @@ func runTerminal(status tfe.RunStatus) bool {
 		tfe.RunPlannedAndFinished,
 		tfe.RunDiscarded,
 		tfe.RunErrored,
-		tfe.RunCanceled:
+		tfe.RunCanceled,
+		tfe.RunPolicySoftFailed:
+		// The policy_soft_failed state is final: a soft-mandatory policy
+		// failure on a plan-only run, which no override can advance. The
+		// policy_override state, by contrast, stays non-terminal because a
+		// user override moves it on.
 		return true
 	case tfe.RunStatus("force_canceled"):
 		// The HCP Terraform API documents force_canceled as a final run state,
