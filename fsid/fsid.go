@@ -64,6 +64,12 @@ func Canonical(path string) string {
 // their logical location under the link, and its target joins the owned
 // trees.
 //
+// Containment cuts both ways: a followed target that itself contains an
+// already-owned tree (nested relocation links, a link to an ancestor of the
+// root) surfaces that tree as a plain directory mid-walk, and the traversal
+// declines it there with the same alias bookkeeping, so no visit order can
+// walk a physical directory twice.
+//
 // A symlink to a regular file reports like the file, a dangling link is
 // skipped, and any other stat or walk fault propagates, so a fault cannot
 // silently hide a subtree from the caller. The walk stops between entries
@@ -109,7 +115,27 @@ func (w *walker) walk(ctx context.Context, physical, logical string) error {
 		case ctx.Err() != nil:
 			return ctx.Err()
 		case d.IsDir():
-			return nil
+			if p == physical {
+				return nil
+			}
+
+			// A followed link's target can physically contain a tree another
+			// walk already owns; it surfaces here as a plain directory whose
+			// path IS a registered root. Decline it like the symlinked case,
+			// or the subtree would report twice under two logical names.
+			owner, owned := w.rootAt(p)
+			if !owned {
+				return nil
+			}
+
+			lp, lpErr := logicalPath(physical, logical, p)
+			if lpErr != nil {
+				return lpErr
+			}
+
+			w.aliases[lp] = owner
+
+			return fs.SkipDir
 		}
 
 		lp, lpErr := logicalPath(physical, logical, p)
@@ -172,6 +198,21 @@ func (w *walker) ownerOf(resolved string) (string, bool) {
 
 		if strings.HasPrefix(resolved, r.phys+string(filepath.Separator)) {
 			return filepath.Join(r.logical, resolved[len(r.phys):]), true
+		}
+	}
+
+	return "", false
+}
+
+// rootAt maps a physically reached directory to the logical root another
+// walk owns it under, when the directory is itself a registered walk root:
+// the containment direction [walker.ownerOf] cannot see, since mid-walk an
+// owned tree always surfaces as an exact root match rather than a resolved
+// link target.
+func (w *walker) rootAt(p string) (string, bool) {
+	for _, r := range w.roots {
+		if p == r.phys {
+			return r.logical, true
 		}
 	}
 

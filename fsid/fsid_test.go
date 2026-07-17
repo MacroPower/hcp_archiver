@@ -141,3 +141,84 @@ func TestWalkFilesStopsOnCancel(t *testing.T) {
 	_, err := fsid.WalkFiles(ctx, tmp, func(string) error { return nil })
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+func TestWalkFilesDeclinesAnOwnedTreeInsideAFollowedTarget(t *testing.T) {
+	t.Parallel()
+
+	// Two relocation links whose targets nest: whichever order the walk
+	// visits them, the shared subtree must report exactly once and the
+	// duplicate prefix must surface as an alias, or its files would report
+	// twice under two logical names depending on lexical order.
+	for name, links := range map[string]struct{ inner, parent string }{
+		"inner link sorts first":  {inner: "a-inner", parent: "b-parent"},
+		"parent link sorts first": {inner: "b-inner", parent: "a-parent"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ext := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(ext, "data", "x"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(ext, "data", "x", "f"), []byte("x"), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(ext, "data", "g"), []byte("g"), 0o600))
+
+			tmp := t.TempDir()
+			require.NoError(t, os.Symlink(filepath.Join(ext, "data", "x"), filepath.Join(tmp, links.inner)))
+			require.NoError(t, os.Symlink(filepath.Join(ext, "data"), filepath.Join(tmp, links.parent)))
+
+			var got []string
+
+			aliases, err := fsid.WalkFiles(t.Context(), tmp, func(logical string) error {
+				rel, relErr := filepath.Rel(tmp, logical)
+				require.NoError(t, relErr)
+
+				got = append(got, filepath.ToSlash(rel))
+
+				return nil
+			})
+			require.NoError(t, err)
+
+			slices.Sort(got)
+
+			fs := 0
+			for _, p := range got {
+				if filepath.Base(p) == "f" {
+					fs++
+				}
+			}
+
+			assert.Equal(t, 1, fs, "the nested subtree's file reports exactly once: %v", got)
+			assert.Len(t, got, 2, "one report per physical file: %v", got)
+			assert.NotEmpty(t, aliases, "the declined duplicate prefix surfaces as an alias")
+		})
+	}
+}
+
+func TestWalkFilesDeclinesALinkToAnAncestorOfTheRoot(t *testing.T) {
+	t.Parallel()
+
+	// A link pointing above the walk root contains the whole walked tree:
+	// following it would re-report the entire archive under the link's name.
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "archive")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "ws"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "ws", "f"), []byte("x"), 0o600))
+	require.NoError(t, os.Symlink(tmp, filepath.Join(root, "up")))
+
+	var got []string
+
+	aliases, err := fsid.WalkFiles(t.Context(), root, func(logical string) error {
+		rel, relErr := filepath.Rel(root, logical)
+		require.NoError(t, relErr)
+
+		got = append(got, filepath.ToSlash(rel))
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"ws/f"}, got, "the archive reports once, not again beneath the link")
+	assert.Equal(t, map[string]string{
+		filepath.Join(root, "up", "archive"): root,
+	}, aliases)
+}
