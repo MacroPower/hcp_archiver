@@ -10,6 +10,8 @@ import (
 	"charm.land/lipgloss/v2"
 
 	tea "charm.land/bubbletea/v2"
+
+	"go.jacobcolvin.com/hcp_archiver/theme"
 )
 
 // ErrBrowser wraps a browser runtime problem so callers can classify it with
@@ -205,7 +207,7 @@ func (m *model) breadcrumb() string {
 		}
 	}
 
-	return strings.Join(crumbs, styleCrumbSep.Render(" › "))
+	return strings.Join(crumbs, styleCrumbSep.Render(" "+theme.GlyphCrumb+" "))
 }
 
 // push wraps a screen constructor into a command, surfacing a construction

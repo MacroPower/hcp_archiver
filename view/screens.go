@@ -10,6 +10,8 @@ import (
 	"charm.land/bubbles/v2/list"
 
 	tea "charm.land/bubbletea/v2"
+
+	"go.jacobcolvin.com/hcp_archiver/theme"
 )
 
 // item is one list row: its display strings and, when it descends somewhere,
@@ -384,7 +386,7 @@ func newRunsScreen(ws *Workspace) (screen, error) {
 		}
 
 		if !run.CreatedAt.IsZero() {
-			parts = append(parts, run.CreatedAt.Format("2006-01-02 15:04"))
+			parts = append(parts, run.CreatedAt.Format(theme.TimeLayout))
 		}
 
 		if run.Message != "" {
@@ -496,7 +498,7 @@ func newStatesScreen(ws *Workspace) (screen, error) {
 	for _, sv := range versions {
 		title := fmt.Sprintf("serial %d", sv.Serial)
 		if !sv.CreatedAt.IsZero() {
-			title += " — " + sv.CreatedAt.Format("2006-01-02 15:04")
+			title += " — " + sv.CreatedAt.Format(theme.TimeLayout)
 		}
 
 		parts := []string{}
@@ -505,7 +507,7 @@ func newStatesScreen(ws *Workspace) (screen, error) {
 		}
 
 		if sv.Size > 0 {
-			parts = append(parts, humanBytes(sv.Size))
+			parts = append(parts, theme.HumanBytes(sv.Size))
 		}
 
 		if sv.Status != "" {
@@ -679,7 +681,7 @@ func fileRow(org *Org, dir string, e os.DirEntry) item {
 
 	info, err := e.Info()
 	if err == nil {
-		desc = humanBytes(info.Size())
+		desc = theme.HumanBytes(info.Size())
 	}
 
 	if _, ok := binaryExts[path.Ext(name)]; ok {
