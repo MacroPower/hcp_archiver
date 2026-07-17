@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
+	"go.jacobcolvin.com/hcp_archiver/fsid"
 )
 
 // schemaVersion is the on-disk manifest format version.
@@ -514,11 +515,15 @@ func (l *Ledger) shardByKey(sk string) *shard {
 // second one over the same snapshot file. Two shards over one file would each
 // seed the cumulative tally from the same entries, and whichever folded second
 // would capture a snapshot missing the records only the other held — after the
-// log that carried them was already retired. Callers hold the write lock; the
-// resolution stats the filesystem, which costs a handful of syscalls once per
-// shard creation, not per record.
+// log that carried them was already retired.
+//
+// Identity comes from [fsid.Canonical], which resolves through the deepest
+// existing ancestor, so a symlinked workspace aliases even before its .ledger
+// is first created beneath it. Callers hold the write lock; the resolution
+// stats the filesystem, which costs a handful of syscalls once per shard
+// creation, not per record.
 func (l *Ledger) shardAt(dir string) *shard {
-	phys := physicalShardDir(dir)
+	phys := fsid.Canonical(dir)
 
 	sh, ok := l.physShards[phys]
 	if !ok {
@@ -527,41 +532,6 @@ func (l *Ledger) shardAt(dir string) *shard {
 	}
 
 	return sh
-}
-
-// physicalShardDir resolves dir to the identity of the physical directory it
-// denotes, so two logical shard paths that reach one on-disk .ledger directory
-// map to one key. A brand-new shard's directory does not exist yet, so the
-// resolution walks up to the deepest existing ancestor, resolves that, and
-// rejoins the missing remainder — a symlinked workspace directory aliases even
-// before its .ledger is first created beneath it. A resolution fault other
-// than absence falls back to the cleaned path: the record paths that need this
-// return nothing, and the fallback risks only the alias-overwrite window this
-// resolution exists to close, never a dropped record.
-func physicalShardDir(dir string) string {
-	dir = filepath.Clean(dir)
-	probe := dir
-
-	var tail []string
-
-	for {
-		resolved, err := filepath.EvalSymlinks(probe)
-		if err == nil {
-			return filepath.Join(append([]string{resolved}, tail...)...)
-		}
-
-		if !errors.Is(err, fs.ErrNotExist) {
-			return dir
-		}
-
-		parent := filepath.Dir(probe)
-		if parent == probe {
-			return dir
-		}
-
-		tail = append([]string{filepath.Base(probe)}, tail...)
-		probe = parent
-	}
 }
 
 // walPath returns the absolute path of the ledger's single org-level log,

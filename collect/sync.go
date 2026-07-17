@@ -23,6 +23,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
+	"go.jacobcolvin.com/hcp_archiver/fsid"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/seal"
@@ -747,137 +748,20 @@ func (e *Env) recordEvictedZip(
 // archive when empty) and hands each regular, sync-eligible file's
 // archive-relative path to fn: the shared skeleton of the sync passes'
 // walks, owning the cancellation check, the relativization, and the
-// [syncEligible] gate. Symlinked directories are followed (see
-// [Env.walkSymlinked]): a subtree an operator relocated behind a symlink is
-// a supported layout the ledger's shard discovery already reads through, so
-// the sweep must see the same tree the ledger describes. An error from fn,
-// the walk, or the cancellation propagates.
+// [syncEligible] gate. The traversal is [fsid.WalkFiles]: symlinked
+// directories are followed — a subtree an operator relocated behind a
+// symlink is a supported layout the ledger's shard discovery already reads
+// through, so the sweep must see the same tree the ledger describes — and
+// every physical directory walks once, so an aliased subtree cannot sync,
+// evict, or count twice. An error from fn, the walk, or the cancellation
+// propagates.
 func (e *Env) walkEligible(ctx context.Context, relPrefix string, fn func(relPath string) error) error {
 	start := filepath.Join(e.store.Root(), filepath.FromSlash(relPrefix))
 
-	return e.walkEligibleFrom(ctx, start, start, make(map[string]struct{}), fn)
-}
-
-// walkEligibleFrom walks the physical directory physical for
-// [Env.walkEligible], reporting each file at its logical location under
-// logical. The two roots differ only beneath a followed symlink, where the
-// walk descends the link's resolved target while every reported path stays
-// under the link itself, so the archive-relative paths handed to fn remain
-// rooted in the archive tree.
-//
-// Every directory registers its physical identity in visited on entry, and a
-// directory whose identity is already registered is skipped whole: a subtree
-// reachable both directly and through a sibling symlink (a rename link an
-// operator left beside its target) walks once, under whichever name the walk
-// reaches first. Walked twice, its files would sync, evict, and count twice
-// under two logical names. The same set breaks symlink cycles (see
-// [Env.walkSymlinked]).
-func (e *Env) walkEligibleFrom(
-	ctx context.Context,
-	physical, logical string,
-	visited map[string]struct{},
-	fn func(relPath string) error,
-) error {
 	//nolint:wrapcheck // Callers wrap with their pass's context.
-	return filepath.WalkDir(physical, func(p string, d fs.DirEntry, err error) error {
-		switch {
-		case err != nil:
-			return err
-		case ctx.Err() != nil:
-			return ctx.Err()
-		case d.IsDir():
-			resolved, rErr := filepath.EvalSymlinks(p)
-
-			switch {
-			case errors.Is(rErr, fs.ErrNotExist):
-				// The directory vanished mid-walk; nothing beneath it remains
-				// to sweep.
-				return fs.SkipDir
-			case rErr != nil:
-				return fmt.Errorf("resolve directory %q: %w", p, rErr)
-			}
-
-			if _, seen := visited[resolved]; seen {
-				return fs.SkipDir
-			}
-
-			visited[resolved] = struct{}{}
-
-			return nil
-		}
-
-		lp, lpErr := logicalWalkPath(physical, logical, p)
-		if lpErr != nil {
-			return lpErr
-		}
-
-		if d.Type()&fs.ModeSymlink != 0 {
-			return e.walkSymlinked(ctx, p, lp, visited, fn)
-		}
-
-		if !d.Type().IsRegular() {
-			return nil
-		}
-
-		return e.visitEligible(lp, fn)
-	})
-}
-
-// walkSymlinked resolves one symlinked walk entry with [os.Stat], mirroring
-// the ledger's shard discovery: a subtree relocated behind a symlink still
-// holds ledger entries for every file beneath it, and a walk that skipped
-// the link would hand the prune a keep set missing all of their remote keys
-// — a mass deletion of live mirror content. A link to a regular file
-// settles like the file, a link to a directory is walked through the link
-// (each physical directory once — the recursion's root visit registers it in
-// visited, which also breaks link cycles), a dangling link reads as absent,
-// and any other stat fault surfaces so a fault cannot silently hide a
-// subtree from the sweep.
-func (e *Env) walkSymlinked(
-	ctx context.Context,
-	physical, logical string,
-	visited map[string]struct{},
-	fn func(relPath string) error,
-) error {
-	info, err := os.Stat(physical)
-
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil
-	case err != nil:
-		return fmt.Errorf("stat symlinked entry %q: %w", physical, err)
-	case info.Mode().IsRegular():
+	return fsid.WalkFiles(ctx, start, func(logical string) error {
 		return e.visitEligible(logical, fn)
-	case !info.IsDir():
-		return nil
-	}
-
-	resolved, err := filepath.EvalSymlinks(physical)
-	if err != nil {
-		return fmt.Errorf("resolve symlinked directory %q: %w", physical, err)
-	}
-
-	if _, ok := visited[resolved]; ok {
-		return nil
-	}
-
-	return e.walkEligibleFrom(ctx, resolved, logical, visited, fn)
-}
-
-// logicalWalkPath translates a path reported by a physical walk rooted at
-// physical to its logical location under logical; the two roots are equal
-// everywhere except beneath a followed symlink.
-func logicalWalkPath(physical, logical, p string) (string, error) {
-	if physical == logical {
-		return p, nil
-	}
-
-	rel, err := filepath.Rel(physical, p)
-	if err != nil {
-		return "", fmt.Errorf("relativize %q: %w", p, err)
-	}
-
-	return filepath.Join(logical, rel), nil
+	})
 }
 
 // visitEligible relativizes one regular file's logical path against the
