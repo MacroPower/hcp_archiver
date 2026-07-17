@@ -810,9 +810,13 @@ sizes where the ledger recorded one. A missing or diverged object — a
 re-pointed bucket, a mis-scoped lifecycle rule, a manual delete — logs an
 error naming the key and counts into the sweep's failures, so the run
 exits incomplete instead of reporting a complete mirror over a hole in the
-long-term record. Obligations are derived before the sweep's own evictions
-run, since the pre-eviction inventory cannot yet hold what this sweep is
-about to move.
+long-term record. A surface whose local presence cannot even be determined
+(a stat fault under its directory) is unverifiable either way: it joins no
+obligation — it may still be local and about to evict this sweep — but the
+fault logs an error and counts a sweep failure the same way, so the check
+never silently goes unexecuted. Obligations are derived before the sweep's
+own evictions run, since the pre-eviction inventory cannot yet hold what
+this sweep is about to move.
 
 After the uploads, a **prune** step makes the mirror true: every inventory key
 the walk saw no local file for is deleted in a bounded fan-out, except the

@@ -599,6 +599,34 @@ func TestSyncArchiveVerifiesEvictedSurfacesRemain(t *testing.T) {
 		"every evicted surface missing from the store must count a failure")
 }
 
+func TestSyncArchiveUnverifiableObligationCountsFailure(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t)
+
+	// A prior sweep evicted the tarball; its done ledger entry is the local
+	// side's only record that the store holds the only copy.
+	f.writeDone(t, tarball, []byte("proven tarball bytes"))
+
+	stats := f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+	require.Equal(t, 1, stats.Evicted)
+
+	// A partial restore leaves a regular file where the config-versions
+	// directory was: the local-presence probe now faults (ENOTDIR) instead of
+	// answering yes or no, so the only-copy verification cannot run. The
+	// fault must count — a run that exits clean here reports a complete
+	// mirror over a check that never executed.
+	require.NoError(t, os.RemoveAll(f.store.AbsPath("config-versions")))
+	f.write(t, "config-versions", []byte("not a directory"))
+
+	stats = f.env.SyncArchive(t.Context())
+	assert.Equal(t, 1, stats.Failed,
+		"an unverifiable obligation must mark the run incomplete")
+}
+
 func TestSyncArchiveVerifiesEvictedTarballSize(t *testing.T) {
 	t.Parallel()
 

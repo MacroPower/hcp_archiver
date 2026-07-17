@@ -452,7 +452,7 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 		return counters.stats()
 	}
 
-	sweep, err := e.classifyTree(ctx)
+	sweep, err := e.classifyTree(ctx, counters)
 	if err != nil {
 		if ctx.Err() != nil {
 			// As above: a cancellation surfacing from the tree walk is the
@@ -482,7 +482,7 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 	// evictions run: the inventory above predates them too, so a surface this
 	// sweep is about to evict (still local here) must not be demanded of the
 	// pre-eviction listing.
-	obligations := e.evictedObligations(sweep)
+	obligations := e.evictedObligations(ctx, sweep, counters)
 
 	// Cold surfaces move sequentially: each is one large upload already
 	// parallelized inside the transfer manager, and each ends in a local
@@ -531,7 +531,18 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 // records done with no local file. It runs before any of the current sweep's
 // evictions, so a surface still local — about to evict against the same
 // pre-eviction inventory — is never an obligation.
-func (e *Env) evictedObligations(sweep *treeSweep) map[string]int64 {
+//
+// A tarball whose local presence cannot be determined (a stat fault under
+// config-versions/) is unverifiable either way. It joins no obligation — it
+// may still be local and about to evict this sweep, and demanding it of the
+// pre-eviction inventory would report a false hole — but the fault logs an
+// error and counts a sweep failure, so the run exits incomplete instead of
+// clean over an only-copy check that never ran.
+func (e *Env) evictedObligations(
+	ctx context.Context,
+	sweep *treeSweep,
+	counters *syncCounters,
+) map[string]int64 {
 	obligations := make(map[string]int64, len(sweep.evictedZips))
 
 	for _, zipRel := range sweep.evictedZips {
@@ -546,9 +557,20 @@ func (e *Env) evictedObligations(sweep *treeSweep) map[string]int64 {
 		}
 
 		present, err := e.store.Exists(relPath)
-		if err != nil || present {
-			// A local copy (or an unreadable root) means the tarball is not
-			// remote-only: it evicts this sweep or stays canonical.
+
+		switch {
+		case err != nil:
+			e.logger.LogAttrs(ctx, slog.LevelError, "evicted_obligation_unverifiable",
+				slog.String("path", relPath),
+				slog.String("error", err.Error()),
+			)
+			counters.failed.Add(1)
+
+			continue
+
+		case present:
+			// A local copy means the tarball is not remote-only: it evicts
+			// this sweep or stays canonical.
 			continue
 		}
 
@@ -658,19 +680,14 @@ type treeSweep struct {
 // A bundle sidecar whose zip is no longer beside it is the local record of a
 // finished eviction — the zip's only copy is the store — so the walk also
 // collects those zips' paths for the sweep's remote-presence verification.
-func (e *Env) classifyTree(ctx context.Context) (*treeSweep, error) {
+func (e *Env) classifyTree(ctx context.Context, counters *syncCounters) (*treeSweep, error) {
 	sweep := &treeSweep{keep: make(map[string]struct{})}
 
 	err := e.walkEligible(ctx, "", func(relPath string) error {
 		sweep.keep[e.RemoteKey(relPath)] = struct{}{}
 
 		if isBundleSidecar(relPath) {
-			zipRel := strings.TrimSuffix(relPath, seal.SidecarSuffix)
-
-			present, existsErr := e.store.Exists(zipRel)
-			if existsErr == nil && !present {
-				sweep.evictedZips = append(sweep.evictedZips, zipRel)
-			}
+			e.recordEvictedZip(ctx, sweep, relPath, counters)
 		}
 
 		switch e.classifyFile(ctx, relPath) {
@@ -695,6 +712,35 @@ func (e *Env) classifyTree(ctx context.Context) (*treeSweep, error) {
 	slices.Sort(sweep.evictedZips)
 
 	return sweep, nil
+}
+
+// recordEvictedZip notes the zip behind one walked sidecar as a finished
+// eviction when the zip is no longer beside it, feeding the sweep's
+// remote-presence verification. A stat fault leaves the zip's custody
+// unknown — it may be local, it may be remote-only — so the zip joins no
+// obligation, but the fault logs an error and counts a sweep failure rather
+// than silently dropping the only-copy check for the run.
+func (e *Env) recordEvictedZip(
+	ctx context.Context,
+	sweep *treeSweep,
+	relPath string,
+	counters *syncCounters,
+) {
+	zipRel := strings.TrimSuffix(relPath, seal.SidecarSuffix)
+
+	present, err := e.store.Exists(zipRel)
+
+	switch {
+	case err != nil:
+		e.logger.LogAttrs(ctx, slog.LevelError, "evicted_obligation_unverifiable",
+			slog.String("path", zipRel),
+			slog.String("error", err.Error()),
+		)
+		counters.failed.Add(1)
+
+	case !present:
+		sweep.evictedZips = append(sweep.evictedZips, zipRel)
+	}
 }
 
 // walkEligible walks the tree under the archive-relative relPrefix (the whole
