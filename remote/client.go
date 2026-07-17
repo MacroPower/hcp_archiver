@@ -585,20 +585,22 @@ func (c *Client) Delete(ctx context.Context, keys []string) (int, error) {
 }
 
 // defaultPartSize is the smallest default part size among the parted-upload
-// backends (S3's 5 MiB); it floors the grow-to-fit logic so a small body
-// never shrinks the part size below what any backend would pick itself.
+// backends and S3's multipart minimum (5 MiB); it floors both a configured
+// part size and the grow-to-fit logic, because S3-compatible stores reject a
+// multipart upload whose non-final parts are smaller with EntityTooSmall —
+// only after the whole body has streamed, a failure that is a pure function
+// of size and configuration and so would repeat on every retry and every run.
 const defaultPartSize = 5 << 20
 
 // partSizeFor returns the part size for a body of size bytes: the configured
-// size, grown when needed to fit the body within [maxUploadParts], and zero
-// (the backend default) when nothing is configured and nothing demands more.
+// size floored at [defaultPartSize], grown when needed to fit the body within
+// [maxUploadParts], and zero (the backend default) when nothing is configured
+// and nothing demands more.
 //
-// Growth gates on the part size actually in effect — the configured value
-// when set, else [defaultPartSize] as the smallest backend default — never on
-// their max: a configured size below the default is still the size the
-// backend uses, so gating growth above the default would let a large body's
-// part count sail past the ceiling, a failure that is a pure function of size
-// and configuration and so would repeat on every retry and every run.
+// Both permanently-repeating failure modes gate here: a part size below the
+// floor is rejected by S3-compatible stores at commit, and a part count past
+// the ceiling is rejected mid-stream, so neither a configured value nor the
+// growth result may cross its bound.
 func partSizeFor(size, configured int64) int {
 	need := (size + maxUploadParts - 1) / maxUploadParts
 
@@ -609,6 +611,8 @@ func partSizeFor(size, configured int64) int {
 
 		return 0
 	}
+
+	configured = max(configured, defaultPartSize)
 
 	if need > configured {
 		return int(need)

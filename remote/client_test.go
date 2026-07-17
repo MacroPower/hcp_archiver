@@ -145,12 +145,13 @@ func TestHeadResolvesMetadataMD5(t *testing.T) {
 func TestUploadLargeBody(t *testing.T) {
 	t.Parallel()
 
-	// A part size far below the body forces the portable layer through its
-	// buffered multi-flush path; the committed object must reassemble byte
-	// for byte.
+	// A sub-minimum part size floors at S3's 5 MiB multipart minimum, and a
+	// body spanning several floored parts forces the portable layer through
+	// its buffered multi-flush path; the committed object must reassemble
+	// byte for byte.
 	client, fake := newClient(t, remote.Config{PartSize: 1 << 20})
 
-	body := make([]byte, 2<<20+1024)
+	body := make([]byte, 2*(5<<20)+1024)
 	_, err := rand.Read(body)
 	require.NoError(t, err)
 

@@ -31,8 +31,9 @@ type Config struct {
 	// Prefix is an optional key prefix every object key composes under.
 	Prefix string
 	// PartSize is the upload part size in bytes for backends that split a
-	// large body into parts; zero takes the backend's default. Very large
-	// bodies grow it further to fit the backend's part-count ceiling.
+	// large body into parts; zero takes the backend's default. A positive
+	// size is floored at S3's 5 MiB multipart minimum, and very large bodies
+	// grow it further to fit the backend's part-count ceiling.
 	PartSize int64
 	// Concurrency is the number of upload parts in flight per bundle; zero
 	// takes the backend's default.

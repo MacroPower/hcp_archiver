@@ -35,13 +35,31 @@ func TestPartSizeFor(t *testing.T) {
 			configured: 64 << 20,
 			want:       64 << 20,
 		},
-		"sub-default configured size still grows to fit the ceiling": {
+		"configured size at the floor is kept": {
+			size:       100 << 20,
+			configured: defaultPartSize,
+			want:       defaultPartSize,
+		},
+		"sub-minimum configured size floors at the multipart minimum": {
+			// S3-compatible stores reject non-final parts under 5 MiB at
+			// commit, so a 1 MiB configured size must not reach the backend.
+			size:       100 << 20,
+			configured: 1 << 20,
+			want:       defaultPartSize,
+		},
+		"sub-minimum configured size grows no further than the floor": {
 			// 30 GiB over 512 KiB parts is ~61k parts, past every backend's
-			// cap; the grown size must fit the body under maxUploadParts even
-			// though it stays below the 5 MiB default.
+			// cap, but the floored 5 MiB size already fits the body under
+			// maxUploadParts, so the floor is the answer.
 			size:       30 << 30,
 			configured: 512 << 10,
-			want:       int((int64(30<<30) + maxUploadParts - 1) / maxUploadParts),
+			want:       defaultPartSize,
+		},
+		"sub-minimum configured size still grows to fit the ceiling": {
+			// 100 GiB needs ~10.7 MiB parts to fit the cap, past the floor.
+			size:       100 << 30,
+			configured: 512 << 10,
+			want:       int((int64(100<<30) + maxUploadParts - 1) / maxUploadParts),
 		},
 		"configured size grows for a body past its own ceiling": {
 			size:       int64(64<<20)*maxUploadParts + 1,
@@ -68,6 +86,8 @@ func TestPartSizeFor(t *testing.T) {
 			parts := (tc.size + effective - 1) / effective
 			assert.LessOrEqual(t, parts, int64(maxUploadParts),
 				"the effective part size must fit the body under the ceiling")
+			assert.GreaterOrEqual(t, effective, int64(defaultPartSize),
+				"the effective part size must clear the S3 multipart minimum")
 		})
 	}
 }
