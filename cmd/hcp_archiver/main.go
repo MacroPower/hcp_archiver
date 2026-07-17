@@ -361,7 +361,10 @@ func newVersionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Show version information",
 		RunE: func(cc *cobra.Command, _ []string) error {
-			cc.Println(version.Get().String())
+			_, err := fmt.Fprintln(cc.OutOrStdout(), version.Get().String())
+			if err != nil {
+				return fmt.Errorf("print version: %w", err)
+			}
 
 			return nil
 		},

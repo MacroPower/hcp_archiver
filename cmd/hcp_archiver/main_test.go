@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -221,9 +222,41 @@ func TestVersionSubcommand(t *testing.T) {
 	cmd := main.NewRootCmd()
 
 	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+
 	cmd.SetOut(out)
-	cmd.SetErr(out)
+	cmd.SetErr(errOut)
 	cmd.SetArgs([]string{"version"})
 
 	require.NoError(t, cmd.Execute())
+	assert.NotEmpty(t, out.String())
+	assert.Empty(t, errOut.String())
+}
+
+// TestVersionSubcommandStdoutFallback runs the version subcommand without
+// configuring command output, mirroring the real binary. It swaps os.Stdout
+// for a pipe, so it must not run in parallel.
+func TestVersionSubcommandStdoutFallback(t *testing.T) { //nolint:paralleltest // swaps os.Stdout
+	origStdout := os.Stdout
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	os.Stdout = w
+
+	t.Cleanup(func() { os.Stdout = origStdout })
+
+	cmd := main.NewRootCmd()
+	cmd.SetArgs([]string{"version"})
+
+	execErr := cmd.Execute()
+
+	os.Stdout = origStdout
+
+	require.NoError(t, w.Close())
+
+	got, readErr := io.ReadAll(r)
+	require.NoError(t, readErr)
+	require.NoError(t, execErr)
+	assert.NotEmpty(t, string(got), "version text is written to stdout")
 }
