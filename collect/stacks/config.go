@@ -109,13 +109,15 @@ func (c *Collector) archiveConfiguration(
 		return wrap(err)
 	}
 
-	// The groups enumeration runs beneath a walk-frozen element, so its outcome
-	// settles a persisted marker; a plain tolerate would let the configurations
+	// The groups enumeration runs beneath a walk-frozen element, so it runs
+	// under an obligation marker; a plain tolerate would let the configurations
 	// walk settle over a dropped listing and never revisit this configuration.
 	groupsDir := st.StackConfigurationFile(project, stackName, cfg.ID, "deployment-groups")
 
-	return c.tolerateListing(ctx, st.Join(groupsDir, listingLeaf),
-		c.collectGroups(ctx, project, stackName, cfg.ID))
+	return c.tolerateEnumeration(ctx, c.env.Obligation(st.Join(groupsDir, listingLeaf)),
+		func(ctx context.Context) error {
+			return c.collectGroups(ctx, project, stackName, cfg.ID)
+		})
 }
 
 // configDiagnostics reads a configuration's diagnostics as an id-serializable
@@ -187,13 +189,23 @@ func (c *Collector) archiveGroup(
 		return wrap(err)
 	}
 
-	// The runs walk runs beneath a walk-frozen configuration, so its outcome
-	// settles a persisted marker under the group's runs prefix, where both the
-	// runs walk's and the configurations walk's errored-child gates scan.
-	runsPrefix := runArchivePrefix(c.env.Store(), project, stackName, configID, group.ID)
+	// The runs walk runs beneath a walk-frozen configuration, so it runs under
+	// an obligation marker that settles only when the nested collection itself
+	// settled: a deployment run still executing under a terminal configuration
+	// keeps the configurations walk open until its final state and steps land.
+	// The marker sits beside the runs directory — under the configurations
+	// prefix its audience scans, but outside the runs prefix it mirrors — so
+	// its own unsettled state never blocks the nested walk from settling, the
+	// cycle that would otherwise pin both forever.
+	st := c.env.Store()
+	groupDir := st.StackDeploymentGroupDir(project, stackName, configID, group.ID)
 
-	return c.tolerateListing(ctx, c.env.Store().Join(runsPrefix, listingLeaf),
-		c.collectRuns(ctx, project, stackName, configID, group.ID))
+	return c.tolerateWalk(ctx,
+		c.env.Obligation(st.Join(groupDir, "runs-"+listingLeaf)),
+		c.env.Collection(runArchivePrefix(st, project, stackName, configID, group.ID)),
+		func(ctx context.Context) error {
+			return c.collectRuns(ctx, project, stackName, configID, group.ID)
+		})
 }
 
 // collectRuns walks a deployment group's runs newest-first, archiving each run
@@ -262,12 +274,14 @@ func (c *Collector) archiveRun(
 	}
 
 	// The steps enumeration runs beneath a run the walk freezes once terminal,
-	// so its outcome settles a persisted marker; a plain tolerate would let the
+	// so it runs under an obligation marker; a plain tolerate would let the
 	// runs walk settle over a dropped listing and never revisit this run.
 	stepsDir := c.env.Store().StackRunFile(project, stackName, configID, groupID, run.ID, "steps")
 
-	return c.tolerateListing(ctx, c.env.Store().Join(stepsDir, listingLeaf),
-		c.collectSteps(ctx, project, stackName, configID, groupID, run.ID))
+	return c.tolerateEnumeration(ctx, c.env.Obligation(c.env.Store().Join(stepsDir, listingLeaf)),
+		func(ctx context.Context) error {
+			return c.collectSteps(ctx, project, stackName, configID, groupID, run.ID)
+		})
 }
 
 // collectSteps archives every step of a deployment run. A per-step failure is

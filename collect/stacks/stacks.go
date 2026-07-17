@@ -11,6 +11,7 @@ import (
 	tfe "github.com/hashicorp/go-tfe"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
@@ -268,41 +269,76 @@ func (c *Collector) tolerate(ctx context.Context, surface string, err error) err
 	return nil
 }
 
-// listingLeaf names the ledger marker recording a child enumeration's outcome,
-// placed inside the directory the enumeration fills. The marker is a ledger
-// entry only — no file is ever written at the path — and cannot collide with a
-// real archived object, whose directories key on API-prefixed ids.
+// listingLeaf names the obligation marker recording a child enumeration's
+// outcome, placed inside the directory the enumeration fills. The marker is a
+// ledger entry only — no file is ever written at the path — and cannot collide
+// with a real archived object, whose directories key on API-prefixed ids.
 const listingLeaf = "listing"
 
-// tolerateListing records the outcome of a child enumeration that runs beneath
-// an element a [collect.Walk] can freeze (a configuration's deployment groups,
-// a group's runs walk, a terminal run's steps) and then defers to
-// [Collector.tolerate]. The dropped-surface record tolerate leaves is
-// run-scoped, and a failed enumeration writes no per-object entries, so on its
-// own the enclosing walks would settle over the gap and their early stop would
-// never revisit the element: the missing children would be lost silently and
-// permanently. The marker entry closes that hole, mirroring how the workspace
-// collector persists run-child listing failures. A failure records marker
-// errored ([collect.Env.Errored]), which [manifest.Ledger.HasUnsettledUnder]
-// finds under the walks' archive prefixes, keeping them open until a later
-// pass re-runs the enumeration; a success settles marker as a not-applicable
-// gap (no file exists at the path) so the walks can close once every child
-// lands. A cancellation propagates unrecorded, matching the archive
-// primitives.
-func (c *Collector) tolerateListing(ctx context.Context, marker string, err error) error {
+// tolerateEnumeration runs a child enumeration under an obligation marker
+// (see [manifest.Obligation]) and defers a failure to [Collector.tolerate].
+// The enumerations this guards run beneath elements a [collect.Walk] can
+// freeze (a configuration's deployment groups, a terminal run's steps), where
+// a run-scoped dropped surface alone would let the enclosing walks settle
+// over the gap and never revisit the element. The marker opens before the
+// enumeration, so even a crash mid-listing leaves a pending record the walks'
+// gates find; a failure records it failed so a later pass retries; a success
+// settles it. A cancellation propagates with the marker left open, the
+// fail-safe direction.
+func (c *Collector) tolerateEnumeration(
+	ctx context.Context,
+	ob *manifest.Obligation,
+	enumerate func(context.Context) error,
+) error {
+	ob.Open()
+
+	err := enumerate(ctx)
 	if err == nil {
-		if c.env.ShouldFetch(marker) {
-			c.env.NotApplicable(marker)
+		ob.Settle()
+
+		return nil
+	}
+
+	if ctx.Err() == nil {
+		c.env.FailObligation(ob, err)
+	}
+
+	return c.tolerate(ctx, ob.Key(), err)
+}
+
+// tolerateWalk runs a nested [collect.Walk] under an obligation marker and
+// settles the marker only when the nested collection itself settled. A nested
+// walk that saw a still-running element (or was interrupted) withholds its
+// own settlement, but that flag is invisible to the enclosing walk's entry
+// gate — a run recorded done while in flight leaves nothing unsettled for
+// [manifest.Collection.HasUnsettled] to find — so without the marker a
+// terminal configuration could freeze over a deployment run still executing
+// beneath it, permanently stranding the run's final state and steps. The
+// pending marker carries the nested walk's openness into an entry both
+// enclosing gates scan, and clears once a later pass finds the nested
+// collection settled.
+func (c *Collector) tolerateWalk(
+	ctx context.Context,
+	ob *manifest.Obligation,
+	col *manifest.Collection,
+	walk func(context.Context) error,
+) error {
+	ob.Open()
+
+	err := walk(ctx)
+	if err == nil {
+		if col.Settled() {
+			ob.Settle()
 		}
 
 		return nil
 	}
 
 	if ctx.Err() == nil {
-		c.env.Errored(marker, err)
+		c.env.FailObligation(ob, err)
 	}
 
-	return c.tolerate(ctx, marker, err)
+	return c.tolerate(ctx, ob.Key(), err)
 }
 
 // wrap gives a bare error from the archive engine or client a stacks-package

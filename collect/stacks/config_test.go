@@ -3,6 +3,7 @@ package stacks_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -84,6 +85,17 @@ func writeEmptyList(t *testing.T, w http.ResponseWriter) {
 	require.NoError(t, err)
 }
 
+// writeList answers with a one-page JSON:API list holding the given resource
+// documents.
+func writeList(t *testing.T, w http.ResponseWriter, items ...string) {
+	t.Helper()
+
+	w.Header().Set("Content-Type", "application/vnd.api+json")
+
+	_, err := w.Write([]byte(`{"data": [` + strings.Join(items, ",") + `]}`))
+	require.NoError(t, err)
+}
+
 func TestArchiveRunStepsListingFailurePersists(t *testing.T) {
 	t.Parallel()
 
@@ -128,7 +140,7 @@ func TestArchiveRunStepsListingFailurePersists(t *testing.T) {
 
 	require.NoError(t, f.collector.ArchiveRunForTest(t.Context(), "proj", "stack", "sc-1", "sdg-1", run))
 
-	assert.Equal(t, manifest.StatusNotApplicable, f.status(marker),
+	assert.Equal(t, manifest.StatusReferenceCleared, f.status(marker),
 		"a successful listing settles the marker")
 	assert.False(t, f.ledger.Collection(runsPrefix).HasUnsettled())
 
@@ -181,7 +193,7 @@ func TestArchiveConfigurationGroupsListingFailurePersists(t *testing.T) {
 
 	require.NoError(t, f.collector.ArchiveConfigurationForTest(t.Context(), "proj", "stack", cfg))
 
-	assert.Equal(t, manifest.StatusNotApplicable, f.status(marker),
+	assert.Equal(t, manifest.StatusReferenceCleared, f.status(marker),
 		"a successful listing settles the marker")
 	assert.False(t, f.ledger.Collection(stacks.ConfigArchivePrefixForTest(st, "proj", "stack")).HasUnsettled())
 }
@@ -190,8 +202,8 @@ func TestArchiveGroupRunsWalkFailurePersists(t *testing.T) {
 	t.Parallel()
 
 	// A group hangs off a walk-frozen configuration, so a runs walk that dies
-	// on a page fetch must leave a persisted errored marker under the group's
-	// runs prefix or the group's runs are silently lost for good.
+	// on a page fetch must leave a persisted errored marker under the
+	// configurations prefix or the group's runs are silently lost for good.
 	var healthy atomic.Bool
 
 	mux := http.NewServeMux()
@@ -213,18 +225,98 @@ func TestArchiveGroupRunsWalkFailurePersists(t *testing.T) {
 
 	require.NoError(t, f.collector.ArchiveGroupForTest(t.Context(), "proj", "stack", "sc-1", group))
 
-	runsPrefix := stacks.RunArchivePrefixForTest(st, "proj", "stack", "sc-1", "sdg-1")
-	marker := st.Join(runsPrefix, stacks.ListingLeafForTest)
+	configPrefix := stacks.ConfigArchivePrefixForTest(st, "proj", "stack")
+	marker := st.Join(st.StackDeploymentGroupDir("proj", "stack", "sc-1", "sdg-1"),
+		"runs-"+stacks.ListingLeafForTest)
 	assert.Equal(t, manifest.StatusErrored, f.status(marker),
 		"a dropped runs walk records a persisted errored marker")
-	assert.True(t, f.ledger.Collection(runsPrefix).HasUnsettled(),
-		"the errored marker holds the errored-child gates open")
+	assert.True(t, f.ledger.Collection(configPrefix).HasUnsettled(),
+		"the errored marker holds the configurations walk's gate open")
 
 	healthy.Store(true)
 
 	require.NoError(t, f.collector.ArchiveGroupForTest(t.Context(), "proj", "stack", "sc-1", group))
 
-	assert.Equal(t, manifest.StatusNotApplicable, f.status(marker),
-		"a completed runs walk settles the marker")
-	assert.False(t, f.ledger.Collection(runsPrefix).HasUnsettled())
+	assert.Equal(t, manifest.StatusReferenceCleared, f.status(marker),
+		"a settled runs walk settles the marker")
+	assert.False(t, f.ledger.Collection(configPrefix).HasUnsettled())
+}
+
+func TestListingFailureAfterSuccessReopensTheMarker(t *testing.T) {
+	t.Parallel()
+
+	// The marker reflects the newest enumeration, never the first: a listing
+	// that succeeded while the configuration was still mutating and then drops
+	// at the frozen boundary must reopen the settled marker, or the walks
+	// settle over the gap and the missing children are lost for good.
+	var healthy atomic.Bool
+
+	healthy.Store(true)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/stack-deployment-runs/sdr-1/stack-deployment-steps",
+		func(w http.ResponseWriter, _ *http.Request) {
+			if !healthy.Load() {
+				w.WriteHeader(http.StatusInternalServerError)
+
+				return
+			}
+
+			writeEmptyList(t, w)
+		})
+
+	f := newStacksFixture(t, mux)
+	st := f.store
+
+	run := &tfe.StackDeploymentRun{ID: "sdr-1", Status: "succeeded"}
+
+	require.NoError(t, f.collector.ArchiveRunForTest(t.Context(), "proj", "stack", "sc-1", "sdg-1", run))
+
+	marker := st.Join(st.StackRunFile("proj", "stack", "sc-1", "sdg-1", "sdr-1", "steps"), stacks.ListingLeafForTest)
+	require.Equal(t, manifest.StatusReferenceCleared, f.status(marker), "the first pass settles the marker")
+
+	healthy.Store(false)
+
+	require.NoError(t, f.collector.ArchiveRunForTest(t.Context(), "proj", "stack", "sc-1", "sdg-1", run))
+
+	assert.Equal(t, manifest.StatusErrored, f.status(marker),
+		"a failure after an earlier success reopens the marker")
+
+	runsPrefix := stacks.RunArchivePrefixForTest(st, "proj", "stack", "sc-1", "sdg-1")
+	assert.True(t, f.ledger.Collection(runsPrefix).HasUnsettled(),
+		"the reopened marker holds the walks open again")
+}
+
+func TestInFlightRunKeepsConfigurationsWalkOpen(t *testing.T) {
+	t.Parallel()
+
+	// A stack configuration reaches its terminal status when preparation
+	// finishes, while its deployment runs keep executing long after. An
+	// in-flight run records run.json done (a settled status) and its steps are
+	// deferred, so no entry under the configurations prefix is unsettled; only
+	// the nested runs walk's withheld settlement carries the openness, and the
+	// runs-walk marker must surface it as a pending entry the configurations
+	// gate can see, or the configuration freezes over the running deployment
+	// and its final state and steps are stranded forever.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/stack-deployment-groups/sdg-1/stack-deployment-runs",
+		func(w http.ResponseWriter, _ *http.Request) {
+			writeList(t, w, `{"id":"sdr-live","type":"stack-deployment-runs","attributes":{"status":"deploying"}}`)
+		})
+
+	f := newStacksFixture(t, mux)
+	st := f.store
+
+	group := &tfe.StackDeploymentGroup{ID: "sdg-1", Name: "primary"}
+
+	require.NoError(t, f.collector.ArchiveGroupForTest(t.Context(), "proj", "stack", "sc-1", group))
+
+	marker := st.Join(st.StackDeploymentGroupDir("proj", "stack", "sc-1", "sdg-1"),
+		"runs-"+stacks.ListingLeafForTest)
+	assert.Equal(t, manifest.StatusPending, f.status(marker),
+		"an unsettled nested runs walk leaves the marker pending")
+
+	configPrefix := stacks.ConfigArchivePrefixForTest(st, "proj", "stack")
+	assert.True(t, f.ledger.Collection(configPrefix).HasUnsettled(),
+		"the pending marker holds the configurations walk open over the in-flight run")
 }
