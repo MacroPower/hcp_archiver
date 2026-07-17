@@ -1446,3 +1446,50 @@ func TestLoad_RecordOnlyPrefixKeepsRecordsWithoutFiles(t *testing.T) {
 	assert.False(t, declared.ShouldFetch(tarball),
 		"a record-only prefix's records replay without any local files")
 }
+
+func TestLedger_EntryDurableTracksTheFlushLifecycle(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("running as root defeats the read-only directory that forces the append failure")
+	}
+
+	// Custody decisions gate on durability: an eviction may destroy a local
+	// only-copy only once the done record proving the remote copy would
+	// survive a crash. The signal must follow the flush lifecycle -- false
+	// while the record lives only in memory, true once the fsynced log holds
+	// it, and false again when a failed append hands the record back.
+	root := t.TempDir()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	ledger, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, ledger.Close()) })
+
+	assert.False(t, ledger.EntryDurable(tarball), "no entry at all")
+
+	ledger.RecordDone(tarball, manifest.Signature{Size: 1})
+	assert.False(t, ledger.EntryDurable(tarball), "recorded but not yet flushed")
+
+	require.NoError(t, ledger.Flush())
+	assert.True(t, ledger.EntryDurable(tarball), "the fsynced log holds the record")
+
+	ledger.RecordDone(tarball, manifest.Signature{Size: 2})
+	assert.False(t, ledger.EntryDurable(tarball), "a re-record dirties the entry again")
+
+	// A failed append restores the drained delta, so the entry must read
+	// non-durable rather than silently durable-without-a-log. A read-only
+	// log file makes the append's open fail while leaving everything else
+	// intact.
+	_, logFile := rootShardFiles(root)
+	require.NoError(t, os.Chmod(logFile, 0o400))
+	require.Error(t, ledger.Flush())
+	require.NoError(t, os.Chmod(logFile, 0o600))
+
+	assert.False(t, ledger.EntryDurable(tarball), "the failed append handed the record back")
+
+	require.NoError(t, ledger.Flush())
+	assert.True(t, ledger.EntryDurable(tarball), "the retried flush lands it")
+}

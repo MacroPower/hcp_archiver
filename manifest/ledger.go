@@ -692,6 +692,32 @@ func (l *Ledger) Entry(relPath string) (Entry, bool) {
 	return cloneEntry(*e), true
 }
 
+// EntryDurable reports whether relPath has an entry all of whose recorded
+// state has reached durable storage — the shard's snapshot or the fsynced
+// org log — so the record would survive a crash. Custody decisions consult
+// it: an eviction may destroy a local only-copy only once the done record
+// proving the remote copy is durable, or a crash between the delete and the
+// next flush would leave neither the record nor the bytes. Callers
+// sequence it after the flush whose durability they rely on; a flush in
+// flight can report an entry durable a failed append then takes back.
+func (l *Ledger) EntryDurable(relPath string) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	sh, ok := l.lookupShard(relPath)
+	if !ok {
+		return false
+	}
+
+	if _, ok := sh.entries[relPath]; !ok {
+		return false
+	}
+
+	_, dirty := sh.dirtyEntries[relPath]
+
+	return !dirty
+}
+
 // RecordDone records a successful fetch of relPath with its content signature.
 func (l *Ledger) RecordDone(relPath string, sig Signature) {
 	stored := sig

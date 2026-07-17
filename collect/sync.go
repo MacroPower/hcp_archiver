@@ -261,6 +261,15 @@ func (e *Env) proveOffloadSource(relPath, absPath string) (remote.Digests, error
 				ErrOffloadUnproven, relPath)
 		}
 
+		// The record that proves the eviction must itself survive a crash
+		// before the local bytes may be destroyed (see [Ledger.EntryDurable]);
+		// the classify pass already screens for this, so tripping here means a
+		// caller reached the delete site around it.
+		if !e.ledger.EntryDurable(relPath) {
+			return remote.Digests{}, fmt.Errorf("%w: tarball %q done record is not yet durable",
+				ErrOffloadUnproven, relPath)
+		}
+
 		if entry.Signature.Hash != "" && entry.Signature.Hash != digests.SHA256 {
 			return remote.Digests{}, fmt.Errorf("%w: tarball %q does not hash to its ledger signature",
 				ErrOffloadUnproven, relPath)
@@ -920,6 +929,20 @@ func (e *Env) classifyTarball(ctx context.Context, relPath string) syncAction {
 	entry, ok := e.ledger.Entry(relPath)
 	if !ok || entry.Status != manifest.StatusDone || entry.Signature == nil {
 		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_tarball_unproven",
+			slog.String("path", relPath),
+		)
+
+		return actionSkip
+	}
+
+	// The done record is the tarball's only local proof once the file is
+	// gone, so the eviction waits for it to be durable: after a failed final
+	// flush the record lives only in memory, and deleting the file would
+	// leave the next run neither the record nor the bytes. The skip is not a
+	// counted failure — the failed flush already marks the run incomplete —
+	// and the file evicts on a later sweep once a flush has landed.
+	if !e.ledger.EntryDurable(relPath) {
+		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_tarball_record_not_durable",
 			slog.String("path", relPath),
 		)
 

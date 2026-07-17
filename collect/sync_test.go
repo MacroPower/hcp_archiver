@@ -76,13 +76,15 @@ func (f syncFixture) write(t *testing.T, relPath string, data []byte) {
 	require.NoError(t, err)
 }
 
-// writeDone commits a loose file and records it done, the state of a settled
-// artifact.
+// writeDone commits a loose file, records it done, and flushes, the state of
+// a settled artifact whose record a healthy run has already made durable —
+// eviction gates on that durability, so the fixture models it.
 func (f syncFixture) writeDone(t *testing.T, relPath string, data []byte) {
 	t.Helper()
 
 	f.write(t, relPath, data)
 	f.ledger.RecordDone(relPath, manifest.SignatureOf(data))
+	require.NoError(t, f.ledger.Flush())
 }
 
 // resume marks the fixture's run as resumed: at least one ledger entry
@@ -178,6 +180,7 @@ func TestSyncArchiveClassification(t *testing.T) {
 				t.Helper()
 				f.ledger.RecordDone("config-versions/cv-1.tar.gz",
 					manifest.SignatureOf([]byte("tarball")))
+				require.NoError(t, f.ledger.Flush())
 			},
 			relPath:     "config-versions/cv-1.tar.gz",
 			wantRemote:  true,
@@ -192,6 +195,7 @@ func TestSyncArchiveClassification(t *testing.T) {
 				t.Helper()
 				f.ledger.RecordDone("config-versions/cv-3.tar.gz",
 					manifest.Signature{Hash: "h", Size: 999})
+				require.NoError(t, f.ledger.Flush())
 			},
 			relPath:    "config-versions/cv-3.tar.gz",
 			wantLocal:  true,
@@ -1814,4 +1818,37 @@ func TestEagerSyncThenSweepSkipsWithoutSecondUpload(t *testing.T) {
 	assert.Equal(t, 1, f.fake.PutCalls())
 	assert.Zero(t, f.fake.HeadCalls(),
 		"the eager Put records a digest, so the gate settles from the inventory alone")
+}
+
+func TestSyncArchiveDoesNotEvictATarballWhoseRecordIsNotDurable(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t)
+
+	// The done record exists only in memory, the state after a failed final
+	// flush: the record is the tarball's only local proof once the file is
+	// gone, so the eviction must wait. The skip is not a counted failure --
+	// the failed flush already marks the run incomplete.
+	data := []byte("tarball")
+	f.write(t, tarball, data)
+	f.ledger.RecordDone(tarball, manifest.SignatureOf(data))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Evicted)
+	assert.Zero(t, stats.Failed)
+	assert.True(t, f.exists(t, tarball), "the only local copy stays until its record is durable")
+
+	// Once a flush lands the record, the next sweep evicts normally.
+	require.NoError(t, f.ledger.Flush())
+
+	stats = f.env.SyncArchive(t.Context())
+
+	assert.Equal(t, 1, stats.Evicted)
+	assert.False(t, f.exists(t, tarball))
+
+	_, ok := f.fake.Object(f.key(tarball))
+	assert.True(t, ok)
 }
