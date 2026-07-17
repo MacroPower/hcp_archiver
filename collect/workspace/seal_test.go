@@ -149,6 +149,42 @@ func TestSealWorkspace_BundlesFrozenArtifacts(t *testing.T) {
 		st.RunFile(project, ws, "run-1", "run-events.json")))
 }
 
+func TestSealWorkspace_FlushesLedgerBeforeRemovingSources(t *testing.T) {
+	t.Parallel()
+
+	f := newSealFixture(t)
+	st := f.store
+	project, ws := "prod", "api"
+
+	planLog := st.RunFile(project, ws, "run-1", "plan.log")
+	f.writeDone(t, planLog, []byte("plan output"))
+	f.markComplete(project, ws)
+
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+	require.False(t, f.exists(planLog), "the loose source is sealed away")
+
+	// Close releases the lock without flushing, so the reload sees exactly
+	// what a process hard-killed right after the seal would leave behind.
+	require.NoError(t, f.ledger.Close())
+
+	reloaded, err := manifest.Load(st.Root())
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, reloaded.Close()) })
+
+	// The seal destroyed the loose plan.log, so the records that authorized
+	// it must already be durable: a reload missing them would re-fetch the
+	// sealed path and could settle an expired artifact absent while the
+	// bundle holds its bytes.
+	entry, ok := reloaded.Entry(planLog)
+	require.True(t, ok, "the sealed artifact's done entry is durable before its loose source is removed")
+	assert.Equal(t, manifest.StatusDone, entry.Status)
+
+	runsKey := st.Join(st.WorkspaceDir(project, ws), "runs")
+	assert.True(t, reloaded.Collection(runsKey).Complete(),
+		"the completion flag that authorized the seal is durable")
+}
+
 func TestSealWorkspace_SkipsIncompleteCollections(t *testing.T) {
 	t.Parallel()
 

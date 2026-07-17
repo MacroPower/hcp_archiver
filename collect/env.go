@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -394,6 +395,21 @@ func (e *Env) ReferencePending(gateKey string) bool {
 // loose copy and removes it.
 func (e *Env) Entry(relPath string) (manifest.Entry, bool) {
 	return e.ledger.Entry(relPath)
+}
+
+// FlushLedger persists everything recorded in the ledger so far durably (see
+// [manifest.Ledger.Flush]). Records otherwise reach disk only on the
+// archiver's periodic flush, so a phase that destroys the loose evidence its
+// in-memory records describe (the seal) flushes first: a hard kill then never
+// leaves a durable ledger missing the entries and collection flags that
+// authorized the destruction.
+func (e *Env) FlushLedger() error {
+	err := e.ledger.Flush()
+	if err != nil {
+		return fmt.Errorf("flush ledger: %w", err)
+	}
+
+	return nil
 }
 
 // Collection returns the ledger handle for the collection whose entries live

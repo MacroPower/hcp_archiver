@@ -72,7 +72,25 @@ const runsRollup = "runs.ndjson"
 // re-fetched: the ledger keys are unchanged, so a re-run treats a sealed
 // object exactly as it did the loose one. Run directories emptied by the seal
 // are pruned.
+//
+// The ledger records that authorize the seal are flushed durable before any
+// loose source is destroyed, so a hard kill mid-seal never leaves a durable
+// ledger missing the done entries and collection flags for the bytes now held
+// only in a bundle.
 func (c *Collector) SealWorkspace(ctx context.Context, project, ws string) error {
+	// The walk typically records the done entries and completion flags this
+	// seal is gated on moments before it runs, so they may still sit in the
+	// unflushed batch while the seal deletes the loose files they describe. A
+	// hard kill in that window would leave a durable ledger that re-fetches
+	// the sealed paths on the next run — and settles an artifact the API has
+	// since expired as absent, even though the verified bundle holds its
+	// bytes. Flushing first makes the authorizing records durable; on a flush
+	// failure the seal aborts with the loose sources still canonical.
+	err := c.env.FlushLedger()
+	if err != nil {
+		return fmt.Errorf("flush ledger before seal: %w", err)
+	}
+
 	logs, err := c.frozenRunArtifacts(project, ws)
 	if err != nil {
 		return fmt.Errorf("gather frozen run artifacts: %w", err)
