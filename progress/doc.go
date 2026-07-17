@@ -17,8 +17,18 @@
 // responses appears, so a slowed rate explains itself. Logfmt carries the
 // same as rps=, paused=, and rateLimited=, JSON as requestsPerSecond,
 // pausedMs, and rateLimited, and the closing summary keeps the run's
-// rate-limited total. Log output routes through a [LogSink] so log lines
-// scroll in scrollback above the panel instead of corrupting it. Off a terminal (a pipe,
+// rate-limited total.
+//
+// Two rules keep the panel visually stable. The frame never shrinks: the
+// panel pads to the tallest frame it has rendered, because the inline
+// renderer erases and resizes on a shrinking frame, which corrupts the screen
+// when a log line is inserted at the same moment. And nothing writes to the
+// terminal beside the renderer: log output routes through a [LogSink] that
+// queues lines for the panel to drain from inside its own event loop, printed
+// in order, hard-wrapped to the terminal width, and batched, so log lines
+// scroll in scrollback above the panel instead of corrupting it; lines still
+// queued when the panel stops flush to the sink's fallback writer, so none
+// are lost. Off a terminal (a pipe,
 // a redirect, or a test buffer) the same signal falls back to a logfmt line.
 // The machine mode ([config.ProgressModeJSON]) is one JSON object per line for
 // wrapping in CI or a watcher. The mode defaults to the panel on an interactive

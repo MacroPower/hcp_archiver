@@ -26,6 +26,13 @@ const (
 	pctWidth   = 4  // "100%" down to "  0%".
 	etaWidth   = 10 // "eta 59m59s", the widest value compactDuration emits.
 
+	// The display width of the spinner cell heading line one (the glyph and its
+	// trailing space). The task rows indent by the whole lead — spinner cell,
+	// phase, separating space — so their bars sit exactly under the phase bar;
+	// deriving both from the same constants is what keeps the grid aligned.
+	spinnerCellWidth = 2
+	rowLeadWidth     = spinnerCellWidth + phaseWidth + 1
+
 	marqueeBlock = 5 // moving block width within the indeterminate track.
 
 	// Digit reserves for the per-status counts; the numbers left-align into
@@ -287,9 +294,13 @@ func (m *tuiModel) logBatch() string {
 // View renders the current snapshot into an inline (non-alt-screen) view, so log
 // lines printed by the sink stay in scrollback above the pinned panel. A
 // quitting model renders nothing, so the program's final render erases the
-// panel rather than stranding its last frame in the output flow.
+// panel rather than stranding its last frame in the output flow. An unsized
+// model (before the first window-size message lands) also renders nothing:
+// fit cannot clip without a width, and a line left wider than the terminal
+// wraps onto extra rows the inline renderer does not account for, skewing its
+// frame from the very first paint. The panel appears one message later, sized.
 func (m *tuiModel) View() tea.View {
-	if m.quitting {
+	if m.quitting || m.width <= 0 {
 		return tea.NewView("")
 	}
 
@@ -377,13 +388,7 @@ func (m *tuiModel) render(snap snapshot) string {
 	line1.WriteByte(' ')
 
 	if snap.hasBar() {
-		// Clamp to [0,1] so a miscounted completed/total can never widen the
-		// percent past its 4-cell reserve (or read negative), keeping the bar and
-		// its label in lockstep. Truncating toward zero floors the percent, so it
-		// never reads 100% before the last unit lands.
-		percent := min(max(float64(snap.completed)/float64(snap.total), 0), 1)
-		line1.WriteString(m.bar.ViewAs(percent))
-		fmt.Fprintf(&line1, " %s", styleCount.Render(fmt.Sprintf("%3d%%", int(percent*100))))
+		line1.WriteString(m.barCell(snap.completed, snap.total))
 	} else {
 		line1.WriteString(marquee(m.bar.Width(), m.tick))
 		fmt.Fprintf(&line1, " %s", strings.Repeat(" ", pctWidth))
@@ -523,19 +528,8 @@ func (m *tuiModel) taskLineBudget(hasRemote bool) int {
 func (m *tuiModel) renderTask(task taskProgress) string {
 	var b strings.Builder
 
-	b.WriteString(strings.Repeat(" ", phaseWidth+3))
-
-	// Guard the division: a task with no total (the same total==0 case the phase
-	// bar skips via hasBar) would otherwise divide by zero into a NaN or an
-	// infinity and render a garbage percent.
-	var percent float64
-
-	if task.total > 0 {
-		percent = min(max(float64(task.done)/float64(task.total), 0), 1)
-	}
-
-	b.WriteString(m.bar.ViewAs(percent))
-	fmt.Fprintf(&b, " %s", styleCount.Render(fmt.Sprintf("%3d%%", int(percent*100))))
+	b.WriteString(strings.Repeat(" ", rowLeadWidth))
+	b.WriteString(m.barCell(task.done, task.total))
 
 	// The fraction rides in the eta column; a fraction outgrowing the reserve
 	// shifts only its own trailing name.
@@ -548,6 +542,24 @@ func (m *tuiModel) renderTask(task taskProgress) string {
 	)
 
 	return b.String()
+}
+
+// barCell renders the bar-and-percent columns shared by line one and the task
+// rows, so the two cannot drift apart. The completion ratio clamps to [0,1]:
+// a miscounted done/total can never widen the percent past its 4-cell reserve
+// or read negative, keeping the bar and its label in lockstep, and a
+// non-positive total (which would otherwise divide to a NaN or an infinity)
+// renders an empty bar at 0%. Truncating toward zero floors the percent, so
+// it never reads 100% before the last unit lands.
+func (m *tuiModel) barCell(done, total int) string {
+	var percent float64
+
+	if total > 0 {
+		percent = min(max(float64(done)/float64(total), 0), 1)
+	}
+
+	return m.bar.ViewAs(percent) +
+		" " + styleCount.Render(fmt.Sprintf("%3d%%", int(percent*100)))
 }
 
 // fit clips a rendered line to the terminal width so the panel never wraps onto
