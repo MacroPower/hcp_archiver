@@ -42,7 +42,7 @@ func TestStateVersionTerminal(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tc.want, workspace.StateVersionTerminal(tc.status))
+			assert.Equal(t, tc.want, tfeclient.StateVersionTerminal(tc.status))
 		})
 	}
 }
@@ -79,7 +79,7 @@ func TestArchiveStateVersionPendingThenFinalized(t *testing.T) {
 	pending := &tfe.StateVersion{ID: "sv-1", CreatedAt: createdAt, Status: tfe.StateVersionPending}
 	require.NoError(t, collector.ArchiveStateVersion(t.Context(), "proj", "ws", pending))
 
-	assert.False(t, workspace.StateVersionTerminal(pending.Status), "a pending state version is non-terminal")
+	assert.False(t, tfeclient.StateVersionTerminal(pending.Status), "a pending state version is non-terminal")
 
 	_, ok := ledger.Entry(rawPath)
 	assert.False(t, ok, "a pending state version records no blob outcome")

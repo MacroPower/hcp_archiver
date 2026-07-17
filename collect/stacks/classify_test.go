@@ -10,6 +10,7 @@ import (
 
 	"go.jacobcolvin.com/hcp_archiver/collect/stacks"
 	"go.jacobcolvin.com/hcp_archiver/store"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 func TestConfigTerminal(t *testing.T) {
@@ -31,7 +32,7 @@ func TestConfigTerminal(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tc.want, stacks.ConfigTerminalForTest(tc.status))
+			assert.Equal(t, tc.want, tfeclient.StackConfigurationTerminal(tc.status))
 		})
 	}
 }
@@ -58,7 +59,7 @@ func TestRunTerminal(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tc.want, stacks.RunTerminalForTest(tc.status))
+			assert.Equal(t, tc.want, tfeclient.DeploymentRunTerminal(tc.status))
 		})
 	}
 }

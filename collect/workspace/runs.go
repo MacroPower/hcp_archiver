@@ -64,7 +64,7 @@ func (c *Collector) collectRuns(ctx context.Context, project string, ws *tfe.Wor
 		return collect.Item{
 			RelPath:   st.RunFile(project, wsName, run.ID, "run.json"),
 			CreatedAt: run.CreatedAt,
-			Terminal:  runTerminal(run.Status),
+			Terminal:  tfeclient.RunTerminal(run.Status),
 			Archive: func(ctx context.Context) error {
 				err := c.archiveRun(ctx, project, wsName, run)
 				if err == nil && progress != nil {
@@ -88,43 +88,11 @@ func (c *Collector) archiveRun(ctx context.Context, project, ws string, run *tfe
 		return err
 	}
 
-	if !runTerminal(run.Status) {
+	if !tfeclient.RunTerminal(run.Status) {
 		return nil
 	}
 
 	return c.archiveRunChildren(ctx, project, ws, run)
-}
-
-// runTerminal reports whether a run has settled into a final state and so needs
-// no further refresh. The remaining statuses are in-flight or paused stages that
-// may still advance.
-//
-// The polarity is an explicit allowlist: an unrecognized status falls through to
-// non-terminal, the safe direction, because a live run mistaken for terminal would
-// freeze premature absences for children it has yet to produce, while a
-// terminal run mistaken for live only re-fetches its summary until the list is
-// updated. See stateVersionTerminal for the same invariant.
-func runTerminal(status tfe.RunStatus) bool {
-	switch status {
-	case tfe.RunApplied,
-		tfe.RunPlannedAndFinished,
-		tfe.RunDiscarded,
-		tfe.RunErrored,
-		tfe.RunCanceled,
-		tfe.RunPolicySoftFailed:
-		// The policy_soft_failed state is final: a soft-mandatory policy
-		// failure on a plan-only run, which no override can advance. The
-		// policy_override state, by contrast, stays non-terminal because a
-		// user override moves it on.
-		return true
-	case tfe.RunStatus("force_canceled"):
-		// The HCP Terraform API documents force_canceled as a final run state,
-		// but go-tfe (v1.109.0) defines no constant for it, so the wire value is
-		// spelled here directly.
-		return true
-	default:
-		return false
-	}
 }
 
 // terminalRunFile reports whether the loose run.json at absPath records a
@@ -153,5 +121,5 @@ func terminalRunFile(absPath string) bool {
 		return false
 	}
 
-	return runTerminal(tfe.RunStatus(doc.Data.Attributes.Status))
+	return tfeclient.RunTerminal(tfe.RunStatus(doc.Data.Attributes.Status))
 }

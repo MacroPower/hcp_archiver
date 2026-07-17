@@ -8,16 +8,6 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
-// ConfigTerminalForTest exposes [configTerminal] to the external test package.
-func ConfigTerminalForTest(status tfe.StackConfigurationStatus) bool {
-	return configTerminal(status)
-}
-
-// RunTerminalForTest exposes [runTerminal] to the external test package.
-func RunTerminalForTest(status tfe.DeploymentRunStatus) bool {
-	return runTerminal(status)
-}
-
 // StateTerminalForTest exposes [stateTerminal] to the external test package.
 func StateTerminalForTest(status string) bool {
 	return stateTerminal(status)

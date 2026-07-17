@@ -21,6 +21,7 @@ require (
 	go.jacobcolvin.com/x/version v0.2.0
 	gocloud.dev v0.46.0
 	golang.org/x/sync v0.21.0
+	golang.org/x/tools v0.46.0
 )
 
 require (
@@ -108,7 +109,6 @@ require (
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	golang.org/x/tools v0.46.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/api v0.272.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260316180232-0b37fe3546d5 // indirect

@@ -6,11 +6,6 @@ import (
 	"github.com/hashicorp/go-tfe"
 )
 
-// RunTerminal exposes runTerminal to the external test package.
-func RunTerminal(status tfe.RunStatus) bool {
-	return runTerminal(status)
-}
-
 // ArchiveConfigurationVersion exposes archiveConfigurationVersion to the
 // external test package.
 func (c *Collector) ArchiveConfigurationVersion(
@@ -80,11 +75,6 @@ func (c *Collector) CollectStateVersions(
 	progress func(n int),
 ) error {
 	return c.collectStateVersions(ctx, project, ws, progress)
-}
-
-// StateVersionTerminal exposes stateVersionTerminal to the external test package.
-func StateVersionTerminal(status tfe.StateVersionStatus) bool {
-	return stateVersionTerminal(status)
 }
 
 // HasNextPage exposes hasNextPage to the external test package.

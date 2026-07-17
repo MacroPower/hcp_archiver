@@ -31,7 +31,7 @@ func (c *Collector) collectConfigurations(ctx context.Context, project string, s
 		return collect.Item{
 			RelPath:   c.env.Store().StackConfigurationFile(project, stack.Name, cfg.ID, "configuration.json"),
 			CreatedAt: cfg.CreatedAt,
-			Terminal:  configTerminal(cfg.Status),
+			Terminal:  tfeclient.StackConfigurationTerminal(cfg.Status),
 			Archive: func(ctx context.Context) error {
 				return c.archiveConfiguration(ctx, project, stack.Name, cfg)
 			},
@@ -76,7 +76,7 @@ func (c *Collector) archiveConfiguration(
 	// still-preparing configuration does not record a premature settled gap for
 	// schemas it has yet to produce. Diagnostics stay mutable below, so a prep
 	// error is still captured while the configuration is in flight.
-	if configTerminal(cfg.Status) {
+	if tfeclient.StackConfigurationTerminal(cfg.Status) {
 		schemaFile := st.StackConfigurationFile(project, stackName, cfg.ID, "json-schemas.json")
 
 		err = c.env.Bytes(ctx, schemaFile, func(ctx context.Context) ([]byte, error) {
@@ -227,7 +227,7 @@ func (c *Collector) collectRuns(ctx context.Context, project, stackName, configI
 		return collect.Item{
 			RelPath:   c.env.Store().StackRunFile(project, stackName, configID, groupID, run.ID, "run.json"),
 			CreatedAt: run.CreatedAt,
-			Terminal:  runTerminal(run.Status),
+			Terminal:  tfeclient.DeploymentRunTerminal(run.Status),
 			Archive: func(ctx context.Context) error {
 				return c.archiveRun(ctx, project, stackName, configID, groupID, run)
 			},
@@ -269,7 +269,7 @@ func (c *Collector) archiveRun(
 	// descriptions). Fetch them only once the run is terminal, so an in-flight run
 	// does not record a premature settled gap for an artifact it has yet to
 	// produce, mirroring the workspace run collector.
-	if !runTerminal(run.Status) {
+	if !tfeclient.DeploymentRunTerminal(run.Status) {
 		return nil
 	}
 

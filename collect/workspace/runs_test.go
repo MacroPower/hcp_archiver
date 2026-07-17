@@ -11,6 +11,7 @@ import (
 
 	"go.jacobcolvin.com/hcp_archiver/collect/workspace"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 func TestRunTerminal(t *testing.T) {
@@ -42,7 +43,7 @@ func TestRunTerminal(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tc.want, workspace.RunTerminal(tc.status))
+			assert.Equal(t, tc.want, tfeclient.RunTerminal(tc.status))
 		})
 	}
 }

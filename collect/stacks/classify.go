@@ -3,34 +3,8 @@ package stacks
 import (
 	"strconv"
 
-	tfe "github.com/hashicorp/go-tfe"
-
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
-
-// configTerminal reports whether a stack configuration has settled into a state
-// that no longer changes, so its snapshot and children can be frozen.
-func configTerminal(status tfe.StackConfigurationStatus) bool {
-	switch status {
-	case tfe.StackConfigurationStatusCompleted, tfe.StackConfigurationStatusFailed:
-		return true
-	default:
-		return false
-	}
-}
-
-// runTerminal reports whether a stack deployment run has reached a terminal
-// status, so its record and steps need no further refresh once archived.
-func runTerminal(status tfe.DeploymentRunStatus) bool {
-	switch status {
-	case tfe.DeploymentRunStatusSucceeded,
-		tfe.DeploymentRunStatusFailed,
-		tfe.DeploymentRunStatusAbandoned:
-		return true
-	default:
-		return false
-	}
-}
 
 // stateTerminal reports whether a stack state generation has finished uploading,
 // so its description can be fetched once and frozen.
