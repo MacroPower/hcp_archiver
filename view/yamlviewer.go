@@ -1,8 +1,6 @@
 package view
 
 import (
-	"fmt"
-
 	"go.jacobcolvin.com/niceyaml"
 	"go.jacobcolvin.com/niceyaml/bubbles/yamlviewport"
 
@@ -54,10 +52,7 @@ func (s *yamlViewerScreen) update(msg tea.Msg) tea.Cmd {
 // view renders the viewport over a footer carrying the scroll position and the
 // key hints.
 func (s *yamlViewerScreen) view() string {
-	footer := fmt.Sprintf("%3.f%% · ↑/↓ scroll · g/G top/bottom · w wrap · esc back · q quit",
-		s.vp.ScrollPercent()*100)
-
-	return s.vp.View() + "\n" + styleFooter.Render(footer)
+	return s.vp.View() + "\n" + viewerFooter(s.vp.ScrollPercent(), "w wrap")
 }
 
 // crumb names the screen's breadcrumb segment.

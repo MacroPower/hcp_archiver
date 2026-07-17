@@ -2,6 +2,7 @@ package view
 
 import (
 	"fmt"
+	"strings"
 
 	"charm.land/bubbles/v2/viewport"
 
@@ -38,6 +39,22 @@ func scrollKey(msg tea.Msg, top, bottom func()) (tea.Cmd, bool) {
 	}
 
 	return nil, false
+}
+
+// viewerFooter renders the footer line the viewer screens share: the scroll
+// position, then the key hints — the keys scrollKey handles, with any
+// viewer-specific hints spliced in before the back and quit keys — so the
+// viewers cannot drift in hint wording or order. It lives beside scrollKey
+// because the two describe the same keys.
+func viewerFooter(scrollPercent float64, extra ...string) string {
+	hints := append([]string{
+		fmt.Sprintf("%3.f%%", scrollPercent*100),
+		"↑/↓ scroll",
+		"g/G top/bottom",
+	}, extra...)
+	hints = append(hints, "esc back", "q quit")
+
+	return styleFooter.Render(strings.Join(hints, " · "))
 }
 
 // viewerScreen scrolls one archived plain-text document: a log or the mixed
@@ -78,10 +95,7 @@ func (s *viewerScreen) update(msg tea.Msg) tea.Cmd {
 // view renders the viewport over a footer carrying the scroll position and the
 // key hints.
 func (s *viewerScreen) view() string {
-	footer := fmt.Sprintf("%3.f%% · ↑/↓ scroll · g/G top/bottom · esc back · q quit",
-		s.vp.ScrollPercent()*100)
-
-	return s.vp.View() + "\n" + styleFooter.Render(footer)
+	return s.vp.View() + "\n" + viewerFooter(s.vp.ScrollPercent())
 }
 
 // crumb names the screen's breadcrumb segment.
