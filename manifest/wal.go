@@ -60,11 +60,19 @@ type walRecord struct {
 
 // walRecordClass ranks a record for the durability order one appended batch
 // must satisfy (see [shard.drainDirty]): collection unsettlements lead, then
-// unsettled-status entries, then settled-status entries, then the
-// collection-level skip signals (watermarks, completion, settlement), then the
-// run metadata. Merging several shards' drains into one batch stable-sorts by
-// this class, so the guard rule holds across the whole batch, not merely
-// within one shard's slice of it.
+// unsettled-status entries, then settled-status entries, then the skip
+// signals — settled gate entries alongside the collection-level watermark,
+// completion, and settlement records — then the run metadata. Merging several
+// shards' drains into one batch stable-sorts by this class, so the guard rule
+// holds across the whole batch, not merely within one shard's slice of it.
+//
+// A settled gate entry (a cleared reference or obligation) ranks behind the
+// ordinary settled entries even though its status is settled too, because the
+// clear is itself a skip signal for the entry it mirrors: a healing run
+// records the healed foreign entry and the gate clear in one batch, and a
+// tear that persisted the clear without the healed entry would disable the
+// retry the gate exists to force. Trailing, a tear loses at most the clear,
+// which costs one redundant re-list and converges.
 func walRecordClass(rec *walRecord) int {
 	switch rec.Kind {
 	case walSettled:
@@ -75,11 +83,18 @@ func walRecordClass(rec *walRecord) int {
 		return 3
 
 	case walEntry:
-		if rec.Entry != nil && !rec.Entry.Status.Settled() {
-			return 1
+		if rec.Entry == nil {
+			return 2
 		}
 
-		return 2
+		switch {
+		case !rec.Entry.Status.Settled():
+			return 1
+		case rec.Entry.Status.IsGate():
+			return 3
+		default:
+			return 2
+		}
 
 	case walWatermark, walCompleted:
 		return 3

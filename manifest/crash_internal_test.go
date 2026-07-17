@@ -285,3 +285,42 @@ func TestCrashPrefix_ReferencedProofPrecedesItsFreeze(t *testing.T) {
 		},
 	)
 }
+
+// TestCrashPrefix_GateClearNeverOutlivesTheHealedEntry pins the settled-gate
+// rank: a healing run records the healed foreign entry and the gate clear in
+// one batch, and the clear must never be durable without the healed entry —
+// the skip conditions gate on the cleared reference, so a durable clear over a
+// still-errored entry would disable the retry the gate exists to force,
+// permanently.
+func TestCrashPrefix_GateClearNeverOutlivesTheHealedEntry(t *testing.T) {
+	t.Parallel()
+
+	const (
+		user = "users/u1.json"
+		gate = "projects/p/workspaces/w/runs/r1/run-events-actors.ref"
+	)
+
+	forEachCrashPrefix(t,
+		func(l *Ledger) {
+			l.RecordErrored(user, errors.New("actor read boom"), true)
+			l.MirrorReference(gate, false)
+		},
+		func(l *Ledger) {
+			l.RecordDone(user, Signature{Size: 1})
+			l.MirrorReference(gate, true)
+		},
+		func(t *testing.T, label string, torn *Ledger) {
+			t.Helper()
+
+			g, ok := torn.Entry(gate)
+			if !ok || g.Status != StatusReferenceCleared {
+				return // The clear is not durable, so the retry stays armed.
+			}
+
+			u, ok := torn.Entry(user)
+			require.True(t, ok, "%s: cleared gate durable without the healed entry", label)
+			require.Equal(t, StatusDone, u.Status,
+				"%s: the healed entry must be durable wherever its clear is", label)
+		},
+	)
+}
