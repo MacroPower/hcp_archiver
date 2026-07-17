@@ -654,7 +654,51 @@ func (e *Env) verifyEvicted(
 
 		case histKey != "":
 			e.healHistoricalKey(ctx, histKey, relPath, info)
+
+		default:
+			e.releaseHistoricalKeys(ctx, inventory, aliases, relPath)
 		}
+	}
+}
+
+// releaseHistoricalKeys retries the cleanup half of a heal whose delete
+// failed on an earlier sweep: the obligation now hits its current key
+// directly, which would otherwise skip the alias path forever and strand the
+// historical copy as an unpruneable duplicate (its eviction shape exempts it
+// from the prune by design). The satisfied current-key copy is the proof
+// that makes each release safe; a failed delete warns and retries next
+// sweep, for as long as the rename links that spell the historical keys
+// survive.
+func (e *Env) releaseHistoricalKeys(
+	ctx context.Context,
+	inventory map[string]remote.ObjectInfo,
+	aliases map[string]string,
+	relPath string,
+) {
+	for _, candidate := range aliasRewrites(aliases, relPath) {
+		key := e.RemoteKey(candidate)
+
+		if _, leftover := inventory[key]; !leftover {
+			continue
+		}
+
+		_, err := e.remote.Delete(ctx, []string{key})
+		if err != nil {
+			if ctx.Err() == nil {
+				e.logger.LogAttrs(ctx, slog.LevelWarn, "evicted_object_heal_error",
+					slog.String("path", relPath),
+					slog.String("key", key),
+					slog.String("error", err.Error()),
+				)
+			}
+
+			continue
+		}
+
+		e.logger.LogAttrs(ctx, slog.LevelInfo, "evicted_object_historical_released",
+			slog.String("path", relPath),
+			slog.String("key", key),
+		)
 	}
 }
 
@@ -669,15 +713,8 @@ func (e *Env) aliasedInventoryLookup(
 	aliases map[string]string,
 	relPath string,
 ) (remote.ObjectInfo, string, bool) {
-	for _, alias := range slices.Sorted(maps.Keys(aliases)) {
-		owner := aliases[alias]
-
-		rest, ok := strings.CutPrefix(relPath, owner+"/")
-		if !ok {
-			continue
-		}
-
-		key := e.RemoteKey(alias + "/" + rest)
+	for _, candidate := range aliasRewrites(aliases, relPath) {
+		key := e.RemoteKey(candidate)
 
 		info, hit := inventory[key]
 		if !hit {
@@ -695,6 +732,44 @@ func (e *Env) aliasedInventoryLookup(
 	return remote.ObjectInfo{}, "", false
 }
 
+// aliasRewrites returns every historical spelling of relPath reachable by
+// rewriting owner prefixes back to their alias names, in deterministic
+// breadth-first order, excluding relPath itself. The rewrites compose:
+// stacked renames (a project rename above a workspace rename) minted keys
+// only the combination of both old names spells, which no single
+// substitution reaches. The seen set bounds the walk, so composition
+// terminates on any alias topology.
+func aliasRewrites(aliases map[string]string, relPath string) []string {
+	sortedAliases := slices.Sorted(maps.Keys(aliases))
+	seen := map[string]struct{}{relPath: {}}
+	queue := []string{relPath}
+
+	var out []string
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		for _, alias := range sortedAliases {
+			rest, ok := strings.CutPrefix(cur, aliases[alias]+"/")
+			if !ok {
+				continue
+			}
+
+			candidate := alias + "/" + rest
+			if _, dup := seen[candidate]; dup {
+				continue
+			}
+
+			seen[candidate] = struct{}{}
+			out = append(out, candidate)
+			queue = append(queue, candidate)
+		}
+	}
+
+	return out
+}
+
 // healHistoricalKey converges a credited only-copy onto its current name: a
 // server-side copy from the historical key, a metadata confirm of the fresh
 // copy, and only then the historical key's delete. Until the copy lands, the
@@ -702,8 +777,10 @@ func (e *Env) aliasedInventoryLookup(
 // the stale link away would turn an intact archive into a permanent false
 // hole — so the heal trades that standing dependency for one converged
 // object. Every step fails safe: a fault leaves the historical copy in
-// place, logs, and counts nothing, since the credit already succeeded and
-// the next sweep retries the heal.
+// place, logs, and counts nothing, since the credit already succeeded. A
+// failed copy retries here next sweep; a failed delete retries through
+// [Env.releaseHistoricalKeys], where the next sweep's direct hit at the
+// current key proves the release safe.
 func (e *Env) healHistoricalKey(ctx context.Context, histKey, relPath string, info remote.ObjectInfo) {
 	dst := e.RemoteKey(relPath)
 

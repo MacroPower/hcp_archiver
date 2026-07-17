@@ -1897,3 +1897,91 @@ func TestSyncArchiveDoesNotEvictATarballWhoseRecordIsNotDurable(t *testing.T) {
 	_, ok := f.fake.Object(f.key(tarball))
 	assert.True(t, ok)
 }
+
+func TestSyncArchiveHealsAcrossStackedRenames(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	// Two stacked renames -- a project rename above a workspace rename --
+	// minted the historical key under BOTH old names, which no single alias
+	// substitution spells. The rewrites must compose, or the intact only-copy
+	// reads as a permanent hole.
+	const (
+		sidecar = "projects/newp/workspaces/newws/bundles/logs.gen0001.zip.sidecar.ndjson"
+		curZip  = "projects/newp/workspaces/newws/bundles/logs.gen0001.zip"
+		oldZip  = "projects/oldp/workspaces/oldws/bundles/logs.gen0001.zip"
+	)
+
+	f.write(t, sidecar, []byte(`{"name":"member.json"}`))
+	f.fake.SetObject(f.key(oldZip), remotetest.Object{Data: []byte("zipbytes")})
+
+	projDir := filepath.Join(f.store.Root(), "projects")
+	require.NoError(t, os.Symlink(filepath.Join(projDir, "newp"), filepath.Join(projDir, "oldp")))
+	require.NoError(t, os.Symlink(
+		filepath.Join(projDir, "newp", "workspaces", "newws"),
+		filepath.Join(projDir, "newp", "workspaces", "oldws"),
+	))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	require.Zero(t, stats.Failed, "the composed rewrite finds the doubly renamed key")
+
+	healed, ok := f.fake.Object(f.key(curZip))
+	require.True(t, ok, "the only-copy converges onto the current key")
+	assert.Equal(t, []byte("zipbytes"), healed.Data)
+	assert.Contains(t, f.fake.Deleted(), f.key(oldZip))
+}
+
+func TestSyncArchiveReleasesAHistoricalCopyLeftByAFailedDelete(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	// A heal whose delete failed leaves copies at both keys. The next sweep
+	// hits the current key directly, so the release must run from that path
+	// too, or the historical duplicate is stranded forever behind the
+	// prune's eviction-shape exemption.
+	const (
+		sidecar = "projects/prod/workspaces/api/bundles/logs.gen0001.zip.sidecar.ndjson"
+		curZip  = "projects/prod/workspaces/api/bundles/logs.gen0001.zip"
+		oldZip  = "projects/prod/workspaces/zeta-old/bundles/logs.gen0001.zip"
+	)
+
+	f.write(t, sidecar, []byte(`{"name":"member.json"}`))
+	f.fake.SetObject(f.key(oldZip), remotetest.Object{Data: []byte("zipbytes")})
+
+	f.fake.DeleteErr = errors.New("delete boom")
+	f.fake.DeleteErrKeys = []string{f.key(oldZip)}
+
+	wsDir := filepath.Join(f.store.Root(), "projects", "prod", "workspaces")
+	require.NoError(t, os.Symlink(
+		filepath.Join(wsDir, "api"),
+		filepath.Join(wsDir, "zeta-old"),
+	))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Failed, "a failed release never fails the run")
+
+	_, ok := f.fake.Object(f.key(curZip))
+	require.True(t, ok, "the copy landed despite the failed delete")
+
+	_, ok = f.fake.Object(f.key(oldZip))
+	require.True(t, ok, "the historical copy survives its failed delete")
+
+	// The fault clears; the next sweep's direct hit releases the leftover.
+	f.fake.DeleteErr = nil
+
+	stats = f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Failed)
+
+	_, ok = f.fake.Object(f.key(oldZip))
+	assert.False(t, ok, "the direct hit retries the release")
+
+	_, ok = f.fake.Object(f.key(curZip))
+	assert.True(t, ok)
+}
