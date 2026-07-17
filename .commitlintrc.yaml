@@ -29,6 +29,7 @@ rules:
       - collect
       - config
       - deps
+      - fsid
       - manifest
       - orgscope
       - progress

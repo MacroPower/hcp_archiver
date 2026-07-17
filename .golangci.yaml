@@ -120,6 +120,10 @@ linters:
           msg: >-
             direct directory creation and renames skip dentry fsyncs; use the
             atomicfile package, which owns the archive's durability ordering
+        - pattern: ^filepath\.(EvalSymlinks|WalkDir|Walk)$
+          msg: >-
+            symlink resolution and tree walks define physical identity; use
+            the fsid package, which owns the archive's aliasing rules
 
     misspell:
       locale: US
@@ -234,6 +238,10 @@ linters:
           - wrapcheck
           - godoclint
       - path: atomicfile/
+        linters:
+          - forbidigo
+      - path: fsid/
+        text: "use the fsid package"
         linters:
           - forbidigo
       - path: _test\.go
