@@ -353,6 +353,17 @@ func lastRecordBoundary(f *os.File) (int64, error) {
 	return 0, nil
 }
 
+// MkdirAll creates dir and any missing ancestor, then flushes each newly
+// created directory's parent so the dentries linking the new subtree are
+// durable, not just the leaf's. It is the package's durable counterpart to
+// [os.MkdirAll], for a caller that pre-creates a directory whose existence
+// later writes depend on: a plain MkdirAll would leave the new dentries
+// unflushed, and the package's write paths, seeing the directory exist, would
+// never flush them either.
+func MkdirAll(dir string, mode fs.FileMode) error {
+	return mkdirAllSynced(dir, mode)
+}
+
 // mkdirAllSynced creates dir and any missing ancestor, then flushes each newly
 // created directory's parent so the dentries linking the new subtree are
 // durable, not just the leaf's.

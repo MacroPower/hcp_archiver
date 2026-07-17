@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 )
 
 // LockFileName is the flock target inside the org-root ledger directory. The
@@ -31,7 +33,12 @@ var ErrLedgerLocked = errors.New("ledger is locked by another process")
 // supported on some network filesystems (old NFS), where the exclusion is
 // best-effort.
 func acquireLock(dir string) (*os.File, error) {
-	err := os.MkdirAll(dir, 0o700)
+	// The org-root ledger directory is created durably: acquireLock runs before
+	// any shard I/O, so every later write into the directory takes the
+	// exists-fast-path and never flushes its dentry — a plain MkdirAll here
+	// would leave the whole org-root shard (and the ledger's log) hanging off a
+	// dentry no fsync ever covers.
+	err := atomicfile.MkdirAll(dir, 0o700)
 	if err != nil {
 		return nil, fmt.Errorf("create ledger dir %q: %w", dir, err)
 	}

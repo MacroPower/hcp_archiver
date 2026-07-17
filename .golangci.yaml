@@ -54,6 +54,7 @@ linters:
     - exhaustive
     - exptostd
     - fatcontext
+    - forbidigo
     - forcetypeassert
     - gocheckcompilerdirectives
     - goconst
@@ -112,6 +113,14 @@ linters:
     - wsl_v5
 
   settings:
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^os\.(MkdirAll|Mkdir|Rename)$
+          msg: >-
+            direct directory creation and renames skip dentry fsyncs; use the
+            atomicfile package, which owns the archive's durability ordering
+
     misspell:
       locale: US
       mode: default
@@ -224,3 +233,9 @@ linters:
         linters:
           - wrapcheck
           - godoclint
+      - path: atomicfile/
+        linters:
+          - forbidigo
+      - path: _test\.go
+        linters:
+          - forbidigo
