@@ -200,6 +200,15 @@ func (c *Collector) archiveGroup(
 	st := c.env.Store()
 	groupDir := st.StackDeploymentGroupDir(project, stackName, configID, group.ID)
 
+	// An earlier layout kept this walk's marker inside the runs prefix itself,
+	// where its errored state counted against the very collection it guards.
+	// Nothing records that key anymore, so an orphan an interrupted run left
+	// errored would pin the collection unsettled forever; settle it here.
+	legacy := st.Join(runArchivePrefix(st, project, stackName, configID, group.ID), listingLeaf)
+	if e, ok := c.env.Entry(legacy); ok && !e.Status.Settled() {
+		c.env.Obligation(legacy).Settle()
+	}
+
 	return c.tolerateWalk(ctx,
 		c.env.Obligation(st.Join(groupDir, "runs-"+listingLeaf)),
 		c.env.Collection(runArchivePrefix(st, project, stackName, configID, group.ID)),
