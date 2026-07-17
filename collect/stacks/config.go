@@ -110,8 +110,12 @@ func (c *Collector) archiveConfiguration(
 		return wrap(err)
 	}
 
-	return c.tolerate(ctx,
-		c.env.Store().StackConfigurationFile(project, stackName, cfg.ID, "deployment-groups"),
+	// The groups enumeration runs beneath a walk-frozen element, so its outcome
+	// settles a persisted marker; a plain tolerate would let the configurations
+	// walk settle over a dropped listing and never revisit this configuration.
+	groupsDir := st.StackConfigurationFile(project, stackName, cfg.ID, "deployment-groups")
+
+	return c.tolerateListing(ctx, st.Join(groupsDir, listingLeaf),
 		c.collectGroups(ctx, project, stackName, cfg.ID))
 }
 
@@ -184,8 +188,12 @@ func (c *Collector) archiveGroup(
 		return wrap(err)
 	}
 
-	return c.tolerate(ctx,
-		runArchivePrefix(c.env.Store(), project, stackName, configID, group.ID),
+	// The runs walk runs beneath a walk-frozen configuration, so its outcome
+	// settles a persisted marker under the group's runs prefix, where both the
+	// runs walk's and the configurations walk's errored-child gates scan.
+	runsPrefix := runArchivePrefix(c.env.Store(), project, stackName, configID, group.ID)
+
+	return c.tolerateListing(ctx, c.env.Store().Join(runsPrefix, listingLeaf),
 		c.collectRuns(ctx, project, stackName, configID, group.ID))
 }
 
@@ -254,8 +262,12 @@ func (c *Collector) archiveRun(
 		return nil
 	}
 
-	return c.tolerate(ctx,
-		c.env.Store().StackRunFile(project, stackName, configID, groupID, run.ID, "steps"),
+	// The steps enumeration runs beneath a run the walk freezes once terminal,
+	// so its outcome settles a persisted marker; a plain tolerate would let the
+	// runs walk settle over a dropped listing and never revisit this run.
+	stepsDir := c.env.Store().StackRunFile(project, stackName, configID, groupID, run.ID, "steps")
+
+	return c.tolerateListing(ctx, c.env.Store().Join(stepsDir, listingLeaf),
 		c.collectSteps(ctx, project, stackName, configID, groupID, run.ID))
 }
 

@@ -335,6 +335,26 @@ func (e *Env) NotApplicable(relPath string) {
 	e.ledger.RecordNotApplicable(relPath)
 }
 
+// Errored records a failed child enumeration as an errored entry at relPath,
+// transient when the client classifies cause so, so a re-run retries it. A
+// settled path is left untouched, never regressed.
+//
+// Unlike the archive primitives it settles nothing: a listing failure names no
+// objects, so even a terminal cause is not a confirmed absence of anything.
+// The unsettled entry is what [Walk]'s errored-child gate
+// ([manifest.Ledger.HasUnsettledUnder]) finds, holding every enclosing walk
+// open until a later pass re-runs the enumeration. Collectors whose child
+// listings run beneath walk-frozen elements record their outcome through this,
+// because a run-scoped dropped surface ([Env.MarkSurfaceDropped]) does not
+// survive into the next run's early-stop decision.
+func (e *Env) Errored(relPath string, cause error) {
+	if !e.ledger.ShouldFetch(relPath) {
+		return
+	}
+
+	e.ledger.RecordErrored(relPath, cause, tfeclient.IsTransient(cause))
+}
+
 // MarkSurfaceDropped records that the enumeration of surface failed this run
 // for a non-cancellation reason, marking the run incomplete.
 //

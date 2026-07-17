@@ -268,6 +268,43 @@ func (c *Collector) tolerate(ctx context.Context, surface string, err error) err
 	return nil
 }
 
+// listingLeaf names the ledger marker recording a child enumeration's outcome,
+// placed inside the directory the enumeration fills. The marker is a ledger
+// entry only — no file is ever written at the path — and cannot collide with a
+// real archived object, whose directories key on API-prefixed ids.
+const listingLeaf = "listing"
+
+// tolerateListing records the outcome of a child enumeration that runs beneath
+// an element a [collect.Walk] can freeze (a configuration's deployment groups,
+// a group's runs walk, a terminal run's steps) and then defers to
+// [Collector.tolerate]. The dropped-surface record tolerate leaves is
+// run-scoped, and a failed enumeration writes no per-object entries, so on its
+// own the enclosing walks would settle over the gap and their early stop would
+// never revisit the element: the missing children would be lost silently and
+// permanently. The marker entry closes that hole, mirroring how the workspace
+// collector persists run-child listing failures. A failure records marker
+// errored ([collect.Env.Errored]), which [manifest.Ledger.HasUnsettledUnder]
+// finds under the walks' archive prefixes, keeping them open until a later
+// pass re-runs the enumeration; a success settles marker as a not-applicable
+// gap (no file exists at the path) so the walks can close once every child
+// lands. A cancellation propagates unrecorded, matching the archive
+// primitives.
+func (c *Collector) tolerateListing(ctx context.Context, marker string, err error) error {
+	if err == nil {
+		if c.env.ShouldFetch(marker) {
+			c.env.NotApplicable(marker)
+		}
+
+		return nil
+	}
+
+	if ctx.Err() == nil {
+		c.env.Errored(marker, err)
+	}
+
+	return c.tolerate(ctx, marker, err)
+}
+
 // wrap gives a bare error from the archive engine or client a stacks-package
 // frame so it is never surfaced unwrapped. A nil error passes through as nil.
 func wrap(err error) error {

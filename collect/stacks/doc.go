@@ -14,4 +14,11 @@
 //
 // This traversal pivots on deployment groups, unlike the workspace-and-run
 // model, which is why the package stands apart from the core project walk.
+//
+// The configuration and run walks freeze terminal elements and stop revisiting
+// them, so a child enumeration that fails beneath one (a configuration's
+// deployment groups, a group's runs, a terminal run's steps) records a
+// persisted listing marker in the ledger. The errored marker holds the
+// enclosing walks open across runs until a later pass re-fetches the missing
+// children; a marker is a ledger entry only, never a file in the archive.
 package stacks
