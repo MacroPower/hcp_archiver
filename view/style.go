@@ -3,6 +3,8 @@ package view
 import (
 	"charm.land/bubbles/v2/list"
 	"charm.land/lipgloss/v2"
+	"go.jacobcolvin.com/niceyaml"
+	"go.jacobcolvin.com/niceyaml/style"
 
 	"go.jacobcolvin.com/hcp_archiver/theme"
 )
@@ -20,6 +22,52 @@ var (
 	// Key hints and scroll position in the viewer footer.
 	styleFooter = theme.Muted
 )
+
+// newThemedPrinter creates a niceyaml printer whose syntax palette resolves to
+// the shared [theme] tokens. The yamlviewport's default printer carries
+// niceyaml's charm theme, whose colors (and solid background) belong to a
+// palette unrelated to the tool's; every viewer viewport is built over this
+// printer instead, so the document body renders in the same palette as the
+// chrome around it.
+func newThemedPrinter() *niceyaml.Printer {
+	// The base style inherits the terminal's own foreground and background,
+	// like every other surface in the tool; the charm theme's painted
+	// background is deliberately dropped.
+	base := lipgloss.NewStyle()
+
+	return niceyaml.NewPrinter(niceyaml.WithStyles(style.NewStyles(base,
+		// Comment also tints the gutter: the printer derives its line numbers
+		// from the comment foreground, landing them in the same muted tone as
+		// the footer and key hints.
+		style.Set(style.Comment, theme.Muted),
+		// Mapping keys are the document's structure, so they take the heading
+		// tone; unbolded, because a whole document of bold keys would shout.
+		style.Set(style.NameTag, base.Foreground(theme.ColorHeading)),
+		// Anchors, aliases, and tags are cross-references, so they take the
+		// liveness accent.
+		style.Set(style.Name, base.Foreground(theme.ColorAccent)),
+		style.Set(style.LiteralString, base.Foreground(theme.ColorSuccess)),
+		style.Set(style.LiteralNumber, base.Foreground(theme.ColorWarning)),
+		style.Set(style.LiteralBoolean, base.Foreground(theme.ColorInfo)),
+		style.Set(style.LiteralNull, base.Foreground(theme.ColorInfo)),
+		style.Set(style.Punctuation, theme.Muted),
+		style.Set(style.TextAccent, theme.Accent),
+		style.Set(style.TextSubtle, theme.Muted),
+		style.Set(style.TextSubtleDim, base.Foreground(theme.ColorTrack)),
+		style.Set(style.TextOK, theme.Success),
+		style.Set(style.TextWarn, theme.Warning),
+		style.Set(style.TextError, theme.Error),
+		style.Set(style.GenericError, theme.Error),
+		style.Set(style.GenericInserted, theme.Success),
+		style.Set(style.GenericDeleted, theme.Error),
+		style.Set(style.GenericHeading, theme.Heading),
+		// Search matches overlay the tokens: the selected match inverts the
+		// terminal's own colors (no off-palette hue), the rest sit on the
+		// inactive-structure track tone.
+		style.Set(style.GenericHighlight, base.Reverse(true)),
+		style.Set(style.GenericHighlightDim, base.Background(theme.ColorTrack)),
+	)))
+}
 
 // newThemedList creates a list whose delegate and chrome draw from the shared
 // [theme]. Every browser list is built here, so no screen can fall back to the

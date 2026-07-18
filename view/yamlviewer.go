@@ -21,7 +21,7 @@ type yamlViewerScreen struct {
 // breadcrumb segment) over content. Long lines wrap by default (w toggles), so
 // a minified document stays readable without horizontal scrolling.
 func newYAMLViewerScreen(name, content string) *yamlViewerScreen {
-	vp := yamlviewport.New()
+	vp := yamlviewport.New(yamlviewport.WithPrinter(newThemedPrinter()))
 	vp.FillHeight = true
 	vp.SetTokens(niceyaml.NewSourceFromString(content, niceyaml.WithName(name)))
 
