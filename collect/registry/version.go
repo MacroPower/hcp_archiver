@@ -41,8 +41,8 @@ func isConcreteVersion(v string) bool {
 
 // resolveNoCodeVersion picks the concrete module version whose no-code variable
 // options should be read: the pin itself when it is concrete, otherwise the
-// newest concrete version among the module's version statuses. It returns the
-// empty string when no concrete version can be resolved.
+// newest concrete ok version among the module's version statuses. It returns
+// the empty string when no concrete version can be resolved.
 func resolveNoCodeVersion(pin string, statuses []tfe.RegistryModuleVersionStatuses) string {
 	if isConcreteVersion(pin) {
 		return pin
@@ -51,11 +51,14 @@ func resolveNoCodeVersion(pin string, statuses []tfe.RegistryModuleVersionStatus
 	return latestModuleVersion(statuses)
 }
 
-// latestModuleVersion returns the newest stable concrete version among statuses,
-// falling back to the newest prerelease only when no stable version exists, and
-// the empty string when none is concrete. The registry serves a "latest" pin as
-// the newest stable, so a prerelease must not shadow it when resolving the
-// version whose no-code variable options to archive.
+// latestModuleVersion returns the newest stable concrete ok version among
+// statuses, falling back to the newest prerelease only when no stable version
+// exists, and the empty string when none qualifies. The registry serves a
+// "latest" pin as the newest stable ok version, so neither a prerelease nor a
+// version that failed or has not finished ingress must shadow it when resolving
+// the version whose no-code variable options to archive: a per-version read
+// against a never-ingressed version would settle its record absent while the
+// version the registry actually serves goes unarchived.
 //
 // Precedence comes from [github.com/hashicorp/go-version], the library behind
 // HashiCorp's own registries, rather than a hand-rolled comparator, so the
@@ -69,7 +72,7 @@ func latestModuleVersion(statuses []tfe.RegistryModuleVersionStatuses) string {
 	bestStableRaw, bestAnyRaw, fallback := "", "", ""
 
 	for _, s := range statuses {
-		if !isConcreteVersion(s.Version) {
+		if s.Status != tfe.RegistryModuleVersionStatusOk || !isConcreteVersion(s.Version) {
 			continue
 		}
 

@@ -35,7 +35,10 @@ func TestLatestModuleVersion(t *testing.T) {
 	versions := func(vs ...string) []tfe.RegistryModuleVersionStatuses {
 		out := make([]tfe.RegistryModuleVersionStatuses, len(vs))
 		for i, v := range vs {
-			out[i] = tfe.RegistryModuleVersionStatuses{Version: v}
+			out[i] = tfe.RegistryModuleVersionStatuses{
+				Version: v,
+				Status:  tfe.RegistryModuleVersionStatusOk,
+			}
 		}
 
 		return out
@@ -81,6 +84,33 @@ func TestLatestModuleVersion(t *testing.T) {
 			statuses: versions("not-a-version-at-all!"),
 			want:     "not-a-version-at-all!",
 		},
+		"a newer version that failed ingress is skipped": {
+			statuses: append(
+				versions("1.0.0"),
+				tfe.RegistryModuleVersionStatuses{
+					Version: "2.0.0",
+					Status:  tfe.RegistryModuleVersionStatusRegIngressFailed,
+				},
+			),
+			want: "1.0.0",
+		},
+		"a version still ingressing is skipped": {
+			statuses: append(
+				versions("1.0.0"),
+				tfe.RegistryModuleVersionStatuses{
+					Version: "2.0.0",
+					Status:  tfe.RegistryModuleVersionStatusPending,
+				},
+			),
+			want: "1.0.0",
+		},
+		"no ok version resolves to empty": {
+			statuses: []tfe.RegistryModuleVersionStatuses{{
+				Version: "1.0.0",
+				Status:  tfe.RegistryModuleVersionStatusCloneFailed,
+			}},
+			want: "",
+		},
 	}
 
 	for name, tc := range tests {
@@ -95,11 +125,13 @@ func TestLatestModuleVersion(t *testing.T) {
 func TestResolveNoCodeVersion(t *testing.T) {
 	t.Parallel()
 
+	ok := tfe.RegistryModuleVersionStatusOk
+
 	statuses := []tfe.RegistryModuleVersionStatuses{
-		{Version: "1.2.0"},
-		{Version: "1.10.1"},
-		{Version: "latest"},
-		{Version: "1.9.9"},
+		{Version: "1.2.0", Status: ok},
+		{Version: "1.10.1", Status: ok},
+		{Version: "latest", Status: ok},
+		{Version: "1.9.9", Status: ok},
 	}
 
 	tests := map[string]struct {
@@ -123,14 +155,28 @@ func TestResolveNoCodeVersion(t *testing.T) {
 			want:     "1.10.1",
 		},
 		"no concrete status resolves to empty": {
-			pin:      "latest",
-			statuses: []tfe.RegistryModuleVersionStatuses{{Version: "latest"}, {Version: ""}},
-			want:     "",
+			pin: "latest",
+			statuses: []tfe.RegistryModuleVersionStatuses{
+				{Version: "latest", Status: ok},
+				{Version: "", Status: ok},
+			},
+			want: "",
 		},
 		"a final release wins over its prerelease": {
-			pin:      "latest",
-			statuses: []tfe.RegistryModuleVersionStatuses{{Version: "1.2.0-rc1"}, {Version: "1.2.0"}},
-			want:     "1.2.0",
+			pin: "latest",
+			statuses: []tfe.RegistryModuleVersionStatuses{
+				{Version: "1.2.0-rc1", Status: ok},
+				{Version: "1.2.0", Status: ok},
+			},
+			want: "1.2.0",
+		},
+		"latest skips a broken newest version": {
+			pin: "latest",
+			statuses: []tfe.RegistryModuleVersionStatuses{
+				{Version: "1.2.0", Status: ok},
+				{Version: "1.3.0", Status: tfe.RegistryModuleVersionStatusRegIngressFailed},
+			},
+			want: "1.2.0",
 		},
 	}
 
