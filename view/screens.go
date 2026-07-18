@@ -56,8 +56,8 @@ func newListScreen(name string, rows []item) *listScreen {
 
 // update handles navigation keys itself and forwards everything else to the
 // list. While the filter prompt is being typed every key belongs to the list,
-// so q and esc stay typable; with a filter applied, esc falls through to the
-// list to clear it before a second esc pops the screen.
+// so q and esc stay typable; with a filter applied, either back key clears it
+// before a second press pops the screen.
 func (s *listScreen) update(msg tea.Msg) tea.Cmd {
 	if key, ok := msg.(tea.KeyPressMsg); ok && s.list.FilterState() != list.Filtering {
 		switch key.String() {
@@ -72,6 +72,13 @@ func (s *listScreen) update(msg tea.Msg) tea.Cmd {
 			if s.list.FilterState() == list.Unfiltered {
 				return pop()
 			}
+
+			// With a filter applied, the list clears it on esc but binds nothing
+			// to backspace; clear explicitly so both back keys share the
+			// clear-then-pop two-step.
+			s.list.ResetFilter()
+
+			return nil
 
 		case "q":
 			return tea.Quit

@@ -6,8 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/list"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestNewWorkspaceScreenCountsCoalescedRuns(t *testing.T) {
@@ -54,6 +57,38 @@ func TestNewWorkspaceScreenCountsCoalescedRuns(t *testing.T) {
 	}
 
 	assert.Equal(t, "2 runs", runsDesc, "the count matches the coalesced run list")
+}
+
+func TestListScreenBackKeysClearAnAppliedFilter(t *testing.T) {
+	t.Parallel()
+
+	// The list binds only esc to clearing an applied filter; the screen must
+	// handle backspace itself or it dies as a no-op, breaking the documented
+	// contract that esc and backspace are interchangeable back keys.
+	for _, backKey := range []tea.Key{{Code: tea.KeyEscape}, {Code: tea.KeyBackspace}} {
+		t.Run(tea.KeyPressMsg(backKey).String(), func(t *testing.T) {
+			t.Parallel()
+
+			s := newListScreen("test", []item{
+				{title: "alpha", desc: "row"},
+				{title: "beta", desc: "row"},
+			})
+			s.setSize(80, 24)
+
+			press := func(k tea.Key) tea.Cmd { return s.update(tea.KeyPressMsg(k)) }
+
+			press(tea.Key{Code: '/', Text: "/"})
+			press(tea.Key{Code: 'a', Text: "a"})
+			press(tea.Key{Code: tea.KeyEnter})
+			require.Equal(t, list.FilterApplied, s.list.FilterState())
+
+			// The first press clears the filter without popping the screen; only
+			// the second, on the now-unfiltered list, pops.
+			assert.Nil(t, press(backKey))
+			assert.Equal(t, list.Unfiltered, s.list.FilterState())
+			assert.NotNil(t, press(backKey))
+		})
+	}
 }
 
 func TestFirstLine(t *testing.T) {
