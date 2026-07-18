@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
 // readIdentity reads the identity sidecar under the archive-relative dir.
@@ -167,9 +169,60 @@ func TestClaimDir(t *testing.T) {
 		assert.Equal(t, "ws-1", readIdentity(t, st.Root(), newDir).ID)
 		assert.Zero(t, ledger.Tally().SurfacesDropped, "a rename is not a failure")
 
-		// Renaming back clears the now-stale breadcrumb.
-		_, err = env.ClaimDir(oldDir, "ws-1")
+		// Renaming back clears the now-stale breadcrumb, stamps the directory
+		// the object just abandoned as an orphan, and reports it like any other
+		// rename.
+		renamedFrom, err = env.ClaimDir(oldDir, "ws-1")
 		require.NoError(t, err)
+		assert.Equal(t, "app-renamed", renamedFrom)
 		assert.Empty(t, readIdentity(t, st.Root(), oldDir).RenamedTo)
+
+		abandoned := readIdentity(t, st.Root(), newDir)
+		assert.Equal(t, "app", abandoned.RenamedTo,
+			"the abandoned directory must not look like a live claim")
+		assert.False(t, abandoned.RenamedAt.IsZero())
+	})
+
+	t.Run("a rename cycle across runs keeps the breadcrumb chain intact", func(t *testing.T) {
+		t.Parallel()
+
+		const (
+			appDir  = "projects/p/workspaces/app"
+			app2Dir = "projects/p/workspaces/app2"
+			app3Dir = "projects/p/workspaces/app3"
+		)
+
+		root := t.TempDir()
+
+		// Each run scans the siblings afresh: a fresh Env over the same root
+		// models a new archiver invocation.
+		claim := func(dir string) string {
+			t.Helper()
+
+			st := store.New(root)
+
+			ledger, err := manifest.Load(st.Root(), manifest.WithClock(fixedClock()))
+			require.NoError(t, err)
+
+			defer func() { require.NoError(t, ledger.Close()) }()
+
+			renamedFrom, err := collect.NewEnv(nil, st, ledger).ClaimDir(dir, "ws-1")
+			require.NoError(t, err)
+
+			return renamedFrom
+		}
+
+		assert.Empty(t, claim(appDir))
+		assert.Equal(t, "app", claim(app2Dir))
+		assert.Equal(t, "app2", claim(appDir))
+
+		// The rename back must have stamped app2 as an orphan; otherwise this
+		// final rename would resolve the prior directory to the stale orphan
+		// (lexically last wins) and stamp the wrong sibling.
+		assert.Equal(t, "app", claim(app3Dir))
+
+		assert.Equal(t, "app3", readIdentity(t, root, appDir).RenamedTo)
+		assert.Equal(t, "app", readIdentity(t, root, app2Dir).RenamedTo)
+		assert.Empty(t, readIdentity(t, root, app3Dir).RenamedTo)
 	})
 }

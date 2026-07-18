@@ -53,9 +53,12 @@ type Identity struct {
 // renamed: renamedFrom names the sibling directory that previously archived
 // the same id, or is empty.
 //
-// An unclaimed directory is claimed; a directory already owned by id passes
-// (clearing a stale rename breadcrumb if the object was renamed back). A
-// directory owned by a different id fails with [ErrIdentityMismatch], and any
+// An unclaimed directory is claimed; a directory already owned by id passes.
+// When the directory carries a stale rename breadcrumb, the object was renamed
+// back: the breadcrumb is cleared, the sibling directory the object just
+// abandoned is stamped as the orphan it now is, and the abandoned sibling is
+// reported through renamedFrom like any other rename. A directory owned by a
+// different id fails with [ErrIdentityMismatch], and any
 // failure (a mismatch, or an identity file that cannot be read or written)
 // records dir as a dropped surface, so the caller must skip archiving the
 // object and the run reports incomplete until the operator intervenes.
@@ -97,14 +100,7 @@ func (e *Env) claimDirLocked(dir, id string) (string, error) {
 	case current != nil && current.ID == id:
 		// The object was renamed away and back again; the breadcrumb is stale.
 		if current.RenamedTo != "" {
-			cleared := *current
-			cleared.RenamedTo = ""
-			cleared.RenamedAt = time.Time{}
-
-			werr := e.writeIdentity(relPath, &cleared)
-			if werr != nil {
-				return "", werr
-			}
+			return e.reclaimRenamedBackLocked(dir, id, current)
 		}
 
 		return "", nil
@@ -147,6 +143,48 @@ func (e *Env) claimDirLocked(dir, id string) (string, error) {
 	if owners := e.idOwners[path.Dir(dir)]; owners != nil {
 		owners[id] = path.Base(dir)
 	}
+
+	return prior, nil
+}
+
+// reclaimRenamedBackLocked handles a re-claim of dir by id when dir still
+// carries a rename breadcrumb: the object was renamed away and back again. The
+// sibling directory the object just abandoned still records an unmarked claim
+// of id, so it is stamped as an orphan before dir's stale breadcrumb is
+// cleared; that order leaves any partial failure re-runnable, where the
+// reverse would strand the sibling as a live-looking duplicate that no later
+// claim ever revisits. The stamped sibling is returned as renamedFrom.
+//
+// The sibling is found through the owners scan rather than by following dir's
+// own breadcrumb, which names only the first hop of a longer rename cycle. A
+// sibling may also be legitimately absent (the operator moved it aside), in
+// which case only the stale breadcrumb is cleared.
+func (e *Env) reclaimRenamedBackLocked(dir, id string, current *Identity) (string, error) {
+	owners, err := e.ownersUnderLocked(path.Dir(dir))
+	if err != nil {
+		return "", err
+	}
+
+	prior := owners[id]
+	if prior != "" && prior != path.Base(dir) {
+		renameErr := e.markRenamed(path.Dir(dir), prior, path.Base(dir))
+		if renameErr != nil {
+			return "", renameErr
+		}
+	} else {
+		prior = ""
+	}
+
+	cleared := *current
+	cleared.RenamedTo = ""
+	cleared.RenamedAt = time.Time{}
+
+	err = e.writeIdentity(e.store.Join(dir, identityFileName), &cleared)
+	if err != nil {
+		return "", err
+	}
+
+	owners[id] = path.Base(dir)
 
 	return prior, nil
 }
@@ -219,7 +257,10 @@ func (e *Env) writeIdentity(relPath string, ident *Identity) error {
 // the child directory's name, scanning the disk once per parent per run and
 // serving later claims from the cache. The scan is best-effort about its
 // children: a child with no identity or an unreadable one is skipped, since its
-// own claim fails closed when it is visited. A directory that does not yet
+// own claim fails closed when it is visited. A child carrying a RenamedTo
+// breadcrumb is also skipped -- it is a kept-for-history orphan, and letting it
+// into the map could shadow the directory that actually holds the object's
+// latest history. A directory that does not yet
 // exist caches an empty map. A real read fault on the parent itself is neither
 // cached nor masked as an empty map -- it returns an error, so the caller fails
 // its claim closed rather than proceeding as if the parent had no siblings and
@@ -240,7 +281,7 @@ func (e *Env) ownersUnderLocked(parent string) (map[string]string, error) {
 			}
 
 			ident, rerr := e.readIdentity(e.store.Join(parent, entry.Name(), identityFileName))
-			if rerr != nil || ident == nil {
+			if rerr != nil || ident == nil || ident.RenamedTo != "" {
 				continue
 			}
 
