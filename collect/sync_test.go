@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/collect/collecttest"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/remote/remotetest"
@@ -248,6 +249,72 @@ func TestSyncArchiveClassification(t *testing.T) {
 				"a suspect only-copy counts; every other outcome stays clean")
 		})
 	}
+}
+
+func TestSyncArchiveDrivesProgressHook(t *testing.T) {
+	t.Parallel()
+
+	const bundles = "projects/prod/workspaces/api/bundles"
+
+	tests := map[string]struct {
+		seed       func(t *testing.T, f syncFixture)
+		wantFailed int
+	}{
+		"every settled file advances, evictions and syncs alike": {
+			seed: func(t *testing.T, f syncFixture) {
+				t.Helper()
+				f.write(t, "org.json", []byte(`{"org":"org"}`))
+				f.write(t, "projects/prod/workspaces/api/runs/run-1/run.json", []byte(`{}`))
+				f.sealBundle(t, bundles+"/logs.gen0001.zip",
+					"projects/prod/workspaces/api/runs/run-1/plan.log", []byte("plan output"))
+				f.writeDone(t, "config-versions/cv-1.tar.gz", []byte("tarball"))
+			},
+		},
+		"a suspect only-copy counts a failure but never settles": {
+			seed: func(t *testing.T, f syncFixture) {
+				t.Helper()
+				f.write(t, "org.json", []byte(`{"org":"org"}`))
+				f.write(t, "config-versions/cv-3.tar.gz", []byte("tarball"))
+				f.ledger.RecordDone("config-versions/cv-3.tar.gz",
+					manifest.Signature{Hash: "h", Size: 999})
+				require.NoError(t, f.ledger.Flush())
+			},
+			wantFailed: 1,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSyncFixture(t)
+			tc.seed(t, f)
+
+			prog := &collecttest.RecordingSyncProgress{}
+			stats := f.env.SyncArchive(t.Context(), collect.WithSyncProgress(prog))
+
+			totals := prog.Totals()
+			require.Len(t, totals, 1,
+				"the total is seeded exactly once, after the tree is classified")
+			assert.Positive(t, totals[0])
+			assert.Equal(t, stats.Uploaded+stats.Skipped+stats.Evicted, totals[0],
+				"with no per-file failures the settled outcomes sum to the total; suspects stay out")
+			assert.Equal(t, totals[0], prog.Advanced(),
+				"a clean sweep's advances sum to the seeded total")
+			assert.Equal(t, tc.wantFailed, stats.Failed)
+		})
+	}
+}
+
+func TestSyncArchiveNoRemoteLeavesHookUntouched(t *testing.T) {
+	t.Parallel()
+
+	env, _, _ := newEnv(t)
+	prog := &collecttest.RecordingSyncProgress{}
+
+	assert.Zero(t, env.SyncArchive(t.Context(), collect.WithSyncProgress(prog)))
+	assert.Empty(t, prog.Totals(), "without a remote the sweep returns before any classification")
+	assert.Zero(t, prog.Advanced())
 }
 
 // TestSyncArchiveMirrorsEveryMeaningfulFile is the mirror's completeness

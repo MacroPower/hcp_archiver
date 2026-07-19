@@ -37,19 +37,25 @@ func remoteConfig(rc *config.RemoteConfig) remote.Config {
 // syncOrg mirrors the organization's archive tree to the remote store at the
 // run's close, logging the sweep's tallies and returning them. It is a no-op
 // without a remote or when ctx is already canceled (an interrupted run winds
-// down; the next run sweeps instead).
+// down; the next run sweeps instead). A non-nil prog receives the sweep's
+// file-settling progress.
 //
 // A per-file failure never aborts the sweep or the organization — local disk
 // stays canonical and the next run re-sweeps — but the returned tally's
 // Failed count marks the run incomplete (see [Archiver.Run]): the mirror is
 // the archive's long-term record, and a scheduled run must not report
 // success while it is knowingly behind.
-func (a *Archiver) syncOrg(ctx context.Context, env *collect.Env, orgName string) collect.SyncStats {
+func (a *Archiver) syncOrg(
+	ctx context.Context,
+	env *collect.Env,
+	orgName string,
+	prog collect.SyncProgress,
+) collect.SyncStats {
 	if a.remote == nil || ctx.Err() != nil {
 		return collect.SyncStats{}
 	}
 
-	stats := env.SyncArchive(ctx)
+	stats := env.SyncArchive(ctx, collect.WithSyncProgress(prog))
 
 	level := slog.LevelInfo
 	if stats.Failed > 0 {

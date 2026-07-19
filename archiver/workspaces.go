@@ -19,10 +19,13 @@ import (
 // belongs to the organization's default project).
 const defaultProjectName = "Default Project"
 
-// Phase names for the two collection surfaces that carry a determinate bar.
+// Phase names for the two collection surfaces that carry a determinate bar,
+// and for the run's close. Each must fit the panel's phase column (phaseWidth
+// in the progress package, sized to the widest name here).
 const (
 	phaseProjects   = "projects"
 	phaseWorkspaces = "workspaces"
+	phaseFinalize   = "finalize"
 )
 
 // collectProjects archives every project in the organization that the

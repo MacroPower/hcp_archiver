@@ -52,9 +52,45 @@ type SyncStats struct {
 	Failed int
 }
 
+// SyncProgress receives the close sweep's file-settling progress: the total
+// files to settle once the tree is classified, then one advance per settled
+// file. The archiver's progress reporter satisfies it, so the sweep drives the
+// live phase bar without this package importing the progress machinery. The
+// bar covers file settling only — the verify and prune passes run after the
+// last advance, so the bar sits full (the spinner still live) through that
+// tail; the total stays decoupled from the prune's size on purpose. Only the
+// whole-tree close sweep drives the hook: the eager and seal-boundary syncs
+// run mid-phase and must not move it.
+type SyncProgress interface {
+	// SetTotal seeds the denominator: how many files the sweep will settle.
+	SetTotal(total int)
+	// Advance moves the bar by n settled files.
+	Advance(n int)
+}
+
+// SyncOption configures one [Env.SyncArchive] sweep.
+//
+// The available options are:
+//   - [WithSyncProgress]
+type SyncOption func(*syncCounters)
+
+// WithSyncProgress sets the [SyncProgress] hook the sweep reports its
+// file-settling progress through. A nil hook is ignored: the sweep reports
+// only through its slog progress lines, the default. It returns a
+// [SyncOption].
+func WithSyncProgress(p SyncProgress) SyncOption {
+	return func(c *syncCounters) {
+		c.progress = p
+	}
+}
+
 // syncCounters is the goroutine-shared accumulator behind [SyncStats]; the
-// synced files fan out over an errgroup, so every field is atomic.
+// synced files fan out over an errgroup, so every counter is atomic. It also
+// carries the pass's configuration: the optional [SyncProgress] hook.
 type syncCounters struct {
+	// The close sweep's progress hook, nil for every other pass; every call
+	// through it guards against the nil.
+	progress      SyncProgress
 	uploadedBytes atomic.Int64
 	uploaded      atomic.Int64
 	skipped       atomic.Int64
@@ -448,13 +484,18 @@ const (
 // by shape, being remote-only by design. Per-file
 // failures are logged and counted, never fatal: local disk stays canonical
 // and the next run re-sweeps. A context cancellation stops the sweep early,
-// leaving the rest to the next run.
-func (e *Env) SyncArchive(ctx context.Context) SyncStats {
+// leaving the rest to the next run. A [WithSyncProgress] hook receives the
+// settle total once the tree is classified and one advance per settled file.
+func (e *Env) SyncArchive(ctx context.Context, opts ...SyncOption) SyncStats {
 	if e.remote == nil {
 		return SyncStats{}
 	}
 
 	counters := &syncCounters{}
+	for _, opt := range opts {
+		opt(counters)
+	}
+
 	orgPrefix := e.RemoteKey("") + "/"
 
 	inventory, ok := e.listInventory(ctx, orgPrefix, counters)
@@ -477,6 +518,13 @@ func (e *Env) SyncArchive(ctx context.Context) SyncStats {
 		counters.failed.Add(1)
 
 		return counters.stats()
+	}
+
+	// The settle total is exactly the files the evict and sync passes drive
+	// through recordSyncProgress; suspect files never settle, so they stay out
+	// of the denominator as they stay out of the advances.
+	if counters.progress != nil {
+		counters.progress.SetTotal(len(sweep.evict) + len(sweep.sync))
 	}
 
 	// A suspect cold surface (a done tarball whose local bytes contradict the
@@ -1697,12 +1745,17 @@ func evictedSurface(relPath string) bool {
 // syncProgressInterval is how many settled files pass between progress lines.
 const syncProgressInterval = 1000
 
-// recordSyncProgress counts one settled file and emits a progress line every
-// [syncProgressInterval]th one. It is called exactly once per settled file, so
-// the monotonic settled counter it advances lands each decade marker exactly
-// once. The close sweep runs after the live progress reporter has stopped, so
-// slog lines are its only visibility.
+// recordSyncProgress counts one settled file, moves the sweep's [SyncProgress]
+// hook, and emits a progress line every [syncProgressInterval]th one. It is
+// called exactly once per settled file, so the monotonic settled counter it
+// advances lands each decade marker exactly once and the hook's advances sum
+// to the total the sweep seeded. The slog line complements the hook: it
+// carries the per-category breakdown the progress views do not.
 func (e *Env) recordSyncProgress(ctx context.Context, counters *syncCounters) {
+	if counters.progress != nil {
+		counters.progress.Advance(1)
+	}
+
 	n := counters.settled.Add(1)
 	if n%syncProgressInterval != 0 {
 		return

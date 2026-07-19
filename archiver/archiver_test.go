@@ -13,6 +13,7 @@ import (
 
 	"go.jacobcolvin.com/hcp_archiver/archiver"
 	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/collect/collecttest"
 	"go.jacobcolvin.com/hcp_archiver/config"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/remote"
@@ -325,7 +326,7 @@ func TestSyncOrgCanceledContextSkipsSweep(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	archiver.SyncOrg(a, ctx, env, "acme")
+	archiver.SyncOrg(a, ctx, env, "acme", nil)
 
 	assert.Empty(t, fake.Keys(), "an interrupted run uploads nothing; the next run sweeps")
 	assert.NotContains(t, buf.String(), "remote_sync_complete")
@@ -338,7 +339,7 @@ func TestSyncOrgFailureWarnsAndReportsFailed(t *testing.T) {
 	a, env, fake := newSyncOrgFixture(t, buf)
 	fake.PutErr = assert.AnError
 
-	stats := archiver.SyncOrg(a, t.Context(), env, "acme")
+	stats := archiver.SyncOrg(a, t.Context(), env, "acme", nil)
 
 	assert.Equal(t, 1, stats.Failed,
 		"the sweep's failures come back to the run loop, which marks the run incomplete")
@@ -355,7 +356,7 @@ func TestSyncOrgLogsSummary(t *testing.T) {
 	buf := &bytes.Buffer{}
 	a, env, fake := newSyncOrgFixture(t, buf)
 
-	archiver.SyncOrg(a, t.Context(), env, "acme")
+	archiver.SyncOrg(a, t.Context(), env, "acme", nil)
 
 	assert.Contains(t, fake.Keys(), "hcp/acme/org.json")
 
@@ -363,6 +364,25 @@ func TestSyncOrgLogsSummary(t *testing.T) {
 	assert.Contains(t, out, "remote_sync_complete")
 	assert.Contains(t, out, "uploaded=1")
 	assert.Contains(t, out, "eager_failed=0")
+}
+
+func TestSyncOrgForwardsProgressHook(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+	prog := &collecttest.RecordingSyncProgress{}
+
+	archiver.SyncOrg(a, t.Context(), env, "acme", prog)
+
+	assert.Contains(t, fake.Keys(), "hcp/acme/org.json")
+
+	totals := prog.Totals()
+	require.Len(t, totals, 1,
+		"the sweep seeds the settle total once, after classifying the tree")
+	assert.Positive(t, totals[0])
+	assert.Equal(t, totals[0], prog.Advanced(),
+		"one advance per settled file, summing to the seeded total")
 }
 
 func TestSyncOrgEagerFailureIsVisibilityOnly(t *testing.T) {
@@ -380,7 +400,7 @@ func TestSyncOrgEagerFailureIsVisibilityOnly(t *testing.T) {
 		func(context.Context) ([]byte, error) { return []byte(`{"id":"user-1"}`), nil }))
 	require.Equal(t, 1, env.EagerFailures())
 
-	stats := archiver.SyncOrg(a, t.Context(), env, "acme")
+	stats := archiver.SyncOrg(a, t.Context(), env, "acme", nil)
 
 	assert.Zero(t, stats.Failed, "a retried eager failure never marks the run incomplete")
 	assert.Contains(t, fake.Keys(), "hcp/acme/users/user-1.json")

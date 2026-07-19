@@ -68,10 +68,14 @@ func listOrgNames(ctx context.Context, client *tfeclient.Client) ([]string, erro
 // runOrg archives one organization end to end.
 //
 // It builds the org's store, ledger, environment, and reporter, opens a run,
-// starts the background progress and flush goroutines bounded to a cancelable
-// child context, drives the collectors with the parent ctx so an interrupt
-// cancels the work, and then closes the run: it writes the run record, stops
-// the goroutines, flushes the ledger a final time, and prints the summary.
+// starts the background progress and flush goroutines each bounded to its own
+// cancelable child context, drives the collectors with the parent ctx so an
+// interrupt cancels the work, and then closes the run: it writes the run
+// record, stops the flush loop, flushes the ledger a final time, runs the
+// close sweep with the reporter still live under the finalize phase (for a
+// large mirror the sweep is the longest part of the close, and the panel's
+// bar and remote readout are what keep it from reading as a hang), and only
+// then stops the reporter and prints the summary.
 //
 // The int result is how many files the close sweep failed to mirror, so the
 // caller sees the sweep's outcome alongside the tally.
@@ -143,31 +147,31 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 
 	ledger.StartRun()
 
-	orgCtx, cancelOrg := context.WithCancel(ctx)
+	// The reporter and the flush loop get independent child contexts: the close
+	// stops the flush loop before the authoritative final flush, but keeps the
+	// reporter live through the flush, the failure logging, and the close sweep,
+	// so the panel is the run's visibility for the whole close. Both are
+	// children of the parent ctx, so an interrupt still cancels both at once.
+	reporterCtx, cancelReporter := context.WithCancel(ctx)
+	flushCtx, cancelFlush := context.WithCancel(ctx)
 
-	var wg sync.WaitGroup
+	var reporterWG, flushWG sync.WaitGroup
 
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-
+	reporterWG.Go(func() {
 		// The interval is already configured via WithInterval above; a non-positive
 		// value here falls back to it, so it need not be passed again.
-		rerr := reporter.Run(orgCtx, 0)
+		rerr := reporter.Run(reporterCtx, 0)
 		if rerr != nil {
-			a.logger.LogAttrs(orgCtx, slog.LevelWarn, "progress_report_error",
+			a.logger.LogAttrs(reporterCtx, slog.LevelWarn, "progress_report_error",
 				slog.String("org", orgName),
 				slog.String("error", rerr.Error()),
 			)
 		}
-	}()
+	})
 
-	go func() {
-		defer wg.Done()
-
-		a.flushLoop(orgCtx, orgName, ledger)
-	}()
+	flushWG.Go(func() {
+		a.flushLoop(flushCtx, orgName, ledger)
+	})
 
 	// The closeRun function below settles the organization's run exactly
 	// once, recording how many files the close sweep failed to mirror. It is
@@ -182,8 +186,18 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 	closeRun := func() {
 		closeOnce.Do(func() {
 			ledger.FinishRun()
-			cancelOrg()
-			wg.Wait()
+
+			// Only the flush loop stops here, so the final flush below is the
+			// sole writer; the reporter keeps running so the close stays visible.
+			cancelFlush()
+			flushWG.Wait()
+
+			// The finalize phase spans the whole close — the final flush, the
+			// failure logging, and the sweep. It starts indeterminate; the sweep
+			// flips it to a determinate bar once it has classified the tree and
+			// knows how many files it will settle.
+			reporter.SetPhase(phaseFinalize)
+			reporter.SetTotal(-1)
 
 			ferr := ledger.Flush()
 			if ferr != nil {
@@ -197,7 +211,9 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 			// shard is compacted (its durable form is the snapshot the sweep
 			// mirrors), and before Close below, so the cross-process flock still
 			// guards the tree. An interrupted run skips it; the next run sweeps.
-			syncFailed = a.syncOrg(ctx, env, orgName).Failed
+			// The reporter rides along as the sweep's progress hook, so the phase
+			// bar moves file by file while the mirror catches up.
+			syncFailed = a.syncOrg(ctx, env, orgName, reporter).Failed
 
 			// The sweep deliberately skips the per-shard replay logs and mirrors
 			// only the snapshots, on the guarantee the final flush just made
@@ -216,6 +232,11 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 						"run's flush and sweep re-mirror them"),
 				)
 			}
+
+			// The reporter stops only after the sweep: its panel's final render
+			// erases itself, so the summary below prints on a clean tail.
+			cancelReporter()
+			reporterWG.Wait()
 
 			serr := reporter.Summary()
 			if serr != nil {

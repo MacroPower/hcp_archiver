@@ -726,7 +726,8 @@ const quitGrace = 2 * time.Second
 // [tea.Program.Send] on the unbuffered message channel, blocks
 // [tea.Program.Kill] on the renderer handshake, and keeps [tea.Program.Run]
 // from returning at all -- exactly the state the escalation exists to escape.
-// The kill's [tea.ErrProgramKilled] is mapped to a clean nil. It activates
+// The kill's bare [tea.ErrProgramKilled] is mapped to a clean nil; one
+// carrying a recovered panic surfaces (see [tuiError]). It activates
 // the log sink for the program's lifetime so log lines queue for the panel to
 // print, and on return revokes the model's feed and deactivates the sink,
 // which flushes any uncommitted lines to the sink's fallback so nothing is
@@ -827,9 +828,12 @@ func (g *feedGuard) Commit(cursor uint64) {
 }
 
 // tuiError maps the panel program's result to [Reporter.Run]'s contract: the
-// shutdown escalation's kill reads as a clean nil, anything else wraps.
+// shutdown escalation's kill reads as a clean nil, anything else wraps. A
+// recovered panic is checked first — Bubble Tea wraps it in the same
+// [tea.ErrProgramKilled] the deliberate kill returns bare, and a crashed
+// panel must surface to the caller's log, not vanish behind the kill's nil.
 func tuiError(err error) error {
-	if err == nil || errors.Is(err, tea.ErrProgramKilled) {
+	if err == nil || (errors.Is(err, tea.ErrProgramKilled) && !errors.Is(err, tea.ErrProgramPanic)) {
 		return nil
 	}
 
