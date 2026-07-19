@@ -1,0 +1,384 @@
+package view_test
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.jacobcolvin.com/hcp_archiver/remote"
+	"go.jacobcolvin.com/hcp_archiver/seal"
+	"go.jacobcolvin.com/hcp_archiver/view"
+)
+
+// buildUnsealArchive extends the standard fixture with the pieces an unseal
+// must skip — a ledger shard and an atomic writer's staging leftover — plus a
+// stack subtree, which only the project scope covers.
+func buildUnsealArchive(t *testing.T) string {
+	t.Helper()
+
+	root := buildArchive(t)
+	org := filepath.Join(root, "my-org")
+
+	writeFile(t, org, wsDir+"/runs/.ledger/frozen.json", `{"shard":true}`)
+	writeFile(t, org, wsDir+"/runs/run-old/.atomicfile-123.tmp", "torn write")
+	writeFile(t, org, "projects/default/stacks/net/stack.json",
+		`{"data":{"id":"st-1","type":"stacks","attributes":{"name":"net"}}}`)
+
+	return root
+}
+
+// openOrg opens the archive at root and returns its single organization.
+func openOrg(t *testing.T, root string, opts ...view.ArchiveOption) *view.Org {
+	t.Helper()
+
+	orgs, err := view.OpenArchive(root, opts...)
+	require.NoError(t, err)
+	require.Len(t, orgs, 1)
+
+	return orgs[0]
+}
+
+// unsealWorkspace plans and runs the fixture workspace's unseal into target,
+// returning the per-file events and summary.
+func unsealWorkspace(t *testing.T, org *view.Org, target string) ([]view.UnsealEvent, view.UnsealSummary) {
+	t.Helper()
+
+	jobs, err := view.PlanWorkspaceUnsealForTest(org, org.Workspace("default", "app"))
+	require.NoError(t, err)
+
+	return view.RunUnsealForTest(t.Context(), org, target, jobs)
+}
+
+// readTarget reads the file at an archive-relative path under the unsealed
+// target tree.
+func readTarget(t *testing.T, target, rel string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(target, "my-org", filepath.FromSlash(rel)))
+	require.NoError(t, err)
+
+	return string(data)
+}
+
+// targetPaths walks the target tree and returns every file's slash-separated
+// path relative to target.
+func targetPaths(t *testing.T, target string) []string {
+	t.Helper()
+
+	var paths []string
+
+	err := filepath.WalkDir(target, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+
+		rel, relErr := filepath.Rel(target, p)
+		if relErr != nil {
+			return fmt.Errorf("relativize %q: %w", p, relErr)
+		}
+
+		paths = append(paths, filepath.ToSlash(rel))
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	return paths
+}
+
+// appendRollupLine appends one raw NDJSON line to a fixture roll-up file.
+func appendRollupLine(t *testing.T, root, rollup, line string) {
+	t.Helper()
+
+	abs := filepath.Join(root, "my-org", filepath.FromSlash(wsDir), "rollups", rollup)
+
+	f, err := os.OpenFile(abs, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+
+	_, err = f.WriteString(line + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+}
+
+func TestUnseal_WorkspaceLocalForms(t *testing.T) {
+	t.Parallel()
+
+	root := buildUnsealArchive(t)
+	org := openOrg(t, root)
+	target := t.TempDir()
+
+	events, sum := unsealWorkspace(t, org, target)
+
+	for _, ev := range events {
+		require.NoError(t, ev.Err, "no per-file failure expected for %s", ev.Path)
+	}
+
+	assert.Zero(t, sum.Errored)
+	assert.Positive(t, sum.Bytes)
+
+	// Every physical form expands back to a plain file with exact bytes; the
+	// comparisons are deliberately byte-for-byte, not JSON-semantic.
+	assert.Equal(t, "plan output line\n", readTarget(t, target, wsDir+"/runs/run-new/plan.log"),
+		"a bundled member is extracted")
+	//nolint:testifylint // Byte-exact reproduction is the point of an unseal.
+	assert.Equal(t,
+		`{"data":{"id":"cv-1","type":"configuration-versions","attributes":{"source":"tfe-api"}}}`,
+		readTarget(t, target, wsDir+"/runs/run-new/config-version.json"),
+		"a rolled-up member is expanded")
+	//nolint:testifylint // Byte-exact reproduction is the point of an unseal.
+	assert.Equal(t, `{"data":[]}`, readTarget(t, target, wsDir+"/runs/run-old/comments.json"),
+		"a loose file is copied")
+	//nolint:testifylint // Byte-exact reproduction is the point of an unseal.
+	assert.Equal(t, `{"serial":2}`, readTarget(t, target, wsDir+"/state-versions/20240101T000000Z-sv-1.tfstate.json"),
+		"a bundled state blob is extracted")
+
+	// The sealed forms and the archive's bookkeeping never reach the target.
+	for _, p := range targetPaths(t, target) {
+		assert.NotContains(t, p, "/rollups/", "roll-up files are omitted: %s", p)
+		assert.NotContains(t, p, "/bundles/", "bundle zips and sidecars are omitted: %s", p)
+		assert.NotContains(t, p, ".sidecar", "sidecar indexes are omitted: %s", p)
+		assert.NotContains(t, p, ".ledger", "ledger shards are omitted: %s", p)
+		assert.NotContains(t, p, ".remote.json", "the remote marker is omitted: %s", p)
+		assert.NotContains(t, p, ".atomicfile-", "staging leftovers are omitted: %s", p)
+		assert.True(t, strings.HasPrefix(p, "my-org/"+wsDir+"/"),
+			"a workspace unseal writes only under the workspace's mirrored path: %s", p)
+	}
+}
+
+func TestUnseal_WorkspaceRemote(t *testing.T) {
+	t.Parallel()
+
+	root, fake := buildRemoteArchive(t)
+
+	org := openOrg(t, root,
+		view.WithContext(t.Context()),
+		view.WithRemoteFactory(func(ctx context.Context, cfg remote.Config) (*remote.Client, error) {
+			return remote.New(ctx, cfg, remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0))
+		}),
+	)
+
+	target := t.TempDir()
+	_, sum := unsealWorkspace(t, org, target)
+
+	assert.Zero(t, sum.Errored)
+	assert.Equal(t, "plan output line\n", readTarget(t, target, wsDir+"/runs/run-new/plan.log"),
+		"an evicted bundle member materializes from the remote store")
+	//nolint:testifylint // Byte-exact reproduction is the point of an unseal.
+	assert.Equal(t, `{"serial":2}`, readTarget(t, target, wsDir+"/state-versions/20240101T000000Z-sv-1.tfstate.json"))
+
+	ranges := fake.Ranges()
+	require.NotEmpty(t, ranges)
+
+	for _, r := range ranges {
+		assert.GreaterOrEqual(t, r.Length, int64(0),
+			"every remote read must be a bounded ranged request, never a full download")
+	}
+}
+
+func TestUnseal_Project(t *testing.T) {
+	t.Parallel()
+
+	root := buildUnsealArchive(t)
+	org := openOrg(t, root)
+
+	jobs, err := view.PlanProjectUnsealForTest(org, "default")
+	require.NoError(t, err)
+
+	target := t.TempDir()
+	_, sum := view.RunUnsealForTest(t.Context(), org, target, jobs)
+
+	assert.Zero(t, sum.Errored)
+
+	//nolint:testifylint // Byte-exact reproduction is the point of an unseal.
+	assert.Equal(t, `{"data":{"id":"prj-1","type":"projects","attributes":{"name":"default"}}}`,
+		readTarget(t, target, "projects/default/project.json"), "the project document is included")
+	//nolint:testifylint // Byte-exact reproduction is the point of an unseal.
+	assert.Equal(t, `{"data":{"id":"st-1","type":"stacks","attributes":{"name":"net"}}}`,
+		readTarget(t, target, "projects/default/stacks/net/stack.json"), "the stacks subtree is included")
+	assert.Equal(t, "plan output line\n", readTarget(t, target, wsDir+"/runs/run-new/plan.log"),
+		"every workspace's sealed members are included")
+	//nolint:testifylint // Byte-exact reproduction is the point of an unseal.
+	assert.Equal(t, `{"data":[]}`, readTarget(t, target, wsDir+"/runs/run-old/comments.json"))
+}
+
+func TestUnseal_OverwriteIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	root := buildUnsealArchive(t)
+	org := openOrg(t, root)
+	target := t.TempDir()
+
+	_, first := unsealWorkspace(t, org, target)
+	require.Zero(t, first.Errored)
+
+	_, second := unsealWorkspace(t, org, target)
+	require.Zero(t, second.Errored, "re-running over an existing target overwrites cleanly")
+
+	assert.Equal(t, first.Files, second.Files)
+	assert.Equal(t, first.Bytes, second.Bytes)
+	assert.Equal(t, "plan output line\n", readTarget(t, target, wsDir+"/runs/run-new/plan.log"))
+}
+
+func TestUnseal_PathTraversalRejected(t *testing.T) {
+	t.Parallel()
+
+	root := buildUnsealArchive(t)
+
+	// A crafted roll-up name that would climb out of the target if joined
+	// naively. It carries the workspace-dir prefix, so the sealed-index prefix
+	// filter cannot drop it: only writeUnsealed's validation stands between it
+	// and the join.
+	escape := wsDir + "/../../../../../../escape"
+	appendRollupLine(t, root, "config-versions.ndjson", `{"path":"`+escape+`","content":"boom"}`)
+
+	org := openOrg(t, root)
+
+	// Give the target a parent all its own, so an escape would land somewhere
+	// this test can see.
+	parent := t.TempDir()
+	target := filepath.Join(parent, "out")
+
+	events, sum := unsealWorkspace(t, org, target)
+
+	assert.Equal(t, 1, sum.Errored)
+
+	var found bool
+
+	for _, ev := range events {
+		if ev.Path == escape {
+			found = true
+
+			require.ErrorIs(t, ev.Err, seal.ErrMemberName)
+		}
+	}
+
+	require.True(t, found, "the crafted name surfaces as a per-file event")
+
+	assert.NoFileExists(t, filepath.Join(parent, "escape"))
+	assert.NoFileExists(t, filepath.Join(target, "escape"))
+	assert.NoFileExists(t, filepath.Join(target, "my-org", "escape"))
+}
+
+func TestUnseal_NewestRollupLineWins(t *testing.T) {
+	t.Parallel()
+
+	root := buildUnsealArchive(t)
+	rel := wsDir + "/runs/run-new/config-version.json"
+
+	// A member re-frozen after its content changed appends a newer line under
+	// the same path; the unseal must reproduce the newest. The line carries no
+	// digest, matching a hand-built fixture, so it is served as-is.
+	appendRollupLine(t, root, "config-versions.ndjson", `{"path":"`+rel+`","content":"updated content"}`)
+
+	org := openOrg(t, root)
+	target := t.TempDir()
+
+	_, sum := unsealWorkspace(t, org, target)
+
+	assert.Zero(t, sum.Errored)
+	assert.Equal(t, "updated content", readTarget(t, target, rel))
+}
+
+func TestUnseal_LooseFileWinsOverSealed(t *testing.T) {
+	t.Parallel()
+
+	root := buildUnsealArchive(t)
+	rel := wsDir + "/runs/run-new/config-version.json"
+
+	// A loose survivor of an interrupted seal is the canonical copy, matching
+	// Workspace.Open's precedence.
+	writeFile(t, filepath.Join(root, "my-org"), rel, "loose survivor")
+
+	org := openOrg(t, root)
+	target := t.TempDir()
+
+	_, sum := unsealWorkspace(t, org, target)
+
+	assert.Zero(t, sum.Errored)
+	assert.Equal(t, "loose survivor", readTarget(t, target, rel))
+}
+
+func TestUnseal_MissingLocalBundleWithoutRemote(t *testing.T) {
+	t.Parallel()
+
+	root := buildUnsealArchive(t)
+	require.NoError(t, os.Remove(
+		filepath.Join(root, "my-org", filepath.FromSlash(wsDir), "bundles", "logs.gen0001.zip")))
+
+	org := openOrg(t, root)
+	target := t.TempDir()
+
+	events, sum := unsealWorkspace(t, org, target)
+
+	assert.Equal(t, 1, sum.Errored, "only the evicted-looking member errors")
+
+	var found bool
+
+	for _, ev := range events {
+		if ev.Path == wsDir+"/runs/run-new/plan.log" {
+			found = true
+
+			require.ErrorIs(t, ev.Err, view.ErrObjectNotFound)
+		}
+	}
+
+	require.True(t, found)
+
+	// The run continued past the failure: the rest of the workspace is intact.
+	//nolint:testifylint // Byte-exact reproduction is the point of an unseal.
+	assert.Equal(t, `{"data":[]}`, readTarget(t, target, wsDir+"/runs/run-old/comments.json"))
+	//nolint:testifylint // Byte-exact reproduction is the point of an unseal.
+	assert.Equal(t, `{"serial":2}`, readTarget(t, target, wsDir+"/state-versions/20240101T000000Z-sv-1.tfstate.json"))
+}
+
+func TestUnseal_RollupChecksumMismatch(t *testing.T) {
+	t.Parallel()
+
+	root := buildUnsealArchive(t)
+	rel := wsDir + "/runs/run-new/config-version.json"
+
+	// A newest line whose content no longer hashes to its recorded digest
+	// models rot inside the roll-up; serving it silently would hand back
+	// corrupt bytes as if archived.
+	appendRollupLine(t, root, "config-versions.ndjson",
+		`{"path":"`+rel+`","sha256":"`+strings.Repeat("0", 64)+`","content":"rotten"}`)
+
+	org := openOrg(t, root)
+	target := t.TempDir()
+
+	events, sum := unsealWorkspace(t, org, target)
+
+	assert.Equal(t, 1, sum.Errored)
+
+	var found bool
+
+	for _, ev := range events {
+		if ev.Path == rel {
+			found = true
+
+			require.ErrorIs(t, ev.Err, view.ErrRollupChecksum)
+		}
+	}
+
+	require.True(t, found)
+}
+
+func TestWriteUnsealed_RejectsUnsafeNames(t *testing.T) {
+	t.Parallel()
+
+	target := t.TempDir()
+
+	err := view.WriteUnsealedForTest(target, "my-org", "../escape", []byte("x"))
+	require.ErrorIs(t, err, seal.ErrMemberName)
+
+	err = view.WriteUnsealedForTest(target, "my-org", "ok/file.json", []byte("x"))
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(target, "my-org", "ok", "file.json"))
+}

@@ -22,6 +22,10 @@ const (
 	// deduplicated configuration-version tarballs (see
 	// [Store.ConfigVersionTarball]).
 	ConfigVersionsDirName = "config-versions"
+
+	// RollupsDirName is the workspace subdirectory holding NDJSON roll-ups
+	// (see [Store.RollupDir]).
+	RollupsDirName = "rollups"
 )
 
 // Join composes archive-relative segments into a single clean forward-slash
@@ -258,7 +262,7 @@ func (s *Store) BundleDir(project, ws string) string {
 // RollupDir returns the directory that holds a workspace's NDJSON roll-ups, the
 // coalesced form of its frozen immutable per-run and per-state-version metadata.
 func (s *Store) RollupDir(project, ws string) string {
-	return cleanJoin("projects", seg(project), "workspaces", seg(ws), "rollups")
+	return cleanJoin("projects", seg(project), "workspaces", seg(ws), RollupsDirName)
 }
 
 // StateVersionDir returns the directory that holds a workspace's state-version

@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
+	"slices"
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/list"
 
 	tea "charm.land/bubbletea/v2"
@@ -15,11 +18,13 @@ import (
 )
 
 // item is one list row: its display strings and, when it descends somewhere,
-// the constructor of the screen it opens.
+// the constructor of the screen it opens. A row for an unsealable scope (a
+// project or a workspace) also carries the constructor of its unseal prompt.
 type item struct {
-	open  func() (screen, error)
-	title string
-	desc  string
+	open   func() (screen, error)
+	unseal func() (screen, error)
+	title  string
+	desc   string
 }
 
 // Title returns the row's first line.
@@ -51,7 +56,16 @@ func newListScreen(name string, rows []item) *listScreen {
 	l.SetShowTitle(false)
 	l.DisableQuitKeybindings()
 
-	return &listScreen{name: name, list: l}
+	s := &listScreen{name: name, list: l}
+
+	// Whether the u key acts here is inferred from the rows themselves, so a
+	// screen can never advertise a dead action key or leave a live one
+	// shadowed by the stock paging binding.
+	if slices.ContainsFunc(rows, func(it item) bool { return it.unseal != nil }) {
+		s.enableUnsealHint()
+	}
+
+	return s
 }
 
 // update handles navigation keys itself and forwards everything else to the
@@ -59,8 +73,8 @@ func newListScreen(name string, rows []item) *listScreen {
 // so q and esc stay typable; with a filter applied, either back key clears it
 // before a second press pops the screen.
 func (s *listScreen) update(msg tea.Msg) tea.Cmd {
-	if key, ok := msg.(tea.KeyPressMsg); ok && s.list.FilterState() != list.Filtering {
-		switch key.String() {
+	if press, ok := msg.(tea.KeyPressMsg); ok && s.list.FilterState() != list.Filtering {
+		switch press.String() {
 		case "enter":
 			if it, ok := s.list.SelectedItem().(item); ok && it.open != nil {
 				return push(it.open)
@@ -82,6 +96,14 @@ func (s *listScreen) update(msg tea.Msg) tea.Cmd {
 
 		case "q":
 			return tea.Quit
+
+		case "u":
+			if it, ok := s.list.SelectedItem().(item); ok && it.unseal != nil {
+				return push(it.unseal)
+			}
+
+			// A row without an unseal action leaves u to the list, whose stock
+			// keymap binds it to paging back.
 		}
 	}
 
@@ -90,6 +112,21 @@ func (s *listScreen) update(msg tea.Msg) tea.Cmd {
 	s.list, cmd = s.list.Update(msg)
 
 	return cmd
+}
+
+// enableUnsealHint frees u for the unseal action: it drops u from the list's
+// stock prev-page keys (left, h, pgup, and b remain) and advertises the key
+// in the list's help. [newListScreen] calls it when any row carries the
+// action.
+func (s *listScreen) enableUnsealHint() {
+	s.list.KeyMap.PrevPage = key.NewBinding(
+		key.WithKeys("left", "h", "pgup", "b"),
+		key.WithHelp("←/h/pgup", "prev page"),
+	)
+
+	unseal := key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "unseal"))
+	s.list.AdditionalShortHelpKeys = func() []key.Binding { return []key.Binding{unseal} }
+	s.list.AdditionalFullHelpKeys = func() []key.Binding { return []key.Binding{unseal} }
 }
 
 // view renders the list.
@@ -179,10 +216,53 @@ func newProjectsScreen(org *Org) (screen, error) {
 			open: func() (screen, error) {
 				return newWorkspacesScreen(org, project, workspaces)
 			},
+			unseal: projectUnsealPrompt(org, project),
 		})
 	}
 
 	return newListScreen("projects", rows), nil
+}
+
+// unsealPrompt builds the unseal-prompt constructor a project or workspace
+// row carries: confirming the target runs plan and pushes the progress screen
+// over the planned jobs.
+func unsealPrompt(org *Org, label string, plan func() ([]unsealJob, error)) func() (screen, error) {
+	return func() (screen, error) {
+		return newUnsealPromptScreen(label, org.remote != nil, defaultTarget(),
+			func(target string) (screen, error) {
+				jobs, err := plan()
+				if err != nil {
+					return nil, err
+				}
+
+				return newUnsealProgressScreen(org, target, jobs, label), nil
+			}), nil
+	}
+}
+
+// projectUnsealPrompt is [unsealPrompt] planning a whole project.
+func projectUnsealPrompt(org *Org, project string) func() (screen, error) {
+	return unsealPrompt(org, "project "+project, func() ([]unsealJob, error) {
+		return org.planProjectUnseal(project)
+	})
+}
+
+// workspaceUnsealPrompt is [unsealPrompt] planning one workspace.
+func workspaceUnsealPrompt(org *Org, ws *Workspace) func() (screen, error) {
+	return unsealPrompt(org, "workspace "+ws.Name, func() ([]unsealJob, error) {
+		return org.planWorkspaceUnseal(ws)
+	})
+}
+
+// defaultTarget is the pre-filled unseal destination: an "unsealed" directory
+// under the working directory the browser was launched from.
+func defaultTarget() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "unsealed"
+	}
+
+	return filepath.Join(cwd, "unsealed")
 }
 
 // newWorkspacesScreen lists one project's workspaces, and its stacks when it
@@ -215,6 +295,7 @@ func newWorkspacesScreen(org *Org, project string, workspaces []string) (screen,
 			open: func() (screen, error) {
 				return newWorkspaceScreen(ws)
 			},
+			unseal: workspaceUnsealPrompt(org, ws),
 		})
 	}
 
@@ -258,6 +339,7 @@ func newAllWorkspacesScreen(org *Org) (screen, error) {
 				open: func() (screen, error) {
 					return newWorkspaceScreen(ws)
 				},
+				unseal: workspaceUnsealPrompt(org, ws),
 			})
 		}
 	}

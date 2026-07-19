@@ -2,6 +2,7 @@ package view
 
 import (
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
 	"go.jacobcolvin.com/niceyaml"
 	"go.jacobcolvin.com/niceyaml/style"
@@ -99,15 +100,23 @@ func newThemedList(entries []list.Item) list.Model {
 	l.Paginator.ActiveDot = theme.Muted.Render(theme.GlyphNeutral)
 	l.Paginator.InactiveDot = track.Render(theme.GlyphNeutral)
 
-	// The filter input carries its own style set; the prompt takes the heading
-	// tone the rest of the chrome uses, and the cursor the liveness accent.
+	// The filter input carries its own style set, themed like every other text
+	// input in the browser.
 	fs := l.FilterInput.Styles()
-	fs.Focused.Prompt = theme.Heading
-	fs.Blurred.Prompt = theme.Heading
-	fs.Cursor.Color = theme.ColorAccent
+	themeInputStyles(&fs)
 	l.FilterInput.SetStyles(fs)
 
 	return l
+}
+
+// themeInputStyles maps a text input's style set onto the shared [theme]: the
+// prompt takes the heading tone the rest of the chrome uses, and the cursor
+// the liveness accent. Every browser text input is styled here, so the inputs
+// cannot drift apart.
+func themeInputStyles(s *textinput.Styles) {
+	s.Focused.Prompt = theme.Heading
+	s.Blurred.Prompt = theme.Heading
+	s.Cursor.Color = theme.ColorAccent
 }
 
 // runGlyph maps an archived run status to its badge glyph, mirroring how the

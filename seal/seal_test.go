@@ -212,6 +212,43 @@ func TestSeal_RejectsMemberNameEscapingArchive(t *testing.T) {
 	}
 }
 
+func TestValidName(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		name string
+		err  error
+	}{
+		"clean relative path":  {name: "projects/default/workspaces/app/run.json"},
+		"single segment":       {name: "org.json"},
+		"dot-prefixed segment": {name: "projects/.hidden/file"},
+		"parent traversal":     {name: "../../../etc/cron.d/x", err: seal.ErrMemberName},
+		"absolute path":        {name: "/etc/passwd", err: seal.ErrMemberName},
+		"interior dotdot":      {name: "runs/../../escape", err: seal.ErrMemberName},
+		"trailing slash":       {name: "runs/", err: seal.ErrMemberName},
+		"double slash":         {name: "runs//plan.json", err: seal.ErrMemberName},
+		"bare dot":             {name: ".", err: seal.ErrMemberName},
+		"bare dotdot":          {name: "..", err: seal.ErrMemberName},
+		"empty name":           {name: "", err: seal.ErrMemberName},
+		"backslash separator":  {name: `runs\run-1\plan.json`, err: seal.ErrMemberName},
+	}
+
+	for tn, tc := range tests {
+		t.Run(tn, func(t *testing.T) {
+			t.Parallel()
+
+			err := seal.ValidName(tc.name)
+			if tc.err != nil {
+				require.ErrorIs(t, err, tc.err)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestSeal_RejectsDuplicateMemberNames(t *testing.T) {
 	t.Parallel()
 

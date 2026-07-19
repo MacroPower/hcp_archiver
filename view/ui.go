@@ -79,6 +79,14 @@ type pushMsg struct {
 	s screen
 }
 
+// initializer is the optional screen hook for startup work: a screen that
+// implements it has its init command run by the root model as it is pushed.
+// Screens have no Bubble Tea Init of their own, so this is how an async
+// screen ([*unsealProgressScreen]) starts its work and its first listen.
+type initializer interface {
+	init() tea.Cmd
+}
+
 // popMsg returns to the screen above; on the root screen it quits.
 type popMsg struct{}
 
@@ -139,6 +147,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.stack = append(m.stack, msg.s)
 		m.status = ""
+
+		if i, ok := msg.s.(initializer); ok {
+			return m, i.init()
+		}
 
 		return m, nil
 

@@ -91,27 +91,42 @@ var (
 	ErrDuplicateMember = errors.New("member names must be unique within a bundle")
 )
 
+// ValidName checks that name is a clean archive-relative path safe to
+// reproduce under a destination directory. Writers gate member names through
+// it before packing; an unsealer gates untrusted sidecar and roll-up names
+// through it before joining them under a target. Names are slash-separated
+// archive paths: an empty name, a leading slash (absolute), a backslash
+// anywhere (a Windows separator a '/'-only split would step over), or any
+// empty, ".", or ".." segment is rejected with [ErrMemberName], which covers
+// "//", a trailing slash, and every traversal form without depending on the
+// host separator.
+func ValidName(name string) error {
+	if name == "" || strings.HasPrefix(name, "/") || strings.ContainsRune(name, '\\') {
+		return fmt.Errorf("%w: %q", ErrMemberName, name)
+	}
+
+	for seg := range strings.SplitSeq(name, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("%w: %q", ErrMemberName, name)
+		}
+	}
+
+	return nil
+}
+
 // checkMemberNames verifies every member names a clean path that stays within
-// the archive tree and is unique within the bundle, so an extract cannot escape
-// its destination directory and read-back verification maps each name to one
-// member. Names are slash-separated bundle paths: an empty name, a leading slash
-// (absolute), a backslash anywhere (a Windows separator a '/'-only split would
-// step over), or any empty, ".", or ".." segment is rejected, which covers "//",
-// a trailing slash, and every traversal form without depending on the host
-// separator; a name repeated across members is rejected too.
+// the archive tree (see [ValidName]) and is unique within the bundle, so an
+// extract cannot escape its destination directory and read-back verification
+// maps each name to one member.
 func checkMemberNames(members []Member) error {
 	seen := make(map[string]struct{}, len(members))
 
 	for i := range members {
 		name := members[i].Name
-		if name == "" || strings.HasPrefix(name, "/") || strings.ContainsRune(name, '\\') {
-			return fmt.Errorf("%w: %q", ErrMemberName, name)
-		}
 
-		for seg := range strings.SplitSeq(name, "/") {
-			if seg == "" || seg == "." || seg == ".." {
-				return fmt.Errorf("%w: %q", ErrMemberName, name)
-			}
+		err := ValidName(name)
+		if err != nil {
+			return err
 		}
 
 		if _, dup := seen[name]; dup {

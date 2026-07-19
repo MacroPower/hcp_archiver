@@ -27,6 +27,12 @@ const orgFile = "org.json"
 type Org struct {
 	remote *orgRemote
 
+	// The browse context the archive was opened under. Long-running work
+	// started from the browser (an unseal) derives its cancelable child from
+	// it, so an external cancellation (SIGINT) stops that work even on a
+	// local-only archive, where no orgRemote carries the context.
+	ctx context.Context //nolint:containedctx // Screens start work from tea.Cmds, which take none.
+
 	// Name is the organization's directory name, which the archiver keys on the
 	// organization name.
 	Name string
@@ -161,7 +167,7 @@ func newOrg(name, root string, opts archiveOptions) (*Org, error) {
 		return nil, err
 	}
 
-	return &Org{Name: name, root: root, remote: rem}, nil
+	return &Org{Name: name, root: root, remote: rem, ctx: opts.ctx}, nil
 }
 
 // isOrgRoot reports whether dir is one organization's archive root, marked by
@@ -182,6 +188,17 @@ func isOrgRoot(dir string) (bool, error) {
 // Root returns the absolute path of the organization's archive directory.
 func (o *Org) Root() string {
 	return o.root
+}
+
+// context returns the organization's browse context, defaulting to
+// [context.Background] for an Org built without [OpenArchive] (a test
+// fixture), so callers never re-derive the fallback themselves.
+func (o *Org) context() context.Context {
+	if o.ctx != nil {
+		return o.ctx
+	}
+
+	return context.Background()
 }
 
 // AbsPath returns the on-disk absolute path for an archive-relative path.

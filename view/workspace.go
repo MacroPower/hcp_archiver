@@ -3,6 +3,8 @@ package view
 import (
 	"archive/zip"
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,11 +15,19 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
-// ErrObjectNotFound indicates an archive-relative path is present in none of
-// the archive's physical forms.
-var ErrObjectNotFound = errors.New("object not found in archive")
+var (
+	// ErrObjectNotFound indicates an archive-relative path is present in none of
+	// the archive's physical forms.
+	ErrObjectNotFound = errors.New("object not found in archive")
+
+	// ErrRollupChecksum indicates a roll-up member's content does not hash to
+	// its recorded digest.
+	ErrRollupChecksum = errors.New("roll-up member does not match its recorded checksum")
+)
 
 // Workspace is a read handle on one workspace's subtree.
 //
@@ -44,10 +54,12 @@ type sealedRef struct {
 	offset int64
 }
 
-// rollupLine mirrors one roll-up record: the member's archive-relative path and
-// its content carried verbatim as a JSON string.
+// rollupLine mirrors one roll-up record: the member's archive-relative path,
+// the SHA-256 the sealer recorded over its bytes, and the content carried
+// verbatim as a JSON string.
 type rollupLine struct {
 	Path    string `json:"path"`
+	SHA256  string `json:"sha256"`
 	Content string `json:"content"`
 }
 
@@ -207,7 +219,7 @@ func (w *Workspace) index() (map[string]sealedRef, error) {
 // its content changed (a terminal run.json updated between seals) appends a
 // newer, different one — the newest is canonical in both cases.
 func (w *Workspace) indexRollups(idx map[string]sealedRef) error {
-	files, err := listFiles(w.org.AbsPath(path.Join(w.dir, "rollups")), ".ndjson")
+	files, err := listFiles(w.org.AbsPath(path.Join(w.dir, store.RollupsDirName)), ".ndjson")
 	if err != nil {
 		return err
 	}
@@ -276,7 +288,7 @@ func indexRollupFile(file string, idx map[string]sealedRef) error {
 // opens only the one bundle that holds it. Sidecars stay local even when their
 // zips are evicted remote, so the index is always built offline.
 func (w *Workspace) indexBundles(idx map[string]sealedRef) error {
-	relBundles := path.Join(w.dir, "bundles")
+	relBundles := path.Join(w.dir, store.BundlesDirName)
 
 	files, err := listFiles(w.org.AbsPath(relBundles), ".sidecar.ndjson")
 	if err != nil {
@@ -369,6 +381,17 @@ func readRollupLine(file string, offset int64, relPath string) ([]byte, error) {
 
 	if rec.Path != relPath {
 		return nil, fmt.Errorf("%w: roll-up line at %q offset %d holds %q", ErrObjectNotFound, file, offset, rec.Path)
+	}
+
+	// The sealer records each line's digest over the source bytes; verify the
+	// carried content against it, so rot inside the JSON string surfaces as an
+	// integrity error rather than silently corrupt content. A line without a
+	// digest (a hand-built fixture, an older writer) is served as-is.
+	if rec.SHA256 != "" {
+		sum := sha256.Sum256([]byte(rec.Content))
+		if hex.EncodeToString(sum[:]) != rec.SHA256 {
+			return nil, fmt.Errorf("%w: %s in roll-up %q", ErrRollupChecksum, relPath, file)
+		}
 	}
 
 	return []byte(rec.Content), nil
