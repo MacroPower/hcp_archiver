@@ -57,9 +57,9 @@ func viewerFooter(scrollPercent float64, extra ...string) string {
 	return styleFooter.Render(strings.Join(hints, " · "))
 }
 
-// viewerScreen scrolls one archived plain-text document: a log or the mixed
-// text-and-JSON overview. JSON documents go through [yamlViewerScreen]
-// instead, which adds syntax highlighting.
+// viewerScreen scrolls one archived plain-text document (a log). JSON
+// documents go through [yamlViewerScreen] instead, which adds syntax
+// highlighting.
 //
 // Create instances with [newViewerScreen].
 type viewerScreen struct {

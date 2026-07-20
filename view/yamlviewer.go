@@ -17,10 +17,11 @@ type yamlViewerScreen struct {
 	vp   yamlviewport.Model
 }
 
-// newYAMLViewerScreen creates a new [yamlViewerScreen] named name (its
-// breadcrumb segment) over content. Long lines wrap by default (w toggles), so
-// a minified document stays readable without horizontal scrolling.
-func newYAMLViewerScreen(name, content string) *yamlViewerScreen {
+// newThemedYAMLViewport creates the highlighting viewport every JSON-viewing
+// screen scrolls: the themed printer, fill-to-height, and the
+// single-document keymap. Every JSON viewer builds its viewport here, so they
+// cannot drift on printer or keymap configuration.
+func newThemedYAMLViewport(name, content string) yamlviewport.Model {
 	vp := yamlviewport.New(yamlviewport.WithPrinter(newThemedPrinter()))
 	vp.FillHeight = true
 	vp.SetTokens(niceyaml.NewSourceFromString(content, niceyaml.WithName(name)))
@@ -32,7 +33,14 @@ func newYAMLViewerScreen(name, content string) *yamlViewerScreen {
 	vp.KeyMap.ToggleDiffMode.SetEnabled(false)
 	vp.KeyMap.ToggleViewMode.SetEnabled(false)
 
-	return &yamlViewerScreen{name: name, vp: vp}
+	return vp
+}
+
+// newYAMLViewerScreen creates a new [yamlViewerScreen] named name (its
+// breadcrumb segment) over content. Long lines wrap by default (w toggles), so
+// a minified document stays readable without horizontal scrolling.
+func newYAMLViewerScreen(name, content string) *yamlViewerScreen {
+	return &yamlViewerScreen{name: name, vp: newThemedYAMLViewport(name, content)}
 }
 
 // update handles navigation keys itself and forwards scrolling to the

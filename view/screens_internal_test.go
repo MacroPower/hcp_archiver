@@ -13,15 +13,18 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-func TestNewWorkspaceScreenCountsCoalescedRuns(t *testing.T) {
-	t.Parallel()
+// testWorkspaceDir is the archive-relative directory of the one workspace
+// [newTestWorkspace] writes.
+const testWorkspaceDir = "projects/default/workspaces/app"
 
-	// A fully coalesced workspace has no runs/ directory at all; the screen's
-	// run count must come from the same loose-plus-sealed enumeration the run
-	// list uses, not from counting subdirectories.
+// newTestWorkspace writes a minimal archive whose one workspace's
+// workspace.json holds content, plus any extra files given as
+// archive-relative path to content, and returns that workspace.
+func newTestWorkspace(t *testing.T, workspaceJSON string, extra map[string]string) *Workspace {
+	t.Helper()
+
 	root := t.TempDir()
 	org := filepath.Join(root, "my-org")
-	ws := "projects/default/workspaces/app"
 
 	write := func(rel, content string) {
 		abs := filepath.Join(org, filepath.FromSlash(rel))
@@ -30,16 +33,31 @@ func TestNewWorkspaceScreenCountsCoalescedRuns(t *testing.T) {
 	}
 
 	write("org.json", `{"data":{"id":"org-1","type":"organizations"}}`)
-	write(ws+"/workspace.json", `{"data":{"id":"ws-1","type":"workspaces"}}`)
-	write(ws+"/rollups/runs.ndjson",
-		`{"path":"`+ws+`/runs/run-a/run.json","content":"{}"}`+"\n"+
-			`{"path":"`+ws+`/runs/run-b/run.json","content":"{}"}`+"\n")
+	write(testWorkspaceDir+"/workspace.json", workspaceJSON)
+
+	for rel, content := range extra {
+		write(rel, content)
+	}
 
 	orgs, err := OpenArchive(root)
 	require.NoError(t, err)
 	require.Len(t, orgs, 1)
 
-	screen, err := newWorkspaceScreen(orgs[0].Workspace("default", "app"))
+	return orgs[0].Workspace("default", "app")
+}
+
+func TestNewWorkspaceScreenCountsCoalescedRuns(t *testing.T) {
+	t.Parallel()
+
+	// A fully coalesced workspace has no runs/ directory at all; the screen's
+	// run count must come from the same loose-plus-sealed enumeration the run
+	// list uses, not from counting subdirectories.
+	ws := newTestWorkspace(t, `{"data":{"id":"ws-1","type":"workspaces"}}`, map[string]string{
+		testWorkspaceDir + "/rollups/runs.ndjson": `{"path":"` + testWorkspaceDir + `/runs/run-a/run.json","content":"{}"}` + "\n" +
+			`{"path":"` + testWorkspaceDir + `/runs/run-b/run.json","content":"{}"}` + "\n",
+	})
+
+	screen, err := newWorkspaceScreen(ws)
 	require.NoError(t, err)
 
 	ls, ok := screen.(*listScreen)
@@ -57,6 +75,61 @@ func TestNewWorkspaceScreenCountsCoalescedRuns(t *testing.T) {
 	}
 
 	assert.Equal(t, "2 runs", runsDesc, "the count matches the coalesced run list")
+}
+
+func TestNewOverviewScreenRendersStatsTable(t *testing.T) {
+	t.Parallel()
+
+	ws := newTestWorkspace(t, `{"data":{"id":"ws-1","type":"workspaces","attributes":{
+		"description":"the app",
+		"terraform-version":"1.9.4",
+		"auto-apply":true,
+		"resource-count":12,
+		"vcs-repo":{"identifier":"acme/app"}
+	}}}`, nil)
+
+	s, err := newOverviewScreen(ws)
+	require.NoError(t, err)
+
+	tv, ok := s.(*tableViewerScreen)
+	require.True(t, ok, "a single-resource workspace.json gets the stats table")
+
+	tv.setSize(80, 24)
+
+	frame := tv.view()
+	assert.Contains(t, frame, "terraform version")
+	assert.Contains(t, frame, "1.9.4")
+	assert.Contains(t, frame, "attributes", "the highlighted JSON body renders below the table")
+	assert.Contains(t, frame, "w wrap")
+	assert.Contains(t, frame, "esc back")
+}
+
+func TestNewOverviewScreenFallsBackToRawDocument(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		workspaceJSON string
+	}{
+		"malformed JSON": {
+			workspaceJSON: `{not json`,
+		},
+		"two-resource list": {
+			workspaceJSON: `{"data":[{"id":"ws-1","type":"workspaces"},{"id":"ws-2","type":"workspaces"}]}`,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ws := newTestWorkspace(t, tc.workspaceJSON, nil)
+
+			s, err := newOverviewScreen(ws)
+			require.NoError(t, err)
+
+			assert.IsType(t, &yamlViewerScreen{}, s, "the raw document still displays")
+		})
+	}
 }
 
 func TestListScreenBackKeysClearAnAppliedFilter(t *testing.T) {

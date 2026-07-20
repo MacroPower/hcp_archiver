@@ -2,6 +2,7 @@ package view
 
 import (
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/table"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
 	"go.jacobcolvin.com/niceyaml"
@@ -107,6 +108,27 @@ func newThemedList(entries []list.Item) list.Model {
 	l.FilterInput.SetStyles(fs)
 
 	return l
+}
+
+// newThemedTable creates a static display table whose chrome draws from the
+// shared [theme]. Every browser table is built here, so no screen can fall
+// back to the bubbles defaults, whose pink selected row and padded cells
+// belong to a palette and layout unrelated to the tool's. The table is
+// unfocused and its Selected style is neutralized: a blurred table still
+// paints its cursor row, and no row of a display table may look selected. The
+// cells carry no padding, so column widths land exactly where the caller's
+// width math puts them; any inter-column gap belongs in the column widths.
+func newThemedTable(cols []table.Column, rows []table.Row) table.Model {
+	return table.New(
+		table.WithColumns(cols),
+		table.WithRows(rows),
+		table.WithFocused(false),
+		table.WithStyles(table.Styles{
+			Header:   theme.Heading,
+			Cell:     lipgloss.NewStyle(),
+			Selected: lipgloss.NewStyle(),
+		}),
+	)
 }
 
 // themeInputStyles maps a text input's style set onto the shared [theme]: the

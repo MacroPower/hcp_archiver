@@ -7,10 +7,13 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/table"
+	"charm.land/lipgloss/v2"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -416,40 +419,52 @@ func newOverviewScreen(ws *Workspace) (screen, error) {
 
 	r := &resources[0]
 
-	var b strings.Builder
+	var rows []table.Row
 
-	writeField := func(label, value string) {
+	addField := func(label, value string) {
 		if value != "" {
-			fmt.Fprintf(&b, "%-20s %s\n", label, value)
+			rows = append(rows, table.Row{label, value})
 		}
 	}
 
-	writeField("workspace", ws.Name)
-	writeField("id", r.ID)
-	writeField("description", r.String("description"))
-	writeField("terraform version", r.String("terraform-version"))
-	writeField("execution mode", r.String("execution-mode"))
+	addField("workspace", ws.Name)
+	addField("id", r.ID)
+	addField("description", r.String("description"))
+	addField("terraform version", r.String("terraform-version"))
+	addField("execution mode", r.String("execution-mode"))
 
 	if v, ok := r.BoolOK("auto-apply"); ok {
-		writeField("auto apply", fmt.Sprintf("%t", v))
+		addField("auto apply", strconv.FormatBool(v))
 	}
 
 	if v, ok := r.IntOK("resource-count"); ok {
-		writeField("resource count", fmt.Sprintf("%d", v))
+		addField("resource count", strconv.FormatInt(v, 10))
 	}
 
-	writeField("created at", r.String("created-at"))
+	addField("created at", r.String("created-at"))
 
 	if repo, ok := r.Attributes["vcs-repo"].(map[string]any); ok {
 		if id, ok := repo["identifier"].(string); ok {
-			writeField("vcs repo", id)
+			addField("vcs repo", id)
 		}
 	}
 
-	b.WriteString("\n─── workspace.json ───\n\n")
-	b.Write(data)
+	// The label column is sized to its longest label plus the inter-column gap
+	// (the themed table's cells are padding-free); the value column flexes on
+	// resize, so its width here is a placeholder. The columns are headerless:
+	// the table's mandatory header row renders as a blank spacer line, which
+	// reads cleaner over a key/value block than "field"/"value" titles would.
+	labelWidth := 0
+	for _, row := range rows {
+		labelWidth = max(labelWidth, lipgloss.Width(row[0]))
+	}
 
-	return newViewerScreen("overview", b.String()), nil
+	cols := []table.Column{
+		{Title: "", Width: labelWidth + 2},
+		{Title: "", Width: 1},
+	}
+
+	return newTableViewerScreen("overview", cols, rows, string(data)), nil
 }
 
 // newRunsScreen lists a workspace's runs, newest first, badged like the HCP run
