@@ -24,25 +24,27 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
-// fixedClock returns a clock stuck at a fixed instant for deterministic ledger
+// clockStart is the instant every test env's clock starts at: fixedClock
+// stays stuck there, and newEnvAt callers advance from it.
+var clockStart = time.Date(2026, time.July, 8, 12, 0, 0, 0, time.UTC)
+
+// fixedClock returns a clock stuck at [clockStart] for deterministic ledger
 // timestamps.
 func fixedClock() func() time.Time {
-	at := time.Date(2026, time.July, 8, 12, 0, 0, 0, time.UTC)
-
-	return func() time.Time { return at }
+	return func() time.Time { return clockStart }
 }
 
-// newEnv builds an [collect.Env] over a real store and ledger rooted in the
+// newEnv builds a [collect.Env] over a real store and ledger rooted in the
 // test's temp dir, plus the ledger so a test can inspect and seed it.
 func newEnv(t *testing.T, opts ...collect.Option) (*collect.Env, *store.Store, *manifest.Ledger) {
 	t.Helper()
 
-	at := time.Date(2026, time.July, 8, 12, 0, 0, 0, time.UTC)
+	at := clockStart
 
 	return newEnvAt(t, &at, opts...)
 }
 
-// newEnvAt builds an [collect.Env] whose ledger clock reads *now on every
+// newEnvAt builds a [collect.Env] whose ledger clock reads *now on every
 // call, so a test can advance time between runs and pin which instant a
 // history record carries rather than watching every stamp collapse onto one
 // fixed value.
@@ -416,7 +418,7 @@ func TestEnvMutableRetainsSupersededContent(t *testing.T) {
 	// leave the prior version recoverable from the history sidecar.
 	const relPath = "projects/example/workspaces/ws/variables.json"
 
-	firstRun := time.Date(2026, time.July, 8, 12, 0, 0, 0, time.UTC)
+	firstRun := clockStart
 	now := firstRun
 
 	env, st, ledger := newEnvAt(t, &now)
@@ -494,7 +496,7 @@ func TestEnvMutableAbsentBuriesOnce(t *testing.T) {
 	// that re-404s appends nothing more.
 	const relPath = "projects/example/workspaces/ws/tags.json"
 
-	firstRun := time.Date(2026, time.July, 8, 12, 0, 0, 0, time.UTC)
+	firstRun := clockStart
 	now := firstRun
 
 	env, st, ledger := newEnvAt(t, &now)

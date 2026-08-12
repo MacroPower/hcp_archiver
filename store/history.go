@@ -67,10 +67,9 @@ func (s *Store) BuryHistory(relPath string, fetchedAt, deletedAt time.Time) (boo
 		return false, fmt.Errorf("read %q to bury: %w", relPath, err)
 	}
 
-	// A zero-length file carries no version to flush: a content record whose
-	// content field is omitted would read back indistinguishable from a
-	// malformed line, so treat it like an absent file and keep only the
-	// tombstone.
+	// A zero-length file carries no version worth preserving, so treat it
+	// like an absent file: [history.Bury] still lands the tombstone when a
+	// sidecar exists.
 	if len(content) == 0 {
 		content = nil
 	}
