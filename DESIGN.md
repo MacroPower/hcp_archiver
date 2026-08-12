@@ -376,8 +376,8 @@ Notes:
     comes back appends its returning content over the tombstone so the
     timeline stays ordered. Each sidecar line is
     `{"fetchedAt": ..., "sha256": <hex>, "content": <file bytes as an escaped JSON string>}`
-    (the roll-up convention: `jq -r 'select(.content) | .content | fromjson'`
-    reproduces the file, and the sha256 matches the ledger signature) or
+    (the roll-up convention: `jq -r 'select(.content) | .content'` emits the
+    file bytes verbatim, and the sha256 matches the ledger signature) or
     `{"fetchedAt": <observed at>, "deleted": true}`. Not every mutable-labeled
     object reaches this seam: the workspace readme is fetched once through the
     blob path and never refreshed, so it supersedes nothing. Cheap metadata

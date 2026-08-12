@@ -14,9 +14,10 @@
 //
 // Each record is one JSON line. A content record carries the superseded bytes
 // verbatim as an escaped JSON string (the same convention as the seal
-// roll-ups), so the recorded sha256 is taken over the exact original bytes and
-// `jq -r '.content | fromjson'` reproduces the file. A tombstone record
-// carries only the observation time and "deleted": true. Appends ride
+// roll-ups), so the recorded sha256 is taken over the exact original bytes
+// and `jq -r 'select(.content) | .content'` emits the file verbatim. A
+// tombstone record carries only the observation time and "deleted": true.
+// Appends ride
 // [go.jacobcolvin.com/hcp_archiver/atomicfile.Append], so a record commits on
 // a newline boundary and a torn tail from a crash is repaired by the next
 // append and ignored by reads.

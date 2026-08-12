@@ -391,8 +391,8 @@ Layout rules worth knowing:
   a tombstone line (`"deleted": true`) if the object disappears upstream; the
   last-known file itself is never removed. Objects that never change grow no
   sidecar. Each line carries the original bytes verbatim, so
-  `jq -r 'select(.content) | .content | fromjson' variables.history.ndjson`
-  reproduces any retained version exactly.
+  `jq -r 'select(.content) | .content' variables.history.ndjson` reproduces
+  any retained version exactly, byte for byte.
 
 ## Limitations
 
