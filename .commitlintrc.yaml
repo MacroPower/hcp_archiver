@@ -30,6 +30,7 @@ rules:
       - config
       - deps
       - fsid
+      - history
       - logtest
       - manifest
       - orgscope
