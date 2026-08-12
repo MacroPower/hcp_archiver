@@ -341,6 +341,7 @@ Settings are grouped by how much they vary; see
     ├── 📁 workspaces/<ws-name>/
     │   ├── 📄 workspace.json            # full settings + project ref
     │   ├── 📄 variables.json            # sensitive values read back blank upstream
+    │   ├── 📄 *.history.ndjson          # superseded versions + tombstones, per changed object
     │   ├── 📄 readme.md                 # workspace README
     │   ├── 📄 tags.json                 # workspace tags
     │   ├── 📄 team-access.json          # workspace RBAC
@@ -384,14 +385,14 @@ Layout rules worth knowing:
   key, so resume and incremental re-run are unaffected.
 - **Re-runs keep every version of mutable metadata.** When a re-run finds a
   settings file changed upstream (an edited variable, a renamed workspace),
-  the outgoing content is appended to an append-only history sidecar beside
-  the file before the new content replaces it: `variables.json` gains
+  the outgoing content is appended to a history sidecar beside the file
+  before the new content replaces it: `variables.json` gains
   `variables.history.ndjson`, holding every superseded version in order plus
   a tombstone line (`"deleted": true`) if the object disappears upstream; the
   last-known file itself is never removed. Objects that never change grow no
   sidecar. Each line carries the original bytes verbatim, so
-  `jq -r '.content | fromjson' variables.history.ndjson` reproduces any
-  retained version exactly.
+  `jq -r 'select(.content) | .content | fromjson' variables.history.ndjson`
+  reproduces any retained version exactly.
 
 ## Limitations
 
@@ -431,8 +432,9 @@ for a best-effort snapshot.
 - **Resumable and re-runnable.** A durable manifest records per-object status,
   content signatures, and per-collection high-water marks. Re-invoking against
   an existing archive skips what is done or permanently gone, retries what
-  errored, appends what is new, and refreshes mutable metadata, without
-  re-downloading immutable blobs.
+  errored, appends what is new, and refreshes mutable metadata (retaining
+  every superseded version in a history sidecar), without re-downloading
+  immutable blobs.
 - **Live progress.** The run reports forward motion to stderr, in a
   human-readable form on a TTY and as one JSON object per line for CI or a
   watcher, with a final per-status summary.

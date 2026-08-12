@@ -42,7 +42,8 @@
 // Mutable objects with no natural watermark (settings, variables, team
 // access, tag bindings, notification configurations, registry metadata) are
 // re-read and atomically overwritten only when the content signature shows the
-// payload differs; that overwrite records a fresh fetch time. Cheap metadata is
+// payload differs; that overwrite records a fresh fetch time, and the outgoing
+// version is retained in a history sidecar beside the object. Cheap metadata is
 // always refreshed; heavy blobs never are.
 //
 // # Durability and the shared tally

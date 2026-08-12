@@ -1,7 +1,8 @@
 // Package orgscope archives the objects an organization owns directly,
 // independent of any single project. It runs once per organization and treats
 // this metadata as mutable: it re-reads the metadata and overwrites the stored
-// copy when the payload changes, rather than tracking a watermark.
+// copy when the payload changes, retaining the outgoing version in a history
+// sidecar beside the object, rather than tracking a watermark.
 //
 // The surface covers the organization record itself; teams with their
 // organization-access matrix, members, and SSO/SCIM linkage, plus their team-

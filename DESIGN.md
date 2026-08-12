@@ -376,8 +376,8 @@ Notes:
     comes back appends its returning content over the tombstone so the
     timeline stays ordered. Each sidecar line is
     `{"fetchedAt": ..., "sha256": <hex>, "content": <file bytes as an escaped JSON string>}`
-    (the roll-up convention: `jq -r '.content | fromjson'` reproduces the
-    file, and the sha256 matches the ledger signature) or
+    (the roll-up convention: `jq -r 'select(.content) | .content | fromjson'`
+    reproduces the file, and the sha256 matches the ledger signature) or
     `{"fetchedAt": <observed at>, "deleted": true}`. Not every mutable-labeled
     object reaches this seam: the workspace readme is fetched once through the
     blob path and never refreshed, so it supersedes nothing. Cheap metadata
@@ -616,12 +616,12 @@ invisible to the collector.
 
   The gate also composes with `Mutable`'s history retention without touching
   it: the skip fires only when the fresh payload is byte-identical to the
-  recorded signature, so nothing was superseded and no sidecar line is owed.
-  A mutable file that legitimately changes after its seal writes loose again
-  and re-freezes on the next seal, so its versions supersede through the
-  roll-up's own newest-line-per-path rule rather than a sidecar; the sidecar
-  covers the in-flight stretch before the first seal, the roll-up the frozen
-  history after it.
+  recorded signature, so nothing was superseded and no history-sidecar line is
+  owed. A mutable file that legitimately changes after its seal writes loose
+  again and re-freezes on the next seal, so its versions supersede through the
+  roll-up's own newest-line-per-path rule rather than a history sidecar; the
+  history sidecar covers the in-flight stretch before the first seal, the
+  roll-up the frozen history after it.
 
 A sidecar index (`<bundle>.sidecar.ndjson`) sits beside each bundle, outside it:
 one NDJSON line per member, with exactly the fields `name`, `bundle`, `method`,
@@ -1027,11 +1027,11 @@ lifecycle rules or backup.
 
 History sidecars ride the loose tier: they sync to the mirror like any other
 file and are never bundled, coalesced, or evicted. The one residue they add: a
-run observed in-flight across two archive runs grows
-`runs/<id>/run.history.ndjson`, which stays loose after the terminal
-`run.json` coalesces, so that run's directory survives the seal's pruning. The
-sidecar is the status timeline nothing else keeps, and the residue is bounded
-by runs actually caught mid-flight, not by run history.
+run observed in-flight across two archive runs, with a summary that changed
+between them, grows `runs/<id>/run.history.ndjson`, which stays loose after
+the terminal `run.json` coalesces, so that run's directory survives the seal's
+pruning. The sidecar is the status timeline nothing else keeps, and the
+residue is bounded by runs actually caught mid-flight, not by run history.
 
 At 1000 workspaces x 200 frozen runs x 30 state versions (config-version tarballs
 excluded, equal either way), coalescing without the runs roll-up already holds
@@ -1056,8 +1056,9 @@ projects/<project>/workspaces/<ws>/
                                                              #   grown only by objects that actually changed
   runs/<run-id>/run.json                                     # loose while in flight; terminal runs coalesce
                                                              #   into rollups/runs.ndjson, emptied dirs pruned
-  runs/<run-id>/run.history.ndjson                           # only for runs caught mid-flight across runs;
-                                                             #   stays loose after the seal, keeping its dir
+  runs/<run-id>/run.history.ndjson                           # only for runs whose summary changed across
+                                                             #   two archive runs; stays loose after the
+                                                             #   seal, keeping its dir
   .ledger/
     snapshot.json                                            # ledger shard, keys = relpaths
     log.ndjson                                               #   append-only; compacts when log > snapshot

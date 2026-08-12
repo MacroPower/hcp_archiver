@@ -6,11 +6,10 @@
 // only when its content changes, and a caller that opts in (see [WithHistory])
 // has the outgoing content appended to an append-only history sidecar beside
 // the object (variables.json gains variables.history.ndjson) before the
-// overwrite, so no version the archive ever held is lost to a refresh. Callers
-// reach the filesystem only
-// through this package, so the layout is the archive's single naming authority,
-// and the relative path it computes doubles as the opaque key the ledger records
-// an object under.
+// overwrite, so no version the archive ever held is lost to a refresh.
+// Callers reach the filesystem only through this package, so the layout is
+// the archive's single naming authority, and the relative path it computes
+// doubles as the opaque key the ledger records an object under.
 //
 // # Layout rules
 //
