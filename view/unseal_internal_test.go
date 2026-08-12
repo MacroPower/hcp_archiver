@@ -48,7 +48,7 @@ func TestListScreenUnsealKeyPushesPrompt(t *testing.T) {
 	cmd := pressOn(s, tea.Key{Code: 'u', Text: "u"})
 	require.NotNil(t, cmd)
 
-	msg, ok := cmd().(pushMsg)
+	msg, ok := execPush(t, cmd).(pushMsg)
 	require.True(t, ok, "u on an unsealable row descends into the prompt")
 	assert.Equal(t, prompt, msg.s)
 }
@@ -118,7 +118,7 @@ func TestUnsealPromptScreen(t *testing.T) {
 		cmd := pressOn(s, tea.Key{Code: tea.KeyEnter})
 		require.NotNil(t, cmd)
 
-		msg, ok := cmd().(pushMsg)
+		msg, ok := execPush(t, cmd).(pushMsg)
 		require.True(t, ok)
 		assert.Equal(t, progress, msg.s)
 		assert.Equal(t, "/tmp/default", started, "the pre-filled default is confirmed as-is")
