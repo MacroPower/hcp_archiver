@@ -924,6 +924,35 @@ func TestSyncArchiveTarballCrashAfterUploadEvictsWithoutReupload(t *testing.T) {
 	assert.False(t, f.exists(t, relPath), "the local tarball is still evicted")
 }
 
+func TestSyncArchiveHistorySidecarSyncsAndSurvivesPrune(t *testing.T) {
+	t.Parallel()
+
+	// A history sidecar is a regular archive file: it mirrors under its own
+	// key, and while the local file backs it no prune touches the remote
+	// copy. Append-only means a stale remote copy is only ever older, so
+	// the plain sweep (no eager path) is the right freshness.
+	f := newSyncFixture(t)
+	st := f.store
+
+	sidecar := st.HistoryPath(st.WorkspaceFile("prod", "api", "variables.json"))
+	f.write(t, sidecar, []byte(`{"deleted":true}`+"\n"))
+
+	f.resume()
+
+	stats := f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+
+	_, ok := f.fake.Object(f.key(sidecar))
+	assert.True(t, ok, "the sidecar mirrors under its own key")
+
+	stats = f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+	assert.Zero(t, stats.Pruned, "a locally backed sidecar is never pruned")
+
+	_, ok = f.fake.Object(f.key(sidecar))
+	assert.True(t, ok, "the remote copy survives the second sweep")
+}
+
 func TestSyncArchivePrunesStaleRemoteKeys(t *testing.T) {
 	t.Parallel()
 

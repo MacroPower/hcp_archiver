@@ -403,6 +403,45 @@ func TestSealWorkspace_CoalescesTerminalRunJSON(t *testing.T) {
 		"the emptied runs dir is pruned")
 }
 
+func TestSealWorkspace_LeavesRunHistorySidecarLoose(t *testing.T) {
+	t.Parallel()
+
+	// A run observed in-flight across two archive runs grows a history
+	// sidecar beside its run.json. The seal coalesces the terminal summary
+	// but must leave the sidecar loose: it is the status timeline nothing
+	// else keeps, so it is never bundled, never rolled up, and never
+	// removed, and the run dir it keeps non-empty survives as accepted
+	// residue.
+	f := newSealFixture(t)
+	st := f.store
+	project, ws := "prod", "api"
+
+	relPath := st.RunFile(project, ws, "run-1", "run.json")
+	f.writeDone(t, relPath, runJSON("applied"))
+
+	sidecar := st.HistoryPath(relPath)
+	sidecarLine := `{"fetchedAt":"2026-08-11T09:00:00Z","sha256":"ab","content":"{}"}` + "\n"
+
+	_, err := st.WriteBytes(sidecar, []byte(sidecarLine))
+	require.NoError(t, err)
+
+	f.markComplete(project, ws)
+
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	assert.False(t, f.exists(relPath), "the terminal summary coalesces away")
+	assert.Equal(t, runJSON("applied"),
+		rollupContent(t, f.store, project, ws, "runs.ndjson", relPath))
+
+	assert.True(t, f.exists(sidecar), "the run's history sidecar stays loose")
+	assert.Empty(t, rollupLines(t, f.store, project, ws, "runs.ndjson", sidecar),
+		"the sidecar is never rolled up")
+	assert.False(t, f.exists(st.Join(st.BundleDir(project, ws), "logs.gen0001.zip")),
+		"the sidecar is never bundled")
+	assert.True(t, f.exists(st.RunDir(project, ws, "run-1")),
+		"a run dir still holding its sidecar is not pruned")
+}
+
 func TestSealWorkspace_RunJSONStaysLoose(t *testing.T) {
 	t.Parallel()
 
