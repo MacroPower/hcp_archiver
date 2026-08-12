@@ -382,6 +382,16 @@ Layout rules worth knowing:
   (`runs.ndjson` among them); an in-flight run's `run.json` stays loose until
   the run reaches a terminal state. Every object keeps its stable path as the
   key, so resume and incremental re-run are unaffected.
+- **Re-runs keep every version of mutable metadata.** When a re-run finds a
+  settings file changed upstream (an edited variable, a renamed workspace),
+  the outgoing content is appended to an append-only history sidecar beside
+  the file before the new content replaces it: `variables.json` gains
+  `variables.history.ndjson`, holding every superseded version in order plus
+  a tombstone line (`"deleted": true`) if the object disappears upstream; the
+  last-known file itself is never removed. Objects that never change grow no
+  sidecar. Each line carries the original bytes verbatim, so
+  `jq -r '.content | fromjson' variables.history.ndjson` reproduces any
+  retained version exactly.
 
 ## Limitations
 

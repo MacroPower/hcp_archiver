@@ -358,12 +358,30 @@ Notes:
     they carry no per-entry id to stop at, so their high-water mark is a `Since`
     time cursor and the re-run walks forward from it, not newest-first (see the
     Audit collector).
-  - **Mutable, re-fetched and overwritten** (org/project/workspace settings,
-    variables, team access, tag bindings, notification configs, registry
-    metadata): these have no natural watermark, so a re-run re-reads them and
-    atomic-overwrites the JSON when the payload differs, recording a new
-    `fetchedAt` in the manifest. Cheap metadata reads are always refreshed;
-    heavy blob downloads never are.
+  - **Mutable, re-fetched and superseded into history** (org/project/workspace
+    settings, variables, team access, tag bindings, notification configs,
+    registry metadata): these have no natural watermark, so a re-run re-reads
+    them and atomic-overwrites the JSON when the payload differs, recording a
+    new `fetchedAt` in the manifest. The overwrite never loses information:
+    every byte sequence the archive ever held at a mutable path stays
+    recoverable, the newest from the file itself and every superseded one from
+    an append-only NDJSON sidecar beside it (`variables.json` gains
+    `variables.history.ndjson`), in order. On a changed write the outgoing
+    bytes append to the sidecar _before_ the new bytes rename into place, so a
+    crash between the two costs a duplicate-checked retry, never a lost
+    version; first writes and unchanged re-reads append nothing, so an object
+    that never changes never grows a sidecar. An object that disappears
+    upstream (a confirmed 404 after a good archive) keeps its last-known file
+    and appends a tombstone (nothing local is ever removed), and one that
+    comes back appends its returning content over the tombstone so the
+    timeline stays ordered. Each sidecar line is
+    `{"fetchedAt": ..., "sha256": <hex>, "content": <file bytes as an escaped JSON string>}`
+    (the roll-up convention: `jq -r '.content | fromjson'` reproduces the
+    file, and the sha256 matches the ledger signature) or
+    `{"fetchedAt": <observed at>, "deleted": true}`. Not every mutable-labeled
+    object reaches this seam: the workspace readme is fetched once through the
+    blob path and never refreshed, so it supersedes nothing. Cheap metadata
+    reads are always refreshed; heavy blob downloads never are.
   - The manifest records a top-level `lastRunAt` / `runCount` and, per object,
     `fetchedAt` + a content signature (size or hash) so a re-run can tell
     "unchanged" from "updated" without diffing files. Not point-in-time
@@ -595,6 +613,15 @@ invisible to the collector.
   file existence, is the record — and with the ledger's own "deleting
   `.ledger/` forgets" stance (deleting the shard re-materializes the file once,
   and the next seal appends a duplicate-content line readers dedupe).
+
+  The gate also composes with `Mutable`'s history retention without touching
+  it: the skip fires only when the fresh payload is byte-identical to the
+  recorded signature, so nothing was superseded and no sidecar line is owed.
+  A mutable file that legitimately changes after its seal writes loose again
+  and re-freezes on the next seal, so its versions supersede through the
+  roll-up's own newest-line-per-path rule rather than a sidecar; the sidecar
+  covers the in-flight stretch before the first seal, the roll-up the frozen
+  history after it.
 
 A sidecar index (`<bundle>.sidecar.ndjson`) sits beside each bundle, outside it:
 one NDJSON line per member, with exactly the fields `name`, `bundle`, `method`,
@@ -992,11 +1019,19 @@ The tool writes every row below as local files; the "Backup tier" column is
 the object-store tier each kind maps onto, as set by an operator's own
 lifecycle rules or backup.
 
-| Tier                      | Objects                                                                                                                                                                     | Backup tier  | Form                                                              |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------- |
-| Loose, mutable, greppable | the 9 per-ws settings files (`workspace.json`, `variables.json`, `tags.json`, team access, notification configs, ...), in-flight `run.json`, ledger shards, sidecar indexes | Standard     | one file per relpath                                              |
-| Coalesced roll-ups        | the 7 immutable run children + state-version `meta.json` + the `run.json` of settled terminal runs (an in-flight run's stays loose until it freezes)                        | Standard     | per-ws `*.ndjson`, keyed by relpath                               |
-| Cold bundles              | `plan.log` / `plan.json` / `apply.log` / `cost-estimate.log` / `policy-check-*.log`; raw + json state                                                                       | Deep Archive | write-once generational `logs.zip` + `state.zip`, sidecar-indexed |
+| Tier                      | Objects                                                                                                                                                                                                            | Backup tier  | Form                                                              |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------ | ----------------------------------------------------------------- |
+| Loose, mutable, greppable | the 9 per-ws settings files (`workspace.json`, `variables.json`, `tags.json`, team access, notification configs, ...), in-flight `run.json`, history sidecars (`*.history.ndjson`), ledger shards, sidecar indexes | Standard     | one file per relpath                                              |
+| Coalesced roll-ups        | the 7 immutable run children + state-version `meta.json` + the `run.json` of settled terminal runs (an in-flight run's stays loose until it freezes)                                                               | Standard     | per-ws `*.ndjson`, keyed by relpath                               |
+| Cold bundles              | `plan.log` / `plan.json` / `apply.log` / `cost-estimate.log` / `policy-check-*.log`; raw + json state                                                                                                              | Deep Archive | write-once generational `logs.zip` + `state.zip`, sidecar-indexed |
+
+History sidecars ride the loose tier: they sync to the mirror like any other
+file and are never bundled, coalesced, or evicted. The one residue they add: a
+run observed in-flight across two archive runs grows
+`runs/<id>/run.history.ndjson`, which stays loose after the terminal
+`run.json` coalesces, so that run's directory survives the seal's pruning. The
+sidecar is the status timeline nothing else keeps, and the residue is bounded
+by runs actually caught mid-flight, not by run history.
 
 At 1000 workspaces x 200 frozen runs x 30 state versions (config-version tarballs
 excluded, equal either way), coalescing without the runs roll-up already holds
@@ -1017,8 +1052,12 @@ which moves only payload GB, the part an archive tier already prices near zero.
 ```
 projects/<project>/workspaces/<ws>/
   workspace.json  variables.json  readme.md  tags.json ...   # loose, mutable
+  variables.history.ndjson ...                               # superseded versions + tombstones, append-only;
+                                                             #   grown only by objects that actually changed
   runs/<run-id>/run.json                                     # loose while in flight; terminal runs coalesce
                                                              #   into rollups/runs.ndjson, emptied dirs pruned
+  runs/<run-id>/run.history.ndjson                           # only for runs caught mid-flight across runs;
+                                                             #   stays loose after the seal, keeping its dir
   .ledger/
     snapshot.json                                            # ledger shard, keys = relpaths
     log.ndjson                                               #   append-only; compacts when log > snapshot
