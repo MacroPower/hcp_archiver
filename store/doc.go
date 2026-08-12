@@ -3,7 +3,11 @@
 // project, workspace, state version, run, or one of their children) to a stable
 // relative path under the archive root, and writes JSON payloads and raw blob
 // streams to those paths atomically. Mutable metadata is overwritten in place
-// only when its content changes. Callers reach the filesystem only
+// only when its content changes, and a caller that opts in (see [WithHistory])
+// has the outgoing content appended to an append-only history sidecar beside
+// the object (variables.json gains variables.history.ndjson) before the
+// overwrite, so no version the archive ever held is lost to a refresh. Callers
+// reach the filesystem only
 // through this package, so the layout is the archive's single naming authority,
 // and the relative path it computes doubles as the opaque key the ledger records
 // an object under.

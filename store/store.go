@@ -104,7 +104,19 @@ func (s *Store) WriteJSON(relPath string, v any) (WriteResult, error) {
 // [WriteResult] reports Changed false with the current signature; otherwise the
 // bytes are committed atomically and Changed is true. The signature is computed
 // over the payload either way.
-func (s *Store) WriteJSONBytes(relPath string, data []byte) (WriteResult, error) {
+//
+// Under [WithHistory] a changed commit first appends the outgoing content to
+// the object's history sidecar, and any commit landing over a trailing
+// tombstone closes it with the incoming content; a history append that does
+// not land fails the whole write with the file untouched, so a superseded
+// version is never silently lost.
+func (s *Store) WriteJSONBytes(relPath string, data []byte, opts ...WriteOption) (WriteResult, error) {
+	var cfg writeConfig
+
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	res := WriteResult{
 		SHA256: sum(data),
 		Size:   int64(len(data)),
@@ -114,13 +126,22 @@ func (s *Store) WriteJSONBytes(relPath string, data []byte) (WriteResult, error)
 
 	//nolint:gosec // Path is composed by the store from the confined archive root.
 	existing, readErr := os.ReadFile(abs)
-
-	switch {
-	case readErr == nil && bytes.Equal(existing, data):
-		return res, nil
-	case readErr != nil && !errors.Is(readErr, fs.ErrNotExist):
+	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
 		return WriteResult{}, fmt.Errorf("read existing %q: %w", relPath, readErr)
-	default:
+	}
+
+	existed := readErr == nil
+	changed := !existed || !bytes.Equal(existing, data)
+
+	if cfg.history {
+		err := s.retainHistory(relPath, abs, existing, data, changed, existed, &cfg)
+		if err != nil {
+			return WriteResult{}, err
+		}
+	}
+
+	if !changed {
+		return res, nil
 	}
 
 	err := atomicfile.WriteFile(abs, data)

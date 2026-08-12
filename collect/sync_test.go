@@ -394,6 +394,7 @@ func TestSyncArchiveMirrorsEveryMeaningfulFile(t *testing.T) {
 	seed(st.RunFile(project, ws, "run-1", "run.json"), "RunFile", "RunDir")
 	seed(st.RunFile(project, ws, "run-1", "plan.log"))
 	seed(st.Join(st.RollupDir(project, ws), "runs.ndjson"), "RollupDir")
+	seed(st.HistoryPath(st.WorkspaceFile(project, ws, "variables.json")), "HistoryPath")
 
 	// Stacks, down to the per-step artifacts.
 	seed(st.StackFile(project, stack, "stack.json"), "StackFile", "StackDir")
@@ -449,6 +450,7 @@ func TestSyncArchiveMirrorsEveryMeaningfulFile(t *testing.T) {
 		"WriteJSONBytes": {}, // writer, not a path builder
 		"WriteBytes":     {}, // writer, not a path builder
 		"WriteReader":    {}, // writer, not a path builder
+		"BuryHistory":    {}, // writer, not a path builder
 	}
 
 	for method := range reflect.TypeFor[*store.Store]().Methods() {
