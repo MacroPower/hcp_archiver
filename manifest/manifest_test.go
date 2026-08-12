@@ -130,6 +130,21 @@ func TestLoad_UnknownStatus(t *testing.T) {
 	require.ErrorIs(t, err, manifest.ErrCorruptManifest)
 }
 
+func TestLedger_Now(t *testing.T) {
+	t.Parallel()
+
+	// One injected clock times the whole run: a caller stamping history
+	// sidecar lines through Now reads the same instants the ledger records.
+	now := time.Date(2026, time.July, 8, 12, 0, 0, 0, time.UTC)
+
+	ledger, err := manifest.Load(t.TempDir(), manifest.WithClock(fixedClock(now)))
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, ledger.Close()) })
+
+	assert.Equal(t, now, ledger.Now())
+}
+
 func TestLedger_RoundTrip(t *testing.T) {
 	t.Parallel()
 

@@ -768,6 +768,13 @@ func (l *Ledger) EntryDurable(relPath string) bool {
 	return !inflight
 }
 
+// Now returns the ledger's clock reading, so one injected clock times the
+// whole run: history sidecar lines stamped through it carry the same
+// deterministic instants as the ledger's own records under [WithClock].
+func (l *Ledger) Now() time.Time {
+	return l.now()
+}
+
 // RecordDone records a successful fetch of relPath with its content signature.
 func (l *Ledger) RecordDone(relPath string, sig Signature) {
 	stored := sig
