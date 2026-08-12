@@ -6,12 +6,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/serialize"
 	"go.jacobcolvin.com/hcp_archiver/store"
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
+)
+
+// retention says what a JSON archive write does with the content it replaces.
+type retention int
+
+const (
+	// Keep only the current content: the file is the whole record.
+	// [Env.Object] uses it; an immutable object is never re-fetched, so
+	// nothing is ever replaced.
+	retainCurrent retention = iota
+	// Supersede replaced content into the object's history sidecar and
+	// record disappearances there as tombstones. [Env.Mutable] uses it, so
+	// a re-run never loses a version a prior run archived.
+	retainHistory
 )
 
 // Object archives a single immutable object at relPath.
@@ -31,7 +46,7 @@ func (e *Env) Object(ctx context.Context, relPath string, fetch func(context.Con
 		return nil
 	}
 
-	return e.archiveJSON(ctx, relPath, fetch)
+	return e.archiveJSON(ctx, relPath, fetch, retainCurrent)
 }
 
 // Mutable archives a single mutable metadata object at relPath.
@@ -44,6 +59,16 @@ func (e *Env) Object(ctx context.Context, relPath string, fetch func(context.Con
 // that finds no change costs only the fetch. Error handling matches
 // [Env.Object].
 //
+// A refresh never loses a version: when the payload changed, the outgoing
+// content is appended to an append-only history sidecar beside the object
+// (variables.json gains variables.history.ndjson) before the new bytes rename
+// into place, so every superseded version stays recoverable in order. An
+// object that disappears upstream (a confirmed 404 after a good archive)
+// keeps its last-known file and records a tombstone in the sidecar, once per
+// disappearance; one that comes back appends its returning content over the
+// tombstone so the timeline stays ordered. An object that never changes never
+// grows a sidecar.
+//
 // A re-read whose payload is byte-identical to what the ledger records done is
 // not re-materialized when the loose file is absent: that is the fingerprint
 // of an object sealed elsewhere (a terminal run.json coalesced into a
@@ -52,7 +77,7 @@ func (e *Env) Object(ctx context.Context, relPath string, fetch func(context.Con
 // — consistent with [Env.Object] — so a hand-deleted, unchanged mutable file
 // also stays deleted. A changed payload always writes.
 func (e *Env) Mutable(ctx context.Context, relPath string, fetch func(context.Context) (any, error)) error {
-	return e.archiveJSON(ctx, relPath, fetch)
+	return e.archiveJSON(ctx, relPath, fetch, retainHistory)
 }
 
 // Blob archives a single immutable blob at relPath, streaming it from fetch's
@@ -321,10 +346,24 @@ func Confirmed[T any](ctx context.Context, e *Env, fetch func(context.Context) (
 }
 
 // archiveJSON runs fetch, serializes and writes the value, and records the
-// object, the shared body of [Env.Object] and [Env.Mutable].
-func (e *Env) archiveJSON(ctx context.Context, relPath string, fetch func(context.Context) (any, error)) error {
+// object, the shared body of [Env.Object] and [Env.Mutable]; keep decides
+// whether replaced content supersedes into the object's history sidecar.
+func (e *Env) archiveJSON(
+	ctx context.Context,
+	relPath string,
+	fetch func(context.Context) (any, error),
+	keep retention,
+) error {
 	v, err := fetchConfirmed(ctx, e, fetch)
 	if err != nil {
+		// A history-kept object that answered a confirmed 404 records its
+		// disappearance before e.fail overwrites the entry's FetchedAt (see
+		// [manifest.Ledger.RecordAbsent]); a cancellation records nothing, so
+		// it buries nothing.
+		if keep == retainHistory && ctx.Err() == nil && tfeclient.IsTerminal(err) {
+			e.buryHistory(ctx, relPath)
+		}
+
 		return e.fail(ctx, relPath, err)
 	}
 
@@ -337,7 +376,7 @@ func (e *Env) archiveJSON(ctx context.Context, relPath string, fetch func(contex
 		return nil
 	}
 
-	res, err := e.store.WriteJSONBytes(relPath, data)
+	res, err := e.store.WriteJSONBytes(relPath, data, e.historyOpts(relPath, keep)...)
 	if err != nil {
 		return e.failWrite(ctx, relPath, err)
 	}
@@ -345,6 +384,47 @@ func (e *Env) archiveJSON(ctx context.Context, relPath string, fetch func(contex
 	e.recordDone(ctx, relPath, res)
 
 	return nil
+}
+
+// historyOpts builds the write options carrying history retention for one
+// JSON commit: nil for retainCurrent, and otherwise [store.WithHistory] over
+// the entry's pre-write FetchedAt (still the prior run's fetch time, because
+// the write happens before recordDone refreshes it) and the ledger's clock.
+func (e *Env) historyOpts(relPath string, keep retention) []store.WriteOption {
+	if keep != retainHistory {
+		return nil
+	}
+
+	var fetchedAt time.Time
+
+	if entry, ok := e.ledger.Entry(relPath); ok {
+		fetchedAt = entry.FetchedAt
+	}
+
+	return []store.WriteOption{store.WithHistory(fetchedAt, e.ledger.Now())}
+}
+
+// buryHistory records an observed disappearance in the object's history
+// sidecar (see [store.Store.BuryHistory]). It must run before the failure is
+// recorded, while the entry's FetchedAt still holds the last good fetch time;
+// on the second and later 404 runs that field holds the prior RecordAbsent
+// time instead, which is harmless because the bury no-ops once the sidecar's
+// newest record is a tombstone. An append that does not land only warns: the
+// disk is unchanged, so the next run's bury re-fires.
+func (e *Env) buryHistory(ctx context.Context, relPath string) {
+	var fetchedAt time.Time
+
+	if entry, ok := e.ledger.Entry(relPath); ok {
+		fetchedAt = entry.FetchedAt
+	}
+
+	_, err := e.store.BuryHistory(relPath, fetchedAt, e.ledger.Now())
+	if err != nil {
+		e.logger.LogAttrs(ctx, slog.LevelWarn, "history_bury_error",
+			slog.String("path", relPath),
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // sealedElsewhere reports whether the freshly marshaled payload at relPath is
@@ -361,6 +441,10 @@ func (e *Env) archiveJSON(ctx context.Context, relPath string, fetch func(contex
 // different payload. A stat error on the loose file fails open — the object is
 // treated as present and the write proceeds — so only a clean "absent" report
 // gates the skip.
+//
+// The skip fires only when the fresh payload is byte-identical to the
+// recorded signature: nothing was superseded, so it returns before the write
+// path's history retention and appends nothing to a sidecar.
 func (e *Env) sealedElsewhere(relPath string, data []byte) bool {
 	entry, ok := e.ledger.Entry(relPath)
 	if !ok || entry.Status != manifest.StatusDone || entry.Signature == nil || entry.Signature.Hash == "" {
@@ -404,7 +488,9 @@ func (e *Env) recordDone(ctx context.Context, relPath string, res store.WriteRes
 // the object absent — settled and sticky — so the caller must have run the
 // read through [Confirmed] and let it re-probe the 404 in-run first; a denial
 // records the object forbidden; anything else records it errored so a re-run
-// retries. Only a cancellation of ctx propagates.
+// retries. Only a cancellation of ctx propagates. No history tombstone is
+// recorded here: the callers feed immutable derived files, which keep only
+// their current content (see [Env.Mutable] for the history semantics).
 func (e *Env) RecordFailure(ctx context.Context, relPath string, cause error) error {
 	if !e.ledger.ShouldFetch(relPath) {
 		return nil

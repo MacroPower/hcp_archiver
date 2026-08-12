@@ -18,7 +18,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/history"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/serialize"
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
@@ -56,6 +58,36 @@ func cannedProject() *tfe.Project {
 		Name:                 "example",
 		DefaultExecutionMode: "remote",
 	}
+}
+
+// sidecarExists reports whether the object at relPath grew a history sidecar.
+func sidecarExists(t *testing.T, st *store.Store, relPath string) bool {
+	t.Helper()
+
+	present, err := st.Exists(st.HistoryPath(relPath))
+	require.NoError(t, err)
+
+	return present
+}
+
+// sidecarRecords parses the object's history sidecar, oldest record first.
+func sidecarRecords(t *testing.T, st *store.Store, relPath string) []history.Record {
+	t.Helper()
+
+	data, err := os.ReadFile(st.AbsPath(st.HistoryPath(relPath)))
+	require.NoError(t, err)
+
+	var out []history.Record
+
+	for line := range strings.SplitSeq(strings.TrimSuffix(string(data), "\n"), "\n") {
+		var rec history.Record
+
+		require.NoError(t, json.Unmarshal([]byte(line), &rec))
+
+		out = append(out, rec)
+	}
+
+	return out
 }
 
 // timeoutError is a net.Error whose timeout classifies as transient.
@@ -261,6 +293,9 @@ func TestEnvMutableSealedElsewhereSkipsWrite(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, before.Attempts, after.Attempts,
 		"the skip leaves the entry untouched rather than churning Attempts")
+
+	assert.False(t, sidecarExists(t, st, relPath),
+		"an unchanged skip supersedes nothing and grows no sidecar")
 }
 
 func TestEnvMutableSealedElsewhereWritesChangedPayload(t *testing.T) {
@@ -292,6 +327,9 @@ func TestEnvMutableSealedElsewhereWritesChangedPayload(t *testing.T) {
 	entry, ok := ledger.Entry(relPath)
 	require.True(t, ok)
 	assert.Equal(t, manifest.StatusDone, entry.Status)
+
+	assert.False(t, sidecarExists(t, st, relPath),
+		"the sealed prior version lives in the roll-up, not a sidecar")
 }
 
 func TestEnvMutableSealedElsewhereFilePresentDedupes(t *testing.T) {
@@ -317,6 +355,9 @@ func TestEnvMutableSealedElsewhereFilePresentDedupes(t *testing.T) {
 	entry, ok := ledger.Entry(relPath)
 	require.True(t, ok)
 	assert.Equal(t, 2, entry.Attempts, "a present file re-records normally")
+
+	assert.False(t, sidecarExists(t, st, relPath),
+		"an unchanged re-read appends nothing")
 }
 
 func TestEnvMutableSealedElsewhereStatErrorFailsOpen(t *testing.T) {
@@ -354,6 +395,269 @@ func TestEnvMutableSealedElsewhereStatErrorFailsOpen(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, manifest.StatusErrored, entry.Status,
 		"an unverifiable absence proceeds to the write, whose failure is recorded")
+}
+
+func TestEnvMutableRetainsSupersededContent(t *testing.T) {
+	t.Parallel()
+
+	// The variable-edit case: a value changed in TFC between runs must leave
+	// the prior version recoverable from the history sidecar.
+	const relPath = "projects/example/workspaces/ws/variables.json"
+
+	env, st, ledger := newEnv(t)
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return cannedProject(), nil
+	}))
+
+	assert.False(t, sidecarExists(t, st, relPath), "a first write grows no sidecar")
+
+	prior, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+
+	edited := cannedProject()
+	edited.Name = "renamed"
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return edited, nil
+	}))
+
+	want, err := serialize.Marshal(cannedProject())
+	require.NoError(t, err)
+
+	recs := sidecarRecords(t, st, relPath)
+	require.Len(t, recs, 1)
+	assert.Equal(t, string(want), recs[0].Content,
+		"the sidecar holds the superseded payload byte for byte")
+	assert.Equal(t, prior.FetchedAt, recs[0].FetchedAt,
+		"stamped with the prior run's recorded fetch time")
+
+	// An unchanged re-read costs only the fetch and appends nothing.
+	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return edited, nil
+	}))
+
+	assert.Len(t, sidecarRecords(t, st, relPath), 1)
+}
+
+func TestEnvObjectKeepsNoHistory(t *testing.T) {
+	t.Parallel()
+
+	// The immutable path keeps only its current content: even a changed
+	// overwrite (an errored entry re-fetched with different bytes) grows no
+	// sidecar.
+	const relPath = "projects/example/project.json"
+
+	env, st, ledger := newEnv(t)
+
+	require.NoError(t, env.Object(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return cannedProject(), nil
+	}))
+
+	ledger.RecordErrored(relPath, errors.New("boom"), true)
+
+	changed := cannedProject()
+	changed.Name = "renamed"
+
+	require.NoError(t, env.Object(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return changed, nil
+	}))
+
+	assert.False(t, sidecarExists(t, st, relPath))
+}
+
+func TestEnvMutableAbsentBuriesOnce(t *testing.T) {
+	t.Parallel()
+
+	// A mutable object deleted upstream: the last-known content and a single
+	// tombstone land in the sidecar, the file stays on disk, and the re-run
+	// that re-404s appends nothing more.
+	const relPath = "projects/example/workspaces/ws/tags.json"
+
+	env, st, ledger := newEnv(t)
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return cannedProject(), nil
+	}))
+
+	notFound := func(_ context.Context) (any, error) {
+		return nil, tfe.ErrResourceNotFound
+	}
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, notFound))
+
+	entry, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusAbsent, entry.Status)
+
+	want, err := serialize.Marshal(cannedProject())
+	require.NoError(t, err)
+
+	recs := sidecarRecords(t, st, relPath)
+	require.Len(t, recs, 2)
+	assert.Equal(t, string(want), recs[0].Content, "the last-known content is flushed first")
+	assert.True(t, recs[1].Deleted, "the tombstone closes the timeline")
+
+	exists, err := st.Exists(relPath)
+	require.NoError(t, err)
+	assert.True(t, exists, "the last-known file is never removed")
+
+	// Mutable re-404s every run; only the first observation records.
+	require.NoError(t, env.Mutable(t.Context(), relPath, notFound))
+	assert.Len(t, sidecarRecords(t, st, relPath), 2)
+}
+
+func TestEnvMutableAbsentUnknownObjectCreatesNoSidecar(t *testing.T) {
+	t.Parallel()
+
+	// An object that 404s without ever having been archived has nothing to
+	// bury: no file, no sidecar, and none may be created.
+	const relPath = "projects/example/workspaces/ws/variables.json"
+
+	env, st, ledger := newEnv(t)
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return nil, tfe.ErrResourceNotFound
+	}))
+
+	entry, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusAbsent, entry.Status)
+
+	assert.False(t, sidecarExists(t, st, relPath))
+}
+
+func TestEnvMutableReappearsAfterTombstone(t *testing.T) {
+	t.Parallel()
+
+	const relPath = "projects/example/workspaces/ws/variables.json"
+
+	tests := map[string]struct {
+		reappear func() *tfe.Project
+	}{
+		"with the same content": {
+			reappear: cannedProject,
+		},
+		"with changed content": {
+			reappear: func() *tfe.Project {
+				p := cannedProject()
+				p.Name = "renamed"
+
+				return p
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env, st, ledger := newEnv(t)
+
+			require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+				return cannedProject(), nil
+			}))
+
+			notFound := func(_ context.Context) (any, error) {
+				return nil, tfe.ErrResourceNotFound
+			}
+
+			require.NoError(t, env.Mutable(t.Context(), relPath, notFound))
+
+			// The object comes back: the returning content must append over
+			// the tombstone so the timeline stays ordered, whether or not
+			// the bytes changed.
+			returning := tc.reappear()
+
+			require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+				return returning, nil
+			}))
+
+			want, err := serialize.Marshal(returning)
+			require.NoError(t, err)
+
+			recs := sidecarRecords(t, st, relPath)
+			require.Len(t, recs, 3)
+			assert.True(t, recs[1].Deleted)
+			assert.Equal(t, string(want), recs[2].Content,
+				"the returning content closes the deletion")
+
+			got, err := os.ReadFile(st.AbsPath(relPath))
+			require.NoError(t, err)
+			assert.Equal(t, want, got, "the file holds the returning content")
+
+			entry, ok := ledger.Entry(relPath)
+			require.True(t, ok)
+			assert.Equal(t, manifest.StatusDone, entry.Status)
+
+			// A second disappearance is a fresh observation and records again.
+			require.NoError(t, env.Mutable(t.Context(), relPath, notFound))
+
+			recs = sidecarRecords(t, st, relPath)
+			require.Len(t, recs, 4)
+			assert.True(t, recs[3].Deleted, "the second disappearance appends its own tombstone")
+		})
+	}
+}
+
+func TestEnvMutableCancellationSkipsBury(t *testing.T) {
+	t.Parallel()
+
+	// A wind-down records no outcome, so it must bury nothing either: the
+	// object may be fine, and the next run will tell.
+	const relPath = "projects/example/workspaces/ws/variables.json"
+
+	env, st, _ := newEnv(t)
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return cannedProject(), nil
+	}))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := env.Mutable(ctx, relPath, func(_ context.Context) (any, error) {
+		return nil, tfe.ErrResourceNotFound
+	})
+	require.ErrorIs(t, err, context.Canceled)
+
+	assert.False(t, sidecarExists(t, st, relPath))
+}
+
+func TestEnvMutableHistoryFailureRecordsErrored(t *testing.T) {
+	t.Parallel()
+
+	// A history append that cannot land fails the whole write: the object
+	// records errored so a re-run retries, and the file keeps its old
+	// content rather than losing the superseded version.
+	const relPath = "projects/example/workspaces/ws/variables.json"
+
+	env, st, ledger := newEnv(t)
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return cannedProject(), nil
+	}))
+
+	// A directory squatting on the sidecar path makes the append fail.
+	require.NoError(t, os.MkdirAll(st.AbsPath(st.HistoryPath(relPath)), 0o700))
+
+	changed := cannedProject()
+	changed.Name = "renamed"
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return changed, nil
+	}))
+
+	entry, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, entry.Status)
+
+	want, err := serialize.Marshal(cannedProject())
+	require.NoError(t, err)
+
+	got, err := os.ReadFile(st.AbsPath(relPath))
+	require.NoError(t, err)
+	assert.Equal(t, want, got, "the file keeps the old content")
 }
 
 func TestEnvBytes(t *testing.T) {
