@@ -78,6 +78,8 @@ func buildArchive(t *testing.T) string {
 	writeFile(t, org, wsDir+"/runs/run-old/run.json",
 		runJSON("run-old", "errored", "2024-01-01T10:00:00Z"))
 	writeFile(t, org, wsDir+"/runs/run-old/comments.json", `{"data":[]}`)
+	writeFile(t, org, wsDir+"/runs/run-old/run.history.ndjson",
+		`{"fetchedAt":"2024-01-01T09:00:00Z","deleted":true}`+"\n")
 
 	// sv-2: newest, fully loose.
 	writeFile(t, org, wsDir+"/state-versions/20240102T030405Z-sv-2.meta.json",
@@ -311,10 +313,11 @@ func TestRunArtifacts(t *testing.T) {
 				wsDir + "/runs/run-new/config-version.json",
 			},
 		},
-		"run.json is excluded": {
+		"run.json is excluded, its history sidecar lists": {
 			runID: "run-old",
 			want: []string{
 				wsDir + "/runs/run-old/comments.json",
+				wsDir + "/runs/run-old/run.history.ndjson",
 			},
 		},
 	}

@@ -53,7 +53,7 @@ func (s *Store) HistoryPath(relPath string) string {
 // absence re-probes. The object file itself is left in place; nothing local
 // is ever removed. The flushed content is stamped fetchedAt, falling back to
 // the file's modification time when zero. It reports whether anything was
-// appended.
+// appended; the report is meaningful only when err is nil.
 func (s *Store) BuryHistory(relPath string, fetchedAt, deletedAt time.Time) (bool, error) {
 	abs := s.AbsPath(relPath)
 
@@ -65,6 +65,14 @@ func (s *Store) BuryHistory(relPath string, fetchedAt, deletedAt time.Time) (boo
 		content = nil
 	case err != nil:
 		return false, fmt.Errorf("read %q to bury: %w", relPath, err)
+	}
+
+	// A zero-length file carries no version to flush: a content record whose
+	// content field is omitted would read back indistinguishable from a
+	// malformed line, so treat it like an absent file and keep only the
+	// tombstone.
+	if len(content) == 0 {
+		content = nil
 	}
 
 	if fetchedAt.IsZero() && content != nil {
@@ -80,19 +88,20 @@ func (s *Store) BuryHistory(relPath string, fetchedAt, deletedAt time.Time) (boo
 }
 
 // retainHistory runs the history side of one [Store.WriteJSONBytes] commit
-// (see [WithHistory]): a changed write over an existing file supersedes the
-// outgoing content, then any trailing tombstone is closed with the incoming
-// content. Every error returns before the caller renames, so a version is
-// never lost to a write that could not record it.
+// (see [WithHistory]): when supersede is set (a changed write over an
+// existing file) the outgoing content is appended first, then any trailing
+// tombstone is closed with the incoming content. Every error returns before
+// the caller renames, so a version is never lost to a write that could not
+// record it.
 func (s *Store) retainHistory(
 	relPath, abs string,
 	existing, data []byte,
-	changed, existed bool,
+	supersede bool,
 	cfg *writeConfig,
 ) error {
 	sidecar := s.AbsPath(s.HistoryPath(relPath))
 
-	if changed && existed {
+	if supersede {
 		fetchedAt := cfg.fetchedAt
 		if fetchedAt.IsZero() {
 			fetchedAt = modTime(abs)

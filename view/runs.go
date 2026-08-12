@@ -66,6 +66,7 @@ var (
 		{"policy-checks.json", "Sentinel policy checks"},
 		{"task-stages.json", "task stages and results"},
 		{"tf-policy-outcomes.json", "native Terraform policy outcomes"},
+		{"run.history.ndjson", "superseded run.json versions and tombstones"},
 	}
 
 	// RunArtifactRank maps each ranked artifact leaf to its reading order,

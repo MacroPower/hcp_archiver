@@ -768,9 +768,9 @@ func (l *Ledger) EntryDurable(relPath string) bool {
 	return !inflight
 }
 
-// Now returns the ledger's clock reading, so one injected clock times the
-// whole run: history sidecar lines stamped through it carry the same
-// deterministic instants as the ledger's own records under [WithClock].
+// Now returns the ledger's clock reading, so a caller stamping records of
+// its own shares the run's single clock and stays deterministic under
+// [WithClock].
 func (l *Ledger) Now() time.Time {
 	return l.now()
 }

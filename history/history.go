@@ -18,8 +18,8 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 )
 
-// Suffix is the filename suffix of every history sidecar. [Path] derives a
-// sidecar name with it; sweeps that classify archive files match on it.
+// Suffix is the filename suffix of every history sidecar; [Path] derives a
+// sidecar name with it.
 const Suffix = ".history.ndjson"
 
 // seedWindow is the initial backward-read window of a sidecar scan, doubling
@@ -82,11 +82,16 @@ func Supersede(path string, content []byte, fetchedAt time.Time) (bool, error) {
 		return false, nil
 	}
 
-	return true, appendRecord(path, &Record{
+	err = appendRecord(path, &Record{
 		FetchedAt: fetchedAt,
 		SHA256:    sha,
 		Content:   string(content),
 	})
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 // Restore appends content only when the sidecar's newest record is a
@@ -108,11 +113,16 @@ func Restore(path string, content []byte, fetchedAt time.Time) (bool, error) {
 		return false, ErrContentNotUTF8
 	}
 
-	return true, appendRecord(path, &Record{
+	err = appendRecord(path, &Record{
 		FetchedAt: fetchedAt,
 		SHA256:    sum(content),
 		Content:   string(content),
 	})
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 // Bury records an observed disappearance: it flushes the object's last-known
@@ -127,7 +137,8 @@ func Restore(path string, content []byte, fetchedAt time.Time) (bool, error) {
 // sidecar however often it re-probes 404. A crash between the flush and the
 // tombstone is healed on retry: the flush dedupes against the committed tail
 // and only the tombstone is appended. It reports whether anything was
-// appended.
+// appended; the report is meaningful only when err is nil, since a tombstone
+// append can fail after the flush landed.
 func Bury(path string, content []byte, fetchedAt, deletedAt time.Time) (bool, error) {
 	newest, ok, err := Newest(path)
 	if err != nil {
@@ -143,16 +154,21 @@ func Bury(path string, content []byte, fetchedAt, deletedAt time.Time) (bool, er
 	}
 
 	if content != nil {
-		flushed, err := Supersede(path, content, fetchedAt)
+		_, err = Supersede(path, content, fetchedAt)
 		if err != nil {
-			return flushed, err
+			return false, err
 		}
 	}
 
-	return true, appendRecord(path, &Record{
+	err = appendRecord(path, &Record{
 		FetchedAt: deletedAt,
 		Deleted:   true,
 	})
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 // Newest returns the sidecar's newest committed record and whether one

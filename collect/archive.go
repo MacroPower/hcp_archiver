@@ -20,8 +20,9 @@ type retention int
 
 const (
 	// Keep only the current content: the file is the whole record.
-	// [Env.Object] uses it; an immutable object is never re-fetched, so
-	// nothing is ever replaced.
+	// [Env.Object] uses it, so even a retry that rewrites an object (an
+	// errored entry re-fetched with different bytes) leaves no superseded
+	// copy behind.
 	retainCurrent retention = iota
 	// Supersede replaced content into the object's history sidecar and
 	// record disappearances there as tombstones. [Env.Mutable] uses it, so
@@ -395,13 +396,20 @@ func (e *Env) historyOpts(relPath string, keep retention) []store.WriteOption {
 		return nil
 	}
 
-	var fetchedAt time.Time
+	return []store.WriteOption{store.WithHistory(e.entryFetchedAt(relPath), e.ledger.Now())}
+}
 
-	if entry, ok := e.ledger.Entry(relPath); ok {
-		fetchedAt = entry.FetchedAt
+// entryFetchedAt returns the fetch time the ledger currently records for
+// relPath, or the zero time when no entry exists. Read before an outcome is
+// recorded, it is the prior run's fetch time: the stamp superseded and buried
+// content carries.
+func (e *Env) entryFetchedAt(relPath string) time.Time {
+	entry, ok := e.ledger.Entry(relPath)
+	if !ok {
+		return time.Time{}
 	}
 
-	return []store.WriteOption{store.WithHistory(fetchedAt, e.ledger.Now())}
+	return entry.FetchedAt
 }
 
 // buryHistory records an observed disappearance in the object's history
@@ -412,13 +420,7 @@ func (e *Env) historyOpts(relPath string, keep retention) []store.WriteOption {
 // newest record is a tombstone. An append that does not land only warns: the
 // disk is unchanged, so the next run's bury re-fires.
 func (e *Env) buryHistory(ctx context.Context, relPath string) {
-	var fetchedAt time.Time
-
-	if entry, ok := e.ledger.Entry(relPath); ok {
-		fetchedAt = entry.FetchedAt
-	}
-
-	_, err := e.store.BuryHistory(relPath, fetchedAt, e.ledger.Now())
+	_, err := e.store.BuryHistory(relPath, e.entryFetchedAt(relPath), e.ledger.Now())
 	if err != nil {
 		e.logger.LogAttrs(ctx, slog.LevelWarn, "history_bury_error",
 			slog.String("path", relPath),

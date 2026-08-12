@@ -158,8 +158,8 @@ func TestStore_WriteJSONBytes_WithHistory(t *testing.T) {
 func TestStore_WriteJSONBytes_DefaultKeepsNoHistory(t *testing.T) {
 	t.Parallel()
 
-	// Without the option the old behavior holds exactly: changed content
-	// overwrites and nothing else is written.
+	// Without the option a commit only overwrites: changed content replaces
+	// the file and nothing else is written.
 	const relPath = "org.json"
 
 	s := store.New(t.TempDir())

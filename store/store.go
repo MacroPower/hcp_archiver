@@ -134,7 +134,7 @@ func (s *Store) WriteJSONBytes(relPath string, data []byte, opts ...WriteOption)
 	changed := !existed || !bytes.Equal(existing, data)
 
 	if cfg.history {
-		err := s.retainHistory(relPath, abs, existing, data, changed, existed, &cfg)
+		err := s.retainHistory(relPath, abs, existing, data, changed && existed, &cfg)
 		if err != nil {
 			return WriteResult{}, err
 		}

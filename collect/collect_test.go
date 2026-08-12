@@ -37,10 +37,22 @@ func fixedClock() func() time.Time {
 func newEnv(t *testing.T, opts ...collect.Option) (*collect.Env, *store.Store, *manifest.Ledger) {
 	t.Helper()
 
+	at := time.Date(2026, time.July, 8, 12, 0, 0, 0, time.UTC)
+
+	return newEnvAt(t, &at, opts...)
+}
+
+// newEnvAt builds an [collect.Env] whose ledger clock reads *now on every
+// call, so a test can advance time between runs and pin which instant a
+// history record carries rather than watching every stamp collapse onto one
+// fixed value.
+func newEnvAt(t *testing.T, now *time.Time, opts ...collect.Option) (*collect.Env, *store.Store, *manifest.Ledger) {
+	t.Helper()
+
 	root := t.TempDir()
 	st := store.New(root)
 
-	ledger, err := manifest.Load(st.Root(), manifest.WithClock(fixedClock()))
+	ledger, err := manifest.Load(st.Root(), manifest.WithClock(func() time.Time { return *now }))
 	require.NoError(t, err)
 
 	// A zero confirm delay keeps the 404-confirming re-probe from sleeping in
@@ -400,11 +412,14 @@ func TestEnvMutableSealedElsewhereStatErrorFailsOpen(t *testing.T) {
 func TestEnvMutableRetainsSupersededContent(t *testing.T) {
 	t.Parallel()
 
-	// The variable-edit case: a value changed in TFC between runs must leave
-	// the prior version recoverable from the history sidecar.
+	// An object edited upstream between runs (the variables.json case) must
+	// leave the prior version recoverable from the history sidecar.
 	const relPath = "projects/example/workspaces/ws/variables.json"
 
-	env, st, ledger := newEnv(t)
+	firstRun := time.Date(2026, time.July, 8, 12, 0, 0, 0, time.UTC)
+	now := firstRun
+
+	env, st, ledger := newEnvAt(t, &now)
 
 	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
 		return cannedProject(), nil
@@ -414,6 +429,11 @@ func TestEnvMutableRetainsSupersededContent(t *testing.T) {
 
 	prior, ok := ledger.Entry(relPath)
 	require.True(t, ok)
+	require.Equal(t, firstRun, prior.FetchedAt)
+
+	// The clock advances between runs, so the superseded stamp below is
+	// provably the prior run's fetch time, not the refreshing run's now.
+	now = firstRun.Add(24 * time.Hour)
 
 	edited := cannedProject()
 	edited.Name = "renamed"
@@ -429,8 +449,8 @@ func TestEnvMutableRetainsSupersededContent(t *testing.T) {
 	require.Len(t, recs, 1)
 	assert.Equal(t, string(want), recs[0].Content,
 		"the sidecar holds the superseded payload byte for byte")
-	assert.Equal(t, prior.FetchedAt, recs[0].FetchedAt,
-		"stamped with the prior run's recorded fetch time")
+	assert.Equal(t, firstRun, recs[0].FetchedAt,
+		"stamped with the prior run's recorded fetch time, not the refreshing run's clock")
 
 	// An unchanged re-read costs only the fetch and appends nothing.
 	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
@@ -474,7 +494,10 @@ func TestEnvMutableAbsentBuriesOnce(t *testing.T) {
 	// that re-404s appends nothing more.
 	const relPath = "projects/example/workspaces/ws/tags.json"
 
-	env, st, ledger := newEnv(t)
+	firstRun := time.Date(2026, time.July, 8, 12, 0, 0, 0, time.UTC)
+	now := firstRun
+
+	env, st, ledger := newEnvAt(t, &now)
 
 	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
 		return cannedProject(), nil
@@ -483,6 +506,12 @@ func TestEnvMutableAbsentBuriesOnce(t *testing.T) {
 	notFound := func(_ context.Context) (any, error) {
 		return nil, tfe.ErrResourceNotFound
 	}
+
+	// The clock advances before the disappearance, so the two stamps below
+	// are provably distinct: the flushed content carries its fetch time, the
+	// tombstone the observation time.
+	observedAt := firstRun.Add(24 * time.Hour)
+	now = observedAt
 
 	require.NoError(t, env.Mutable(t.Context(), relPath, notFound))
 
@@ -496,13 +525,17 @@ func TestEnvMutableAbsentBuriesOnce(t *testing.T) {
 	recs := sidecarRecords(t, st, relPath)
 	require.Len(t, recs, 2)
 	assert.Equal(t, string(want), recs[0].Content, "the last-known content is flushed first")
+	assert.Equal(t, firstRun, recs[0].FetchedAt, "the flushed content carries its fetch time")
 	assert.True(t, recs[1].Deleted, "the tombstone closes the timeline")
+	assert.Equal(t, observedAt, recs[1].FetchedAt, "the tombstone carries the observation time")
 
 	exists, err := st.Exists(relPath)
 	require.NoError(t, err)
 	assert.True(t, exists, "the last-known file is never removed")
 
 	// Mutable re-404s every run; only the first observation records.
+	now = observedAt.Add(24 * time.Hour)
+
 	require.NoError(t, env.Mutable(t.Context(), relPath, notFound))
 	assert.Len(t, sidecarRecords(t, st, relPath), 2)
 }
