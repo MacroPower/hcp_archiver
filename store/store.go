@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -26,17 +27,45 @@ import (
 //
 // Create instances with [New].
 type Store struct {
+	// The logger history sidecar scans report skipped records through.
+	logger *slog.Logger
 	// The organization's archive directory, e.g. <outputDir>/<org>.
 	root string
+}
+
+// Option configures a [Store] passed to [New].
+//
+// The available options are:
+//   - [WithLogger]
+type Option func(*Store)
+
+// WithLogger sets the structured logger the history sidecars report non-fatal
+// damage through (a committed record skipped because it does not parse),
+// overriding [slog.Default]. A nil logger keeps the default. It returns an
+// [Option].
+func WithLogger(logger *slog.Logger) Option {
+	return func(s *Store) {
+		if logger != nil {
+			s.logger = logger
+		}
+	}
 }
 
 // New creates a new [Store] rooted at root.
 //
 // The archiver builds one Store per organization, so root is typically
 // <outputDir>/<org>. The directory need not exist; write methods create any
-// missing parent as they commit.
-func New(root string) *Store {
-	return &Store{root: root}
+// missing parent as they commit. The options carry what the Store cannot
+// derive from its root, currently only where its history sidecars report
+// damage they walk past.
+func New(root string, opts ...Option) *Store {
+	s := &Store{logger: slog.Default(), root: root}
+
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	return s
 }
 
 // Root returns the absolute archive root the Store was created with.

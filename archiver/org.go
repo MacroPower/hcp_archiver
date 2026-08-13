@@ -80,7 +80,7 @@ func listOrgNames(ctx context.Context, client *tfeclient.Client) ([]string, erro
 // The int result is how many files the close sweep failed to mirror, so the
 // caller sees the sweep's outcome alongside the tally.
 func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, int, error) {
-	st := store.New(filepath.Join(a.cfg.OutputDir, orgName))
+	st := store.New(filepath.Join(a.cfg.OutputDir, orgName), store.WithLogger(a.logger))
 	envOpts := []collect.Option{collect.WithLogger(a.logger)}
 
 	if a.remote != nil {

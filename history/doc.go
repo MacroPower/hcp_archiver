@@ -38,11 +38,20 @@
 // though it returned after the deletion. A sidecar with a damaged line is
 // therefore a timeline to read skeptically, not one to trust for order.
 //
-// The damaged bytes stay on disk and can be recovered by hand, but nothing
-// announces them: this package takes no logger, so a skip is silent and the
-// damage surfaces only to whoever reads the sidecar. That is weaker than
-// [go.jacobcolvin.com/hcp_archiver/manifest]'s write-ahead log, which warns
-// when it truncates at damage.
+// The damaged bytes stay on disk and can be recovered by hand, and a skip is
+// announced rather than silent: a scan that walks past one warns through its
+// logger (see [WithLogger]) with the sidecar's path, how many lines it
+// skipped, and the file offset of the newest, which is enough to seek to the
+// damage and read whatever is left of it. The warning is one aggregated
+// record per scan, so a wholly rotted sidecar costs a line of log rather
+// than thousands.
+//
+// It reports what a scan walked past, not what a sidecar holds. A scan stops
+// at the record it was looking for and never reads the bytes behind it, so
+// damage sitting under an intact answer goes unmentioned until some later
+// scan reaches it. Auditing a sidecar means reading the whole file; this
+// warning is narrower and more urgent than that, since it says a read the
+// archive just performed was already reading past damage.
 //
 // The append path is not safe for concurrent writers of one sidecar:
 // [go.jacobcolvin.com/hcp_archiver/atomicfile.Append] truncates and rewrites

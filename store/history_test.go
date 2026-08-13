@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.jacobcolvin.com/hcp_archiver/history"
+	"go.jacobcolvin.com/hcp_archiver/logtest"
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
@@ -33,6 +34,37 @@ func historyRecords(t *testing.T, s *store.Store, relPath string) []history.Reco
 	}
 
 	return out
+}
+
+// damageSidecar appends a committed line that does not parse to the object's
+// history sidecar, creating the sidecar when the object has none yet.
+func damageSidecar(t *testing.T, s *store.Store, relPath string) {
+	t.Helper()
+
+	abs := s.AbsPath(s.HistoryPath(relPath))
+
+	f, err := os.OpenFile(abs, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	require.NoError(t, err)
+
+	_, err = f.WriteString("{\"fetchedAt\":\"2026-08-13T00:00:00Z\",\"sha\xff\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+}
+
+// rotNewestLine rewrites a sidecar's newest committed line so it no longer
+// parses, putting the damage on a record that already carries meaning.
+func rotNewestLine(t *testing.T, abs string) {
+	t.Helper()
+
+	data, err := os.ReadFile(abs)
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	require.NotEmpty(t, lines)
+
+	lines[len(lines)-1] = "{\"fetchedAt\":\"2026-08-13T00:00:00Z\",\"sha\xff"
+
+	require.NoError(t, os.WriteFile(abs, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
 }
 
 // sidecarExists reports whether the object at relPath has a history sidecar.
@@ -287,6 +319,94 @@ func TestStore_WriteJSONBytes_DefaultKeepsNoHistory(t *testing.T) {
 	assert.True(t, res.Changed)
 
 	assert.False(t, sidecarExists(t, s, relPath))
+}
+
+func TestStore_HistoryLoggerReachesHistory(t *testing.T) {
+	t.Parallel()
+
+	// The sidecar's absolute path is the operator-facing value of the event
+	// and the one thing the store composes, so every call site is exercised
+	// through the logger it was handed.
+	const relPath = "projects/p/workspaces/ws/variables.json"
+
+	fetchedAt := time.Date(2026, time.August, 11, 9, 0, 0, 0, time.UTC)
+	now := fetchedAt.Add(24 * time.Hour)
+	v1 := []byte("{\n  \"v\": 1\n}")
+	v2 := []byte("{\n  \"v\": 2\n}")
+
+	tests := map[string]struct {
+		run  func(t *testing.T, s *store.Store)
+		want int
+	}{
+		"supersede on a changed commit": {
+			run: func(t *testing.T, s *store.Store) {
+				t.Helper()
+
+				_, err := s.WriteJSONBytes(relPath, v1, store.WithHistory(time.Time{}, fetchedAt))
+				require.NoError(t, err)
+
+				damageSidecar(t, s, relPath)
+
+				// The superseded record lands over the damage, so the close
+				// that follows matches it without reading any further.
+				_, err = s.WriteJSONBytes(relPath, v2, store.WithHistory(fetchedAt, now))
+				require.NoError(t, err)
+			},
+			want: 1,
+		},
+		"close on an unchanged commit": {
+			run: func(t *testing.T, s *store.Store) {
+				t.Helper()
+
+				_, err := s.WriteJSONBytes(relPath, v1, store.WithHistory(time.Time{}, fetchedAt))
+				require.NoError(t, err)
+
+				_, err = s.BuryHistory(relPath, fetchedAt, now)
+				require.NoError(t, err)
+
+				rotNewestLine(t, s.AbsPath(s.HistoryPath(relPath)))
+
+				// Re-committing the same bytes leaves only the tombstone
+				// close to run, so the event can come from nowhere else.
+				_, err = s.WriteJSONBytes(relPath, v1, store.WithHistory(fetchedAt, now))
+				require.NoError(t, err)
+			},
+			want: 1,
+		},
+		"bury scans twice": {
+			run: func(t *testing.T, s *store.Store) {
+				t.Helper()
+
+				_, err := s.WriteJSONBytes(relPath, v1, store.WithHistory(time.Time{}, fetchedAt))
+				require.NoError(t, err)
+
+				damageSidecar(t, s, relPath)
+
+				_, err = s.BuryHistory(relPath, fetchedAt, now)
+				require.NoError(t, err)
+			},
+			want: 2,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := logtest.NewRecorder()
+			s := store.New(t.TempDir(), store.WithLogger(rec.Logger()))
+
+			tc.run(t, s)
+
+			events := rec.Events("history_records_skipped")
+			require.Len(t, events, tc.want)
+
+			for _, e := range events {
+				assert.Equal(t, s.AbsPath(s.HistoryPath(relPath)), e.Attrs["path"],
+					"the event names the sidecar's absolute path")
+			}
+		})
+	}
 }
 
 func TestStore_BuryHistory(t *testing.T) {

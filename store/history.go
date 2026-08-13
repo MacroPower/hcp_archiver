@@ -86,7 +86,10 @@ func (s *Store) BuryHistory(relPath string, fetchedAt, deletedAt time.Time) (boo
 		fetchedAt = modTime(abs)
 	}
 
-	buried, err := history.Bury(s.AbsPath(s.HistoryPath(relPath)), content, fetchedAt, deletedAt)
+	buried, err := history.Bury(
+		s.AbsPath(s.HistoryPath(relPath)), content, fetchedAt, deletedAt,
+		history.WithLogger(s.logger),
+	)
 	if err != nil {
 		return false, fmt.Errorf("retain history %q: %w", relPath, err)
 	}
@@ -114,7 +117,8 @@ func (s *Store) supersedeHistory(relPath, abs string, existing []byte, cfg *writ
 		fetchedAt = modTime(abs)
 	}
 
-	_, err := history.Supersede(s.AbsPath(s.HistoryPath(relPath)), existing, fetchedAt)
+	_, err := history.Supersede(s.AbsPath(s.HistoryPath(relPath)), existing, fetchedAt,
+		history.WithLogger(s.logger))
 	if err != nil {
 		return fmt.Errorf("retain history %q: %w", relPath, err)
 	}
@@ -138,7 +142,8 @@ func (s *Store) supersedeHistory(relPath, abs string, existing []byte, cfg *writ
 // should the object disappear first, [history.Bury] flushes the unrecorded
 // content ahead of its tombstone.
 func (s *Store) restoreHistory(relPath string, data []byte, cfg *writeConfig) error {
-	_, err := history.Restore(s.AbsPath(s.HistoryPath(relPath)), data, cfg.now)
+	_, err := history.Restore(s.AbsPath(s.HistoryPath(relPath)), data, cfg.now,
+		history.WithLogger(s.logger))
 	if err != nil {
 		return fmt.Errorf("%w: %q: %w", ErrHistoryNotClosed, relPath, err)
 	}
