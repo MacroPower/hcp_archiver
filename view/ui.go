@@ -232,7 +232,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(build, grace)
 
 	case loadGraceMsg:
-		if m.loading == 0 {
+		// A grace timer is never canceled, so one armed by a settled load can
+		// still fire while a later load is in flight. Starting a chain from it
+		// while the spinner already ticks would leave two chains running, each
+		// re-arming the other's frame: the indicator would spin at twice the
+		// rate and the pair would never rejoin. Only a grace that finds the
+		// indicator dark starts one.
+		if m.loading == 0 || m.spinning {
 			return m, nil
 		}
 

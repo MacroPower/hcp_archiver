@@ -200,6 +200,34 @@ func TestModelGraceAfterSettledLoadStaysQuiet(t *testing.T) {
 	assert.NotContains(t, m.View().Content, "loading")
 }
 
+func TestModelStaleGraceStartsNoSecondSpinnerChain(t *testing.T) {
+	t.Parallel()
+
+	// Two navigations inside the grace window: the first load settles, the
+	// second arms its own timer, and the first load's timer is still pending.
+	// Both fire while the second build is in flight, and the stale one must
+	// not start a chain of its own beside the one already ticking.
+	m := newTestModel(stubScreen{name: "root"})
+
+	first := push(func() (screen, error) { return stubScreen{name: "first"}, nil })
+	firstStart := announce(t, first)
+
+	m.Update(firstStart)
+	m.Update(firstStart.build())
+
+	second := push(func() (screen, error) { return stubScreen{name: "second"}, nil })
+
+	m.Update(announce(t, second))
+
+	_, tick := m.Update(loadGraceMsg{})
+	require.NotNil(t, tick, "the first grace to arrive starts the chain")
+	require.True(t, m.spinning)
+
+	_, stale := m.Update(loadGraceMsg{})
+	assert.Nil(t, stale, "a second grace rides the running chain rather than forking one")
+	assert.True(t, m.spinning, "the indicator stays up for the load still in flight")
+}
+
 func TestModelLoadErrorSurfacesOnStatusLine(t *testing.T) {
 	t.Parallel()
 
