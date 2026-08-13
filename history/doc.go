@@ -22,6 +22,28 @@
 // a newline boundary and a torn tail from a crash is repaired by the next
 // append and ignored by reads.
 //
+// A committed line that does not parse is skipped rather than failing the
+// read, matching the resilience the archive's other NDJSON readers take
+// against bit rot and partial restores. Failing instead would be far worse:
+// the scan runs on the write path, so one damaged line would fail every
+// future commit of the object and freeze the file it sits beside.
+//
+// Skipping is not free, and the cost is ordering rather than bytes. Every
+// intact record stays on disk and every version stays recoverable, but the
+// scans that place a new record read past the damage to an older one, so they
+// can misjudge where the tail is: [Supersede] may re-record content the
+// damaged line already carried, [Restore] may not see a damaged tombstone it
+// should close, and damage to the record a [Bury] flushed can put the
+// pre-deletion content back on top of an intact tombstone, where it reads as
+// though it returned after the deletion. A sidecar with a damaged line is
+// therefore a timeline to read skeptically, not one to trust for order.
+//
+// The damaged bytes stay on disk and can be recovered by hand, but nothing
+// announces them: this package takes no logger, so a skip is silent and the
+// damage surfaces only to whoever reads the sidecar. That is weaker than
+// [go.jacobcolvin.com/hcp_archiver/manifest]'s write-ahead log, which warns
+// when it truncates at damage.
+//
 // The append path is not safe for concurrent writers of one sidecar:
 // [go.jacobcolvin.com/hcp_archiver/atomicfile.Append] truncates and rewrites
 // the file's tail, so two concurrent appends could interleave destructively.

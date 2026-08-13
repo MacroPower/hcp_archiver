@@ -174,7 +174,8 @@ func Bury(path string, content []byte, fetchedAt, deletedAt time.Time) (bool, er
 // Newest returns the sidecar's newest committed record and whether one
 // exists. A missing or empty sidecar reports false; a torn fragment past the
 // final newline (a crash mid-append) is ignored, matching what the next
-// append repairs.
+// append repairs, and a committed line that does not parse is skipped rather
+// than failing the read (see the package doc).
 func Newest(path string) (Record, bool, error) {
 	return newestMatching(path, func(*Record) bool { return true })
 }
@@ -215,11 +216,7 @@ func newestMatching(path string, match func(*Record) bool) (Record, bool, error)
 			return Record{}, false, fmt.Errorf("read history %q: %w", path, err)
 		}
 
-		rec, ok, scanErr := scanWindow(buf, off == 0, match)
-		if scanErr != nil {
-			return Record{}, false, fmt.Errorf("parse history %q: %w", path, scanErr)
-		}
-
+		rec, ok := scanWindow(buf, off == 0, match)
 		if ok {
 			return rec, true, nil
 		}
@@ -236,10 +233,14 @@ func newestMatching(path string, match func(*Record) bool) (Record, bool, error)
 // preceding newline to be whole; otherwise the bytes before the window's
 // first newline are the tail of a line the next, larger window will see
 // complete.
-func scanWindow(buf []byte, wholeFile bool, match func(*Record) bool) (Record, bool, error) {
+//
+// A line that does not parse is skipped and the scan keeps walking backward,
+// so damage to one record costs at most the dedupe it would have answered
+// (see the package doc).
+func scanWindow(buf []byte, wholeFile bool, match func(*Record) bool) (Record, bool) {
 	end := bytes.LastIndexByte(buf, '\n')
 	if end < 0 {
-		return Record{}, false, nil
+		return Record{}, false
 	}
 
 	start := 0
@@ -248,7 +249,7 @@ func scanWindow(buf []byte, wholeFile bool, match func(*Record) bool) (Record, b
 	}
 
 	if start >= end {
-		return Record{}, false, nil
+		return Record{}, false
 	}
 
 	lines := bytes.Split(buf[start:end], []byte("\n"))
@@ -262,15 +263,15 @@ func scanWindow(buf []byte, wholeFile bool, match func(*Record) bool) (Record, b
 
 		err := json.Unmarshal(line, &rec)
 		if err != nil {
-			return Record{}, false, fmt.Errorf("record %q: %w", line, err)
+			continue
 		}
 
 		if match(&rec) {
-			return rec, true, nil
+			return rec, true
 		}
 	}
 
-	return Record{}, false, nil
+	return Record{}, false
 }
 
 // appendRecord encodes rec as one newline-terminated JSON line and appends it

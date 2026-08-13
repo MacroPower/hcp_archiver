@@ -382,6 +382,155 @@ func TestNewestIgnoresTornTail(t *testing.T) {
 	assert.Equal(t, "committed", rec.Content, "the torn fragment is ignored")
 }
 
+func TestScanSkipsMalformedRecord(t *testing.T) {
+	t.Parallel()
+
+	at := time.Date(2026, time.August, 12, 9, 0, 0, 0, time.UTC)
+	v1 := []byte("{\n  \"v\": 1\n}")
+	v2 := []byte("{\n  \"v\": 2\n}")
+
+	// A whole line that does not parse is the shape bit rot or a partial
+	// restore leaves behind. Unlike a torn tail it sits behind a newline, so
+	// the scan reaches it and has to decide what to do.
+	damage := func(t *testing.T, path string) {
+		t.Helper()
+
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+		require.NoError(t, err)
+
+		_, err = f.WriteString("{\"fetchedAt\":\"2026-08-13T00:00:00Z\",\"sha\xff\n")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+	}
+
+	// Rewriting the newest committed line in place puts the damage on a
+	// record that already carries meaning, rather than on an extra one
+	// arriving at the end.
+	rotNewest := func(t *testing.T, path string) {
+		t.Helper()
+
+		data, err := os.ReadFile(path)
+		require.NoError(t, err)
+
+		lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+		require.NotEmpty(t, lines)
+
+		lines[len(lines)-1] = "{\"fetchedAt\":\"2026-08-13T00:00:00Z\",\"sha\xff"
+
+		require.NoError(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
+	}
+
+	t.Run("a read walks past the damage to the newest intact record", func(t *testing.T) {
+		t.Parallel()
+
+		path := sidecar(t)
+
+		_, err := history.Supersede(path, v1, at)
+		require.NoError(t, err)
+
+		damage(t, path)
+
+		rec, ok, err := history.Newest(path)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, string(v1), rec.Content)
+	})
+
+	t.Run("the write path keeps working", func(t *testing.T) {
+		t.Parallel()
+
+		// The scan runs on every history-retaining commit, so failing on the
+		// damaged line would freeze the object it sits beside forever.
+		path := sidecar(t)
+
+		_, err := history.Supersede(path, v1, at)
+		require.NoError(t, err)
+
+		damage(t, path)
+
+		appended, err := history.Supersede(path, v2, at.Add(time.Hour))
+		require.NoError(t, err)
+		assert.True(t, appended)
+
+		rec, ok, err := history.Newest(path)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, string(v2), rec.Content)
+	})
+
+	t.Run("dedupe still answers from behind the damage", func(t *testing.T) {
+		t.Parallel()
+
+		path := sidecar(t)
+
+		_, err := history.Supersede(path, v1, at)
+		require.NoError(t, err)
+
+		damage(t, path)
+
+		appended, err := history.Supersede(path, v1, at.Add(time.Hour))
+		require.NoError(t, err)
+		assert.False(t, appended, "the intact record behind the damage still dedupes")
+	})
+
+	t.Run("a damaged tombstone goes unclosed by restore", func(t *testing.T) {
+		t.Parallel()
+
+		// Restore reads past the damage to the content record beneath it, so
+		// it cannot tell the object was ever deleted and declines to close
+		// the deletion. The cost is a missing marker, not a missing version.
+		path := sidecar(t)
+
+		_, err := history.Bury(path, v1, at, at.Add(time.Hour))
+		require.NoError(t, err)
+
+		rotNewest(t, path)
+
+		appended, err := history.Restore(path, v2, at.Add(2*time.Hour))
+		require.NoError(t, err)
+		assert.False(t, appended)
+	})
+
+	t.Run("a damaged tombstone earns a fresh one from bury", func(t *testing.T) {
+		t.Parallel()
+
+		// Bury reads past the damage the same way, so the disappearance it
+		// can no longer see recorded is recorded again rather than dropped.
+		path := sidecar(t)
+
+		_, err := history.Bury(path, v1, at, at.Add(time.Hour))
+		require.NoError(t, err)
+
+		rotNewest(t, path)
+
+		buried, err := history.Bury(path, v1, at, at.Add(2*time.Hour))
+		require.NoError(t, err)
+		assert.True(t, buried)
+
+		rec, ok, err := history.Newest(path)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.True(t, rec.Deleted)
+	})
+
+	t.Run("a wholly unreadable sidecar still appends", func(t *testing.T) {
+		t.Parallel()
+
+		path := sidecar(t)
+
+		damage(t, path)
+
+		appended, err := history.Supersede(path, v1, at)
+		require.NoError(t, err)
+		assert.True(t, appended)
+
+		rec, ok, err := history.Newest(path)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, string(v1), rec.Content)
+	})
+}
+
 func TestNewestLargeRecord(t *testing.T) {
 	t.Parallel()
 
