@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 	"go.jacobcolvin.com/hcp_archiver/serialize"
@@ -21,9 +22,23 @@ import (
 // is joined with every relative path a builder returns, and those relative
 // paths double as the opaque keys the ledger records objects under.
 //
-// A Store is safe for concurrent use: its path builders are pure and its write
-// methods delegate to atomicfile, whose temp-then-rename discipline lets many
-// workers commit into the tree at once.
+// A Store is safe for concurrent use, by two separate mechanisms. Its path
+// builders are pure and a plain write delegates to atomicfile, whose
+// temp-then-rename discipline lets many workers commit into the tree at once. A
+// history-retaining commit ([WithHistory]) is more than that rename: it reads
+// the outgoing bytes, appends them to a sidecar, and only then renames, so
+// concurrent commits of one object would interleave over the sidecar. Those are
+// serialized per object instead, here rather than left to the caller.
+//
+// The second mechanism reaches only the commits that ask for it, so a path is
+// safe under concurrency while every commit of it retains history, or while
+// none does. An object written both ways would let a plain rename land inside a
+// history-retaining commit's critical section, between the read that captures
+// the outgoing bytes and the rename that replaces them, costing the sidecar a
+// generation.
+//
+// The serialization is also process-local, which is the whole scope that needs
+// it: one archiver owns an archive root for the length of a run.
 //
 // Create instances with [New].
 type Store struct {
@@ -31,6 +46,8 @@ type Store struct {
 	logger *slog.Logger
 	// The organization's archive directory, e.g. <outputDir>/<org>.
 	root string
+	// Serializes the commits that touch one object's history sidecar.
+	historyLocks [historyStripes]sync.Mutex
 }
 
 // Option configures a [Store] passed to [New].
@@ -153,6 +170,20 @@ func (s *Store) WriteJSONBytes(relPath string, data []byte, opts ...WriteOption)
 	res := WriteResult{
 		SHA256: sum(data),
 		Size:   int64(len(data)),
+	}
+
+	// A history-retaining commit is a read-modify-write over the sidecar, so it
+	// holds the object's stripe across the whole sequence below: the read of the
+	// outgoing bytes, the supersede that records them, the rename, and the
+	// restore that closes a tombstone. A plain commit needs none of it, the
+	// rename being atomic on its own. That split rests on an object being
+	// written either always with history or always without, which holds because
+	// the retention is fixed per archive primitive rather than per call.
+	if cfg.history {
+		mu := s.historyLock(relPath)
+		mu.Lock()
+
+		defer mu.Unlock()
 	}
 
 	abs := s.AbsPath(relPath)

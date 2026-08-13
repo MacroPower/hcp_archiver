@@ -1,12 +1,16 @@
 package workspace_test
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 
 	"github.com/hashicorp/go-tfe"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
+
+	"go.jacobcolvin.com/hcp_archiver/manifest"
 )
 
 func TestArchiveRunEventsArchivesActors(t *testing.T) {
@@ -37,4 +41,56 @@ func TestArchiveRunEventsArchivesActors(t *testing.T) {
 
 	bob := f.attrs(t, st.User("user-2"), "users", "user-2")
 	assert.Equal(t, "bob", bob["username"])
+}
+
+func TestArchiveUserConcurrentReferencesClaimOneWrite(t *testing.T) {
+	t.Parallel()
+
+	// One creator or actor recurs across the runs of a page and across the
+	// workspaces the shared collector fans out over, so the same user arrives
+	// from many goroutines at once. The claim must hand the write to one of
+	// them and leave the object settled by the time every caller returns: the
+	// reference gate each caller mirrors its write into reads exactly that.
+	f := newWSFixture(t, http.NewServeMux())
+	st := f.store
+
+	user := &tfe.User{ID: "user-1", Username: "alice", Email: "alice@example.com"}
+
+	var g errgroup.Group
+
+	settled := make([]bool, 16)
+
+	for i := range settled {
+		g.Go(func() error {
+			err := f.collector.ArchiveUser(t.Context(), user)
+			if err != nil {
+				return fmt.Errorf("archive user: %w", err)
+			}
+
+			settled[i] = f.status(st.User("user-1")) == manifest.StatusDone
+
+			return nil
+		})
+	}
+
+	require.NoError(t, g.Wait())
+
+	for i, ok := range settled {
+		assert.Truef(t, ok, "caller %d returned before the user settled", i)
+	}
+
+	alice := f.attrs(t, st.User("user-1"), "users", "user-1")
+	assert.Equal(t, "alice", alice["username"])
+
+	exists, err := st.Exists(st.HistoryPath(st.User("user-1")))
+	require.NoError(t, err)
+	assert.False(t, exists, "one write per run leaves nothing to supersede")
+}
+
+func TestArchiveUserNilIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	f := newWSFixture(t, http.NewServeMux())
+
+	require.NoError(t, f.collector.ArchiveUser(t.Context(), nil))
 }

@@ -180,16 +180,25 @@ func (c *Collector) mutable(ctx context.Context, relPath string, value any) erro
 //
 // The go-tfe SDK exposes no user list, only ReadCurrent, so a User hydrated as a
 // run's created-by or a run event's actor is the only path to capturing who ran
-// or confirmed a run; every other reference is a permanently-opaque id. No dedup
-// set is kept: the Collector is shared across concurrent workspace workers, so a
-// shared set would need a lock for little gain, while Mutable already no-ops an
-// unchanged re-write and the store commits each write atomically.
+// or confirmed a run; every other reference is a permanently-opaque id.
+//
+// One user's file is written from everywhere at once: the Collector is shared
+// across concurrent workspace workers, runs archive concurrently within a page,
+// and a creator or actor recurs across both. The file is mutable metadata, so
+// its commit retains history, which is more than the atomic rename covers. The
+// write therefore goes through the run's claim
+// ([collect.Env.ArchiveShared]), which reduces that crowd to a single writer.
 func (c *Collector) archiveUser(ctx context.Context, u *tfe.User) error {
 	if u == nil {
 		return nil
 	}
 
-	return c.mutable(ctx, c.env.Store().User(u.ID), u)
+	relPath := c.env.Store().User(u.ID)
+
+	//nolint:wrapcheck // The claim is transparent; mutable wraps with the path context.
+	return c.env.ArchiveShared(ctx, relPath, func(ctx context.Context) error {
+		return c.mutable(ctx, relPath, u)
+	})
 }
 
 // doRead runs read through the shared client so it passes the rate governor,

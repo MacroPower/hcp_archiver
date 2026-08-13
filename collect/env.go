@@ -58,8 +58,11 @@ const DefaultConcurrency = 16
 // through this type, which keeps the per-object archive policy in one place.
 //
 // An Env is safe for concurrent use: the client, store, and ledger it wraps are
-// each concurrency-safe, so the orchestrator can share one Env across the
-// workspace workers it runs in parallel. Create instances with [NewEnv].
+// each concurrency-safe, and the state an Env keeps itself is guarded, so the
+// orchestrator can share one across the workspace workers it runs in parallel.
+// Chief among that state are the run's directory identities ([Env.ClaimDir])
+// and its claim over the objects several collections address at once
+// ([Env.ArchiveShared]). Create instances with [NewEnv].
 type Env struct {
 	client             *tfeclient.Client
 	store              *store.Store
@@ -67,10 +70,12 @@ type Env struct {
 	remote             *remote.Client
 	logger             *slog.Logger
 	idOwners           map[string]map[string]string
+	shared             map[string]*sharedOnce
 	eagerSem           *semaphore.Weighted
 	remoteOrg          string
 	remoteCfg          remote.Config
 	idMu               sync.Mutex
+	sharedMu           sync.Mutex
 	eagerFailed        atomic.Int64
 	remoteTally        remoteTally
 	blobRetries        int
@@ -168,6 +173,7 @@ func NewEnv(client *tfeclient.Client, st *store.Store, ledger *manifest.Ledger, 
 		store:              st,
 		ledger:             ledger,
 		idOwners:           make(map[string]map[string]string),
+		shared:             make(map[string]*sharedOnce),
 		blobRetries:        DefaultBlobRetries,
 		blobRetryDelay:     DefaultBlobRetryDelay,
 		absentConfirmDelay: DefaultAbsentConfirmDelay,

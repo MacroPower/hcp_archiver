@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
 
 	"github.com/hashicorp/go-tfe"
 	"golang.org/x/sync/errgroup"
@@ -30,18 +29,9 @@ const msgListSkipped = "org-scoped list read did not complete; skipping collecti
 // artifact and is fetched only once. Create instances with [New]; it satisfies
 // [collect.Collector].
 type Collector struct {
-	env *collect.Env
-
-	// Set of user ids already archived this Collect, so the many teams and roster
-	// entries that reference the same users skip a duplicate re-serialization.
-	// Guarded by seenMu: enumerate archives items concurrently, and two teams
-	// listing the same member would otherwise race to claim one users/<id>.json.
-	seenUsers map[string]struct{}
-
-	org string
-
-	seenMu sync.Mutex
-	hyok   bool
+	env  *collect.Env
+	org  string
+	hyok bool
 }
 
 // Option configures a [Collector] passed to [New].
@@ -64,9 +54,8 @@ func WithHYOK(enabled bool) Option {
 // domain collectors sharing the same [collect.Env].
 func New(env *collect.Env, org string, opts ...Option) *Collector {
 	c := &Collector{
-		env:       env,
-		org:       org,
-		seenUsers: make(map[string]struct{}),
+		env: env,
+		org: org,
 	}
 
 	for _, opt := range opts {
@@ -199,8 +188,9 @@ func fanOut[T any](
 // The list read is best-effort: a read that does not complete is logged and the
 // collection skipped (see [paginate]), so nothing is archived this run and a
 // re-run retries. Items write under distinct per-id paths, and the user
-// sub-objects shared across teams dedupe through the seen-set, so concurrent
-// archives never contend on one ledger entry.
+// sub-objects shared across teams collapse to one write through the run's claim
+// (see [Collector.archiveUser]), so concurrent archives never contend on one
+// ledger entry.
 func enumerate[T any](
 	ctx context.Context,
 	c *Collector,
@@ -232,38 +222,33 @@ func (c *Collector) mutableValue(ctx context.Context, relPath string, value any)
 }
 
 // archiveUser archives a hydrated user sub-object at users/<id>.json as mutable
-// metadata, once per Collect.
+// metadata, once per run.
 //
 // The go-tfe SDK exposes no user list, only ReadCurrent, so a User hydrated on a
 // team or membership is the only path to capturing who is on a team or in the
 // org; every other reference is a permanently-opaque id. Teams and the roster
-// reference the same users in bulk, so a seen-set skips the duplicate
-// re-serialization; the id is claimed under the lock and only the claimant
-// writes, so the concurrent team archives never race on one user's file. A nil
-// user is a no-op.
+// reference the same users in bulk, and the workspace collector writes the same
+// files from run creators and event actors, so the write goes through the run's
+// claim ([collect.Env.ArchiveShared]): one caller writes each user and the rest
+// wait on its outcome, which both skips the duplicate re-serialization and
+// keeps the concurrent team archives off one file. A nil user is a no-op.
+//
+// One write per run means the first collector to reach a user fixes that run's
+// payload, and this one runs before the workspace walk, so a user on a team is
+// archived as the team hydrated them rather than as a run's created-by. The
+// two hydrate the same resource, so the choice is invisible today; it stops
+// being invisible if they ever diverge.
 func (c *Collector) archiveUser(ctx context.Context, u *tfe.User) error {
 	if u == nil {
 		return nil
 	}
 
-	if !c.claimUser(u.ID) {
-		return nil
-	}
+	relPath := c.env.Store().User(u.ID)
 
-	return c.mutableValue(ctx, c.env.Store().User(u.ID), u)
-}
-
-// claimUser marks the user id seen and reports whether this caller made the
-// claim, so exactly one of the concurrent team archives referencing the same
-// user goes on to write it.
-func (c *Collector) claimUser(id string) bool {
-	c.seenMu.Lock()
-	defer c.seenMu.Unlock()
-
-	_, seen := c.seenUsers[id]
-	c.seenUsers[id] = struct{}{}
-
-	return !seen
+	//nolint:wrapcheck // The claim is transparent; mutableValue wraps with the path context.
+	return c.env.ArchiveShared(ctx, relPath, func(ctx context.Context) error {
+		return c.mutableValue(ctx, relPath, u)
+	})
 }
 
 // archiveList archives a whole paginated collection as one mutable file at

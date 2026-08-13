@@ -2,9 +2,11 @@ package store_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -479,4 +481,61 @@ func TestStore_BuryHistory(t *testing.T) {
 		assert.True(t, mtime.Equal(recs[0].FetchedAt),
 			"the flushed content is stamped with the file's mtime")
 	})
+}
+
+func TestStore_WriteJSONBytes_ConcurrentHistory(t *testing.T) {
+	t.Parallel()
+
+	// An object several collections address at once (a user, hydrated from
+	// teams, run creators, and event actors alike) is committed from many
+	// goroutines. Appending to a sidecar reads it first, so without the store's
+	// per-object serialization two commits scan the same tail and each records
+	// the version the other already did, or overlap at one offset and tear the
+	// line at the seam.
+	const (
+		relPath = "users/user-1.json"
+		writers = 16
+	)
+
+	fetchedAt := time.Date(2026, time.August, 11, 9, 0, 0, 0, time.UTC)
+	now := fetchedAt.Add(24 * time.Hour)
+	seed := []byte("{\n  \"v\": 0\n}")
+
+	s := store.New(t.TempDir())
+
+	_, err := s.WriteJSONBytes(relPath, seed, store.WithHistory(time.Time{}, fetchedAt))
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+
+	for i := range writers {
+		wg.Go(func() {
+			payload := fmt.Appendf(nil, "{\n  \"v\": %d\n}", i+1)
+
+			_, wErr := s.WriteJSONBytes(relPath, payload, store.WithHistory(fetchedAt, now))
+			assert.NoError(t, wErr)
+		})
+	}
+
+	wg.Wait()
+
+	// Serialized, the writers displace each other in some order: the seed plus
+	// every payload but the last one to land is recorded, each exactly once, and
+	// the content the file ends up holding is not in the sidecar at all.
+	recs := historyRecords(t, s, relPath)
+	require.Len(t, recs, writers, "one record per displaced version, no duplicates")
+
+	final, err := os.ReadFile(s.AbsPath(relPath))
+	require.NoError(t, err)
+
+	seen := make(map[string]struct{}, len(recs))
+
+	for i, rec := range recs {
+		assert.NotEqualf(t, string(final), rec.Content, "record %d records the content the file still holds", i)
+
+		_, dup := seen[rec.Content]
+		assert.Falsef(t, dup, "record %d duplicates a version already recorded", i)
+
+		seen[rec.Content] = struct{}{}
+	}
 }

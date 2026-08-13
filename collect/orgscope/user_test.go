@@ -41,8 +41,8 @@ func TestArchiveUserDeduplicates(t *testing.T) {
 	user := &tfe.User{ID: "user-1", Username: "alice"}
 	require.NoError(t, f.collector.ArchiveUser(t.Context(), user))
 
-	// Remove the written file; a second archive of the same user is skipped by the
-	// seen-set, so the file is not recreated.
+	// Remove the written file; the run's claim on a settled user holds, so a second
+	// archive returns the first one's outcome and the file is not recreated.
 	require.NoError(t, os.Remove(st.AbsPath(st.User("user-1"))))
 	require.NoError(t, f.collector.ArchiveUser(t.Context(), user))
 
@@ -58,8 +58,8 @@ func TestArchiveUserConcurrentDeduplicates(t *testing.T) {
 	st := f.store
 
 	// Teams archive concurrently and often share members, so the same user
-	// arrives from many goroutines at once; the seen-set claim must hand the
-	// write to exactly one of them. The race detector guards the claim itself.
+	// arrives from many goroutines at once; the run's claim must hand the write
+	// to exactly one of them. The race detector guards the claim itself.
 	user := &tfe.User{ID: "user-1", Username: "alice", Email: "alice@example.com"}
 
 	var g errgroup.Group

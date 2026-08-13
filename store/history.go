@@ -3,12 +3,27 @@ package store
 import (
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"os"
+	"sync"
 	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/history"
 )
+
+// historyStripes is how many mutexes the commits that touch a history sidecar
+// are spread across.
+//
+// A sidecar is appended to by a read-modify-write ([history.Supersede] scans
+// the committed tail before it appends, and the append trims any uncommitted
+// fragment and writes at the boundary it computed), so two commits of one
+// object must not overlap: they would compute that boundary independently. A fixed
+// stripe array rather than a mutex per path: an archive holds a mutable object
+// for every run of every workspace, so a map keyed by path would grow with the
+// tree to hold a lock that is almost never contended. Two objects landing on
+// one stripe only serialize a pair of local writes.
+const historyStripes = 256
 
 // ErrHistoryNotClosed indicates that a commit's bytes landed but the record
 // closing a trailing tombstone in the object's history sidecar did not. It
@@ -38,7 +53,14 @@ type WriteOption func(*writeConfig)
 // whether or not the bytes changed. The superseded content is stamped
 // fetchedAt (the prior run's fetch time; a zero value falls back to the
 // file's modification time, then to omitted) and a reappearance is stamped
-// now. It returns a [WriteOption].
+// now.
+//
+// Commits carrying it are serialized per object, since appending to a sidecar
+// reads it first and so cannot be made atomic the way the object file's rename
+// is. Concurrent commits of one object are therefore safe. A commit without it
+// takes no such lock, so the serialization covers a path only while every
+// commit of it retains history, which holds because retention is fixed per
+// archive primitive rather than per call. It returns a [WriteOption].
 func WithHistory(fetchedAt, now time.Time) WriteOption {
 	return func(c *writeConfig) {
 		c.history = true
@@ -54,6 +76,24 @@ func (s *Store) HistoryPath(relPath string) string {
 	return history.Path(relPath)
 }
 
+// historyLock returns the mutex serializing the commits that touch the history
+// sidecar of the object at relPath, one of historyStripes.
+//
+// It keys on the absolute sidecar path, the identical string the appends
+// themselves open, so the lock and the file it protects are named the same way.
+// The sidecar rather than the object because [history.Path] trims a trailing
+// ".json", and the absolute form because [Store.AbsPath] cleans as it joins:
+// either mapping is many-to-one, and hashing ahead of it would let two names
+// for one sidecar past each other.
+func (s *Store) historyLock(relPath string) *sync.Mutex {
+	h := fnv.New32a()
+
+	//nolint:gosec // hash.Hash never reports a write error.
+	h.Write([]byte(s.AbsPath(s.HistoryPath(relPath))))
+
+	return &s.historyLocks[h.Sum32()%historyStripes]
+}
+
 // BuryHistory records an observed disappearance of the mutable object at
 // relPath: the last-known file content is flushed into the history sidecar
 // (unless its newest record already carries it) and a tombstone stamped
@@ -63,6 +103,13 @@ func (s *Store) HistoryPath(relPath string) string {
 // the file's modification time when zero. It reports whether anything was
 // appended; the report is meaningful only when err is nil.
 func (s *Store) BuryHistory(relPath string, fetchedAt, deletedAt time.Time) (bool, error) {
+	// The other door onto the sidecar, held against a concurrent commit of the
+	// same object for the same reason a write holds it.
+	mu := s.historyLock(relPath)
+	mu.Lock()
+
+	defer mu.Unlock()
+
 	abs := s.AbsPath(relPath)
 
 	//nolint:gosec // Path is composed by the store from the confined archive root.

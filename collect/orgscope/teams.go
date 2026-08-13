@@ -151,7 +151,7 @@ func (c *Collector) collectMemberships(ctx context.Context) error {
 
 	// Roster members not on any team are archived here rather than by the
 	// concurrent team pass, so fan them across the concurrency budget the same way
-	// enumerate does; archiveUser is seenMu-guarded and safe to run in parallel.
+	// enumerate does; archiveUser claims each user and is safe to run in parallel.
 	return fanOut(ctx, c, memberships, func(ctx context.Context, m *tfe.OrganizationMembership) error {
 		return c.archiveUser(ctx, m.User)
 	})

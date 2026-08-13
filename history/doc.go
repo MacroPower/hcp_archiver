@@ -56,9 +56,21 @@
 // The append path is not safe for concurrent writers of one sidecar:
 // [go.jacobcolvin.com/hcp_archiver/atomicfile.Append] truncates and rewrites
 // the file's tail, so two concurrent appends could interleave destructively.
-// The archive's one-object-one-call discipline (each object is archived by
-// exactly one worker per run) is what provides the required single writer per
-// sidecar.
+// Three mechanisms above this package supply the required single writer. The
+// archive's one-object-one-call discipline (each object is archived by exactly
+// one worker per run) covers the objects that sit inside a single walk. The
+// store serializes the commits that touch one sidecar against each other (see
+// [go.jacobcolvin.com/hcp_archiver/store.WithHistory]), which is what holds the
+// line for an object no single walk owns. And the collectors claim an object
+// several of them address at once (a user, hydrated from teams, run creators,
+// and event actors alike) for the run, so the crowd reaching for it collapses
+// to one writer before it ever gets here.
+//
+// The store's serialization covers the sidecar alone. The ledger entry
+// recording an object's signature is written outside it, so an object written
+// from two places can still finish with the ledger describing one version and
+// the file holding another: an intact timeline is not the same as a safely
+// shared object.
 //
 // This is per-object content history, unrelated to the configuration's
 // runHistory bound, which limits how many runs a workspace archives.
