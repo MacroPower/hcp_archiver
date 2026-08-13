@@ -76,7 +76,9 @@ func (c *Collector) CollectWorkspace(
 
 	// The two collections are independent and the ledger, store, and progress
 	// callback are all concurrency-safe, so their walks share the workspace's
-	// wall-clock. Real parallelism stays bounded by the client's request gate.
+	// wall-clock. Real parallelism stays bounded by the client's request gates:
+	// the run walk's list pages by the runs-list one, everything else by the
+	// general gate.
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {

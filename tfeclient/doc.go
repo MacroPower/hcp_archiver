@@ -22,9 +22,13 @@
 // the ceiling. The go-tfe client's own rate-limit machinery is kept dormant:
 // its server-error retry stays disabled, no 429 is ever surfaced to it, and the
 // X-RateLimit-Limit header its internal limiter configures itself from is
-// stripped off every response. An optional [Gate] bounds how many requests are
-// in flight at once; the gate caps concurrency only and leaves the launch rate
-// to the governors. The package also walks paginated list endpoints (advancing
+// stripped off every response. A [Gate] per bucket bounds how many requests one
+// bucket has outstanding at once, capping concurrency only and leaving the
+// launch rate to the governors. The split matters because a gate slot spans its
+// bucket's governor wait as well as the wire time: a single shared gate would
+// let the runs-list bucket's multi-second pacing sit on slots general traffic
+// needs. The general gate is the caller's ([WithGate]); the runs-list one is the
+// client's own. The package also walks paginated list endpoints (advancing
 // the page number while the response reports a next page) and follows the
 // short-lived signed-URL download flow for state blobs, configuration
 // tarballs, and plan/apply logs.

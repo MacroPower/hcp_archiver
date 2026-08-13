@@ -30,11 +30,13 @@ func (c *Collector) collectRuns(ctx context.Context, project string, ws *tfe.Wor
 	pager := func(ctx context.Context, page int) ([]*tfe.Run, bool, error) {
 		var list *tfe.RunList
 
-		err := c.env.Client().Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
-			// The runs list endpoint is metered in its own bucket of 30
-			// requests per minute, so each request fetches the maximum page
-			// rather than the default 20: a fifth of the spend from the walk's
-			// scarcest budget.
+		// DoRunsList, not Do: the runs list endpoint is metered in its own bucket
+		// of 30 requests per minute, and a slot is held across the wait for that
+		// bucket's token, so drawing this walk's slots from the general gate
+		// would park one for seconds at a time.
+		err := c.env.Client().DoRunsList(ctx, func(ctx context.Context, tc *tfe.Client) error {
+			// Each request fetches the maximum page rather than the default 20:
+			// a fifth of the spend from the walk's scarcest budget.
 			l, e := tc.Runs.List(ctx, wsID, &tfe.RunListOptions{
 				ListOptions: tfe.ListOptions{PageNumber: page, PageSize: tfeclient.MaxPageSize},
 				Include: []tfe.RunIncludeOpt{

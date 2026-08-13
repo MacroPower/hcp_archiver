@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-tfe"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 )
 
 // DefaultRateLimit is the default ceiling of the general adaptive rate
@@ -37,6 +38,21 @@ const DefaultRateLimit float64 = 30
 // already-scarce budget.
 const DefaultRunsListRateLimit float64 = 29.0 / 60
 
+// DefaultRunsListConcurrency is the default size of the gate bounding the two
+// runs list endpoints, which take their slots from a gate of their own rather
+// than the general one (see [Client.DoRunsList]).
+//
+// It is not what bounds the rate; the runs governor is, and one slot alone
+// already sustains that rate: tokens accrue on the wall clock, so a request
+// transferring for less than the roughly two seconds between tokens is back
+// waiting on the governor before the next token is due. Slots past the first
+// cover a page that outlasts a token interval, which on one slot would leave
+// that token unspent; a second slot lets the next request take it while the
+// slow page finishes. Three carries a page running about three token intervals
+// long. The gate is also the only bound on how many maximum-size pages are
+// buffered at once.
+const DefaultRunsListConcurrency = 3
+
 // Pagination settings for [Paginate].
 const (
 	// MaxPageSize is the page size [Paginate] requests. The API serves at most
@@ -45,7 +61,7 @@ const (
 	MaxPageSize = 100
 
 	// DefaultPageConcurrency is the ceiling on how many pages one [Paginate]
-	// call fetches at once. It sits below the client's in-flight gate, which
+	// call fetches at once. It sits below the client's general gate, which
 	// binds first, so it only keeps one listing from monopolizing the gate.
 	DefaultPageConcurrency = 8
 
@@ -72,17 +88,51 @@ const DefaultResponseHeaderTimeout = 60 * time.Second
 // a dead dial promptly.
 const DefaultTLSHandshakeTimeout = 20 * time.Second
 
-// Gate bounds how many requests may be in flight at once. Acquire blocks
-// until a slot is free or ctx is done and Release returns the slot. The gate
-// answers "how many at once" and nothing else; "how fast" belongs to the
-// client's adaptive rate governor, so server feedback moves the rate, never
-// the concurrency. The archiver satisfies it with a fixed-size counting
-// semaphore.
+// Gate bounds how many requests one server-side rate bucket may have
+// outstanding at once. Acquire blocks until a slot is free or ctx is done and
+// Release returns the slot. The gate answers "how many at once" and nothing
+// else; "how fast" belongs to the bucket's adaptive rate governor, so server
+// feedback moves the rate, never the concurrency.
+//
+// There is one gate per bucket, mirroring the governors: a slot is held from
+// before the governor wait until the request is done, so a bucket's pacing
+// would otherwise consume slots that requests to another bucket need. See
+// [Client.Do] and [Client.DoRunsList]. The caller supplies the general gate
+// ([WithGate]); the client builds the runs-list one itself (see
+// [DefaultRunsListConcurrency]).
+//
+// See [Semaphore] for an implementation.
 type Gate interface {
 	// Acquire takes a slot, blocking until one is free or ctx is done.
 	Acquire(ctx context.Context) error
 	// Release returns a slot taken by Acquire.
 	Release()
+}
+
+// Semaphore is a fixed-size counting [Gate]. Uniform weight-one acquires keep
+// [semaphore.Weighted]'s queue strictly first-in-first-out, so no request
+// starves while the client is saturated.
+//
+// Create instances with [NewSemaphore].
+type Semaphore struct {
+	sem *semaphore.Weighted
+}
+
+// NewSemaphore creates a new [Semaphore] with the given number of slots. A
+// non-positive value yields a gate that never grants, whose Acquire returns
+// only once its context is done.
+func NewSemaphore(slots int) *Semaphore {
+	return &Semaphore{sem: semaphore.NewWeighted(int64(slots))}
+}
+
+// Acquire takes a slot, blocking until one is free or ctx is done.
+func (g *Semaphore) Acquire(ctx context.Context) error {
+	return g.sem.Acquire(ctx, 1) //nolint:wrapcheck // A transparent semaphore wrapper.
+}
+
+// Release returns a slot taken by Acquire.
+func (g *Semaphore) Release() {
+	g.sem.Release(1)
 }
 
 // Client is the single, worker-safe point of contact with HCP Terraform.
@@ -104,12 +154,16 @@ type Gate interface {
 // dormant (its server-error retry disabled, a 429 never surfaced to it, and the
 // rate-limit header its internal limiter reads stripped). Every request routed
 // through [Client.Do] additionally takes a slot from the optional [Gate] first,
-// so a caller can bound the whole run's parallelism in one place.
+// so one caller-supplied gate bounds all general traffic in one place. The
+// bucket split reaches the gates too, for the reason [Gate] describes: the runs
+// list endpoints are routed through [Client.DoRunsList] and draw on a gate of
+// their own.
 //
 // Create instances with [New]. A Client is safe for concurrent use.
 type Client struct {
 	tfe      *tfe.Client
 	gate     Gate
+	runsGate Gate
 	governor *Governor
 }
 
@@ -132,6 +186,7 @@ type config struct {
 	idleReadTimeout       time.Duration
 	serverErrorRetryDelay time.Duration
 	serverErrorRetries    int
+	runsListConcurrency   int
 }
 
 // Option configures a [Client] during [New].
@@ -141,6 +196,7 @@ type config struct {
 //   - [WithAddress]
 //   - [WithRateLimit]
 //   - [WithRunsListRateLimit]
+//   - [WithRunsListConcurrency]
 //   - [WithResponseHeaderTimeout]
 //   - [WithIdleReadTimeout]
 //   - [WithServerErrorRetry]
@@ -187,12 +243,30 @@ func WithRateLimit(perSecond float64) Option {
 // WithRunsListRateLimit sets the ceiling of the separate governor pacing the
 // two runs list endpoints, in requests per second, for a server whose
 // runs-list budget differs from HCP Terraform's documented 30 per minute. A
-// non-positive value keeps [DefaultRunsListRateLimit]. Returns an [Option].
+// non-positive value keeps [DefaultRunsListRateLimit]. A server with a larger
+// budget wants a wider runs-list gate to spend it (see
+// [WithRunsListConcurrency]). Neither is exposed as an operator setting.
+// Requests to these endpoints go through [Client.DoRunsList]. Returns an
+// [Option].
 func WithRunsListRateLimit(perSecond float64) Option {
 	return func(c *config) {
 		if perSecond > 0 {
 			c.runsListRateLimit = perSecond
 		}
+	}
+}
+
+// WithRunsListConcurrency sets how many runs list requests ([Client.DoRunsList])
+// may be outstanding at once, the runs-list bucket's counterpart to [WithGate].
+// A non-positive value leaves those requests bounded only by their governor.
+// Left unset it is [DefaultRunsListConcurrency], which suits
+// [DefaultRunsListRateLimit]; a server paced faster through
+// [WithRunsListRateLimit] wants this raised with it, since the slots a bucket
+// needs scale with its rate. Like that option, this is not exposed as an
+// operator setting. Returns an [Option].
+func WithRunsListConcurrency(slots int) Option {
+	return func(c *config) {
+		c.runsListConcurrency = slots
 	}
 }
 
@@ -270,9 +344,11 @@ func WithRateLimitCounter(counter *atomic.Int64) Option {
 }
 
 // WithGate sets the [Gate] every request routed through [Client.Do] takes a
-// slot from before waiting on the rate governor, bounding how many requests
-// are in flight at once across all workers. A nil gate leaves requests
-// bounded only by the governor. Returns an [Option].
+// slot from before waiting on the rate governor, bounding how many general
+// requests one run has outstanding at once across all workers.
+// [NewSemaphore] supplies the usual fixed-size implementation. The runs list
+// endpoints are bounded separately (see [WithRunsListConcurrency]). A nil gate
+// leaves requests bounded only by the governor. Returns an [Option].
 func WithGate(g Gate) Option {
 	return func(c *config) {
 		c.gate = g
@@ -306,8 +382,11 @@ func WithHTTPClient(hc *http.Client) Option {
 
 // New creates a new [Client].
 //
-// It constructs exactly one go-tfe client and one shared rate governor. It
-// returns [ErrMissingToken] if no token was supplied via [WithToken].
+// It constructs exactly one go-tfe client, one rate governor per server-side
+// rate bucket, and, unless [WithRunsListConcurrency] disables it, the runs-list
+// bucket's own [Gate]. The general gate is the caller's ([WithGate]) and may be
+// absent. It returns [ErrMissingToken] if no token was supplied via
+// [WithToken].
 func New(opts ...Option) (*Client, error) {
 	cfg := newConfig(opts)
 
@@ -337,6 +416,7 @@ func New(opts ...Option) (*Client, error) {
 	return &Client{
 		tfe:      tc,
 		gate:     cfg.gate,
+		runsGate: newRunsGate(cfg.runsListConcurrency),
 		governor: cfg.governor,
 	}, nil
 }
@@ -347,6 +427,7 @@ func newConfig(opts []Option) config {
 		address:               tfe.DefaultAddress,
 		rateLimit:             DefaultRateLimit,
 		runsListRateLimit:     DefaultRunsListRateLimit,
+		runsListConcurrency:   DefaultRunsListConcurrency,
 		responseHeaderTimeout: DefaultResponseHeaderTimeout,
 		idleReadTimeout:       DefaultIdleReadTimeout,
 		serverErrorRetries:    DefaultServerErrorRetries,
@@ -365,6 +446,18 @@ func newConfig(opts []Option) config {
 	cfg.runsGovernor = NewGovernor(cfg.runsListRateLimit, cfg.rateLimited)
 
 	return cfg
+}
+
+// newRunsGate builds the gate bounding the runs-list bucket. It is the client's
+// own, not the caller's: which bucket an endpoint is metered in is a property
+// of the server, like the governor pacing it. A non-positive size leaves that
+// bucket ungated, matching a nil [WithGate].
+func newRunsGate(slots int) Gate {
+	if slots <= 0 {
+		return nil
+	}
+
+	return NewSemaphore(slots)
 }
 
 // resolveHTTPClient returns the caller-supplied HTTP client when one was set,
@@ -449,8 +542,9 @@ func wrapRetryAndThrottle(next http.RoundTripper, cfg *config) http.RoundTripper
 
 // TFE returns the underlying go-tfe client so collectors can build closures
 // over its many typed services. Requests made directly on the returned client
-// bypass the gate but not the governor, which lives in the client's HTTP
-// transport; route them through [Client.Do] to stay bounded.
+// bypass the gates but not the governors, which live in the client's HTTP
+// transport; route them through [Client.Do], or [Client.DoRunsList] for the runs
+// list endpoints, to stay bounded.
 func (c *Client) TFE() *tfe.Client {
 	return c.tfe
 }
@@ -465,29 +559,56 @@ func (c *Client) RateStatus() (float64, time.Duration) {
 	return c.governor.Snapshot()
 }
 
-// Do runs fn after taking a slot from the optional [Gate], passing the
-// underlying go-tfe client. It is the single chokepoint every API call should
-// pass through so the whole run shares one parallelism bound; the slot is
-// held until fn returns, so buffered downloads count against the bound for
-// their whole transfer. Rate limiting is not applied here but at the HTTP
-// transport, where every attempt the call causes pays its own token; taking
-// the gate first still means a queued request starts no attempt it cannot use
-// yet. A ctx already done returns its error without invoking fn. The error
-// from fn is returned unmodified so callers can classify it with [Classify],
+// Do runs fn after taking a slot from the optional general [Gate], passing the
+// underlying go-tfe client. It is the chokepoint every API call to a
+// generally-metered endpoint should pass through so the run shares one
+// parallelism bound; the slot is held until fn returns, so buffered downloads
+// count against the bound for their whole transfer.
+//
+// Rate limiting is not applied here but at the HTTP transport, where every
+// attempt the call causes pays its own token; taking the gate first still means
+// a queued request starts no attempt it cannot use yet. The slot therefore
+// spans the governor wait as well as the wire time, which is what makes the
+// per-bucket split described on [Gate] necessary: the two runs list endpoints
+// go through [Client.DoRunsList] instead.
+//
+// A ctx already done returns its error without invoking fn. The error from fn
+// is returned unmodified so callers can classify it with [Classify],
 // [IsTransient], [IsTerminal], or [IsForbidden].
 func (c *Client) Do(ctx context.Context, fn func(context.Context, *tfe.Client) error) error {
+	return c.do(ctx, c.gate, fn)
+}
+
+// DoRunsList runs fn against the runs-list gate rather than the general one,
+// for the two endpoints the server meters in their own far slower bucket (see
+// [DefaultRunsListRateLimit]). It is otherwise exactly [Client.Do], and the same
+// classification applies to the error it returns.
+//
+// Which bucket paces a request is decided at the transport from the request
+// URL, and that stays the one authority; this method only picks the matching
+// gate. The two are kept in step by hand: a runs list call routed through
+// [Client.Do] is still paced correctly, but parks on a general slot for the
+// whole wait, which is the behavior the split exists to avoid. Likewise
+// [Paginate] cannot serve these endpoints without losing the split, since it
+// routes every page through [Client.Do].
+func (c *Client) DoRunsList(ctx context.Context, fn func(context.Context, *tfe.Client) error) error {
+	return c.do(ctx, c.runsGate, fn)
+}
+
+// do runs fn holding one slot of g, or no slot at all when g is nil.
+func (c *Client) do(ctx context.Context, g Gate, fn func(context.Context, *tfe.Client) error) error {
 	err := ctx.Err()
 	if err != nil {
 		return fmt.Errorf("request context: %w", err)
 	}
 
-	if c.gate != nil {
-		err := c.gate.Acquire(ctx)
+	if g != nil {
+		err := g.Acquire(ctx)
 		if err != nil {
 			return fmt.Errorf("gate acquire: %w", err)
 		}
 
-		defer c.gate.Release()
+		defer g.Release()
 	}
 
 	return fn(ctx, c.tfe)

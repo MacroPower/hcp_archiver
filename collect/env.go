@@ -41,9 +41,9 @@ const (
 const DefaultStreamThreshold int64 = 32 << 20
 
 // DefaultConcurrency is the fixed bound on concurrent API work: the archiver
-// sizes its in-flight request gate from it, and each collection caps its
+// sizes its general request gate from it, and each collection caps its
 // fan-out at it ([Env.Concurrency]). One constant serves both so the fan-out
-// can never outrun the gate.
+// can never outrun that gate.
 const DefaultConcurrency = 16
 
 // Env is the shared environment every domain collector composes to archive an

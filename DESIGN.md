@@ -427,19 +427,29 @@ Notes:
   time, any orgs/workspaces that errored) prints on completion and is also written
   to the manifest as the run record, which stays per-run.
 
-- **Concurrency and rate**: a fixed gate of 16 in-flight API requests, shared
-  by the whole run, bounds "how many at once"; "how fast" belongs to
-  per-bucket adaptive rate governors at the HTTP transport, so the server's
-  feedback moves the rate, never the concurrency. The server meters most
-  endpoints from one general bucket (30 requests per second), but the two runs
-  list endpoints (`/workspaces/:id/runs`, `/organizations/:name/runs`) from
-  their own bucket of 30 requests per _minute_, documented only on the runs API
-  page, so each bucket gets its own governor and a 429 in one never pauses or
-  halves the other. The general governor's ceiling defaults to the documented
-  30 rps and is operator-configurable (the config file's `rateLimit`) for an
-  org whose granted limit sits well below it; the governor adapts downward
-  from server feedback either way, so the knob only keeps a run from probing
-  past a known-lower budget. The runs governor paces just under the documented budget
+- **Concurrency and rate**: a fixed gate per rate bucket, 16 slots for general
+  traffic and 3 for the runs list endpoints, bounds "how many at once"; "how
+  fast" belongs to per-bucket adaptive rate governors at the HTTP transport, so
+  the server's feedback moves the rate, never the concurrency. The gate is per
+  bucket rather than per run because a slot is taken before the governor wait
+  and held until the request is done, so it covers time queued for a rate token
+  as well as time on the wire: the runs list endpoints below are paced sixty
+  times slower, and on a shared gate all 16 slots could sit parked waiting for
+  that bucket's tokens while general work queued behind them. The runs gate is
+  sized for headroom when a page runs long rather than to bound the rate (one
+  slot alone already sustains that rate), which puts the run's ceiling at
+  16 + 3. The general gate still spans its own governor's wait, but that one is
+  around 33ms with a burst of 10, so it costs nothing worth splitting further.
+  The server meters most endpoints from one general bucket (30 requests per
+  second), but the two runs list endpoints (`/workspaces/:id/runs`,
+  `/organizations/:name/runs`) from their own bucket of 30 requests per
+  _minute_, documented only on the runs API page, so each bucket gets its own
+  governor and a 429 in one never pauses or halves the other. The general
+  governor's ceiling defaults to the documented 30 rps and is
+  operator-configurable (the config file's `rateLimit`) for an org whose granted
+  limit sits well below it; the governor adapts downward from server feedback
+  either way, so the knob only keeps a run from probing past a known-lower
+  budget. The runs governor paces just under the documented budget
   (29/min) and the run walk spends it carefully: pages are fetched at the
   maximum size (100) and the per-workspace count probe reads the workspace's
   advertised `RunsCount` instead of the listing. Every physical attempt pays a
@@ -451,11 +461,19 @@ Notes:
   reset, clean responses creep the rate back up one rps per two-second stretch
   toward the ceiling. A 429's `X-RateLimit-Limit` value is debug-logged, so an
   endpoint metered outside the known buckets identifies itself in the trace.
-  Workspace walks fan out on coordinator goroutines (capped at the gate's size)
-  that hold no slot themselves, so parallelism follows the requests rather than
-  a fixed per-workspace assignment. `go-tfe`'s retry and rate machinery stays
-  dormant: its unbounded 5xx retry is replaced by a bounded doubling backoff at
-  the transport, 429s are retried there too (with no local backoff, since
+  Workspace walks fan out on coordinator goroutines (capped at the general
+  gate's size) that hold a slot only while one of their own requests runs, so
+  parallelism follows the requests rather than a fixed per-workspace
+  assignment. A coordinator paging runs blocks in the runs-list gate rather
+  than holding a general slot. That leaves the coordinator-level stall in
+  place: only 3 of the 16 coordinators can be listing runs at once and the
+  other 13 queue there, and since a workspace cannot finish until its run walk
+  does, a large organization's coordinators still serialize behind one runs
+  token per two seconds with no further workspace starting until one completes.
+  What changes is that they no longer hold the general slots the rest of the run
+  needs while they wait. `go-tfe`'s retry and rate machinery stays dormant: its
+  unbounded 5xx retry is replaced by a bounded doubling backoff at the
+  transport, 429s are retried there too (with no local backoff, since
   re-entry waits out the cooldown in the governor) and convert to a transient
   error once their budget is spent, and the `X-RateLimit-Limit` header is
   stripped from every response so go-tfe's internal limiter never engages.

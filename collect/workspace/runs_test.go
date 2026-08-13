@@ -1,7 +1,9 @@
 package workspace_test
 
 import (
+	"context"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,6 +92,59 @@ func TestCollectRunsHonorsRunHistoryLimit(t *testing.T) {
 		"a limit-stopped walk records completion so the seal phase can bundle the slice")
 	assert.False(t, f.ledger.Collection("projects/proj/workspaces/ws/runs").Settled(),
 		"but withholds settlement so a wider limit still pages down into the tail")
+}
+
+// TestCollectRunsBypassesTheGeneralGate guards the one call site the runs-list
+// bucket split rests on. The runs list endpoint is paced sixty times slower than
+// the general one, and a gate slot is held across that wait, so the walk must
+// take its slot from the client's runs-list gate. Routing it through the general
+// gate leaves the pacing correct, so nothing observable changes except a slot
+// parked where the rest of the run needs it; this test asserts the slot.
+func TestCollectRunsBypassesTheGeneralGate(t *testing.T) {
+	t.Parallel()
+
+	listed := make(chan struct{}, 1)
+
+	mux := http.NewServeMux()
+	// A non-blocking signal: a second request (a grown payload, a retry) must
+	// report and move on rather than wedge the handler on a full channel, which
+	// would hang the server's shutdown instead of failing readably.
+	mux.HandleFunc("/api/v2/workspaces/ws-1/runs", func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case listed <- struct{}{}:
+		default:
+		}
+
+		writeJSONAPI(t, w, runListPayload)
+	})
+
+	// A gate with no slots never grants one, standing in for a general gate the
+	// rest of the run has fully occupied.
+	f := newWSFixtureClient(t, mux, []tfeclient.Option{tfeclient.WithGate(tfeclient.NewSemaphore(0))}, nil)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ws := &tfe.Workspace{ID: "ws-1", Name: "ws"}
+
+	var wg sync.WaitGroup
+
+	// The listed runs are all in flight, so archiving them writes summaries
+	// locally and issues no further request. Only the list request is under
+	// test; the cancel below unwinds a walk that has not returned yet.
+	wg.Go(func() {
+		//nolint:errcheck // The walk returns nil, or a cancellation if the cancel below wins.
+		_ = f.collector.CollectRuns(ctx, "proj", ws, nil)
+	})
+
+	select {
+	case <-listed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the runs list request queued behind the general gate")
+	}
+
+	cancel()
+	wg.Wait()
 }
 
 func TestHasNextPage(t *testing.T) {

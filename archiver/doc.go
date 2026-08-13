@@ -5,22 +5,27 @@
 // collector, then drives the walk. It enumerates the organizations the token can
 // see (all of them when no organization is named) and, for each, archives the
 // directly-owned org-level objects once, walks that organization's projects in
-// order, fans its workspaces across the run's shared request gate, always
-// gathers the registry surface (deepened by the registry-detail toggle), and
-// adds the optional stacks and audit surfaces as their toggles allow.
+// order, fans its workspaces across the run's shared general request gate,
+// always gathers the registry surface (deepened by the registry-detail toggle),
+// and adds the optional stacks and audit surfaces as their toggles allow.
 // Because each organization has its own archive tree and manifest, a fresh
 // store and ledger are built per organization.
 //
-// The gate bounds in-flight API requests, not workspaces: every request takes
-// a slot, so the same slots serve many small workspaces or many pieces of one
-// large workspace, whichever is ready. The bound is a fixed constant, because
-// concurrency is a resource cap rather than a throughput control: how fast
-// requests launch is decided by the client's adaptive rate governors (one per
-// server-side rate bucket), which, when the server rate-limits the run, halve
-// the affected bucket's rate and pause its launches until the server's
-// advertised reset, then creep back up while responses stay clean. A
-// rate-limited run therefore shows requests slowing, with a cooldown pause in
-// the progress views.
+// The gate bounds outstanding API requests, not workspaces: every
+// generally-metered request takes a slot, so the same slots serve many small
+// workspaces or many pieces of one large workspace, whichever is ready. The
+// bound is a fixed constant, because concurrency is a resource cap rather than
+// a throughput control: how fast requests launch is decided by the client's
+// adaptive rate governors (one per server-side rate bucket), which, when the
+// server rate-limits the run, halve the affected bucket's rate and pause its
+// launches until the server's advertised reset, then creep back up while
+// responses stay clean. A rate-limited run therefore shows requests slowing,
+// with a cooldown pause in the progress views.
+//
+// The gate this package supplies is not the run's only one. A slot covers time
+// queued for a rate token as well as time on the wire, so the client keeps a
+// separate, much smaller gate for the two runs list endpoints, whose bucket is
+// paced sixty times slower; see [tfeclient.Gate].
 //
 // It owns the cross-cutting runtime and nothing else: the request gate, the
 // ledger-flush and progress tickers, graceful shutdown that flushes the

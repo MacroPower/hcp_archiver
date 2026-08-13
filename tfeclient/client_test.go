@@ -595,6 +595,204 @@ func TestDoGate(t *testing.T) {
 	})
 }
 
+func TestDoRunsListUsesSeparateGate(t *testing.T) {
+	t.Parallel()
+
+	gate := &recordingGate{}
+	c := newOfflineClient(t, tfeclient.WithGate(gate))
+
+	called := false
+
+	err := c.DoRunsList(t.Context(), func(_ context.Context, _ *tfe.Client) error {
+		called = true
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	assert.True(t, called)
+	assert.Empty(t, gate.events, "the runs list bucket must not touch the general gate")
+}
+
+func TestDoRunsListConcurrency(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		slots int
+		unset bool
+		calls int
+		want  int
+	}{
+		"bounds concurrent calls at the configured size": {slots: 2, calls: 3, want: 2},
+		// Both counts sit above the default, so a disable path that silently fell
+		// back to it would stall in the admit loop rather than pass.
+		"a non-positive size leaves the bucket ungated": {
+			slots: 0,
+			calls: tfeclient.DefaultRunsListConcurrency + 1,
+			want:  tfeclient.DefaultRunsListConcurrency + 1,
+		},
+		"the unset default bounds the bucket": {
+			unset: true,
+			calls: tfeclient.DefaultRunsListConcurrency + 1,
+			want:  tfeclient.DefaultRunsListConcurrency,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var opts []tfeclient.Option
+
+			if !tc.unset {
+				opts = append(opts, tfeclient.WithRunsListConcurrency(tc.slots))
+			}
+
+			c := newOfflineClient(t, opts...)
+
+			// The callback issues no request, so nothing but the gate can bound
+			// it: the governor lives in the transport, and a real call would
+			// serialize there whatever the gate does.
+			var (
+				entered = make(chan struct{}, tc.calls)
+				release = make(chan struct{})
+				wg      sync.WaitGroup
+			)
+
+			// The error is always nil; the callback exists to occupy a slot until
+			// the test releases it.
+			//nolint:unparam // The signature is [tfeclient.Client.DoRunsList]'s.
+			hold := func(_ context.Context, _ *tfe.Client) error {
+				entered <- struct{}{}
+
+				<-release
+
+				return nil
+			}
+
+			for range tc.calls {
+				wg.Go(func() {
+					_ = c.DoRunsList(t.Context(), hold) //nolint:errcheck // The call's own error is not under test.
+				})
+			}
+
+			for range tc.want {
+				select {
+				case <-entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("a call the gate should admit never started")
+				}
+			}
+
+			// One more would mean the gate admitted past its size. Nothing is
+			// left to wait on, so this window only has to outlast the scheduling
+			// of goroutines already running. An ungated bucket admits every call
+			// by design, leaving no held-back one to watch for.
+			if tc.calls > tc.want {
+				select {
+				case <-entered:
+					t.Fatalf("more than %d calls ran at once", tc.want)
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
+
+			close(release)
+			wg.Wait()
+		})
+	}
+}
+
+// TestRunsListBypassesAFullGeneralGate drives the whole stack: with the general
+// gate permanently full, a runs list request must still reach the server, and a
+// general one must not.
+func TestRunsListBypassesAFullGeneralGate(t *testing.T) {
+	t.Parallel()
+
+	var (
+		runsHit = make(chan struct{}, 1)
+		readHit = make(chan struct{}, 1)
+		mux     = http.NewServeMux()
+	)
+
+	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Both signals are non-blocking, so a retried request reports and moves on
+	// rather than wedging its handler on a full channel.
+	mux.HandleFunc("/api/v2/workspaces/ws-1/runs", func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case runsHit <- struct{}{}:
+		default:
+		}
+
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		fmt.Fprint(w, `{"data":[]}`) //nolint:errcheck // Best-effort test response.
+	})
+
+	mux.HandleFunc("/api/v2/workspaces/ws-1", func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case readHit <- struct{}{}:
+		default:
+		}
+
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		fmt.Fprint(w, `{"data":{"type":"workspaces","id":"ws-1"}}`) //nolint:errcheck // Best-effort test response.
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	// A gate with no slots never grants one, standing in for a general gate the
+	// rest of the run has fully occupied.
+	c, err := tfeclient.New(
+		tfeclient.WithToken("test-token"),
+		tfeclient.WithAddress(srv.URL),
+		tfeclient.WithGate(tfeclient.NewSemaphore(0)),
+	)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var wg sync.WaitGroup
+
+	wg.Go(func() {
+		//nolint:errcheck // Only the request reaching the server is under test.
+		_ = c.DoRunsList(ctx, func(ctx context.Context, tc *tfe.Client) error {
+			_, e := tc.Runs.List(ctx, "ws-1", &tfe.RunListOptions{})
+
+			return fmt.Errorf("list runs: %w", e)
+		})
+	})
+
+	wg.Go(func() {
+		//nolint:errcheck // This call is expected never to launch.
+		_ = c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
+			_, e := tc.Workspaces.ReadByID(ctx, "ws-1")
+
+			return fmt.Errorf("read workspace: %w", e)
+		})
+	})
+
+	select {
+	case <-runsHit:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a runs list request must not queue behind the general gate")
+	}
+
+	select {
+	case <-readHit:
+		t.Fatal("a general request must still wait for a general slot")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Unblock the general request still parked in the gate, so neither goroutine
+	// outlives the test.
+	cancel()
+	wg.Wait()
+}
+
 // newServerClient builds a [tfeclient.Client] against a live test server
 // serving mux, answering the constructor ping itself, so download methods
 // exercise the real request path end to end.

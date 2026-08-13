@@ -3,8 +3,10 @@
 // append-mostly history of state versions and runs. The orchestrator runs
 // workspaces concurrently, and work within a single workspace fans out too:
 // the state-version and run walks proceed side by side and each page's items
-// archive concurrently, with the shared client's request gate bounding the
-// run's real parallelism.
+// archive concurrently, with the shared client's request gates bounding the
+// run's real parallelism. The run walk's list pages draw on the client's
+// separate runs-list gate, since the server meters that endpoint far more
+// tightly; everything else, run children included, draws on the general gate.
 //
 // # Projects and workspace settings
 //

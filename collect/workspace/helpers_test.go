@@ -46,6 +46,20 @@ func newWSFixtureLedger(
 ) wsFixture {
 	t.Helper()
 
+	return newWSFixtureClient(t, mux, nil, ledgerOpts, opts...)
+}
+
+// newWSFixtureClient is [newWSFixtureLedger] with explicit client options, for
+// tests that need to shape the client's gates or rate governors.
+func newWSFixtureClient(
+	t *testing.T,
+	mux *http.ServeMux,
+	clientOpts []tfeclient.Option,
+	ledgerOpts []manifest.Option,
+	opts ...workspace.Option,
+) wsFixture {
+	t.Helper()
+
 	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -53,7 +67,10 @@ func newWSFixtureLedger(
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	client, err := tfeclient.New(tfeclient.WithToken("test-token"), tfeclient.WithAddress(srv.URL))
+	client, err := tfeclient.New(append([]tfeclient.Option{
+		tfeclient.WithToken("test-token"),
+		tfeclient.WithAddress(srv.URL),
+	}, clientOpts...)...)
 	require.NoError(t, err)
 
 	st := store.New(t.TempDir())

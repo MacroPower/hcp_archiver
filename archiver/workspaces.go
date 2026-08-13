@@ -35,9 +35,9 @@ const (
 //
 // Enumeration paginates through the shared governor; each project is archived
 // by the workspace collector's project method, fanned across the run's shared
-// request gate exactly like the workspaces after it: each goroutine is only a
-// coordinator, every request it causes takes a slot from the client's gate, and
-// the fan-out is capped at the gate's size. A project goroutine returns
+// general request gate exactly like the workspaces after it: each goroutine is
+// only a coordinator, every request it causes takes a slot from that gate, and
+// the fan-out is capped at the general gate's size. A project goroutine returns
 // non-nil only on a cancellation, which cancels the group.
 func (a *Archiver) collectProjects(
 	ctx context.Context,
@@ -130,15 +130,16 @@ func (a *Archiver) collectProjects(
 
 // collectWorkspaces archives every workspace in the organization that the
 // configured project and workspace filters admit, fanning them across the
-// run's shared request gate.
+// run's shared general request gate.
 //
 // Enumeration hydrates each workspace's project relation so its project name
 // resolves from names. The goroutine per workspace is only a coordinator: it
-// holds no request slot itself, and every request it causes takes one from the
-// client's gate, so slots flow across workspace boundaries (many small
-// workspaces at once, or many requests inside one large workspace) and the
-// gate, not this fan-out, bounds the real parallelism. The fan-out is capped
-// at the gate's size so the in-flight task list stays meaningful. A workspace
+// holds a request slot only for as long as one of its own requests runs, and
+// every request it causes takes one from the gate of that request's rate
+// bucket, so slots flow across workspace boundaries (many small workspaces at
+// once, or many requests inside one large workspace) and the gates, not this
+// fan-out, bound the real parallelism. The fan-out is capped at the general
+// gate's size so the in-flight task list stays meaningful. A workspace
 // goroutine returns non-nil only on a cancellation, which cancels the group.
 func (a *Archiver) collectWorkspaces(
 	ctx context.Context,

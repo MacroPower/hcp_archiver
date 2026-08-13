@@ -10,8 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/semaphore"
-
 	"go.jacobcolvin.com/hcp_archiver/collect"
 	"go.jacobcolvin.com/hcp_archiver/config"
 	"go.jacobcolvin.com/hcp_archiver/progress"
@@ -23,12 +21,12 @@ import (
 // flushed durably to disk while its collectors run.
 const defaultFlushInterval = 10 * time.Second
 
-// defaultConcurrency is the run's fixed bound on in-flight API requests,
-// aliasing [collect.DefaultConcurrency] so the gate and every fan-out cap
-// share the collectors' number. Concurrency is a static resource bound here,
-// not a tuning knob: request pacing is decided entirely by the client's
-// adaptive rate governors, which react to the server's rate-limit feedback, so
-// there is nothing for a concurrency setting to adapt to.
+// defaultConcurrency is the fixed bound on outstanding API requests to the
+// general rate bucket, aliasing [collect.DefaultConcurrency] so the gate and
+// every fan-out cap share the collectors' number. Concurrency is a static
+// resource bound here, not a tuning knob: request pacing is decided entirely by
+// the client's adaptive rate governors, which react to the server's rate-limit
+// feedback, so there is nothing for a concurrency setting to adapt to.
 const defaultConcurrency = collect.DefaultConcurrency
 
 var (
@@ -59,12 +57,15 @@ var (
 // tickers, graceful shutdown, and the closing run record). It holds no
 // per-object API knowledge; that lives in the collectors it runs.
 //
-// The gate is the run's one parallelism bound: every API request takes a slot
-// through the client's gate, so slots flow to whatever work is ready (several
-// small workspaces, or many pieces of one large workspace) rather than being
-// pinned one-per-workspace. The bound is fixed at [defaultConcurrency]; how
-// fast those slots launch requests is decided by the client's adaptive rate
-// governors, which are where the server's rate-limit feedback lands.
+// The gate is the run's parallelism bound for generally-metered endpoints:
+// every such API request takes a slot through the client's gate, so slots flow
+// to whatever work is ready (several small workspaces, or many pieces of one
+// large workspace) rather than being pinned one-per-workspace. The bound is
+// fixed at [defaultConcurrency]; how fast those slots launch requests is decided
+// by the client's adaptive rate governors, which are where the server's
+// rate-limit feedback lands. The two runs list endpoints draw on a separate gate
+// the client owns, because a slot spans the wait for its bucket's rate token and
+// that bucket is paced sixty times slower.
 //
 // Create instances with [New].
 type Archiver struct {
@@ -79,24 +80,6 @@ type Archiver struct {
 	uploadWireBytes *atomic.Int64
 	rateLimited     *atomic.Int64
 	flushInterval   time.Duration
-}
-
-// gate bounds in-flight API requests with a FIFO counting semaphore,
-// satisfying [tfeclient.Gate]. Uniform weight-one acquires keep
-// [semaphore.Weighted]'s queue strictly first-in-first-out, so no request
-// starves while the run is busy.
-type gate struct {
-	sem *semaphore.Weighted
-}
-
-// Acquire takes a slot, blocking until one is free or ctx is done.
-func (g *gate) Acquire(ctx context.Context) error {
-	return g.sem.Acquire(ctx, 1) //nolint:wrapcheck // A transparent semaphore wrapper.
-}
-
-// Release returns a slot taken by Acquire.
-func (g *gate) Release() {
-	g.sem.Release(1)
 }
 
 // Option configures an [Archiver] passed to [New].
@@ -199,10 +182,10 @@ func (a *Archiver) Run(ctx context.Context) error {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
-	// One gate of request slots serves the whole run: every request the client
-	// makes takes a slot, so parallelism follows the work rather than a fixed
-	// per-workspace assignment. The count is fixed; the client's adaptive rate
-	// governor decides how fast the slots launch, and orgs run sequentially
+	// One gate of request slots serves the whole run's general traffic: every
+	// such request takes a slot, so parallelism follows the work rather than a
+	// fixed per-workspace assignment. The count is fixed; the client's adaptive
+	// rate governor decides how fast the slots launch, and orgs run sequentially
 	// over one shared monotonic wire-byte counter (each reporter windows
 	// deltas of it) with the rate-limit counter feeding the progress views the
 	// same way.
@@ -212,7 +195,7 @@ func (a *Archiver) Run(ctx context.Context) error {
 		tfeclient.WithRateLimit(a.cfg.RateLimit),
 		tfeclient.WithWireBytes(a.wireBytes),
 		tfeclient.WithRateLimitCounter(a.rateLimited),
-		tfeclient.WithGate(&gate{sem: semaphore.NewWeighted(defaultConcurrency)}),
+		tfeclient.WithGate(tfeclient.NewSemaphore(defaultConcurrency)),
 		tfeclient.WithLogger(a.logger),
 	)
 	if err != nil {

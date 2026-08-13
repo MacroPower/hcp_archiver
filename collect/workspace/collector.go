@@ -16,13 +16,13 @@ import (
 // and its settings, and every workspace with its state versions and runs.
 //
 // The orchestrator enumerates projects and workspaces itself and fans
-// workspaces across the shared request gate, so the collector exposes
+// workspaces across the shared general request gate, so the collector exposes
 // granular methods ([Collector.CollectProject] and
 // [Collector.CollectWorkspace]) rather than the
 // single-method collector contract. Work within one workspace fans out too:
 // the state-version and run walks run concurrently and each page's items
-// archive concurrently, with the client's request gate bounding the whole
-// run's real parallelism.
+// archive concurrently, with the client's request gates bounding the whole
+// run's real parallelism (the run walk's list pages draw on the runs-list one).
 //
 // Create instances with [New].
 type Collector struct {

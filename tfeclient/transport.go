@@ -126,6 +126,11 @@ func (t *throttleTransport) governorFor(req *http.Request) *Governor {
 // server meters in their own 30-requests-per-minute bucket. The match is on the
 // trailing path segments, so a Terraform Enterprise base path prefix does not
 // defeat it, and neither run reads (/runs/:id) nor run creation (/runs) match.
+//
+// This decides pacing only. A caller of either endpoint must also take its slot
+// from the matching gate by going through [Client.DoRunsList] rather than
+// [Client.Do]: a slot is held across the wait this classification imposes, so a
+// runs list request on the general gate parks a general slot for seconds.
 func runsListPath(path string) bool {
 	segs := strings.Split(strings.Trim(path, "/"), "/")
 	n := len(segs)
