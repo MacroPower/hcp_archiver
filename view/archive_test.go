@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.jacobcolvin.com/hcp_archiver/remote/remotetest"
 	"go.jacobcolvin.com/hcp_archiver/seal"
 	"go.jacobcolvin.com/hcp_archiver/store"
 	"go.jacobcolvin.com/hcp_archiver/view"
@@ -53,6 +54,19 @@ func evictTarball(t *testing.T, root, cvID string) string {
 	require.NoError(t, err)
 
 	writeFile(t, filepath.Join(root, "my-org"), store.RemoteStubPath(rel), string(stub))
+
+	return rel
+}
+
+// evictTarballRemote models the same eviction with the mirror still holding
+// the object: the stub stands in for the file locally, and content sits at the
+// mirrored key. Passing content other than [tarballContent] models a mirror
+// whose bytes no longer match the digest the eviction proved.
+func evictTarballRemote(t *testing.T, root, cvID string, fake *remotetest.Fake, content string) string {
+	t.Helper()
+
+	rel := evictTarball(t, root, cvID)
+	fake.SetObject(viewPrefix+"/my-org/"+rel, remotetest.Object{Data: []byte(content)})
 
 	return rel
 }

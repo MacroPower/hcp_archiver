@@ -2,6 +2,7 @@ package view
 
 import (
 	"context"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +15,16 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 )
+
+// writeBytesJob builds an [unsealJob] write function serving fixed content, the
+// shape the screen tests need without an archive behind it.
+func writeBytesJob(content string) func(context.Context, string, io.Writer) (int64, error) {
+	return func(_ context.Context, _ string, w io.Writer) (int64, error) {
+		n, err := w.Write([]byte(content))
+
+		return int64(n), err
+	}
+}
 
 // initStub is a screen that records whether the root model ran its init hook.
 type initStub struct {
@@ -200,7 +211,7 @@ func TestUnsealProgressScreenInitRunsToSummary(t *testing.T) {
 	org := &Org{Name: "my-org"}
 	target := t.TempDir()
 
-	jobs := []unsealJob{{rel: "a.json", read: func() ([]byte, error) { return []byte("data"), nil }}}
+	jobs := []unsealJob{{rel: "a.json", write: writeBytesJob("data")}}
 	s := newUnsealProgressScreen(org, target, jobs, "workspace app")
 
 	pending := []tea.Cmd{s.init()}
@@ -260,8 +271,8 @@ func TestRunUnsealCanceledWithoutReceiverDoesNotStrand(t *testing.T) {
 	events := make(chan unsealEvent)
 
 	jobs := []unsealJob{
-		{rel: "a.json", read: func() ([]byte, error) { return []byte("a"), nil }},
-		{rel: "b.json", read: func() ([]byte, error) { return []byte("b"), nil }},
+		{rel: "a.json", write: writeBytesJob("a")},
+		{rel: "b.json", write: writeBytesJob("b")},
 	}
 
 	go runUnseal(ctx, org, t.TempDir(), jobs, events)

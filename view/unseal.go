@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"path/filepath"
 
@@ -16,11 +17,23 @@ import (
 var ErrNoTarget = errors.New("unseal target directory is required")
 
 // unsealJob is one file of an unseal: the archive-relative path to reproduce
-// under the target and the reader that resolves its bytes through [*Org.Read],
-// whichever physical form holds them.
+// under the target and the writer that streams its bytes through
+// [*Org.writeObject], whichever physical form holds them and wherever they
+// live.
+//
+// The job streams rather than returning bytes because the surfaces it covers
+// have no common bound: a bundle member is capped by [maxMemberSize], but a
+// configuration tarball fetched from the mirror is whatever size it was
+// archived at, and buffering one whole would put an archive's largest object
+// into memory to write it straight back out.
+//
+// The path is a parameter of write rather than something write closes over, so
+// a plan is a list of paths beside one shared function value instead of one
+// closure per object. A whole-organization plan holds every job at once, and a
+// per-object closure would pin whatever the loop that built it had in scope.
 type unsealJob struct {
-	read func() ([]byte, error)
-	rel  string
+	write func(ctx context.Context, rel string, w io.Writer) (int64, error)
+	rel   string
 }
 
 // UnsealSummary totals one finished unseal run.
@@ -57,13 +70,15 @@ type unsealEvent struct {
 
 // planUnseal enumerates the archived objects at or beneath an archive-relative
 // prefix as unseal jobs, in listing order. The jobs carry exactly [*Org.List]'s
-// entries — same dedup, same machinery filter, same order — so a listing is a
-// faithful dry run of the unseal it plans.
+// entries, with the same dedup, the same machinery filter, and the same order,
+// so a listing is a faithful dry run of the unseal it plans.
 //
 // That faithfulness is about what the run attempts, not about what it
 // recovers: a listed object can still fail its read, and one kind fails
-// predictably. [Entry.RemoteOnly] names the objects an unseal is certain to
-// lose, so a caller summarizing the plan can count them against it up front.
+// predictably. An object the eviction moved to the mirror is fetched back in an
+// organization that records where its mirror is (see [*Org.HasRemote]) and lost
+// in one that does not, so a caller summarizing the plan can count the second
+// kind against it up front.
 func (o *Org) planUnseal(prefix string) ([]unsealJob, error) {
 	entries, err := o.List(prefix)
 	if err != nil {
@@ -71,9 +86,10 @@ func (o *Org) planUnseal(prefix string) ([]unsealJob, error) {
 	}
 
 	jobs := make([]unsealJob, 0, len(entries))
+	write := o.writeObject
 
 	for _, e := range entries {
-		jobs = append(jobs, unsealJob{rel: e.Path, read: func() ([]byte, error) { return o.Read(e.Path) }})
+		jobs = append(jobs, unsealJob{rel: e.Path, write: write})
 	}
 
 	return jobs, nil
@@ -95,12 +111,20 @@ func (o *Org) planProjectUnseal(project string) ([]unsealJob, error) {
 // outcome to emit, and returns the totals plus whether the run finished.
 //
 // A per-file problem increments Errored and the run continues: an unreadable
-// member, an evicted bundle with no remote configured, an evicted
-// configuration-version tarball (no in-tool read path at all,
-// [ErrRemoteOnly]), a member above the [maxMemberSize] read bound (which
-// errors out rather than silently truncates), an unsafe recorded name. The
-// loop stops between files once ctx ends or emit returns false, reporting an
-// unfinished run.
+// member, an evicted tarball in an organization that records no mirror
+// ([ErrRemoteOnly]), a member of an evicted bundle in one ([ErrObjectNotFound],
+// since a sidecar entry is not something bytes can be read out of), a mirrored
+// object whose fetch fails or comes back contradicting the proof its eviction
+// recorded, a member above the [maxMemberSize] read bound (which errors out
+// rather than silently truncates), an unsafe recorded name. The loop stops
+// between files once ctx ends or emit returns false, reporting an unfinished
+// run.
+//
+// A cancellation is not a per-file problem, even though it surfaces as one: a
+// SIGINT lands inside a long fetch as that file's error, and counting it would
+// report a failed object where the operator stopped the run. A failed write
+// under an ended context therefore ends the run unfinished, which is what the
+// callers turn into an interrupted-run message rather than a failure.
 func unsealJobs(
 	ctx context.Context,
 	org, target string,
@@ -114,12 +138,12 @@ func unsealJobs(
 			return sum, false
 		}
 
-		data, err := job.read()
-		if err == nil {
-			err = writeUnsealed(target, org, job.rel, data)
-		}
-
+		n, err := writeUnsealed(ctx, target, org, job.rel, job.write)
 		if err != nil {
+			if ctx.Err() != nil {
+				return sum, false
+			}
+
 			sum.Errored++
 
 			if !emit(unsealEvent{Path: job.rel, Err: err}) {
@@ -130,9 +154,9 @@ func unsealJobs(
 		}
 
 		sum.Files++
-		sum.Bytes += int64(len(data))
+		sum.Bytes += n
 
-		if !emit(unsealEvent{Path: job.rel, Bytes: int64(len(data))}) {
+		if !emit(unsealEvent{Path: job.rel, Bytes: n}) {
 			return sum, false
 		}
 	}
@@ -162,24 +186,54 @@ func runUnseal(ctx context.Context, org *Org, target string, jobs []unsealJob, e
 	}
 }
 
-// writeUnsealed writes one member's bytes at its archive-relative path under
-// target/<org>, overwriting an existing file so a re-run refreshes the tree.
+// writeUnsealed streams one object at its archive-relative path under
+// target/<org>, overwriting an existing file so a re-run refreshes the tree,
+// and returns how many bytes write produced.
 //
-// The path is untrusted — it comes from a sidecar or roll-up record — so it is
-// validated with [seal.ValidName] before any join: cleaning it the way
-// [*Org.AbsPath] does would silently collapse a traversal instead of refusing
-// it. The write is atomic and creates parents, both with the owner-only
-// default modes, matching the archive's secret-at-rest stance for raw state.
-func writeUnsealed(target, org, rel string, data []byte) error {
+// The path is untrusted, coming from a sidecar or roll-up record, so it is
+// validated with [seal.ValidName] before any join and before anything is
+// created. Cleaning it the way [*Org.AbsPath] does would silently collapse a
+// traversal instead of refusing it. The write is atomic and creates parents,
+// both with the owner-only default modes, matching the archive's secret-at-rest
+// stance for raw state.
+//
+// Staging the stream is what makes a verified fetch safe, because
+// [atomicfile.Write] discards the staging file when write fails, so an object
+// whose bytes come back from the mirror contradicting the digest its eviction
+// recorded leaves no file at all rather than a plausible-looking one. The cost
+// is a directory, since the parents are created before the first byte is asked
+// for, so a file that never arrives can leave an empty directory behind it.
+//
+// A failure of write is returned as it stands, so the reason an object could
+// not be resolved reads plainly; only a failure of the write path itself is
+// wrapped with the path it was writing.
+func writeUnsealed(
+	ctx context.Context,
+	target, org, rel string,
+	write func(ctx context.Context, rel string, w io.Writer) (int64, error),
+) (int64, error) {
 	err := seal.ValidName(rel)
 	if err != nil {
-		return fmt.Errorf("refuse unsafe member name: %w", err)
+		return 0, fmt.Errorf("refuse unsafe member name: %w", err)
 	}
 
-	err = atomicfile.WriteFile(filepath.Join(target, org, filepath.FromSlash(rel)), data)
-	if err != nil {
-		return fmt.Errorf("write %q: %w", rel, err)
+	var (
+		n        int64
+		writeErr error
+	)
+
+	err = atomicfile.Write(filepath.Join(target, org, filepath.FromSlash(rel)), func(w io.Writer) error {
+		n, writeErr = write(ctx, rel, w)
+
+		return writeErr
+	})
+
+	switch {
+	case writeErr != nil:
+		return n, writeErr
+	case err != nil:
+		return n, fmt.Errorf("write %q: %w", rel, err)
 	}
 
-	return nil
+	return n, nil
 }

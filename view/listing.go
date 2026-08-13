@@ -55,8 +55,11 @@ type Entry struct {
 	// Size is the object's content length in bytes, in every form.
 	Size int64
 	// Offloaded reports an object whose bytes were evicted to the remote
-	// store, so reading it either needs network access or has no in-tool path
-	// at all (see [Entry.RemoteOnly]).
+	// store, so reading it needs network access: a bundle member is fetched
+	// from its remote bundle with ranged reads, a configuration-version
+	// tarball is downloaded whole. Neither is reachable in an organization
+	// that records no mirror (see [*Org.HasRemote]), where an unseal counts
+	// the object as one it could not recover.
 	Offloaded bool
 }
 
@@ -64,18 +67,6 @@ type Entry struct {
 // accepts and an unseal reproduces beneath its target.
 func (e Entry) ArchivePath() string {
 	return path.Join(e.Org, e.Path)
-}
-
-// RemoteOnly reports an evicted object with no in-tool read path, so a read
-// fails with [ErrRemoteOnly] and an unseal cannot recover it.
-//
-// The two evictable surfaces differ here. A bundle member survives eviction
-// readable: the sidecar index stays behind, so the member is fetched from the
-// remote bundle with ranged reads. A configuration-version tarball is the
-// whole object, with nothing left to read it out of, so it must be fetched
-// from the mirror directly.
-func (e Entry) RemoteOnly() bool {
-	return e.Offloaded && e.Form == FormLoose
 }
 
 // List returns the org's archived objects at or beneath an archive-relative
@@ -140,18 +131,9 @@ func (o *Org) List(prefix string) ([]Entry, error) {
 // roll-up, a bundle sidecar) is still readable by its real path, which is
 // useful for inspecting the archive's own files.
 func (o *Org) Read(relPath string) ([]byte, error) {
-	rel, err := cleanRel(relPath)
+	rel, err := o.resolveRel(relPath)
 	if err != nil {
 		return nil, err
-	}
-
-	if rel == "" {
-		return nil, fmt.Errorf("%w: %q", ErrNotFile, relPath)
-	}
-
-	info, err := os.Stat(o.AbsPath(rel))
-	if err == nil && info.IsDir() {
-		return nil, fmt.Errorf("%w: %s is a directory", ErrNotFile, rel)
 	}
 
 	if ws := o.workspaceFor(rel); ws != nil {
@@ -168,6 +150,35 @@ func (o *Org) Read(relPath string) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// resolveRel narrows a caller-supplied archive path to the archive-relative
+// path of one object: an unclean path is refused with [ErrInvalidPath], and
+// both the empty path (the whole scope) and a physically present directory with
+// [ErrNotFile].
+//
+// It is the prologue [*Org.Read] and [*Org.writeObject] share, so a path that
+// names no single object is refused identically whichever shape the caller
+// asked its bytes in. Only a directory that physically exists is caught here; a
+// directory whose physical form sealing removed exists in the logical tree
+// alone, which only the owning workspace's index can see (see
+// [Workspace.missOrDir]).
+func (o *Org) resolveRel(relPath string) (string, error) {
+	rel, err := cleanRel(relPath)
+	if err != nil {
+		return "", err
+	}
+
+	if rel == "" {
+		return "", fmt.Errorf("%w: %q", ErrNotFile, relPath)
+	}
+
+	info, err := os.Stat(o.AbsPath(rel))
+	if err == nil && info.IsDir() {
+		return "", fmt.Errorf("%w: %s is a directory", ErrNotFile, rel)
+	}
+
+	return rel, nil
 }
 
 // describeMiss names what an absent file means: an eviction stub beside it
@@ -214,18 +225,27 @@ func readWorkspacePath(ws *Workspace, rel string) ([]byte, error) {
 		return data, err
 	}
 
-	sealed, sealedErr := ws.sealedUnder(rel)
+	return nil, ws.missOrDir(rel, err)
+}
+
+// missOrDir upgrades a workspace miss over a logical directory to [ErrNotFile],
+// returning miss unchanged for a path that names no object and holds none
+// beneath it either. See [readWorkspacePath] for why the two answers differ,
+// and [Workspace.writeObject], which shares the rule so a stream and a read
+// describe the same path the same way.
+func (w *Workspace) missOrDir(rel string, miss error) error {
+	sealed, sealedErr := w.sealedUnder(rel)
 	if sealedErr != nil {
-		return nil, err
+		return miss
 	}
 
 	for _, se := range sealed {
 		if se.rel != rel {
-			return nil, fmt.Errorf("%w: %s holds archived objects", ErrNotFile, rel)
+			return fmt.Errorf("%w: %s holds archived objects", ErrNotFile, rel)
 		}
 	}
 
-	return nil, err
+	return miss
 }
 
 // cleanRel normalizes a caller-supplied archive-relative path or prefix:

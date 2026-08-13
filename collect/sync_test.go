@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -41,8 +42,10 @@ type syncFixture struct {
 	fake   *remotetest.Fake
 }
 
-// newSyncFixture builds a [syncFixture] over the standard test prefix.
-func newSyncFixture(t *testing.T) syncFixture {
+// newSyncFixture builds a [syncFixture] over the standard test prefix. The
+// client retries nothing unless opts say otherwise, so an injected fault
+// surfaces as the failure it models rather than being absorbed.
+func newSyncFixture(t *testing.T, opts ...remote.Option) syncFixture {
 	t.Helper()
 
 	root := t.TempDir()
@@ -55,7 +58,7 @@ func newSyncFixture(t *testing.T) syncFixture {
 	fake := remotetest.New()
 
 	client, err := remote.New(t.Context(), cfg,
-		remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0))
+		append([]remote.Option{remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0)}, opts...)...)
 	require.NoError(t, err)
 
 	env := collect.NewEnv(nil, st, ledger,
@@ -952,6 +955,45 @@ func TestSyncArchiveEvictReadsBackDigestlessCopy(t *testing.T) {
 	assert.False(t, f.exists(t, tarball))
 	assert.NotEmpty(t, f.fake.Ranges(),
 		"the digestless confirm must actually read the remote bytes back")
+}
+
+func TestSyncArchiveEvictReadsBackThroughAResumedDownload(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t, remote.WithRetry(2, 0))
+
+	// Long enough that a mid-body failure lands inside the stream rather than
+	// between requests.
+	data := []byte(strings.Repeat("proven tarball bytes\n", 5000))
+	f.writeDone(t, tarball, data)
+
+	f.fake.HeadHook = func(context.Context) {
+		obj, ok := f.fake.Object(f.key(tarball))
+		if ok {
+			obj.Metadata = nil
+			obj.MD5 = nil
+			f.fake.SetObject(f.key(tarball), obj)
+		}
+	}
+
+	// The read-back's body dies partway through. Resuming is what keeps the
+	// hash honest: a restart would feed the hasher a duplicated prefix and
+	// report a healthy object as a mismatch, blocking its eviction for good.
+	f.fake.RangeBodyErr = errors.New("connection reset")
+	f.fake.RangeBodyErrAfter = 4096
+	f.fake.RangeBodyErrN = 1
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Failed)
+	assert.Equal(t, 1, stats.Evicted, "each byte is hashed exactly once across the resume")
+	assert.False(t, f.exists(t, tarball))
+
+	ranges := f.fake.Ranges()
+	require.Len(t, ranges, 2, "the read-back resumed rather than restarting or giving up")
+	assert.Positive(t, ranges[1].Offset, "the second request starts past what already landed")
 }
 
 func TestSyncArchiveEvictRefusesDigestlessForeignContent(t *testing.T) {

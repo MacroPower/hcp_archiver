@@ -3,6 +3,7 @@ package view
 import (
 	"archive/zip"
 	"context"
+	"io"
 )
 
 // DeflateMethod is [zip.Deflate], exposed so the external test package can drive
@@ -60,7 +61,14 @@ func RunUnsealForTest(ctx context.Context, org *Org, target string, jobs []Unsea
 	return perFile, summary
 }
 
-// WriteUnsealedForTest exposes [writeUnsealed] to tests.
-func WriteUnsealedForTest(target, org, rel string, data []byte) error {
-	return writeUnsealed(target, org, rel, data)
+// WriteUnsealedForTest exposes [writeUnsealed] to tests, streaming data as the
+// object's bytes.
+func WriteUnsealedForTest(ctx context.Context, target, org, rel string, data []byte) error {
+	_, err := writeUnsealed(ctx, target, org, rel, func(_ context.Context, _ string, w io.Writer) (int64, error) {
+		n, err := w.Write(data)
+
+		return int64(n), err //nolint:wrapcheck // A test shim over one write.
+	})
+
+	return err
 }

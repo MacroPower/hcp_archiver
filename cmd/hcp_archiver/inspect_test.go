@@ -2,8 +2,12 @@ package main_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,7 +17,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	main "go.jacobcolvin.com/hcp_archiver/cmd/hcp_archiver"
+	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/seal"
+	"go.jacobcolvin.com/hcp_archiver/store"
 	"go.jacobcolvin.com/hcp_archiver/view"
 )
 
@@ -336,6 +342,83 @@ func evictMiniTarball(t *testing.T, root, content string) string {
 	return "mini-org/" + rel
 }
 
+// mirrorMiniTarball evicts a configuration-version tarball to a mirror the
+// commands can actually reach: the stub stands in for the local file, the org
+// root records where the mirror is, and the bytes sit at the mirrored key
+// under a file:// bucket, which needs no credentials and no fake. It returns
+// the tarball's org-prefixed path.
+func mirrorMiniTarball(t *testing.T, root, content string) string {
+	t.Helper()
+
+	const (
+		rel    = "config-versions/cv-1.tar.gz"
+		prefix = "hcp"
+	)
+
+	org := filepath.Join(root, "mini-org")
+	mirror := t.TempDir()
+	sum := sha256.Sum256([]byte(content))
+
+	writeMini(t, org, rel+store.RemoteStubSuffix,
+		`{"version":1,"size":`+strconv.Itoa(len(content))+`,"sha256":"`+hex.EncodeToString(sum[:])+`"}`)
+
+	bucket := (&url.URL{Scheme: "file", Path: mirror}).String()
+	writeMini(t, org, remote.MarkerName, `{"version":1,"url":"`+bucket+`","prefix":"`+prefix+`"}`)
+	writeMini(t, mirror, path.Join(prefix, "mini-org", rel), content)
+
+	return "mini-org/" + rel
+}
+
+func TestUnsealCmd_FetchesEvictedTarballFromMirror(t *testing.T) {
+	t.Parallel()
+
+	const content = "mirrored tarball bytes"
+
+	root := buildMiniArchive(t)
+	tarball := mirrorMiniTarball(t, root, content)
+
+	// The dry run predicts a complete recovery, and says what the run will
+	// pull down to get there: with no opt-out flag, this is where an operator
+	// sees the egress before paying it.
+	out, _, err := runCmd(t, "unseal", root, "--dry-run", "--json")
+	require.NoError(t, err, "an evicted object with a mirror behind it is recoverable")
+
+	type unsealReport struct {
+		Files       int   `json:"files"`
+		Errored     int   `json:"errored"`
+		RemoteFiles int   `json:"remoteFiles"`
+		RemoteBytes int64 `json:"remoteBytes"`
+	}
+
+	var predicted unsealReport
+
+	require.NoError(t, json.Unmarshal([]byte(out), &predicted))
+	assert.Zero(t, predicted.Errored)
+	assert.Equal(t, 1, predicted.RemoteFiles)
+	assert.EqualValues(t, len(content), predicted.RemoteBytes)
+
+	text, _, err := runCmd(t, "unseal", root, "--dry-run")
+	require.NoError(t, err)
+	assert.Contains(t, text, "to fetch from the remote store")
+
+	// And the run delivers it: the bytes come back from the bucket, byte-exact.
+	target := t.TempDir()
+
+	summary, _, err := runCmd(t, "unseal", root, "--target", target, "--json")
+	require.NoError(t, err)
+
+	var ran unsealReport
+
+	require.NoError(t, json.Unmarshal([]byte(summary), &ran))
+	assert.Zero(t, ran.Errored)
+	assert.Equal(t, predicted.Files, ran.Files, "the dry run predicted the run it described")
+	assert.Zero(t, ran.RemoteFiles, "the volume line is a prediction, not a result")
+
+	data, err := os.ReadFile(filepath.Join(target, filepath.FromSlash(tarball)))
+	require.NoError(t, err)
+	assert.Equal(t, content, string(data))
+}
+
 func TestListCmd_EvictedObjectsReadRemote(t *testing.T) {
 	t.Parallel()
 
@@ -403,6 +486,45 @@ func TestUnsealCmd_DryRunCountsRemoteOnlyObjects(t *testing.T) {
 	require.ErrorIs(t, err, main.ErrUnsealIncomplete)
 	assert.Contains(t, text, "1 not recoverable")
 	assert.NotContains(t, text, "errored")
+}
+
+func TestUnsealCmd_DryRunCountsOffloadedBundleMembers(t *testing.T) {
+	t.Parallel()
+
+	// An evicted bundle in an organization recording no mirror loses its
+	// members exactly as an evicted tarball loses itself: the sidecar still
+	// lists them, and nothing can fetch the zip their bytes live in. What makes
+	// an object unrecoverable is the missing mirror, not the shape that held
+	// it, so the dry run counts these where the real run will.
+	root := buildMiniArchive(t)
+	require.NoError(t, os.Remove(filepath.Join(root, "mini-org",
+		filepath.FromSlash(miniWs), "bundles", "logs.gen0001.zip")))
+
+	out, errOut, err := runCmd(t, "unseal", root, "--dry-run", "--json")
+	require.ErrorIs(t, err, main.ErrUnsealIncomplete)
+
+	var predicted struct {
+		Errored     int `json:"errored"`
+		RemoteFiles int `json:"remoteFiles"`
+	}
+
+	require.NoError(t, json.Unmarshal([]byte(out), &predicted))
+	assert.Equal(t, 1, predicted.Errored, "the bundled member cannot be recovered")
+	assert.Zero(t, predicted.RemoteFiles, "and it is not volume the run would fetch either")
+	assert.Contains(t, errOut, miniPlanPath, "the object is named where the run streams its failures")
+
+	// The real run reaches the same verdict, by trying.
+	target := t.TempDir()
+
+	summary, _, err := runCmd(t, "unseal", root, "--target", target, "--json")
+	require.ErrorIs(t, err, main.ErrUnsealIncomplete)
+
+	var ran struct {
+		Errored int `json:"errored"`
+	}
+
+	require.NoError(t, json.Unmarshal([]byte(summary), &ran))
+	assert.Equal(t, 1, ran.Errored)
 }
 
 func TestUnsealCmd_DryRunText(t *testing.T) {

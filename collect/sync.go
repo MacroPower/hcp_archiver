@@ -453,39 +453,27 @@ func confirmRemoteCopy(info remote.ObjectInfo, size int64, digests remote.Digest
 }
 
 // confirmRemoteContent proves a digestless remote copy byte for byte: the
-// object is streamed back through ranged reads and hashed, and only a
-// SHA-256 matching the local proof lets the custody transfer proceed. It is
-// the eviction confirm's escalation path when no recorded digest exists to
-// compare — the strongest verification available, paid in one read of the
-// object.
+// object is streamed back into a hasher, and only a SHA-256 matching the local
+// proof lets the custody transfer proceed. It is the eviction confirm's
+// escalation path when no recorded digest exists to compare, the strongest
+// verification available and paid in one read of the object.
+//
+// The stream comes back through [remote.Client.Download], whose resume is what
+// keeps this hash honest by delivering every byte exactly once. A transient
+// blip mid-read-back then costs a re-request of the remainder rather than
+// hashing a duplicated prefix and reporting a healthy object as a mismatch,
+// which would block its eviction permanently.
 func (e *Env) confirmRemoteContent(ctx context.Context, key string, size int64, wantSHA256 string) error {
-	const chunk = 4 << 20
-
 	h := sha256.New()
-	buf := make([]byte, chunk)
 
-	var off int64
-
-	for off < size {
-		n, err := e.remote.ReadAt(ctx, key, size, buf, off)
-		if n > 0 {
-			h.Write(buf[:n])
-
-			off += int64(n)
-		}
-
-		if errors.Is(err, io.EOF) {
-			break
-		}
-
-		if err != nil {
-			return fmt.Errorf("read back remote copy %q: %w", key, err)
-		}
+	n, err := e.remote.Download(ctx, key, size, h)
+	if err != nil {
+		return fmt.Errorf("read back remote copy %q: %w", key, err)
 	}
 
-	if off != size {
+	if n != size {
 		return fmt.Errorf("%w: %q served %d of %d bytes on read-back (needs manual inspection)",
-			ErrRemoteCopyMismatch, key, off, size)
+			ErrRemoteCopyMismatch, key, n, size)
 	}
 
 	if hex.EncodeToString(h.Sum(nil)) != wantSHA256 {

@@ -5,9 +5,12 @@ import (
 	"bytes"
 	"compress/flate"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"hash/crc32"
 	"io"
 	"io/fs"
@@ -17,6 +20,7 @@ import (
 	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/remote"
+	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
 // remoteReadTimeout bounds each individual ranged GET against the remote
@@ -137,6 +141,66 @@ func (r *orgRemote) readMember(relBundle, relPath string) ([]byte, error) {
 	}
 
 	return nil, fmt.Errorf("%w: %s in remote bundle %q", ErrObjectNotFound, relPath, relBundle)
+}
+
+// fetchObject streams one evicted object's bytes from the mirror into w and
+// returns how many it wrote, verifying them against the proof the eviction
+// recorded in the stub. The size must match, and so must the digest when the
+// eviction proved one. It is the whole-object counterpart of
+// [orgRemote.readMember], for the surface that leaves nothing local to read
+// out of.
+//
+// Verification matters more here than anywhere else in the read path, because
+// this is the archive's only copy. The roll-up and bundle readers check their
+// members against digests recorded beside intact local machinery, while these
+// bytes come back from the one place they exist. The caller stages the stream
+// through an atomic write, so a mismatch leaves no file rather than a plausible
+// one.
+//
+// The download deliberately runs under the caller's context alone, with none of
+// [remoteReadTimeout] over it. That bound sizes one ranged GET, and a whole
+// tarball would blow it as a pure function of its length, failing identically
+// on every retry and every run. The client's own stall watchdog is the right
+// bound for a transfer, since it cuts a wedged connection without capping a
+// working one.
+func (r *orgRemote) fetchObject(
+	ctx context.Context, relPath string, stub store.RemoteStub, w io.Writer,
+) (int64, error) {
+	client, err := r.clientBuild()
+	if err != nil {
+		return 0, err
+	}
+
+	key := r.cfg.Key(r.orgName, relPath)
+	dst := w
+
+	// A stub whose eviction proved no digest verifies on length alone: there is
+	// nothing else to compare, and refusing it would strand an object the
+	// archive holds. The hasher is built only when there is something to
+	// compare it against, so such a fetch does not spend a pass over gigabytes
+	// to throw the result away.
+	var sum hash.Hash
+
+	if stub.SHA256 != "" {
+		sum = sha256.New()
+		dst = io.MultiWriter(w, sum)
+	}
+
+	n, err := client.Download(ctx, key, stub.Size, dst)
+	if err != nil {
+		return n, fmt.Errorf("fetch remote object %q: %w", key, err)
+	}
+
+	if n != stub.Size {
+		return n, fmt.Errorf("remote object %q served %d of the %d bytes its eviction recorded",
+			key, n, stub.Size)
+	}
+
+	if sum != nil && hex.EncodeToString(sum.Sum(nil)) != stub.SHA256 {
+		return n, fmt.Errorf("remote object %q does not match the digest its eviction recorded", key)
+	}
+
+	return n, nil
 }
 
 // bundle returns the cached read state for an evicted bundle, building it on

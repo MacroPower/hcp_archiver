@@ -22,7 +22,13 @@ import (
 var (
 	// ErrObjectNotFound indicates an archive-relative path is present in none of
 	// the archive's physical forms, with no eviction stub standing in for it
-	// either (see [ErrRemoteOnly]).
+	// either.
+	//
+	// The two evicted surfaces answer differently, because only one of them
+	// leaves a stub. An evicted configuration tarball is fetched from the
+	// mirror or reported [ErrRemoteOnly]; a member of an evicted bundle in an
+	// organization recording no mirror reports here, since the sidecar that
+	// lists it is not something its bytes can be read out of.
 	ErrObjectNotFound = errors.New("object not found in archive")
 
 	// ErrRollupChecksum indicates a roll-up member's content does not hash to
@@ -101,6 +107,14 @@ func (w *Workspace) Open(relPath string) ([]byte, error) {
 		return nil, fmt.Errorf("read %q: %w", relPath, err)
 	}
 
+	return w.openSealed(relPath)
+}
+
+// openSealed reads the object at an archive-relative path from the workspace's
+// sealed forms alone, the half of [Workspace.Open] that runs once no loose file
+// answers. [Workspace.writeObject] shares it, so the two agree on which sealed
+// form carries a path and on what its absence means.
+func (w *Workspace) openSealed(relPath string) ([]byte, error) {
 	idx, err := w.index()
 	if err != nil {
 		return nil, err

@@ -165,8 +165,16 @@ func (c *Client) withRetry(ctx context.Context, op func() error) error {
 // name), and trusting that guess would let a resolver blip settle sticky,
 // destructive decisions — a delete counted as already-removed, a Head
 // answering a permanent absence.
+//
+// A failure marked [errPermanent] is refused ahead of everything else: it
+// did not come from the store at all, so no classification of the store's
+// response applies to it.
 func retryable(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() != nil {
+		return false
+	}
+
+	if errors.Is(err, errPermanent) {
 		return false
 	}
 

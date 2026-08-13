@@ -12,8 +12,14 @@
 // sidecar indexes, all keyed by the same archive-relative path the ledger
 // records. The browser therefore renders a freshly-collected tree and a fully
 // sealed one identically, and needs no ledger: everything it knows, it learns
-// from the tree. Only reading a member of a bundle whose zip was evicted to a
-// remote store touches the network.
+// from the tree.
+//
+// Only an object the eviction moved to the mirror touches the network, and only
+// when something reads it. A member of an evicted bundle is fetched with ranged
+// reads of the remote zip, which the browser and an unseal both do; an evicted
+// configuration-version tarball is the whole object, so it is downloaded whole,
+// which only an unseal does. Listing, searching, and reading everything else
+// stay offline.
 //
 // [Browse] starts the browser; [OpenArchive] exposes the read layer on its
 // own, and [Archive] layers org-prefixed addressing over it for logical

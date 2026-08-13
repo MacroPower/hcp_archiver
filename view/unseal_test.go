@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.jacobcolvin.com/hcp_archiver/remote"
+	"go.jacobcolvin.com/hcp_archiver/remote/remotetest"
 	"go.jacobcolvin.com/hcp_archiver/seal"
 	"go.jacobcolvin.com/hcp_archiver/store"
 	"go.jacobcolvin.com/hcp_archiver/view"
@@ -160,12 +161,13 @@ func TestUnseal_WorkspaceLocalForms(t *testing.T) {
 	}
 }
 
-func TestUnseal_RemoteOnlyTarballIsCountedNotSkipped(t *testing.T) {
+func TestUnseal_EvictedTarballWithoutMirrorIsCountedNotSkipped(t *testing.T) {
 	t.Parallel()
 
-	// An evicted tarball has no in-tool read path, so an unseal cannot recover
-	// it. It must say so: an object missing from the plan would let the run
-	// report a clean recovery of an archive it had not fully recovered.
+	// An organization that records no mirror has nowhere to fetch an evicted
+	// tarball from, so an unseal cannot recover it. It must say so: an object
+	// missing from the plan would let the run report a clean recovery of an
+	// archive it had not fully recovered.
 	root := buildArchive(t)
 	evictTarball(t, root, "cv-9")
 
@@ -184,17 +186,151 @@ func TestUnseal_RemoteOnlyTarballIsCountedNotSkipped(t *testing.T) {
 	}
 }
 
+// unsealOrg runs a whole-organization unseal into target, returning the summary
+// and the per-file byte counts by archive-relative path.
+func unsealOrg(t *testing.T, ctx context.Context, org *view.Org, target string,
+) (view.UnsealSummary, map[string]int64, error) {
+	t.Helper()
+
+	bytesByPath := make(map[string]int64)
+
+	sum, err := view.NewArchive([]*view.Org{org}).Unseal(ctx, target, "my-org",
+		func(archivePath string, n int64, _ error) {
+			bytesByPath[strings.TrimPrefix(archivePath, "my-org/")] = n
+		})
+
+	return sum, bytesByPath, err //nolint:wrapcheck // A test shim; the caller asserts on the error.
+}
+
+func TestUnseal_EvictedTarballFetchedFromMirror(t *testing.T) {
+	t.Parallel()
+
+	// The mirror is where the bytes went, and the organization records where
+	// the mirror is, so the unseal fetches them back rather than declaring the
+	// object lost.
+	root := buildArchive(t)
+	fake := remotetest.New()
+
+	writeFile(t, filepath.Join(root, "my-org"), ".remote.json", viewMarker)
+
+	rel := evictTarballRemote(t, root, "cv-9", fake, tarballContent)
+
+	org := openRemoteOrg(t, root, fake)
+	target := t.TempDir()
+
+	sum, bytesByPath, err := unsealOrg(t, t.Context(), org, target)
+	require.NoError(t, err)
+
+	assert.Zero(t, sum.Errored)
+	assert.Equal(t, tarballContent, readTarget(t, target, rel), "the fetched object is byte-exact")
+	assert.EqualValues(t, len(tarballContent), bytesByPath[rel],
+		"the run counts what it wrote, which is the size the stub recorded")
+}
+
+func TestUnseal_EvictedTarballDigestMismatchWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	// Same length, different bytes: only the digest the eviction recorded
+	// catches it. Staging the fetch is what keeps the mismatch from landing as
+	// a plausible-looking file.
+	root := buildArchive(t)
+	fake := remotetest.New()
+
+	writeFile(t, filepath.Join(root, "my-org"), ".remote.json", viewMarker)
+
+	corrupt := strings.Repeat("x", len(tarballContent))
+	rel := evictTarballRemote(t, root, "cv-9", fake, corrupt)
+
+	org := openRemoteOrg(t, root, fake)
+	target := t.TempDir()
+
+	var failure error
+
+	sum, err := view.NewArchive([]*view.Org{org}).Unseal(t.Context(), target, "my-org",
+		func(archivePath string, _ int64, progErr error) {
+			if archivePath == "my-org/"+rel {
+				failure = progErr
+			}
+		})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, sum.Errored)
+	require.ErrorContains(t, failure, "does not match the digest its eviction recorded")
+	assert.NoFileExists(t, filepath.Join(target, "my-org", filepath.FromSlash(rel)),
+		"a fetch that fails its digest leaves no file")
+	assert.Positive(t, sum.Files, "the rest of the archive still recovered")
+}
+
+func TestUnseal_EvictedTarballAbsentFromMirror(t *testing.T) {
+	t.Parallel()
+
+	// The stub says the object went to the mirror and the mirror does not have
+	// it. That is one file's failure, named, with the run carrying on.
+	root := buildArchive(t)
+	fake := remotetest.New()
+
+	writeFile(t, filepath.Join(root, "my-org"), ".remote.json", viewMarker)
+
+	rel := evictTarball(t, root, "cv-9")
+
+	org := openRemoteOrg(t, root, fake)
+	target := t.TempDir()
+
+	var failure error
+
+	sum, err := view.NewArchive([]*view.Org{org}).Unseal(t.Context(), target, "my-org",
+		func(archivePath string, _ int64, progErr error) {
+			if archivePath == "my-org/"+rel {
+				failure = progErr
+			}
+		})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, sum.Errored)
+	require.ErrorIs(t, failure, remote.ErrNotFound)
+	assert.Contains(t, failure.Error(), viewPrefix+"/my-org/"+rel, "the message names the key it looked for")
+	assert.NoFileExists(t, filepath.Join(target, "my-org", filepath.FromSlash(rel)))
+
+	// The staging write creates the parents before it asks for the first byte,
+	// so a file that never arrives leaves its directory behind. That is the
+	// price of discarding a bad fetch instead of writing it, and it is recorded
+	// here rather than left to be discovered.
+	assert.DirExists(t, filepath.Join(target, "my-org", store.ConfigVersionsDirName))
+}
+
+func TestUnseal_EvictedTarballCancellationWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+	fake := remotetest.New()
+
+	writeFile(t, filepath.Join(root, "my-org"), ".remote.json", viewMarker)
+
+	rel := evictTarballRemote(t, root, "cv-9", fake, tarballContent)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	// A SIGINT landing inside the fetch. It ends the run rather than counting
+	// the file it interrupted as one that failed.
+	fake.RangeHook = func(context.Context) { cancel() }
+
+	org := openRemoteOrg(t, root, fake)
+	target := t.TempDir()
+
+	sum, _, err := unsealOrg(t, ctx, org, target)
+	require.ErrorIs(t, err, context.Canceled)
+
+	assert.Zero(t, sum.Errored, "an interrupted file is not a failed one")
+	assert.NoFileExists(t, filepath.Join(target, "my-org", filepath.FromSlash(rel)))
+}
+
 func TestUnseal_WorkspaceRemote(t *testing.T) {
 	t.Parallel()
 
 	root, fake := buildRemoteArchive(t)
 
-	org := openOrg(t, root,
-		view.WithContext(t.Context()),
-		view.WithRemoteFactory(func(ctx context.Context, cfg remote.Config) (*remote.Client, error) {
-			return remote.New(ctx, cfg, remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0))
-		}),
-	)
+	org := openRemoteOrg(t, root, fake)
 
 	target := t.TempDir()
 	_, sum := unsealWorkspace(t, org, target)
@@ -407,10 +543,10 @@ func TestWriteUnsealed_RejectsUnsafeNames(t *testing.T) {
 
 	target := t.TempDir()
 
-	err := view.WriteUnsealedForTest(target, "my-org", "../escape", []byte("x"))
+	err := view.WriteUnsealedForTest(t.Context(), target, "my-org", "../escape", []byte("x"))
 	require.ErrorIs(t, err, seal.ErrMemberName)
 
-	err = view.WriteUnsealedForTest(target, "my-org", "ok/file.json", []byte("x"))
+	err = view.WriteUnsealedForTest(t.Context(), target, "my-org", "ok/file.json", []byte("x"))
 	require.NoError(t, err)
 	assert.FileExists(t, filepath.Join(target, "my-org", "ok", "file.json"))
 }

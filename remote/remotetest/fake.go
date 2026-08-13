@@ -81,6 +81,16 @@ type Fake struct {
 	// RangeErr fails every ranged read at its open; a positive RangeErrN
 	// bounds it to the first n reads.
 	RangeErr error
+	// RangeBodyErr fails every ranged read's body once RangeBodyErrAfter
+	// bytes have been delivered, rather than at the open the way RangeErr
+	// does; a positive RangeBodyErrN bounds it to the first n reads. It
+	// models the failure a reader cannot retry blindly: bytes already
+	// reached the caller, so a reopen must resume past them.
+	RangeBodyErr error
+	// RangeHook, when set, runs at the start of each ranged read with the
+	// call's context, serving the same mid-flight cancellation modeling as
+	// HeadHook.
+	RangeHook func(ctx context.Context)
 	// HeadHook, when set, runs at the start of each attributes read with the
 	// call's context. A test cancels a context it controls from inside it to
 	// model a cancellation surfacing mid-flight; the read then returns the
@@ -107,15 +117,20 @@ type Fake struct {
 	copies  []CopyRecord
 	mu      sync.Mutex
 
-	// PutErrN, HeadErrN, ListErrN, DeleteErrN, RangeErrN, and CopyErrN bound
-	// their error's blast radius to the first n calls; zero keeps the error
-	// firing on every call.
-	PutErrN    int
-	HeadErrN   int
-	ListErrN   int
-	DeleteErrN int
-	RangeErrN  int
-	CopyErrN   int
+	// RangeBodyErrAfter is how many bytes a ranged read delivers before
+	// RangeBodyErr fires; zero fails the body before its first byte.
+	RangeBodyErrAfter int64
+
+	// PutErrN, HeadErrN, ListErrN, DeleteErrN, RangeErrN, RangeBodyErrN, and
+	// CopyErrN bound their error's blast radius to the first n calls; zero
+	// keeps the error firing on every call.
+	PutErrN       int
+	HeadErrN      int
+	ListErrN      int
+	DeleteErrN    int
+	RangeErrN     int
+	RangeBodyErrN int
+	CopyErrN      int
 
 	// ErrCode, when set, is the [gcerrors.ErrorCode] stamped on every
 	// injected fault, so a test can model a driver-classified failure (a
@@ -124,15 +139,16 @@ type Fake struct {
 	// one. A genuinely missing object still classifies NotFound regardless.
 	ErrCode gcerrors.ErrorCode
 
-	putCalls   int
-	headCalls  int
-	listCalls  int
-	putFails   int
-	headFails  int
-	listFails  int
-	delFails   int
-	rangeFails int
-	copyFails  int
+	putCalls       int
+	headCalls      int
+	listCalls      int
+	putFails       int
+	headFails      int
+	listFails      int
+	delFails       int
+	rangeFails     int
+	rangeBodyFails int
+	copyFails      int
 }
 
 // CopyRecord is one recorded server-side copy, source to destination.
@@ -358,10 +374,37 @@ func (f *Fake) NewTypedWriter(
 	return &fakeWriter{ctx: ctx, f: f, key: key, md5: opts.ContentMD5, metadata: maps.Clone(opts.Metadata)}, nil
 }
 
-// fakeReader serves one ranged read from an object's bytes.
+// fakeReader serves one ranged read from an object's bytes, optionally failing
+// its body partway through.
 type fakeReader struct {
 	io.Reader
-	attrs driver.ReaderAttributes
+	bodyErr error
+	attrs   driver.ReaderAttributes
+	failAt  int64
+	served  int64
+}
+
+// Read serves the range's bytes, failing with the injected body error once
+// failAt bytes have been delivered. The bytes served before the failure are
+// really delivered, which is what a resuming reader has to account for; a
+// reader that restarts from zero re-delivers them and can be caught doing it.
+func (r *fakeReader) Read(p []byte) (int, error) {
+	if r.bodyErr == nil {
+		return r.Reader.Read(p) //nolint:wrapcheck // A transparent in-memory reader.
+	}
+
+	if r.served >= r.failAt {
+		return 0, r.bodyErr
+	}
+
+	if int64(len(p)) > r.failAt-r.served {
+		p = p[:r.failAt-r.served]
+	}
+
+	n, err := r.Reader.Read(p)
+	r.served += int64(n)
+
+	return n, err //nolint:wrapcheck // A transparent in-memory reader.
 }
 
 // Attributes reports the read's metadata.
@@ -379,8 +422,17 @@ func (r *fakeReader) Close() error { return nil }
 // errs as the real backends' range handling does, so a caller that fails to
 // bound its reads cannot pass against the fake.
 func (f *Fake) NewRangeReader(
-	_ context.Context, key string, offset, length int64, _ *driver.ReaderOptions,
+	ctx context.Context, key string, offset, length int64, _ *driver.ReaderOptions,
 ) (driver.Reader, error) {
+	if f.RangeHook != nil {
+		f.RangeHook(ctx)
+
+		err := ctx.Err()
+		if err != nil {
+			return nil, err //nolint:wrapcheck // A faked mid-flight cancellation.
+		}
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -407,10 +459,17 @@ func (f *Fake) NewRangeReader(
 		end = min(offset+length, size)
 	}
 
-	return &fakeReader{
+	r := &fakeReader{
 		Reader: bytes.NewReader(obj.Data[offset:end]),
 		attrs:  driver.ReaderAttributes{Size: size, ModTime: time.Time{}},
-	}, nil
+	}
+
+	if takeFault(f.RangeBodyErr, &f.rangeBodyFails, f.RangeBodyErrN) {
+		r.bodyErr = f.RangeBodyErr
+		r.failAt = f.RangeBodyErrAfter
+	}
+
+	return r, nil
 }
 
 // listPageSize is how many keys one listing page serves without an explicit

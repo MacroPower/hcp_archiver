@@ -34,10 +34,15 @@ var (
 	ErrInvalidPath = errors.New("invalid archive path")
 
 	// ErrRemoteOnly indicates an archived object whose bytes were evicted to
-	// the remote store leaving nothing to read them out of locally, so the
-	// object is listed but not readable here and must be fetched from the
-	// mirror directly. It is distinct from a missing object: the archive holds
-	// the object, elsewhere.
+	// the remote store leaving nothing local to read them out of. It is
+	// distinct from a missing object: the archive holds the object, elsewhere.
+	//
+	// It is what a whole-object read ([*Org.Read]) answers for an evicted
+	// configuration tarball, naming the mirrored key to fetch, because that
+	// shape holds the bytes in memory and such a tarball has no bound. An
+	// unseal streams instead and fetches the object back, so it meets this
+	// error only where no fetch is possible, in an organization recording no
+	// mirror or over a stub too damaged to trust.
 	ErrRemoteOnly = errors.New("archived object is remote-only")
 )
 
@@ -218,6 +223,18 @@ func isOrgRoot(dir string) (bool, error) {
 // Root returns the absolute path of the organization's archive directory.
 func (o *Org) Root() string {
 	return o.root
+}
+
+// HasRemote reports whether the organization's root carries a remote marker,
+// so its evicted objects have somewhere to be fetched from.
+//
+// It answers what is configured, not what answers: the mirror may be
+// unreachable, the credentials absent, the object gone from the bucket. That
+// is the useful boundary for a caller predicting a run, since an evicted object
+// in an organization with no marker is one an unseal is certain to lose, while
+// everything else is only as reachable as the network.
+func (o *Org) HasRemote() bool {
+	return o.remote != nil
 }
 
 // context returns the organization's browse context, defaulting to

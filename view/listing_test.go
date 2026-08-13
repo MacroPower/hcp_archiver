@@ -213,7 +213,7 @@ func TestOrgList_EvictedTarball(t *testing.T) {
 	e := entryByPath(t, entries, tarball)
 	assert.Equal(t, view.FormLoose, e.Form, "a tarball is a plain file wherever it lives")
 	assert.True(t, e.Offloaded)
-	assert.True(t, e.RemoteOnly(), "nothing local can read it back")
+	assert.False(t, org.HasRemote(), "the fixture records no mirror, so nothing can fetch it back")
 	assert.EqualValues(t, len(tarballContent), e.Size, "the stub's recorded size works offline")
 	assert.Empty(t, e.Container)
 	assert.True(t, e.ModTime.IsZero(), "an evicted object has no local file to date it")
@@ -243,6 +243,39 @@ func TestOrgList_EvictedTarballPrefixes(t *testing.T) {
 	entries, err = org.List(store.RemoteStubPath(tarball))
 	require.NoError(t, err)
 	assert.Empty(t, entries)
+}
+
+func TestOrgHasRemote(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+	assert.False(t, openOrg(t, root).HasRemote(), "an archive with no marker has no mirror")
+
+	mirrored := buildArchive(t)
+	writeFile(t, filepath.Join(mirrored, "my-org"), ".remote.json", viewMarker)
+	assert.True(t, openOrg(t, mirrored).HasRemote(), "the org-root marker is what records one")
+}
+
+func TestOrgList_OffloadedBundleMemberWithoutMirror(t *testing.T) {
+	t.Parallel()
+
+	// A bundle whose zip is gone with no marker beside it: its members still
+	// list, from the sidecar index eviction left behind, and nothing can fetch
+	// them. An unseal counts them as unrecoverable on exactly this pairing,
+	// which is why the two facts have to be readable together.
+	root := buildArchive(t)
+	require.NoError(t, os.Remove(
+		filepath.Join(root, "my-org", filepath.FromSlash(wsDir), "bundles", "logs.gen0001.zip")))
+
+	org := openOrg(t, root)
+
+	entries, err := org.List("")
+	require.NoError(t, err)
+
+	e := entryByPath(t, entries, wsDir+"/runs/run-new/plan.log")
+	assert.Equal(t, view.FormBundle, e.Form)
+	assert.True(t, e.Offloaded, "the member's bytes are not here")
+	assert.False(t, org.HasRemote(), "and there is nowhere to fetch them from")
 }
 
 func TestOrgList_LocalTarballBeatsItsStub(t *testing.T) {

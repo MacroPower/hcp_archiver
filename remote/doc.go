@@ -8,15 +8,19 @@
 // stays on local disk. A [Client] uploads a bundle with its full-object
 // digests recorded as object metadata ([Digests]), confirms it landed with
 // [Client.Head] (which serves those digests back for egress-free
-// comparison), and serves later reads through [Client.ReadAt], whose ranged
-// reads let a zip central directory be parsed and a single member fetched
-// without downloading the bundle. [Client.Preflight] round-trips a small
-// probe object through the write, head, list, ranged-read, and delete
-// motions at startup: the metadata digests must read back exactly (the
-// mirror's digest comparisons depend on them, so a metadata-dropping store
-// fails the run before any archive work), while a backend digest attribute
-// that mismatches the written bytes (an SSE-KMS bucket's ETag is hex but no
-// content MD5) just downgrades the client to the metadata digests alone.
+// comparison), and serves later reads in two shapes: [Client.ReadAt], whose
+// ranged reads let a zip central directory be parsed and a single member
+// fetched without downloading the bundle, and [Client.Download], which
+// streams a whole object into a writer, for the surfaces whose bytes are the
+// object itself rather than a span of one (a configuration tarball).
+//
+// [Client.Preflight] round-trips a small probe object through the write,
+// head, list, ranged-read, and delete motions at startup: the metadata
+// digests must read back exactly (the mirror's digest comparisons depend on
+// them, so a metadata-dropping store fails the run before any archive work),
+// while a backend digest attribute that mismatches the written bytes (an
+// SSE-KMS bucket's ETag is hex but no content MD5) just downgrades the client
+// to the metadata digests alone.
 //
 // The mirror is the archive's long-term record, so every operation retries
 // a transient store failure under a bounded doubling backoff ([WithRetry],

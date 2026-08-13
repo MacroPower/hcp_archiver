@@ -151,11 +151,18 @@ directory, expanding roll-ups and bundles back into loose files. The target
 reproduces the "<org>/<path>" layout, so a listed path names the same file
 after recovery.
 
+An object whose bytes were evicted to the archive's mirror is fetched back
+from it, needing object-store credentials from the backend provider's default
+chain. An organization whose archive root records no mirror leaves one
+unrecoverable before the run starts, counted and named among the run's
+failures; a fetch can still fail against a mirror that is configured.
+
 ` + inspectLong + `
 
 A single argument names the archive directory; pass "." explicitly to address
-a path in the current directory. With --dry-run the plan is summarized from
-the listing and nothing is written; --target is not required.`,
+a path in the current directory. With --dry-run the plan, including how much it
+would fetch from the mirror, is summarized from the listing and nothing is
+written; --target is not required.`,
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cc *cobra.Command, args []string) error {
 			dir, prefix := archiveArgs(args)
@@ -224,7 +231,7 @@ func runUnsealCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
 		return describeNoOrg(err, arc)
 	}
 
-	err = writeUnsealSummary(cc.OutOrStdout(), sum, target, false, jsonOut)
+	err = writeUnsealSummary(cc.OutOrStdout(), unsealOutcome{summary: sum, target: target}, jsonOut)
 	if err != nil {
 		return err
 	}
@@ -240,65 +247,116 @@ func runUnsealCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
 // listing carries the same entries in the same order as the plan the real run
 // executes, so the totals predict it.
 //
-// An object the listing reports as remote-only counts as errored rather than
-// as a file to write, and when the plan holds any the dry run exits 1 the way
-// the run would. Each is named on stderr, where the real run streams its
-// per-file failures, so the answer to "which ones" does not need a second
-// command. The prediction is a lower bound on the failures: a bundle that
-// turns out to be corrupt errors only when something tries to read it, which a
-// dry run never does, so a clean dry run does not promise a clean run.
+// An evicted object in an organization whose root records no mirror counts as
+// errored rather than as a file to write, because nothing can fetch its bytes
+// back, and when the plan holds any the dry run exits 1 the way the run would.
+// Each is named on stderr, where the real run streams its per-file failures, so
+// the answer to "which ones" does not need a second command.
+//
+// Everything else evicted is counted as recoverable and reported separately as
+// the volume the run will pull down, since a run with no opt-out flag fetches
+// it without asking and this is the only place an operator sees that cost
+// before paying it.
+//
+// The prediction is a lower bound on the failures: a bundle that turns out to
+// be corrupt, a mirror that refuses the credentials it is offered, or an object
+// missing from the bucket all error only when something tries to read them,
+// which a dry run never does, so a clean dry run does not promise a clean run.
 func unsealDryRun(out, errW io.Writer, arc *view.Archive, prefix, target string, jsonOut bool) error {
 	entries, err := arc.List(prefix)
 	if err != nil {
 		return describeNoOrg(err, arc)
 	}
 
-	var sum view.UnsealSummary
+	mirrored := make(map[string]bool, len(arc.Orgs()))
+	for _, org := range arc.Orgs() {
+		mirrored[org.Name] = org.HasRemote()
+	}
+
+	outcome := unsealOutcome{target: target, dryRun: true}
 
 	for _, e := range entries {
-		if e.RemoteOnly() {
-			sum.Errored++
+		if e.Offloaded && !mirrored[e.Org] {
+			outcome.summary.Errored++
 
-			eprintf(errW, "%s: cannot be unsealed; its bytes are in the remote store\n", e.ArchivePath())
+			eprintf(errW, "%s: cannot be unsealed; its bytes are in the remote store "+
+				"and the organization records no mirror to fetch them from\n", e.ArchivePath())
 
 			continue
 		}
 
-		sum.Files++
-		sum.Bytes += e.Size
+		if e.Offloaded {
+			outcome.remote.files++
+			outcome.remote.bytes += e.Size
+		}
+
+		outcome.summary.Files++
+		outcome.summary.Bytes += e.Size
 	}
 
-	err = writeUnsealSummary(out, sum, target, true, jsonOut)
+	err = writeUnsealSummary(out, outcome, jsonOut)
 	if err != nil {
 		return err
 	}
 
-	if sum.Errored > 0 {
-		return fmt.Errorf("%w: %d of %d objects", ErrUnsealIncomplete, sum.Errored, sum.Errored+sum.Files)
+	if outcome.summary.Errored > 0 {
+		return fmt.Errorf("%w: %d of %d objects",
+			ErrUnsealIncomplete, outcome.summary.Errored, outcome.summary.Errored+outcome.summary.Files)
 	}
 
 	return nil
 }
 
+// unsealVolume counts the objects an unseal plans to pull down from the
+// mirror, an estimate of the egress a run costs.
+//
+// The byte figure is each object's archived length, which is exact for a
+// tarball (the object is downloaded whole) and an overestimate for a member of
+// an evicted bundle, whose compressed span in the remote zip is what actually
+// crosses the wire. Only the bundle's central directory knows that span, and
+// reading it is a network round trip per bundle, which is the one thing a dry
+// run promises not to do.
+type unsealVolume struct {
+	bytes int64
+	files int
+}
+
+// unsealOutcome is one unseal's reported result: a finished run's totals, or a
+// dry run's prediction of them.
+//
+// The remote volume is a dry run's alone. A finished run has already spent
+// whatever egress it spent, so reporting it there would only add a field that
+// is always zero to every summary the real command writes.
+type unsealOutcome struct {
+	target  string
+	summary view.UnsealSummary
+	remote  unsealVolume
+	dryRun  bool
+}
+
 // unsealReport is the wire shape of an unseal summary under --json.
 type unsealReport struct {
-	Target  string `json:"target"`
-	Files   int    `json:"files"`
-	Bytes   int64  `json:"bytes"`
-	Errored int    `json:"errored"`
-	DryRun  bool   `json:"dryRun"`
+	Target      string `json:"target"`
+	Files       int    `json:"files"`
+	Bytes       int64  `json:"bytes"`
+	Errored     int    `json:"errored"`
+	RemoteFiles int    `json:"remoteFiles,omitempty"`
+	RemoteBytes int64  `json:"remoteBytes,omitempty"`
+	DryRun      bool   `json:"dryRun"`
 }
 
 // writeUnsealSummary reports one run's totals to out, as one human line or one
 // JSON object.
-func writeUnsealSummary(out io.Writer, sum view.UnsealSummary, target string, dryRun, jsonOut bool) error {
+func writeUnsealSummary(out io.Writer, oc unsealOutcome, jsonOut bool) error {
 	if jsonOut {
 		err := json.NewEncoder(out).Encode(unsealReport{
-			Target:  target,
-			Files:   sum.Files,
-			Bytes:   sum.Bytes,
-			Errored: sum.Errored,
-			DryRun:  dryRun,
+			Target:      oc.target,
+			Files:       oc.summary.Files,
+			Bytes:       oc.summary.Bytes,
+			Errored:     oc.summary.Errored,
+			RemoteFiles: oc.remote.files,
+			RemoteBytes: oc.remote.bytes,
+			DryRun:      oc.dryRun,
 		})
 		if err != nil {
 			return fmt.Errorf("encode summary: %w", err)
@@ -309,25 +367,31 @@ func writeUnsealSummary(out io.Writer, sum view.UnsealSummary, target string, dr
 
 	var b strings.Builder
 
-	if dryRun {
+	if oc.dryRun {
 		b.WriteString("would unseal ")
 	} else {
 		b.WriteString("unsealed ")
 	}
 
-	fmt.Fprintf(&b, "%s (%s)", theme.CountNoun(sum.Files, "object", "objects"), theme.HumanBytes(sum.Bytes))
+	fmt.Fprintf(&b, "%s (%s)",
+		theme.CountNoun(oc.summary.Files, "object", "objects"), theme.HumanBytes(oc.summary.Bytes))
 
-	if target != "" {
-		b.WriteString(" into " + target)
+	if oc.target != "" {
+		b.WriteString(" into " + oc.target)
 	}
 
-	if sum.Errored > 0 {
+	if oc.remote.files > 0 {
+		fmt.Fprintf(&b, "; %s (up to %s) to fetch from the remote store",
+			theme.CountNoun(oc.remote.files, "object", "objects"), theme.HumanBytes(oc.remote.bytes))
+	}
+
+	if oc.summary.Errored > 0 {
 		// A dry run has not tried anything yet, so nothing has errored; what it
 		// counted is what it can already tell will not come back.
-		if dryRun {
-			fmt.Fprintf(&b, "; %d not recoverable", sum.Errored)
+		if oc.dryRun {
+			fmt.Fprintf(&b, "; %d not recoverable", oc.summary.Errored)
 		} else {
-			fmt.Fprintf(&b, "; %d errored", sum.Errored)
+			fmt.Fprintf(&b, "; %d errored", oc.summary.Errored)
 		}
 	}
 

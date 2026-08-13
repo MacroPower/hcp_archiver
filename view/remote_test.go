@@ -75,14 +75,12 @@ func buildRemoteArchive(t *testing.T) (string, *remotetest.Fake) {
 	return root, fake
 }
 
-// openRemoteWorkspace opens the evicted fixture with a fake-backed client
-// factory and returns its workspace plus the fake.
-func openRemoteWorkspace(t *testing.T) (*view.Workspace, *remotetest.Fake) {
+// openRemoteOrg opens the archive at root with a fake-backed client factory,
+// the shape every read of an evicted object needs.
+func openRemoteOrg(t *testing.T, root string, fake *remotetest.Fake) *view.Org {
 	t.Helper()
 
-	root, fake := buildRemoteArchive(t)
-
-	orgs, err := view.OpenArchive(root,
+	return openOrg(t, root,
 		view.WithContext(t.Context()),
 		view.WithRemoteFactory(func(ctx context.Context, cfg remote.Config) (*remote.Client, error) {
 			assert.Equal(t, viewURL, cfg.URL, "the marker's URL drives the client")
@@ -90,10 +88,16 @@ func openRemoteWorkspace(t *testing.T) (*view.Workspace, *remotetest.Fake) {
 			return remote.New(ctx, cfg, remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0))
 		}),
 	)
-	require.NoError(t, err)
-	require.Len(t, orgs, 1)
+}
 
-	return orgs[0].Workspace("default", "app"), fake
+// openRemoteWorkspace opens the evicted fixture with a fake-backed client
+// factory and returns its workspace plus the fake.
+func openRemoteWorkspace(t *testing.T) (*view.Workspace, *remotetest.Fake) {
+	t.Helper()
+
+	root, fake := buildRemoteArchive(t)
+
+	return openRemoteOrg(t, root, fake).Workspace("default", "app"), fake
 }
 
 func TestWorkspaceOpen_RemoteBundleMember(t *testing.T) {

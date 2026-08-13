@@ -675,10 +675,12 @@ of the archive, in two modes with different semantics:
   have no mid-run eviction driver, so they accumulate until the sweep), which
   is what lets a 5k+ workspace org's archive run on a machine that could
   never hold the whole thing at once. Each eviction leaves something local
-  standing for what it removed, so the read side keeps seeing the object: a
-  bundle already leaves its sidecar index, and a tarball is given a small
-  `<id>.tar.gz.remote.json` stub recording the size and digest the eviction
-  proved.
+  standing for what it removed, so the read side keeps seeing the object and
+  can go get it: a bundle already leaves its sidecar index, from which a member
+  is fetched with ranged reads of the remote zip, and a tarball is given a
+  small `<id>.tar.gz.remote.json` stub recording the size and digest the
+  eviction proved: the size the listing reports, and the handle an unseal
+  downloads and verifies the object by.
 - **Sync** (incremental upload, local kept) mirrors everything else — loose
   files, roll-ups, sidecar indexes, ledger snapshots. Local disk stays the
   canonical search layer, so browsing and grep remain offline operations;
@@ -837,13 +839,15 @@ a crash between the two leaves a stub beside a live tarball, which the next
 sweep re-evicts and rewrites, while a delete-first crash would leave a path
 nothing ever walks again. The stub records the size and digest the eviction
 proved, which is what the read side needs to list an object whose bytes are
-gone, and it closes, for the readers, the asymmetry `RecordOnlyLedgerPrefixes`
-records for the ledger: a sealed bundle leaves its sidecar behind, a tarball
-leaves nothing, so the tarball has to be given something. That declaration
-still stands, since a stub is unverified and an operator can delete it. An
-archive whose tarballs were evicted without stubs is repaired from the ledger
-at the close sweep, which already derives the set of remote-only tarballs in
-order to verify them against the store. That repair
+gone and to fetch it back: an unseal reads the stub for the object's length,
+downloads the mirrored key, and checks what arrives against both recorded
+values before the file lands. The stub closes, for the readers, the asymmetry
+`RecordOnlyLedgerPrefixes` records for the ledger: a sealed bundle leaves its
+sidecar behind, a tarball leaves nothing, so the tarball has to be given
+something. That declaration still stands, since a stub is unverified and an
+operator can delete it. An archive whose tarballs were evicted without stubs is
+repaired from the ledger at the close sweep, which already derives the set of
+remote-only tarballs in order to verify them against the store. That repair
 restores the read model, not custody: it asserts no more than the ledger entry
 it copies, and the same sweep's verification is what decides whether the remote
 copy is really there. It logs a warning but counts no sweep failure, since no

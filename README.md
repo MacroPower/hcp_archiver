@@ -154,13 +154,16 @@ sidecar index, is local — and only opening a sealed member whose bundle was
 evicted reaches the remote store, fetching just that member with ranged reads
 rather than the whole bundle. That read path needs object-store credentials
 from the backend provider's default chain; a read-only identity scoped to the
-archive prefix is the right shape. Evicted configuration tarballs have no
-in-tool read path; fetch one directly from its mirrored key
-(`<prefix>/<org>/config-versions/<id>.tar.gz`) with any client for the
-backing store. They stay visible nonetheless: eviction leaves a small stub in
-each tarball's place, so `list` still reports the object at its true size,
-shown as `remote`; a read names the key to fetch; and an unseal counts it as
-one it could not recover rather than passing over it in silence.
+archive prefix is the right shape.
+
+Evicted configuration tarballs stay visible too: eviction leaves a small stub
+in each tarball's place, so `list` still reports the object at its true size,
+shown as `remote`. `unseal` fetches one back from the mirror like any other
+evicted object, verifying the bytes against the size and digest the eviction
+proved. Only `show` and the browser's viewer stop at such an object, since both
+hold what they read whole in memory and a tarball has no bound; they name its
+mirrored key (`<prefix>/<org>/config-versions/<id>.tar.gz`) to fetch with any
+client for the backing store.
 
 ### Listing and unsealing files
 
@@ -188,9 +191,8 @@ hcp_archiver unseal ./archive my-org --target ./restore
 
 `list` prints one line per object (size, physical form, path), with sealed
 members labeled by the form that carries them and anything evicted to the
-mirror shown as `remote` (reading an evicted bundle member needs object-store
-credentials, like the browser's evicted-read path; an evicted configuration
-tarball has to be fetched from the bucket directly):
+mirror shown as `remote` (reading one needs object-store credentials, like the
+browser's evicted-read path):
 
 ```
 4.1 KiB  remote  my-org/config-versions/cv-abc.tar.gz
@@ -206,16 +208,24 @@ tarball has to be fetched from the bucket directly):
 --dry-run` reports what a run would write without writing, planning from the
 same listing over the same prefix, so it predicts the run it describes: every
 listed object is accounted for, either as one that would be written or as one
-already known to be unrecoverable, each of the latter named on stderr. It is a
-lower bound on the failures, since a bundle that turns out to be corrupt errors
-only when something reads it, which a dry run never does. Both the text summary
-and the `errored` field of `--json` carry that count.
+already known to be unrecoverable, each of the latter named on stderr. Only an
+evicted object in an organization recording no mirror falls in the second
+group; everything else evicted is reported separately, as the volume the run
+would fetch (`remoteFiles` and `remoteBytes` under `--json`), since a run
+fetches it without asking and this is where that cost is visible first. That
+byte figure is an upper bound: it counts each object's archived length, which
+is what a tarball costs exactly, while a member of an evicted bundle travels as
+its compressed span. The prediction is a lower bound on the failures, since a
+corrupt bundle, an unreachable mirror, or an object missing from the bucket all
+error only when something reads them, which a dry run never does. Both the text
+summary and the `errored` field of `--json` carry the count.
 
 `unseal -v` streams one line per recovered file to stderr, and per-file
 failures always land there. A run in which every object recovers exits 0; if
 any object fails, the failures are counted and reported and the command exits
 with status 1, and a dry run whose plan already holds one exits the same way.
-An interrupted run reports its partial totals to stderr and exits 0.
+An interrupted run reports its partial totals to stderr and exits 0; a fetch
+cut off mid-object leaves no partial file behind.
 
 ### Mirroring the archive to object storage
 
