@@ -45,17 +45,19 @@
 // they land, so one huge workspace cannot park the bar for its whole duration.
 // While tasks are in flight, the panel lists each one under the combined phase
 // bar on its own line (bar, percent, unit fraction, and name), in registration
-// order so rows hold still, and caps the list to a screenful with the overflow
-// counted. The target stays empty while tasks name the work: workspaces archive
-// concurrently, so no single name is the target. The line-oriented modes stay
-// single-line and report the item with the most remaining work: logfmt as
-// completed=x/y with an eta once units have landed (plus task=, taskCompleted=,
-// and tasks= while items are in flight), and JSON as phaseTotal and
-// phaseCompleted with task, taskTotal, taskCompleted, and tasksActive, each
-// present only while determinate. A final summary prints when the run ends
-// with the totals per status class and the wall time; the archiver logs each
-// object still errored or forbidden in full just above it, so failure text is
-// never truncated to fit the panel.
+// order so rows hold still. Only a terminal too short to fit every item elides
+// rows, with the remainder counted on an overflow line. The widest fan-out
+// therefore sets the frame's peak height, and the frame holds there for the
+// rest of the run unless the terminal shrinks. The target stays empty while
+// tasks name the work: workspaces archive concurrently, so no single name is
+// the target. The line-oriented modes stay single-line and report the item with
+// the most remaining work: logfmt as completed=x/y with an eta once units have
+// landed (plus task=, taskCompleted=, and tasks= while items are in flight),
+// and JSON as phaseTotal and phaseCompleted with task, taskTotal,
+// taskCompleted, and tasksActive, each present only while determinate. A final
+// summary prints when the run ends with the totals per status class and the
+// wall time; the archiver logs each object still errored or forbidden in full
+// just above it, so failure text is never truncated to fit the panel.
 //
 // The per-status counts are cumulative: they reflect every object the ledger has
 // recorded by its current status, across runs, so a resumed run opens with the

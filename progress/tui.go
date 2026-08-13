@@ -63,11 +63,6 @@ const (
 	colRetriedWidth   = len("retried ") + countRetriedWidth
 )
 
-// maxTaskLines caps how many in-flight work items the panel lists, so a wide
-// fan-out cannot grow the panel past a screenful; the overflow line counts
-// the rest.
-const maxTaskLines = 8
-
 // Bar cell glyphs, matching the determinate bar's defaults so the marquee looks
 // like the same component.
 const (
@@ -136,7 +131,7 @@ type tuiModel struct {
 	// runs (only a terminal too short for it re-clamps it): the inline renderer
 	// erases and resizes on a shrinking frame, which corrupts the panel when a
 	// log line is inserted above it at the same moment. Shorter content pads
-	// with trailing blank lines up to this height (see padFrame).
+	// with trailing blank lines up to this height (see [tuiModel.composeFrame]).
 	frame    int
 	quitting bool
 	sampled  bool
@@ -394,13 +389,14 @@ func windowedRate(samples []rateSample, fallback float64) float64 {
 // spinner, a fixed-width phase, the bar or its indeterminate marquee, the
 // percent, the eta, and the target. One line per in-flight work item follows,
 // each with its own bar, percent, unit fraction, and name, in registration
-// order so rows hold still as their bars move; items past the cap are counted
-// on an overflow line. The closing lines carry the colored per-status counts,
-// the byte, rate, and elapsed metadata, and — when a remote is configured —
-// the remote-transfer readout. Every field before a line's trailing name or
-// metadata holds a constant width, so the panel does not reflow as values
-// change, and the whole frame pads out to its held height (see padFrame) so
-// it never shrinks as work items finish or a smaller phase begins.
+// order so rows hold still as their bars move; on a terminal too short to list
+// them all, the items that do not fit are counted on an overflow line. The
+// closing lines carry the colored per-status counts, the byte, rate, and
+// elapsed metadata, and (when a remote is configured) the remote-transfer
+// readout. Every field before a line's trailing name or metadata holds a
+// constant width, so the panel does not reflow as values change, and the whole
+// frame pads out to its held height (see [tuiModel.composeFrame]) so it never
+// shrinks as work items finish or a smaller phase begins.
 func (m *tuiModel) render(snap snapshot) string {
 	var line1 strings.Builder
 
@@ -469,13 +465,13 @@ func (m *tuiModel) render(snap snapshot) string {
 	counts := "  " + statusCounts(t, true)
 	metaLine := "  " + strings.Join(metaCells, " ")
 
-	budget := m.taskLineBudget(snap.hasRemote)
+	visible := min(len(snap.tasks), m.taskLineBudget(len(snap.tasks), snap.hasRemote))
 
-	// The body: line one and the task region.
-	body := make([]string, 0, budget+2)
+	// The body: line one, the task region, and the overflow line the region
+	// spills onto when the budget cannot hold every item.
+	body := make([]string, 0, visible+2)
 	body = append(body, m.fit(line1.String()))
 
-	visible := min(len(snap.tasks), budget)
 	for _, task := range snap.tasks[:visible] {
 		body = append(body, m.fit(m.renderTask(task)))
 	}
@@ -522,9 +518,11 @@ func (m *tuiModel) composeFrame(body, footer []string) []string {
 
 // chromeLines is how many non-task lines the panel renders around the task
 // region: line one, the overflow slot, the counts line, the metadata line,
-// and — when a remote is configured — the remote readout. The task-line
-// budget and render's capacity hint both derive from it, so the two cannot
-// drift apart.
+// and, when a remote is configured, the remote readout. The task-line budget
+// subtracts it from the terminal height. The overflow slot is reserved
+// unconditionally, including on a terminal tall enough that no item is elided
+// and the line never renders, so a full pool needs a terminal one row taller
+// than the panel it draws.
 func chromeLines(hasRemote bool) int {
 	if hasRemote {
 		return 5
@@ -533,17 +531,16 @@ func chromeLines(hasRemote bool) int {
 	return 4
 }
 
-// taskLineBudget bounds how many task lines the panel may show: the fixed cap,
-// tightened on a short terminal so the panel (the task lines plus its
-// chrome, see [chromeLines]) never outgrows the screen. An unknown height
-// (before the first size message, and in the golden tests) keeps the fixed
-// cap.
-func (m *tuiModel) taskLineBudget(hasRemote bool) int {
+// taskLineBudget is how many task lines the panel may show: one per in-flight
+// item, reduced on a terminal too short to hold them all alongside the panel's
+// chrome (see [chromeLines]) so the frame never outgrows the screen. With an
+// unknown height, before the first size message, the budget covers every item.
+func (m *tuiModel) taskLineBudget(tasks int, hasRemote bool) int {
 	if m.height <= 0 {
-		return maxTaskLines
+		return tasks
 	}
 
-	return min(maxTaskLines, max(m.height-chromeLines(hasRemote), 0))
+	return max(m.height-chromeLines(hasRemote), 0)
 }
 
 // renderTask formats one in-flight work item's line: its bar aligned under the

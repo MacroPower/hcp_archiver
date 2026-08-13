@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.jacobcolvin.com/hcp_archiver/collect"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/progress"
 )
@@ -69,23 +70,69 @@ func TestRenderPanel_Tasks(t *testing.T) {
 	golden.RequireEqual(t, []byte(progress.RenderPanel(panel)))
 }
 
-func TestRenderPanel_TaskOverflow(t *testing.T) {
+func TestRenderPanel_WideFanOut(t *testing.T) {
 	t.Parallel()
 
-	// A pool larger than the cap lists the first eight items and counts the
-	// rest on an overflow line.
-	panel := barPanel()
-	panel.Tally.Target = ""
+	// A wide pool lists every in-flight item, one row each, with no overflow
+	// line: only a terminal too short for the pool drops rows.
+	golden.RequireEqual(t, []byte(progress.RenderPanel(tasksPanel(10))))
+}
 
-	for i := range 11 {
-		panel.Tasks = append(panel.Tasks, progress.PanelTask{
-			Name:  fmt.Sprintf("acme/ws-%02d", i),
-			Total: 10 + i,
-			Done:  i,
-		})
+func TestRenderPanel_TaskOverflowOnShortTerminal(t *testing.T) {
+	t.Parallel()
+
+	// The overflow line's shape on a terminal too short for the pool: its
+	// indent, glyph, and dimming, under the rows that fit.
+	golden.RequireEqual(t, []byte(progress.RenderPanelAt(tasksPanel(10), 80, 6)))
+}
+
+func TestRenderPanel_FullPoolFitsNormalTerminal(t *testing.T) {
+	t.Parallel()
+
+	// The whole worker pool shows on an ordinary terminal, which has room for
+	// every concurrent worker alongside the panel's chrome.
+	panel := tasksPanel(collect.DefaultConcurrency)
+	rendered := ansi.Strip(progress.RenderPanelAt(panel, 80, 24))
+
+	for _, task := range panel.Tasks {
+		assert.Contains(t, rendered, task.Name, "every worker has a row")
 	}
 
-	golden.RequireEqual(t, []byte(progress.RenderPanel(panel)))
+	assert.NotContains(t, rendered, "more active", "no worker is elided")
+}
+
+func TestRenderPanel_FullPoolNeedsOverflowReserve(t *testing.T) {
+	t.Parallel()
+
+	// The panel reserves a row for the overflow line even when it does not
+	// render one, so the whole pool needs a terminal one row taller than the
+	// panel it draws: line one, a row per worker, and the counts and metadata.
+	panel := tasksPanel(collect.DefaultConcurrency)
+	drawn := len(panel.Tasks) + 3
+
+	fits := ansi.Strip(progress.RenderPanelAt(panel, 80, drawn+1))
+	assert.NotContains(t, fits, "more active", "the reserve holds the whole pool")
+	assert.Len(t, strings.Split(fits, "\n"), drawn, "the reserved row goes unused")
+
+	tight := ansi.Strip(progress.RenderPanelAt(panel, 80, drawn))
+	assert.Contains(t, tight, "+1 more active", "one row short elides one worker")
+	assert.Len(t, strings.Split(tight, "\n"), drawn,
+		"the overflow line takes the elided row's place")
+}
+
+func TestRenderPanel_HeightHoldsAtFullPoolPeak(t *testing.T) {
+	t.Parallel()
+
+	// The frame ratchets to the widest fan-out and holds it: once every worker
+	// has had a row, a later phase that registers no work items at all pads to
+	// that height rather than shrinking back.
+	frames := progress.RenderPanelFrames(80, 24,
+		tasksPanel(collect.DefaultConcurrency), tasksPanel(0))
+
+	assert.Len(t, strings.Split(frames[0], "\n"), collect.DefaultConcurrency+3,
+		"a row per worker, plus line one and the counts and metadata rows")
+	assert.Equal(t, strings.Count(frames[0], "\n"), strings.Count(frames[1], "\n"),
+		"panel height holds once the pool drains")
 }
 
 func TestRenderPanel_TaskAlignsWithPhaseBar(t *testing.T) {
@@ -114,16 +161,7 @@ func TestRenderPanel_TaskLinesFitTerminalHeight(t *testing.T) {
 	// A short terminal tightens the task budget so the whole panel fits: at
 	// six rows there is room for two task lines beside the first line, the
 	// overflow line, the counts, and the metadata.
-	panel := barPanel()
-	for i := range 11 {
-		panel.Tasks = append(panel.Tasks, progress.PanelTask{
-			Name:  fmt.Sprintf("acme/ws-%02d", i),
-			Total: 10,
-			Done:  i,
-		})
-	}
-
-	rendered := progress.RenderPanelAt(panel, 80, 6)
+	rendered := progress.RenderPanelAt(tasksPanel(11), 80, 6)
 	lines := strings.Split(rendered, "\n")
 
 	assert.Len(t, lines, 6, "panel height matches the terminal")
@@ -134,8 +172,8 @@ func TestRenderPanel_HeightHoldsAsTasksFinish(t *testing.T) {
 	t.Parallel()
 
 	// The panel must not shrink as work items finish; a shrinking frame corrupts
-	// it mid-log (see padFrame). The height holds and the surviving task still
-	// shows.
+	// it mid-log (see composeFrame). The height holds and the surviving task
+	// still shows.
 	frames := progress.RenderPanelFrames(0, 0, tasksPanel(5), tasksPanel(2))
 
 	assert.Equal(t, strings.Count(frames[0], "\n"), strings.Count(frames[1], "\n"),
@@ -208,7 +246,8 @@ func TestRenderPanel_Resumed(t *testing.T) {
 }
 
 // tasksPanel is barPanel with the target cleared and n in-flight work items,
-// shared by the task-region tests.
+// shared by the task-region tests. Each item's total outruns its done count by
+// a widening margin, so however wide the pool no two rows share a bar fill.
 func tasksPanel(n int) progress.PanelSnapshot {
 	p := barPanel()
 	p.Tally.Target = ""
@@ -216,7 +255,7 @@ func tasksPanel(n int) progress.PanelSnapshot {
 	for i := range n {
 		p.Tasks = append(p.Tasks, progress.PanelTask{
 			Name:  fmt.Sprintf("acme/ws-%02d", i),
-			Total: 10,
+			Total: 10 + i,
 			Done:  i,
 		})
 	}

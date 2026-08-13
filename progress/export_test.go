@@ -114,7 +114,7 @@ func TakeUploadWireBytes(r *Reporter) int64 {
 	return r.lockedTake().uploadWireBytes
 }
 
-// RenderPanel renders the live two-line panel for ps, using a fresh model so the
+// RenderPanel renders the live panel for ps, using a fresh model so the
 // spinner shows its first frame.
 func RenderPanel(ps PanelSnapshot) string {
 	m := newTUIModel(nil, nil, nil)
