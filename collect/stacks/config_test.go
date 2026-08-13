@@ -29,9 +29,10 @@ type stacksFixture struct {
 }
 
 // newStacksFixture serves mux (with a go-tfe construction ping added) and
-// builds a collector over a client pointed at it. Server-error retries are
-// disabled so a handler answering 500 fails the listing immediately.
-func newStacksFixture(t *testing.T, mux *http.ServeMux) stacksFixture {
+// builds a collector over a client pointed at it, forwarding opts to
+// [stacks.New]. Server-error retries are disabled so a handler answering 500
+// fails its request immediately.
+func newStacksFixture(t *testing.T, mux *http.ServeMux, opts ...stacks.Option) stacksFixture {
 	t.Helper()
 
 	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
@@ -58,7 +59,7 @@ func newStacksFixture(t *testing.T, mux *http.ServeMux) stacksFixture {
 	env := collect.NewEnv(client, st, ledger, collect.WithAbsentConfirm(0))
 
 	return stacksFixture{
-		collector: stacks.New(env, "example-org"),
+		collector: stacks.New(env, "example-org", opts...),
 		store:     st,
 		ledger:    ledger,
 	}

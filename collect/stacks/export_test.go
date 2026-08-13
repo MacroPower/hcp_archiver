@@ -33,6 +33,15 @@ func RunArchivePrefixForTest(st *store.Store, project, stackName, configID, grou
 // ListingLeafForTest exposes [listingLeaf] to the external test package.
 const ListingLeafForTest = listingLeaf
 
+// ResolveProjectForTest exposes [Collector.resolveProject] to the external test
+// package, reporting the resolved project name and whether it is the project's
+// display name rather than a stand-in for one.
+func (c *Collector) ResolveProjectForTest(ctx context.Context, stack *tfe.Stack) (string, bool) {
+	resolved := c.resolveProject(ctx, stack)
+
+	return resolved.name, resolved.named
+}
+
 // ArchiveConfigurationForTest exposes [Collector.archiveConfiguration] to the
 // external test package.
 func (c *Collector) ArchiveConfigurationForTest(

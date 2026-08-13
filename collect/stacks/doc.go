@@ -1,6 +1,7 @@
 // Package stacks archives the stacks deployment model, a project-scoped
 // alternative to workspaces that an organization enables only when it uses one.
-// It is gathered only when its scope toggle is on.
+// It is gathered only when its scope toggle is on, and then only for the
+// projects the configured allow-list admits.
 //
 // A stack record carries its name, VCS repository, project reference, and latest
 // configuration. Beneath it the package walks each configuration with its JSON

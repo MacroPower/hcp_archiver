@@ -55,7 +55,7 @@ func (a *Archiver) collectOrg(
 	}
 
 	if a.cfg.Stacks {
-		err = a.runCollector(ctx, reporter, stacks.New(env, orgName))
+		err = a.runCollector(ctx, reporter, stacks.New(env, orgName, stacks.WithProjects(a.cfg.Projects)))
 		if err != nil {
 			return err
 		}

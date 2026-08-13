@@ -2,44 +2,14 @@ package archiver
 
 import (
 	"github.com/hashicorp/go-tfe"
+
+	"go.jacobcolvin.com/hcp_archiver/namefilter"
 )
-
-// nameFilter is an optional allow-list of names. A nil filter admits every
-// name, mirroring how an empty organizations list archives every visible
-// organization.
-type nameFilter map[string]struct{}
-
-// newNameFilter builds a [nameFilter] from the configured names, returning nil
-// when the list is empty so the zero configuration admits everything.
-func newNameFilter(names []string) nameFilter {
-	if len(names) == 0 {
-		return nil
-	}
-
-	f := make(nameFilter, len(names))
-	for _, n := range names {
-		f[n] = struct{}{}
-	}
-
-	return f
-}
-
-// admits reports whether name passes the filter. A nil filter admits every
-// name.
-func (f nameFilter) admits(name string) bool {
-	if f == nil {
-		return true
-	}
-
-	_, ok := f[name]
-
-	return ok
-}
 
 // filterProjects returns the projects the configured project filter admits,
 // preserving the listing's order. An empty filter admits every project.
 func filterProjects(filter []string, projects []*tfe.Project) []*tfe.Project {
-	f := newNameFilter(filter)
+	f := namefilter.New(filter)
 	if f == nil {
 		return projects
 	}
@@ -47,7 +17,7 @@ func filterProjects(filter []string, projects []*tfe.Project) []*tfe.Project {
 	kept := make([]*tfe.Project, 0, len(projects))
 
 	for _, p := range projects {
-		if f.admits(p.Name) {
+		if f.Admits(p.Name) {
 			kept = append(kept, p)
 		}
 	}
@@ -65,8 +35,8 @@ func filterWorkspaces(
 	names map[string]string,
 	workspaces []*tfe.Workspace,
 ) []*tfe.Workspace {
-	pf := newNameFilter(projectFilter)
-	wf := newNameFilter(workspaceFilter)
+	pf := namefilter.New(projectFilter)
+	wf := namefilter.New(workspaceFilter)
 
 	if pf == nil && wf == nil {
 		return workspaces
@@ -75,7 +45,7 @@ func filterWorkspaces(
 	kept := make([]*tfe.Workspace, 0, len(workspaces))
 
 	for _, ws := range workspaces {
-		if pf.admits(projectNameFor(names, ws)) && wf.admits(ws.Name) {
+		if pf.Admits(projectNameFor(names, ws)) && wf.Admits(ws.Name) {
 			kept = append(kept, ws)
 		}
 	}

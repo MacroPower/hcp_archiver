@@ -12,6 +12,7 @@ import (
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/namefilter"
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
@@ -34,19 +35,34 @@ type Collector struct {
 	env *collect.Env
 	log *slog.Logger
 
-	// Cache of resolved project display names by id. Guarded by projectsMu:
-	// stacks archive concurrently, and many stacks share a project.
-	projects map[string]string
+	// Cache of project lookups by id. Guarded by projectsMu: stacks archive
+	// concurrently, and many stacks share a project.
+	projects map[string]resolvedProject
+
+	// Allow-list of project names, narrowing this collector to the stacks nested
+	// under them. A nil filter admits every project.
+	projectFilter namefilter.Filter
 
 	org string
 
 	projectsMu sync.Mutex
 }
 
+// resolvedProject is the outcome of a project-name lookup: the segment a
+// stack's archive path nests under, and whether that segment is the project's
+// display name. When no name came back a stand-in fills the segment (the
+// project id, or a sentinel when the stack names no project), which the archive
+// tolerates as a path segment but a name filter never matches.
+type resolvedProject struct {
+	name  string
+	named bool
+}
+
 // Option configures a [Collector] passed to [New].
 //
 // Options of this type:
 //   - [WithLogger]
+//   - [WithProjects]
 type Option func(*Collector)
 
 // WithLogger sets the logger the collector reports list-level failures through.
@@ -54,6 +70,15 @@ type Option func(*Collector)
 func WithLogger(log *slog.Logger) Option {
 	return func(c *Collector) {
 		c.log = log
+	}
+}
+
+// WithProjects limits the collector to stacks whose project the names admit,
+// matching on the project name the stack's archive path is keyed on. An empty
+// list archives every stack in the organization. It returns an [Option].
+func WithProjects(names []string) Option {
+	return func(c *Collector) {
+		c.projectFilter = namefilter.New(names)
 	}
 }
 
@@ -66,7 +91,7 @@ func New(env *collect.Env, org string, opts ...Option) *Collector {
 		env:      env,
 		org:      org,
 		log:      slog.Default(),
-		projects: make(map[string]string),
+		projects: make(map[string]resolvedProject),
 	}
 
 	for _, opt := range opts {
@@ -81,12 +106,17 @@ func (c *Collector) Name() string {
 	return name
 }
 
-// Collect archives every stack in the organization.
+// Collect archives every stack in the organization whose project the filter
+// admits.
 //
 // It returns only on a context cancellation: a single missing object is recorded
 // by the [collect.Env] primitives and a list-level failure for one stack is
 // logged and skipped, so neither aborts the whole collector.
 func (c *Collector) Collect(ctx context.Context) error {
+	// The listing stays organization-wide even under a filter. The API narrows a
+	// stack listing by project id, but the filter names projects, and a stack's
+	// project name is known only once the project behind it reads back, so the
+	// filter applies per stack rather than narrowing the listing.
 	stacks, err := tfeclient.Paginate(ctx, c.env.Client(),
 		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.Stack, *tfe.Pagination, error) {
 			l, e := tc.Stacks.List(ctx, c.org, &tfe.StackListOptions{ListOptions: o})
@@ -122,10 +152,32 @@ func (c *Collector) Collect(ctx context.Context) error {
 }
 
 // collectStack archives one stack: its metadata, configurations, named
-// deployments, and states. Only a context cancellation propagates; a list-level
-// failure within one collection is logged and skipped.
+// deployments, and states. A stack the project filter excludes is skipped whole.
+// Only a context cancellation propagates; a list-level failure within one
+// collection is logged and skipped.
 func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
-	project := c.projectName(ctx, stack)
+	resolved := c.resolveProject(ctx, stack)
+	project := resolved.name
+
+	// Skip ahead of the claim below. An excluded stack then costs nothing past
+	// the project read behind it, which the cache normally shares across all of
+	// that project's stacks. It also leaves no project directory behind: ClaimDir
+	// would create the stack's own directory to hold its identity sidecar, and
+	// the project directory appearing around it reads back as a project with no
+	// identity of its own and no workspaces.
+	if !c.projectFilter.Admits(project) {
+		// Nothing records this as a dropped surface, so the run still closes
+		// reporting a complete archive; the warning is the only evidence that an
+		// in-scope stack was lost to a read blip rather than genuinely excluded.
+		if !resolved.named {
+			c.log.WarnContext(ctx, "stack project name unresolved; excluded by the project filter",
+				slog.String("stack", stack.Name),
+				slog.String("project", project),
+			)
+		}
+
+		return nil
+	}
 
 	// Bind the name-keyed directory to this stack's id before the first write;
 	// a failed claim skips the stack with its surface dropped (recorded by
@@ -179,9 +231,11 @@ func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 	return g.Wait() //nolint:wrapcheck // Collection errors already carry their context.
 }
 
-// projectName resolves the display name of a stack's project, caching each
-// resolved name. A stack always carries a project relation; when the project
-// has no readable name the id stands in.
+// resolveProject resolves the display name of a stack's project, caching every
+// stable answer. A stack normally carries a project relation; without one the
+// sentinel "unknown-project" fills the segment, and when the project reads back
+// with no name the id does. Either way the returned [resolvedProject] marks the
+// segment unnamed.
 //
 // A read failure is a transient blip or a permission gap, not a stable answer,
 // so it falls back to the id for this stack without caching it. That keeps a
@@ -191,13 +245,13 @@ func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 // the id, since that answer is stable. Concurrent stacks that miss the cache on
 // the same project may each read it; both cache the same stable answer, so the
 // duplicate read is harmless.
-func (c *Collector) projectName(ctx context.Context, stack *tfe.Stack) string {
+func (c *Collector) resolveProject(ctx context.Context, stack *tfe.Stack) resolvedProject {
 	if stack.Project == nil || stack.Project.ID == "" {
-		return "unknown-project"
+		return resolvedProject{name: "unknown-project"}
 	}
 
 	id := stack.Project.ID
-	if cached, ok := c.cachedProjectName(id); ok {
+	if cached, ok := c.cachedProject(id); ok {
 		return cached
 	}
 
@@ -211,37 +265,38 @@ func (c *Collector) projectName(ctx context.Context, stack *tfe.Stack) string {
 		return wrap(e)
 	})
 	if err != nil {
-		return id
+		return resolvedProject{name: id}
 	}
 
 	if project == nil || project.Name == "" {
-		c.cacheProjectName(id, id)
+		c.cacheProject(id, resolvedProject{name: id})
 
-		return id
+		return resolvedProject{name: id}
 	}
 
-	c.cacheProjectName(id, project.Name)
+	resolved := resolvedProject{name: project.Name, named: true}
+	c.cacheProject(id, resolved)
 
-	return project.Name
+	return resolved
 }
 
-// cachedProjectName reads the resolved display name for a project id, reporting
-// whether one is cached.
-func (c *Collector) cachedProjectName(id string) (string, bool) {
+// cachedProject reads a project id's cached lookup, reporting whether one is
+// cached.
+func (c *Collector) cachedProject(id string) (resolvedProject, bool) {
 	c.projectsMu.Lock()
 	defer c.projectsMu.Unlock()
 
-	name, ok := c.projects[id]
+	p, ok := c.projects[id]
 
-	return name, ok
+	return p, ok
 }
 
-// cacheProjectName records the resolved display name for a project id.
-func (c *Collector) cacheProjectName(id, name string) {
+// cacheProject records a project id's lookup.
+func (c *Collector) cacheProject(id string, p resolvedProject) {
 	c.projectsMu.Lock()
 	defer c.projectsMu.Unlock()
 
-	c.projects[id] = name
+	c.projects[id] = p
 }
 
 // tolerate turns a list-level failure into either a propagated cancellation or a
