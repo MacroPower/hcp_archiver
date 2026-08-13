@@ -291,6 +291,33 @@ func TestModelEscAbandonsInFlightLoad(t *testing.T) {
 	assert.Len(t, m.stack, 2, "a fresh load still pushes")
 }
 
+func TestModelPushAbandonsSiblingLoad(t *testing.T) {
+	t.Parallel()
+
+	// Enter pressed twice on a slow row: both builds are in flight, launched
+	// from the same screen. The first to settle descends; the second must not
+	// stack its screen on top of the one that just replaced its context.
+	m := newTestModel(stubScreen{name: "root"})
+
+	firstCmd := push(func() (screen, error) { return stubScreen{name: "child"}, nil })
+	secondCmd := push(func() (screen, error) { return stubScreen{name: "child"}, nil })
+
+	_, first := m.Update(announce(t, firstCmd))
+	_, second := m.Update(announce(t, secondCmd))
+	require.Equal(t, 2, m.loading, "both builds are counted")
+
+	firstDone := settleLoad(t, first)
+	secondDone := settleLoad(t, second)
+
+	m.Update(firstDone)
+	require.Len(t, m.stack, 2, "the first outcome descends")
+	assert.Equal(t, 0, m.loading, "the sibling is abandoned with it")
+
+	m.Update(secondDone)
+	assert.Len(t, m.stack, 2, "the duplicate never stacks a second copy")
+	assert.False(t, m.spinning)
+}
+
 func TestModelPopAbandonsInFlightLoad(t *testing.T) {
 	t.Parallel()
 

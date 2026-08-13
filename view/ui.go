@@ -185,6 +185,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case pushMsg:
+		// Descending abandons every other in-flight build for the same reason
+		// popping does: they were launched from the screen this one now
+		// covers, so their result would land on a stack that no longer means
+		// what it did. It is also what keeps an impatient second keypress
+		// during a slow build from stacking the same screen twice.
+		m.abandonLoads()
+
 		msg.s.setSize(m.width, max(m.height-chromeLines, 0))
 
 		m.stack = append(m.stack, msg.s)
