@@ -10,6 +10,14 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/history"
 )
 
+// ErrHistoryNotClosed indicates that a commit's bytes landed but the record
+// closing a trailing tombstone in the object's history sidecar did not. It
+// accompanies a populated [WriteResult], because the object file is committed
+// and durable; only the sidecar's agreement with it is outstanding, and the
+// next commit re-attempts the close. A caller should record the object done
+// and surface the cause, never treat it as unwritten.
+var ErrHistoryNotClosed = errors.New("history tombstone not closed")
+
 // writeConfig holds the resolved settings for a single JSON commit.
 type writeConfig struct {
 	fetchedAt time.Time
@@ -26,11 +34,11 @@ type WriteOption func(*writeConfig)
 // WithHistory retains the object's history across the commit: a changed
 // write appends the outgoing content to the object's sidecar before the new
 // bytes rename into place, and a commit landing over a trailing tombstone
-// appends the incoming content to close the recorded deletion, whether or
-// not the bytes changed. The superseded content is stamped fetchedAt (the
-// prior run's fetch time; a zero value falls back to the file's modification
-// time, then to omitted) and a reappearance is stamped now. It returns a
-// [WriteOption].
+// appends the incoming content afterwards to close the recorded deletion,
+// whether or not the bytes changed. The superseded content is stamped
+// fetchedAt (the prior run's fetch time; a zero value falls back to the
+// file's modification time, then to omitted) and a reappearance is stamped
+// now. It returns a [WriteOption].
 func WithHistory(fetchedAt, now time.Time) WriteOption {
 	return func(c *writeConfig) {
 		c.history = true
@@ -86,39 +94,53 @@ func (s *Store) BuryHistory(relPath string, fetchedAt, deletedAt time.Time) (boo
 	return buried, nil
 }
 
-// retainHistory runs the history side of one [Store.WriteJSONBytes] commit
-// (see [WithHistory]): when supersede is set (a changed write over an
-// existing file with content) the outgoing content is appended first, then any
-// trailing tombstone is closed with the incoming content. Every error returns
-// before the caller renames, so a version is never lost to a write that could
-// not record it.
-func (s *Store) retainHistory(
-	relPath, abs string,
-	existing, data []byte,
-	supersede bool,
-	cfg *writeConfig,
-) error {
-	sidecar := s.AbsPath(s.HistoryPath(relPath))
-
+// supersedeHistory appends the content a changed [Store.WriteJSONBytes]
+// commit is about to overwrite (see [WithHistory]). It runs before the rename
+// and returns its error to the caller, so a version is never lost to a write
+// that could not record it; a rename that then fails costs nothing, because
+// the appended record still holds exactly what the file still holds and the
+// next commit dedupes against it.
+func (s *Store) supersedeHistory(relPath, abs string, existing []byte, cfg *writeConfig) error {
 	// A zero-length file carries no version worth preserving, the same reading
 	// [Store.BuryHistory] takes. Superseding one would append a record whose
 	// content marshals away under omitempty, leaving a line readers can
 	// classify as neither a version nor a tombstone.
-	if supersede && len(existing) > 0 {
-		fetchedAt := cfg.fetchedAt
-		if fetchedAt.IsZero() {
-			fetchedAt = modTime(abs)
-		}
-
-		_, err := history.Supersede(sidecar, existing, fetchedAt)
-		if err != nil {
-			return fmt.Errorf("retain history %q: %w", relPath, err)
-		}
+	if len(existing) == 0 {
+		return nil
 	}
 
-	_, err := history.Restore(sidecar, data, cfg.now)
+	fetchedAt := cfg.fetchedAt
+	if fetchedAt.IsZero() {
+		fetchedAt = modTime(abs)
+	}
+
+	_, err := history.Supersede(s.AbsPath(s.HistoryPath(relPath)), existing, fetchedAt)
 	if err != nil {
 		return fmt.Errorf("retain history %q: %w", relPath, err)
+	}
+
+	return nil
+}
+
+// restoreHistory closes a trailing tombstone with the content the commit just
+// landed (see [WithHistory]).
+//
+// It runs after the object file holds data, never before, because the
+// sidecar's newest version must never be one the file does not yet hold: a
+// record appended ahead of a rename that then failed would leave the next
+// commit superseding the file's older content on top of it, ordering the
+// timeline backward.
+//
+// Appending afterwards risks no version, since the content is already durable
+// in the object file itself. The record is a consistency marker rather than
+// the only copy of anything, so its failure reports [ErrHistoryNotClosed] and
+// leaves the commit standing: the next commit re-attempts the close, and
+// should the object disappear first, [history.Bury] flushes the unrecorded
+// content ahead of its tombstone.
+func (s *Store) restoreHistory(relPath string, data []byte, cfg *writeConfig) error {
+	_, err := history.Restore(s.AbsPath(s.HistoryPath(relPath)), data, cfg.now)
+	if err != nil {
+		return fmt.Errorf("%w: %q: %w", ErrHistoryNotClosed, relPath, err)
 	}
 
 	return nil

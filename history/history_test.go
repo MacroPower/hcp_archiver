@@ -262,6 +262,31 @@ func TestBury(t *testing.T) {
 		assert.Len(t, readRecords(t, path), 2)
 	})
 
+	t.Run("content the tombstone never covered earns its own", func(t *testing.T) {
+		t.Parallel()
+
+		// A commit whose tombstone-closing record did not land leaves the file
+		// holding a version the sidecar never saw, under a trailing tombstone.
+		// The next disappearance must record that version and a tombstone of
+		// its own, not read the stale one as already covering it.
+		path := sidecar(t)
+		returned := []byte("{\n  \"v\": 2\n}")
+
+		_, err := history.Bury(path, content, fetched, deleted)
+		require.NoError(t, err)
+
+		buried, err := history.Bury(path, returned, fetched.Add(48*time.Hour), deleted.Add(48*time.Hour))
+		require.NoError(t, err)
+		assert.True(t, buried)
+
+		recs := readRecords(t, path)
+		require.Len(t, recs, 4)
+		assert.Equal(t, string(content), recs[0].Content)
+		assert.True(t, recs[1].Deleted)
+		assert.Equal(t, string(returned), recs[2].Content, "the unrecorded version is flushed")
+		assert.True(t, recs[3].Deleted, "the second disappearance earns its own tombstone")
+	})
+
 	t.Run("nothing to bury creates no sidecar", func(t *testing.T) {
 		t.Parallel()
 

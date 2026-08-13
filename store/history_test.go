@@ -151,6 +151,104 @@ func TestStore_WriteJSONBytes_WithHistory(t *testing.T) {
 		assert.False(t, sidecarExists(t, s, relPath))
 	})
 
+	t.Run("a tombstone stays open until the returning bytes land", func(t *testing.T) {
+		t.Parallel()
+
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses directory permissions, so the rename cannot be made to fail")
+		}
+
+		// The returning content may only close a tombstone once the file holds
+		// it. Recorded ahead of a rename that then failed, it would be a
+		// version the file never held, and the retry would supersede the
+		// file's older content on top of it, ordering the timeline backward.
+		s := store.New(t.TempDir())
+
+		_, err := s.WriteJSONBytes(relPath, v1, store.WithHistory(time.Time{}, fetchedAt))
+		require.NoError(t, err)
+
+		_, err = s.BuryHistory(relPath, fetchedAt, now)
+		require.NoError(t, err)
+
+		// A directory the store may read but not stage a temp file in fails
+		// the rename while leaving every history read intact.
+		dir := filepath.Dir(s.AbsPath(relPath))
+		require.NoError(t, os.Chmod(dir, 0o500))
+
+		t.Cleanup(func() {
+			//nolint:errcheck // Best-effort restore so TempDir cleanup can unlink.
+			_ = os.Chmod(dir, 0o700)
+		})
+
+		_, err = s.WriteJSONBytes(relPath, v2, store.WithHistory(fetchedAt, now))
+		require.Error(t, err)
+
+		recs := historyRecords(t, s, relPath)
+		require.Len(t, recs, 2)
+		assert.True(t, recs[1].Deleted, "the tombstone is still the newest record")
+
+		// The retry lands the bytes and only then closes the tombstone.
+		require.NoError(t, os.Chmod(dir, 0o700))
+
+		_, err = s.WriteJSONBytes(relPath, v2, store.WithHistory(fetchedAt, now))
+		require.NoError(t, err)
+
+		got, err := os.ReadFile(s.AbsPath(relPath))
+		require.NoError(t, err)
+		assert.Equal(t, v2, got)
+
+		recs = historyRecords(t, s, relPath)
+		require.Len(t, recs, 3)
+		assert.Equal(t, string(v1), recs[0].Content, "the buried version stays oldest")
+		assert.True(t, recs[1].Deleted)
+		assert.Equal(t, string(v2), recs[2].Content, "the returning version closes the tombstone")
+	})
+
+	t.Run("a tombstone that cannot be closed leaves the commit standing", func(t *testing.T) {
+		t.Parallel()
+
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses file permissions, so the sidecar append cannot be made to fail")
+		}
+
+		// The closing record is a consistency marker, not the only copy of
+		// anything. Failing the commit would leave the ledger describing
+		// content the archive no longer holds, so the bytes stand and the
+		// cause is reported for the caller to classify.
+		s := store.New(t.TempDir())
+
+		_, err := s.WriteJSONBytes(relPath, v1, store.WithHistory(time.Time{}, fetchedAt))
+		require.NoError(t, err)
+
+		_, err = s.BuryHistory(relPath, fetchedAt, now)
+		require.NoError(t, err)
+
+		// A read-only sidecar fails the append, which opens read-write, while
+		// the backward scan and the object's own rename both still succeed.
+		sc := s.AbsPath(s.HistoryPath(relPath))
+		require.NoError(t, os.Chmod(sc, 0o400))
+
+		res, err := s.WriteJSONBytes(relPath, v2, store.WithHistory(fetchedAt, now))
+		require.ErrorIs(t, err, store.ErrHistoryNotClosed)
+		assert.True(t, res.Changed, "the result describes the bytes that landed")
+
+		got, err := os.ReadFile(s.AbsPath(relPath))
+		require.NoError(t, err)
+		assert.Equal(t, v2, got, "the object file holds the committed bytes")
+		assert.Len(t, historyRecords(t, s, relPath), 2, "the sidecar did not move")
+
+		// The next commit re-attempts the close, in order.
+		require.NoError(t, os.Chmod(sc, 0o600))
+
+		_, err = s.WriteJSONBytes(relPath, v2, store.WithHistory(fetchedAt, now))
+		require.NoError(t, err)
+
+		recs := historyRecords(t, s, relPath)
+		require.Len(t, recs, 3)
+		assert.True(t, recs[1].Deleted)
+		assert.Equal(t, string(v2), recs[2].Content, "the returning version closes the tombstone")
+	})
+
 	t.Run("a history append that cannot land fails the write intact", func(t *testing.T) {
 		t.Parallel()
 

@@ -131,33 +131,39 @@ func Restore(path string, content []byte, fetchedAt time.Time) (bool, error) {
 // before the file stops refreshing. A nil content means no file remains to
 // flush; the tombstone still lands when a sidecar exists.
 //
-// It is a no-op when the newest record is already a tombstone (the
-// disappearance was recorded on an earlier run) and when there is nothing to
-// bury at all (no file and no sidecar), so a never-archived object grows no
-// sidecar however often it re-probes 404. A crash between the flush and the
-// tombstone is healed on retry: the flush dedupes against the committed tail
-// and only the tombstone is appended. It reports whether anything was
-// appended; the report is meaningful only when err is nil, since a tombstone
-// append can fail after the flush landed.
+// It is a no-op when a trailing tombstone already covers the content on disk
+// (the disappearance was recorded on an earlier run and nothing has been
+// archived since) and when there is nothing to bury at all (no file and no
+// sidecar), so a never-archived object grows no sidecar however often it
+// re-probes 404. A flush that does land under a trailing tombstone earns a
+// second one: the object came back and went away again between the two
+// observations, and the returning version must not be left looking like the
+// deletion's last word. A crash between the flush and the tombstone is healed
+// on retry: the flush dedupes against the committed tail and only the
+// tombstone is appended. It reports whether anything was appended; the report
+// is meaningful only when err is nil, since a tombstone append can fail after
+// the flush landed.
 func Bury(path string, content []byte, fetchedAt, deletedAt time.Time) (bool, error) {
 	newest, ok, err := Newest(path)
 	if err != nil {
 		return false, err
 	}
 
-	if ok && newest.Deleted {
-		return false, nil
-	}
-
 	if content == nil && !ok {
 		return false, nil
 	}
 
+	flushed := false
+
 	if content != nil {
-		_, err = Supersede(path, content, fetchedAt)
+		flushed, err = Supersede(path, content, fetchedAt)
 		if err != nil {
 			return false, err
 		}
+	}
+
+	if ok && newest.Deleted && !flushed {
+		return false, nil
 	}
 
 	err = appendRecord(path, &Record{

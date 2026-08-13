@@ -462,6 +462,57 @@ func TestEnvMutableRetainsSupersededContent(t *testing.T) {
 	assert.Len(t, sidecarRecords(t, st, relPath), 1)
 }
 
+func TestEnvMutableRecordsDoneWhenOnlyTheTombstoneCloseFails(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions, so the sidecar append cannot be made to fail")
+	}
+
+	// The bytes land and only the sidecar record closing a trailing tombstone
+	// does not. Recording the object errored would leave the ledger
+	// describing content the archive no longer holds and skip the eager
+	// mirror upload, so the commit is recorded done and the next one
+	// re-attempts the close.
+	const relPath = "projects/example/workspaces/ws/variables.json"
+
+	firstRun := clockStart
+	now := firstRun
+
+	env, st, ledger := newEnvAt(t, &now)
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return cannedProject(), nil
+	}))
+
+	// Bury the object so its sidecar carries a trailing tombstone, then make
+	// that sidecar's appends fail while every read still succeeds.
+	_, err := st.BuryHistory(relPath, firstRun, firstRun.Add(time.Hour))
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(st.AbsPath(st.HistoryPath(relPath)), 0o400))
+
+	now = firstRun.Add(24 * time.Hour)
+
+	edited := cannedProject()
+	edited.Name = "renamed"
+
+	require.NoError(t, env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+		return edited, nil
+	}))
+
+	want, err := serialize.Marshal(edited)
+	require.NoError(t, err)
+
+	got, err := os.ReadFile(st.AbsPath(relPath))
+	require.NoError(t, err)
+	assert.Equal(t, want, got, "the archive holds the refreshed payload")
+
+	entry, ok := ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusDone, entry.Status, "the commit stands")
+	assert.Equal(t, now, entry.FetchedAt, "the ledger tracks the bytes on disk")
+}
+
 func TestEnvObjectKeepsNoHistory(t *testing.T) {
 	t.Parallel()
 

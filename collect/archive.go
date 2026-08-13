@@ -378,7 +378,20 @@ func (e *Env) archiveJSON(
 	}
 
 	res, err := e.store.WriteJSONBytes(relPath, data, e.historyOpts(relPath, keep)...)
-	if err != nil {
+
+	switch {
+	case errors.Is(err, store.ErrHistoryNotClosed):
+		// The bytes landed and only the sidecar record closing a trailing
+		// tombstone did not, so the object is done: recording it errored
+		// would leave the ledger describing content the archive no longer
+		// holds, and would skip the eager mirror upload for bytes that are
+		// already on disk. The next commit re-attempts the close.
+		e.logger.LogAttrs(ctx, slog.LevelWarn, "history_restore_error",
+			slog.String("path", relPath),
+			slog.String("error", err.Error()),
+		)
+
+	case err != nil:
 		return e.failWrite(ctx, relPath, err)
 	}
 

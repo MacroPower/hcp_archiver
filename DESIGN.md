@@ -373,8 +373,11 @@ Notes:
     that never changes never grows a sidecar. An object that disappears
     upstream (a confirmed 404 after a good archive) keeps its last-known file
     and appends a tombstone (nothing local is ever removed), and one that
-    comes back appends its returning content over the tombstone so the
-    timeline stays ordered. Each sidecar line is
+    comes back appends its returning content over the tombstone _after_ the
+    rename, never before (a rename that then failed would leave the sidecar
+    holding a version the file never held, and the next run would supersede
+    the file's older content on top of it), so the timeline stays ordered.
+    Each sidecar line is
     `{"fetchedAt": ..., "sha256": <hex>, "content": <file bytes as an escaped JSON string>}`
     (the roll-up convention: `jq -r 'select(.content) | .content'` emits the
     file bytes verbatim, and the sha256 matches the ledger signature) or

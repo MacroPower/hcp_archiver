@@ -105,11 +105,15 @@ func (s *Store) WriteJSON(relPath string, v any) (WriteResult, error) {
 // bytes are committed atomically and Changed is true. The signature is computed
 // over the payload either way.
 //
-// Under [WithHistory] a changed commit first appends the outgoing content to
-// the object's history sidecar, and any commit landing over a trailing
-// tombstone closes it with the incoming content; a history append that does
-// not land fails the whole write with the file untouched, so a superseded
-// version is never silently lost.
+// Under [WithHistory] a changed commit appends the outgoing content to the
+// object's history sidecar before the rename, and an append that does not land
+// fails the whole write with the file untouched, so a superseded version is
+// never silently lost. Any commit landing over a trailing tombstone then
+// closes it with the incoming content, after the bytes are durable, so the
+// sidecar never records a version newer than the one the file holds. That
+// closing append is the one failure the commit survives: it reports
+// [ErrHistoryNotClosed] alongside a populated [WriteResult], since the bytes
+// are on disk and only the sidecar lags.
 func (s *Store) WriteJSONBytes(relPath string, data []byte, opts ...WriteOption) (WriteResult, error) {
 	var cfg writeConfig
 
@@ -133,23 +137,28 @@ func (s *Store) WriteJSONBytes(relPath string, data []byte, opts ...WriteOption)
 	existed := readErr == nil
 	changed := !existed || !bytes.Equal(existing, data)
 
-	if cfg.history {
-		err := s.retainHistory(relPath, abs, existing, data, changed && existed, &cfg)
+	if cfg.history && changed && existed {
+		err := s.supersedeHistory(relPath, abs, existing, &cfg)
 		if err != nil {
 			return WriteResult{}, err
 		}
 	}
 
-	if !changed {
-		return res, nil
+	if changed {
+		err := atomicfile.WriteFile(abs, data)
+		if err != nil {
+			return WriteResult{}, fmt.Errorf("write %q: %w", relPath, err)
+		}
+
+		res.Changed = true
 	}
 
-	err := atomicfile.WriteFile(abs, data)
-	if err != nil {
-		return WriteResult{}, fmt.Errorf("write %q: %w", relPath, err)
+	if cfg.history {
+		err := s.restoreHistory(relPath, data, &cfg)
+		if err != nil {
+			return res, err
+		}
 	}
-
-	res.Changed = true
 
 	return res, nil
 }
