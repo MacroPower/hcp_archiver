@@ -7,18 +7,20 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash"
 	"hash/crc32"
 	"io"
-	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
@@ -44,26 +46,69 @@ const maxMemberSize int64 = 1 << 30 // 1 GiB
 // a fake-backed builder through [WithRemoteFactory].
 type remoteClientFactory func(ctx context.Context, cfg remote.Config) (*remote.Client, error)
 
-// orgRemote serves one organization's evicted bundles from its remote store.
+// orgRemote serves one organization's mirrored objects from its remote store:
+// ranged reads out of evicted bundles, whole-object fetches that persist at
+// the local archive path ([orgRemote.ensureLocal]), and the session's cached
+// mirror inventory ([orgRemote.objects]).
 //
-// It is built only when the org root carries a [remote.MarkerName] marker, so
-// a local-only archive never touches a client or a credential chain. The
-// client and each bundle's parsed central directory are built lazily on first
-// use and cached for the session; reads run on Bubble Tea command goroutines,
-// so the cache is mutex-guarded. A bundle build (a Head and a central-directory
-// parse over ranged GETs) runs outside the mutex behind a per-key readiness
-// signal, so a read of one cached bundle never waits on another's in-flight
-// build and one key is built at most once.
+// It is built when the org root carries a [remote.MarkerName] marker or when
+// [OpenArchive] was handed a remote through [WithRemote], so a local-only
+// archive never touches a client or a credential chain. The client and each
+// bundle's parsed central directory are built lazily on first use and cached
+// for the session; reads run on Bubble Tea command goroutines, so the caches
+// are mutex-guarded. A bundle build (a Head and a central-directory parse over
+// ranged GETs) runs outside the mutex behind a per-key readiness signal, so a
+// read of one cached bundle never waits on another's in-flight build and one
+// key is built at most once.
 type orgRemote struct {
-	ctx        context.Context //nolint:containedctx // Reads run inside io.ReaderAt calls, which take none.
-	newClient  remoteClientFactory
-	client     *remote.Client
-	clientErr  error
-	bundles    map[string]*remoteBundle
-	orgName    string
-	cfg        remote.Config
+	ctx       context.Context //nolint:containedctx // Reads run inside io.ReaderAt calls, which take none.
+	newClient remoteClientFactory
+	client    *remote.Client
+	clientErr error
+	bundles   map[string]*remoteBundle
+	fetches   map[string]*inflightFetch
+
+	// The org's mirror inventory keyed by archive-relative path, listed once
+	// per session under listMu (its own lock, so a long listing never blocks a
+	// bundle read's map access). Both the listing and a listing failure are
+	// cached: the merged listing helpers consult the inventory per keystroke,
+	// and re-listing an unreachable mirror on each would hammer the bucket
+	// while the browser degrades to local content anyway. A pre-seeded listing
+	// (the bootstrap's root listing, sliced per org) is stored with listed set.
+	// The byDir field is the listing's per-directory child index (see
+	// [indexListing]), built and replaced together with it.
+	listing map[string]remote.ObjectInfo
+	byDir   map[string]map[string]remoteChild
+	listErr error
+
+	orgName string
+	cfg     remote.Config
+
+	listed bool
+
+	// Whether the remote stands in for the whole tree rather than only the
+	// evicted surfaces: listings union in the mirror's inventory and an
+	// ordinary miss fetches through. It is set when the remote was supplied
+	// explicitly ([WithRemote]) and when the marker records a partial tree
+	// (one a bootstrap materialized, see [writeMarker]); an archive the
+	// archiver wrote is complete locally, so its marker keeps every local
+	// read local.
+	merged bool
+
+	listMu sync.Mutex
+
 	mu         sync.Mutex
 	clientOnce sync.Once
+}
+
+// inflightFetch is one in-progress [orgRemote.ensureLocal] download. The ready
+// channel closes once the fetch settles; a same-path caller waits on it and
+// shares err instead of downloading the object a second time in parallel.
+// Entries are removed once settled (a success is served from disk afterward,
+// and a failure retries), so only concurrent callers ever share one.
+type inflightFetch struct {
+	ready chan struct{}
+	err   error
 }
 
 // remoteBundle is one evicted bundle's cached read state: its parsed central
@@ -86,26 +131,13 @@ type remoteBundle struct {
 // loadOrgRemote reads the organization root's remote marker into an
 // [*orgRemote], or nil when no marker exists (a local-only archive).
 func loadOrgRemote(root, orgName string, opts archiveOptions) (*orgRemote, error) {
-	//nolint:gosec // The path is composed from the archive root being browsed.
-	data, err := os.ReadFile(filepath.Join(root, remote.MarkerName))
-
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, nil //nolint:nilnil // No marker simply means a local-only archive.
-	case err != nil:
-		return nil, fmt.Errorf("read remote marker: %w", err)
-	}
-
-	var marker remote.Marker
-
-	err = json.Unmarshal(data, &marker)
+	marker, ok, err := remote.ReadMarker(root)
 	if err != nil {
-		return nil, fmt.Errorf("parse remote marker %q: %w", remote.MarkerName, err)
+		return nil, err //nolint:wrapcheck // The marker reader names the file and the fault.
 	}
 
-	if marker.Version > remote.MarkerVersion {
-		return nil, fmt.Errorf("remote marker %q is version %d, newer than this build reads (%d)",
-			remote.MarkerName, marker.Version, remote.MarkerVersion)
+	if !ok {
+		return nil, nil //nolint:nilnil // No marker simply means a local-only archive.
 	}
 
 	// A marker that parses but records no bucket ("{}" from a damaged
@@ -123,7 +155,35 @@ func loadOrgRemote(root, orgName string, opts archiveOptions) (*orgRemote, error
 		orgName:   orgName,
 		cfg:       marker.Config(),
 		bundles:   make(map[string]*remoteBundle),
+		fetches:   make(map[string]*inflightFetch),
+		merged:    marker.Partial,
 	}, nil
+}
+
+// newSeededOrgRemote builds an [*orgRemote] around the shared client and the
+// per-org slice of the root inventory the bootstrap already holds, so opening
+// an archive against a supplied remote costs one client build and one listing
+// for every organization together. A nil listing leaves the inventory to be
+// listed lazily on first use (the bootstrap's root listing was unavailable).
+// An explicitly supplied remote is always merged: the caller asked for the
+// mirror to stand in for whatever is absent.
+func newSeededOrgRemote(
+	orgName string, cfg remote.Config, client *remote.Client,
+	listing map[string]remote.ObjectInfo, opts archiveOptions,
+) *orgRemote {
+	return &orgRemote{
+		ctx:       opts.ctx,
+		newClient: opts.newClient,
+		client:    client,
+		orgName:   orgName,
+		cfg:       cfg,
+		bundles:   make(map[string]*remoteBundle),
+		fetches:   make(map[string]*inflightFetch),
+		listing:   listing,
+		byDir:     indexListing(listing),
+		listed:    listing != nil,
+		merged:    true,
+	}
 }
 
 // readMember extracts one member from an evicted bundle at its
@@ -156,51 +216,305 @@ func (r *orgRemote) readMember(relBundle, relPath string) ([]byte, error) {
 // bytes come back from the one place they exist. The caller stages the stream
 // through an atomic write, so a mismatch leaves no file rather than a plausible
 // one.
-//
-// The download deliberately runs under the caller's context alone, with none of
-// [remoteReadTimeout] over it. That bound sizes one ranged GET, and a whole
-// tarball would blow it as a pure function of its length, failing identically
-// on every retry and every run. The client's own stall watchdog is the right
-// bound for a transfer, since it cuts a wedged connection without capping a
-// working one.
 func (r *orgRemote) fetchObject(
 	ctx context.Context, relPath string, stub store.RemoteStub, w io.Writer,
+) (int64, error) {
+	return r.downloadVerified(ctx, r.cfg.Key(r.orgName, relPath), stub.Size, stub.SHA256, "its eviction", w)
+}
+
+// downloadVerified streams one whole mirrored object into w and returns how
+// many bytes it wrote, verifying them against the size and, when one exists,
+// the digest its proof recorded; proof names that record ("its eviction", the
+// stub; "its upload", the mirror's own metadata) so a mismatch says which
+// promise was broken. A proof carrying no digest verifies on length alone:
+// there is nothing else to compare, and refusing it would strand an object
+// the archive holds. The hasher is built only when there is something to
+// compare it against, so such a fetch does not spend a pass over gigabytes to
+// throw the result away.
+//
+// The download deliberately runs under the caller's context alone, with none
+// of [remoteReadTimeout] over it: that bound sizes one ranged GET, and a
+// whole object would blow it as a pure function of its length, failing
+// identically on every retry and every run. The client's own stall watchdog
+// is the right bound for a transfer, since it cuts a wedged connection
+// without capping a working one.
+func (r *orgRemote) downloadVerified(
+	ctx context.Context, key string, size int64, digest, proof string, w io.Writer,
 ) (int64, error) {
 	client, err := r.clientBuild()
 	if err != nil {
 		return 0, err
 	}
 
-	key := r.cfg.Key(r.orgName, relPath)
 	dst := w
 
-	// A stub whose eviction proved no digest verifies on length alone: there is
-	// nothing else to compare, and refusing it would strand an object the
-	// archive holds. The hasher is built only when there is something to
-	// compare it against, so such a fetch does not spend a pass over gigabytes
-	// to throw the result away.
 	var sum hash.Hash
 
-	if stub.SHA256 != "" {
+	if digest != "" {
 		sum = sha256.New()
 		dst = io.MultiWriter(w, sum)
 	}
 
-	n, err := client.Download(ctx, key, stub.Size, dst)
+	n, err := client.Download(ctx, key, size, dst)
 	if err != nil {
 		return n, fmt.Errorf("fetch remote object %q: %w", key, err)
 	}
 
-	if n != stub.Size {
-		return n, fmt.Errorf("remote object %q served %d of the %d bytes its eviction recorded",
-			key, n, stub.Size)
+	if n != size {
+		return n, fmt.Errorf("remote object %q served %d of the %d bytes %s recorded", key, n, size, proof)
 	}
 
-	if sum != nil && hex.EncodeToString(sum.Sum(nil)) != stub.SHA256 {
-		return n, fmt.Errorf("remote object %q does not match the digest its eviction recorded", key)
+	if sum != nil && hex.EncodeToString(sum.Sum(nil)) != digest {
+		return n, fmt.Errorf("remote object %q does not match the digest %s recorded", key, proof)
 	}
 
 	return n, nil
+}
+
+// objects returns the org's mirror inventory keyed by archive-relative path,
+// listed once per session. Both the inventory and a listing failure are cached
+// (see the field's doc); [*Org.RemoteWarning] surfaces the cached failure so
+// callers can degrade to local content without going quiet about it.
+//
+// The listing runs under the stored browse context alone, with none of
+// [remoteReadTimeout] over it: a large mirror's listing is many pages, and the
+// client's own stall watchdog already cuts a wedged page without capping a
+// working enumeration.
+func (r *orgRemote) objects() (map[string]remote.ObjectInfo, error) {
+	r.listMu.Lock()
+	defer r.listMu.Unlock()
+
+	if r.listed {
+		return r.listing, r.listErr
+	}
+
+	r.listed = true
+
+	client, err := r.clientBuild()
+	if err != nil {
+		r.listErr = err
+
+		return nil, r.listErr
+	}
+
+	prefix := r.cfg.Key(r.orgName, "") + "/"
+
+	inventory, err := client.List(r.ctx, prefix)
+	if err != nil {
+		r.listErr = fmt.Errorf("list mirror inventory: %w", err)
+
+		return nil, r.listErr
+	}
+
+	r.listing = relativeListing(inventory, prefix)
+	r.byDir = indexListing(r.listing)
+
+	return r.listing, nil
+}
+
+// relativeListing strips a key prefix from every listed key, dropping keys
+// outside the prefix and the prefix itself. An empty prefix keeps every key.
+func relativeListing(inventory map[string]remote.ObjectInfo, prefix string) map[string]remote.ObjectInfo {
+	out := make(map[string]remote.ObjectInfo, len(inventory))
+
+	for key, info := range inventory {
+		rel := strings.TrimPrefix(key, prefix)
+		if (rel == key && prefix != "") || rel == "" {
+			continue
+		}
+
+		out[rel] = info
+	}
+
+	return out
+}
+
+// remoteChild is one indexed child of a mirrored directory: a file with its
+// recorded size, or a subdirectory.
+type remoteChild struct {
+	size int64
+	dir  bool
+}
+
+// indexListing derives the per-directory child index from a flat inventory,
+// so the merged listing helpers answer one directory in one lookup instead of
+// scanning every key the mirror holds on every screen build. It is built once
+// beside the listing it derives from and read-only after.
+func indexListing(listing map[string]remote.ObjectInfo) map[string]map[string]remoteChild {
+	idx := make(map[string]map[string]remoteChild)
+
+	set := func(dir, name string, c remoteChild) {
+		m := idx[dir]
+		if m == nil {
+			m = make(map[string]remoteChild)
+			idx[dir] = m
+		}
+
+		// A directory never downgrades to a file: a name can only appear as
+		// both under a malformed listing, and the subtree is the one to keep.
+		if old, ok := m[name]; ok && old.dir {
+			return
+		}
+
+		m[name] = c
+	}
+
+	for rel, info := range listing {
+		dir := path.Dir(rel)
+		if dir == "." {
+			dir = ""
+		}
+
+		set(dir, path.Base(rel), remoteChild{size: info.Size})
+
+		for dir != "" {
+			parent := path.Dir(dir)
+			if parent == "." {
+				parent = ""
+			}
+
+			set(parent, path.Base(dir), remoteChild{dir: true})
+
+			dir = parent
+		}
+	}
+
+	return idx
+}
+
+// childrenAt returns the indexed children of one mirrored directory, nil when
+// the mirror holds nothing there (or the listing has not been built). The
+// returned map is shared and read-only.
+func (r *orgRemote) childrenAt(relDir string) map[string]remoteChild {
+	r.listMu.Lock()
+	defer r.listMu.Unlock()
+
+	return r.byDir[relDir]
+}
+
+// listingErr returns the cached mirror-listing failure the session is
+// degrading around, or nil when no listing has failed (or run yet).
+func (r *orgRemote) listingErr() error {
+	r.listMu.Lock()
+	defer r.listMu.Unlock()
+
+	return r.listErr
+}
+
+// head probes one mirrored object by its archive-relative path, resolving the
+// size and digests the mirror records for it.
+func (r *orgRemote) head(relPath string) (remote.ObjectInfo, error) {
+	client, err := r.clientBuild()
+	if err != nil {
+		return remote.ObjectInfo{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(r.ctx, remoteReadTimeout)
+	defer cancel()
+
+	info, err := client.Head(ctx, r.cfg.Key(r.orgName, relPath))
+	if err != nil {
+		//nolint:wrapcheck // The client names the key; callers classify with errors.Is.
+		return remote.ObjectInfo{}, err
+	}
+
+	return info, nil
+}
+
+// ensureLocal fetches the whole object at an archive-relative path from the
+// mirror and persists it atomically at its local archive path, verifying the
+// bytes against the size and digest the mirror records. A path the mirror does
+// not hold returns [ErrObjectNotFound]. Concurrent same-path calls share one
+// download; distinct paths fetch in parallel.
+//
+// The write takes no cross-process lock against a concurrently running
+// archiver: it is rename-atomic, and its content is byte-identical to what the
+// archiver itself mirrored (the digest it verifies is the one the archiver's
+// upload recorded), so whichever write lands last leaves the same bytes.
+func (r *orgRemote) ensureLocal(root, relPath string) error {
+	r.mu.Lock()
+
+	if f, ok := r.fetches[relPath]; ok {
+		r.mu.Unlock()
+		<-f.ready
+
+		return f.err
+	}
+
+	f := &inflightFetch{ready: make(chan struct{})}
+	r.fetches[relPath] = f
+	r.mu.Unlock()
+
+	err := r.fetchLocal(root, relPath)
+
+	// Settle before delete, so a waiter that captured this entry reads err;
+	// the delete then lets the next caller retry a failure or hit the disk.
+	f.err = err
+	close(f.ready)
+
+	r.mu.Lock()
+	delete(r.fetches, relPath)
+	r.mu.Unlock()
+
+	return err
+}
+
+// fetchLocal is one [orgRemote.ensureLocal] download: a Head for the object's
+// size and digest, then a stream through an atomic write that verifies before
+// the rename, so a mismatch leaves no file rather than a plausible one.
+//
+// The Head runs under [remoteReadTimeout] (one small request); the download
+// runs under the stored browse context alone, since a whole object's transfer
+// time is a function of its length and the client's stall watchdog is the
+// right bound for it (the same shape as [orgRemote.fetchObject]).
+func (r *orgRemote) fetchLocal(root, relPath string) error {
+	client, err := r.clientBuild()
+	if err != nil {
+		return err
+	}
+
+	key := r.cfg.Key(r.orgName, relPath)
+
+	headCtx, cancel := context.WithTimeout(r.ctx, remoteReadTimeout)
+	defer cancel()
+
+	info, err := client.Head(headCtx, key)
+	if err != nil {
+		if errors.Is(err, remote.ErrNotFound) {
+			return fmt.Errorf("%w: %s is not in the mirror", ErrObjectNotFound, relPath)
+		}
+
+		return fmt.Errorf("probe remote object %q: %w", key, err)
+	}
+
+	// Confine the landing path to the org root exactly as [*Org.AbsPath]
+	// confines the read side: a relPath carrying ".." segments must not let
+	// the write escape what the follow-up read would then miss.
+	clean := strings.TrimPrefix(path.Clean("/"+filepath.ToSlash(relPath)), "/")
+	abs := filepath.Join(root, filepath.FromSlash(clean))
+
+	err = atomicfile.Write(abs, func(w io.Writer) error {
+		_, dlErr := r.downloadVerified(r.ctx, key, info.Size, info.SHA256, "its upload", w)
+
+		return dlErr
+	})
+	if err != nil {
+		return fmt.Errorf("persist %q: %w", relPath, err)
+	}
+
+	return nil
+}
+
+// fetchEligible reports whether a locally absent archive-relative path may be
+// materialized from the mirror. The evicted surfaces are excluded so
+// read-through never undoes an eviction: a configuration-version tarball
+// (served by [ErrRemoteOnly] and the unseal's fetch instead) and a bundle zip
+// (served by ranged member reads). Everything else in the warm layer,
+// including roll-ups, sidecars, and identity files, is eligible; eviction
+// stubs pass the guard harmlessly but are never mirrored, so a fetch of one
+// simply misses.
+func fetchEligible(rel string) bool {
+	return !store.IsConfigTarball(rel) && !store.IsBundleZip(rel)
 }
 
 // bundle returns the cached read state for an evicted bundle, building it on
@@ -300,6 +614,13 @@ func (r *orgRemote) buildBundle(relBundle string) (*zip.Reader, io.ReaderAt, int
 //nolint:contextcheck // See above; there is no caller context to pass.
 func (r *orgRemote) clientBuild() (*remote.Client, error) {
 	r.clientOnce.Do(func() {
+		// A pre-built shared client (the bootstrap's, injected through
+		// newSeededOrgRemote) is already in place; the Do still runs so every
+		// later read of the field sits behind the Once's memory barrier.
+		if r.client != nil {
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(r.ctx, remoteReadTimeout)
 		defer cancel()
 
@@ -423,4 +744,182 @@ func (t *timedReaderAt) ReadAt(p []byte, off int64) (int, error) {
 
 	//nolint:wrapcheck // A transparent pass-through; the client already wraps.
 	return t.client.ReadAt(ctx, t.key, t.size, p, off)
+}
+
+// RemoteWarning returns the mirror-listing failure the organization's merged
+// listings are currently degrading around, or nil for an organization with no
+// remote or whose mirror has answered (or never been asked). Callers surface
+// it once, on the status line or stderr, so a listing that silently shows
+// local content only never claims to be the whole archive.
+func (o *Org) RemoteWarning() error {
+	if o.remote == nil {
+		return nil
+	}
+
+	return o.remote.listingErr()
+}
+
+// remoteObjects returns the organization's mirror inventory, or nil when the
+// mirror should not (or cannot) stand in for the local tree: an organization
+// with no remote, one whose remote is not merged (a complete archive's
+// marker, where local reads stay local), or one whose listing failed. Under a
+// failed listing the merged helpers built on it degrade to local content,
+// with the failure held for [*Org.RemoteWarning] rather than failing a browse
+// that may need nothing remote at all.
+func (o *Org) remoteObjects() map[string]remote.ObjectInfo {
+	if o.remote == nil || !o.remote.merged {
+		return nil
+	}
+
+	inventory, err := o.remote.objects()
+	if err != nil {
+		return nil
+	}
+
+	return inventory
+}
+
+// remoteHas returns the mirror's record of an archive-relative path from the
+// cached inventory, without a network round trip of its own.
+func (o *Org) remoteHas(rel string) (remote.ObjectInfo, bool) {
+	info, ok := o.remoteObjects()[rel]
+
+	return info, ok
+}
+
+// remoteDirExists reports whether the mirror holds objects strictly beneath an
+// archive-relative path, making it a directory in the merged tree. The path
+// being an object itself wins: a mirror never holds both.
+func (o *Org) remoteDirExists(rel string) bool {
+	inventory := o.remoteObjects()
+	if len(inventory) == 0 {
+		return false
+	}
+
+	if _, ok := inventory[rel]; ok {
+		return false
+	}
+
+	return len(o.remote.childrenAt(rel)) > 0
+}
+
+// remoteChildren returns the immediate child names the mirror holds under an
+// archive-relative directory: subdirectory names sorted, and file names with
+// their recorded sizes. Both are empty for an organization with no remote and
+// under a failed listing (see [*Org.remoteObjects]).
+func (o *Org) remoteChildren(relDir string) ([]string, map[string]int64) {
+	if len(o.remoteObjects()) == 0 {
+		return nil, nil
+	}
+
+	children := o.remote.childrenAt(relDir)
+	if len(children) == 0 {
+		return nil, nil
+	}
+
+	var dirs []string
+
+	files := make(map[string]int64)
+
+	for name, c := range children {
+		if c.dir {
+			dirs = append(dirs, name)
+		} else {
+			files[name] = c.size
+		}
+	}
+
+	slices.Sort(dirs)
+
+	return dirs, files
+}
+
+// remoteKeysUnder returns the mirror's archive-relative paths at or beneath a
+// prefix, empty for an organization with no remote and under a failed listing
+// (see [*Org.remoteObjects]).
+func (o *Org) remoteKeysUnder(prefix string) map[string]remote.ObjectInfo {
+	inventory := o.remoteObjects()
+	if len(inventory) == 0 {
+		return nil
+	}
+
+	out := make(map[string]remote.ObjectInfo)
+
+	for rel, info := range inventory {
+		if underPrefix(rel, prefix) {
+			out[rel] = info
+		}
+	}
+
+	return out
+}
+
+// fetchThrough materializes an absent object at its local archive path from
+// the mirror, reporting whether it landed so the caller can re-read it from
+// disk. A false with a nil error means the object cannot be fetched (no
+// merged remote, an ineligible path, or a mirror that does not hold it), and
+// the caller keeps its original miss; a non-nil error is a real fetch fault
+// (a failed transfer, a digest mismatch) worth surfacing over the miss.
+//
+// Only a merged remote fetches through: a complete archive's miss means the
+// object was never archived, and a probe would spend a network round trip
+// (and possibly a credential error) to learn nothing.
+func (o *Org) fetchThrough(rel string) (bool, error) {
+	if o.remote == nil || !o.remote.merged || !fetchEligible(rel) {
+		return false, nil
+	}
+
+	err := o.remote.ensureLocal(o.root, rel)
+
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrObjectNotFound):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// readThrough answers a confirmed local miss: it materializes the object from
+// the mirror when it can ([*Org.fetchThrough]) and reads the landed bytes
+// back, and otherwise returns miss, the caller's original error, unchanged.
+// It is the one place the fetch-then-reread contract lives, so every read
+// path falls through identically.
+func (o *Org) readThrough(rel string, miss error) ([]byte, error) {
+	fetched, err := o.fetchThrough(rel)
+
+	switch {
+	case err != nil:
+		return nil, err
+	case fetched:
+		data, readErr := os.ReadFile(o.AbsPath(rel))
+		if readErr != nil {
+			return nil, fmt.Errorf("read %q: %w", rel, readErr)
+		}
+
+		return data, nil
+
+	default:
+		return nil, miss
+	}
+}
+
+// copyThrough is [*Org.readThrough]'s streaming shape for the unseal path: on
+// a fetch it streams the landed file into w and reports handled; a false
+// leaves the caller to describe its own miss.
+func (o *Org) copyThrough(rel string, w io.Writer) (int64, bool, error) {
+	fetched, err := o.fetchThrough(rel)
+
+	switch {
+	case err != nil:
+		return 0, true, err
+	case fetched:
+		n, copyErr := copyLoose(o.AbsPath(rel), rel, w)
+
+		return n, true, copyErr
+
+	default:
+		return 0, false, nil
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.jacobcolvin.com/hcp_archiver/config"
+	"go.jacobcolvin.com/hcp_archiver/remote"
 )
 
 // NewRootCmd exposes newRootCmd for tests.
@@ -22,4 +23,20 @@ func ConfigFromArgs(args []string) (*config.Config, error) {
 	}
 
 	return af.config()
+}
+
+// ResolveRemoteFromArgs registers the mirror-location flags on a fresh
+// command, parses args against them, and resolves the result. It exposes the
+// flag-to-remote binding (--remote over the configuration file, prefix
+// override) for offline tests without opening an archive.
+func ResolveRemoteFromArgs(args []string) (*remote.Config, error) {
+	cmd := &cobra.Command{Use: "test"}
+	rf := registerRemoteFlags(cmd)
+
+	err := cmd.Flags().Parse(args)
+	if err != nil {
+		return nil, err
+	}
+
+	return rf.resolve()
 }

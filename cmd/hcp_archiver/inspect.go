@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -13,16 +14,21 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"go.jacobcolvin.com/hcp_archiver/archiver"
+	"go.jacobcolvin.com/hcp_archiver/config"
+	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/theme"
 	"go.jacobcolvin.com/hcp_archiver/view"
 )
 
 // Flag names shared by the inspect commands.
 const (
-	flagJSON    = "json"
-	flagTarget  = "target"
-	flagDryRun  = "dry-run"
-	flagVerbose = "verbose"
+	flagJSON         = "json"
+	flagTarget       = "target"
+	flagDryRun       = "dry-run"
+	flagVerbose      = "verbose"
+	flagRemote       = "remote"
+	flagRemotePrefix = "remote-prefix"
 )
 
 var (
@@ -34,6 +40,10 @@ var (
 	// directory being read, where recovered files would be written into the
 	// archive itself.
 	ErrTargetInArchive = errors.New("unseal target must be outside the archive directory")
+
+	// ErrPrefixNeedsRemote indicates --remote-prefix was given with nothing to
+	// apply it to: no --remote URL and no configuration file naming a remote.
+	ErrPrefixNeedsRemote = errors.New("--remote-prefix needs --remote or a configuration file naming a remote")
 )
 
 // inspectLong is the addressing contract the three read commands share.
@@ -43,6 +53,102 @@ directory is the archive root or a single organization's directory.
 
 Positional arguments bind left to right: with two arguments the first is the
 archive directory and the second the archive path.`
+
+// remoteLong is the mirror read-through contract the browse and inspect
+// commands share.
+const remoteLong = `The archive's object-store mirror can stand in for absent local files: name
+it with --remote (and --remote-prefix), or with --config naming a
+configuration file whose remote section records it. Anything read that is not
+on disk is fetched from the mirror and persisted at its local archive path,
+so later reads need no network; a directory holding nothing at all is
+bootstrapped from the mirror outright, and the recorded marker means the
+flags are only needed once. A supplied remote that disagrees with the mirror
+an organization's marker records is refused. Object-store credentials come
+from the backend provider's default chain.`
+
+// remoteFlags holds the raw mirror-location flag values bound onto the browse
+// and inspect commands. Its resolve method turns them into the remote
+// configuration [view.OpenArchive] accepts, or nil when none is named.
+type remoteFlags struct {
+	configPath string
+	url        string
+	prefix     string
+}
+
+// registerRemoteFlags binds the mirror-location flags onto cmd and returns
+// the [*remoteFlags] they write into.
+func registerRemoteFlags(cmd *cobra.Command) *remoteFlags {
+	rf := &remoteFlags{}
+	fs := cmd.Flags()
+
+	fs.StringVarP(&rf.configPath, flagConfig, "c", "",
+		fmt.Sprintf("path to the YAML configuration file whose remote section names the mirror (defaults to $%s)",
+			config.EnvConfigPath))
+	fs.StringVar(&rf.url, flagRemote, "",
+		"mirror bucket URL in gocloud.dev form (s3://, azblob://, file://); overrides the configuration file")
+	fs.StringVar(&rf.prefix, flagRemotePrefix, "",
+		"key prefix the archive is mirrored under")
+
+	return rf
+}
+
+// resolve turns the flag values into the remote configuration the archive
+// opens with: an explicit --remote wins, then the configuration file's remote
+// section (the --config flag or the environment), and nil means no remote was
+// named anywhere, leaving the archive to its local tree and markers.
+func (rf *remoteFlags) resolve() (*remote.Config, error) {
+	if rf.url != "" {
+		return &remote.Config{URL: rf.url, Prefix: rf.prefix}, nil
+	}
+
+	cfgPath := rf.configPath
+	if cfgPath == "" {
+		cfgPath = os.Getenv(config.EnvConfigPath)
+	}
+
+	if cfgPath == "" {
+		if rf.prefix != "" {
+			return nil, ErrPrefixNeedsRemote
+		}
+
+		return nil, nil //nolint:nilnil // No remote named anywhere is the local-only default.
+	}
+
+	file, err := config.LoadFile(cfgPath)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // Source-annotated configuration errors render as-is.
+	}
+
+	if file.Remote.IsZero() {
+		if rf.prefix != "" {
+			return nil, ErrPrefixNeedsRemote
+		}
+
+		return nil, nil //nolint:nilnil // The file names no remote; same local-only default.
+	}
+
+	rc := file.Remote.RemoteConfig()
+	cfg := archiver.RemoteConfig(&rc)
+
+	if rf.prefix != "" {
+		cfg.Prefix = rf.prefix
+	}
+
+	return &cfg, nil
+}
+
+// warnDegraded reports each organization whose mirror listing failed, so a
+// result covering local content only never passes silently for the whole
+// archive. It writes at most one line per organization per run.
+func warnDegraded(errW io.Writer, arc *view.Archive) {
+	for _, org := range arc.Orgs() {
+		err := org.RemoteWarning()
+		if err != nil {
+			eprintf(errW, "warning: organization %q: mirror unreachable; results cover local content only (%v)\n",
+				org.Name, err)
+		}
+	}
+}
 
 // newListCmd returns a command that lists archived objects as plain text or
 // NDJSON, one line per object, transparent to sealing.
@@ -57,31 +163,43 @@ whichever physical form (loose, roll-up, bundle) holds it.
 
 ` + inspectLong + `
 
+` + remoteLong + `
+
 A single argument names the archive directory; pass "." explicitly to address
 a path in the current directory.`,
 		Args: cobra.MaximumNArgs(2),
-		RunE: func(cc *cobra.Command, args []string) error {
-			dir, prefix := archiveArgs(args)
+	}
 
-			ctx, stop := signalContext(cc.Context())
-			defer stop()
+	rf := registerRemoteFlags(cmd)
 
-			arc, err := openArchive(ctx, dir)
-			if err != nil {
-				return hintLoneArg(err, "list", args)
-			}
+	cmd.RunE = func(cc *cobra.Command, args []string) error {
+		dir, prefix := archiveArgs(args)
 
-			entries, err := arc.List(prefix)
-			if err != nil {
-				return describeNoOrg(err, arc)
-			}
+		ctx, stop := signalContext(cc.Context())
+		defer stop()
 
-			if jsonOut {
-				return writeEntriesJSON(cc.OutOrStdout(), entries)
-			}
+		rcfg, err := rf.resolve()
+		if err != nil {
+			return err
+		}
 
-			return writeEntriesText(cc.OutOrStdout(), entries)
-		},
+		arc, err := openArchive(ctx, dir, rcfg)
+		if err != nil {
+			return hintLoneArg(err, "list", args)
+		}
+
+		entries, err := arc.List(prefix)
+		if err != nil {
+			return describeNoOrg(err, arc)
+		}
+
+		warnDegraded(cc.ErrOrStderr(), arc)
+
+		if jsonOut {
+			return writeEntriesJSON(cc.OutOrStdout(), entries)
+		}
+
+		return writeEntriesText(cc.OutOrStdout(), entries)
 	}
 
 	cmd.Flags().BoolVar(&jsonOut, flagJSON, false, "emit NDJSON, one object per line")
@@ -92,7 +210,7 @@ a path in the current directory.`,
 // newShowCmd returns a command that prints one archived object's exact bytes
 // to stdout, whichever physical form holds it.
 func newShowCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "show [archive-dir] <path>",
 		Short: "Print one archived object's bytes to stdout",
 		Long: `Print the exact bytes of one archived object to stdout, whichever physical
@@ -100,37 +218,54 @@ form (loose, roll-up, bundle) holds it.
 
 ` + inspectLong + `
 
+` + remoteLong + `
+
 A single argument is the archive path, read from the archive in the current
 directory.`,
 		Args: cobra.RangeArgs(1, 2),
-		RunE: func(cc *cobra.Command, args []string) error {
-			dir, archivePath := showArgs(args)
-
-			ctx, stop := signalContext(cc.Context())
-			defer stop()
-
-			arc, err := openArchive(ctx, dir)
-			if err != nil {
-				return err
-			}
-
-			data, err := arc.Read(archivePath)
-			if err != nil {
-				if errors.Is(err, view.ErrNotFile) {
-					return fmt.Errorf("%w (try: %s list %s %s)", err, appName, dir, archivePath)
-				}
-
-				return describeNoOrg(err, arc)
-			}
-
-			_, err = cc.OutOrStdout().Write(data)
-			if err != nil {
-				return fmt.Errorf("write output: %w", err)
-			}
-
-			return nil
-		},
 	}
+
+	rf := registerRemoteFlags(cmd)
+
+	cmd.RunE = func(cc *cobra.Command, args []string) error {
+		dir, archivePath := showArgs(args)
+
+		ctx, stop := signalContext(cc.Context())
+		defer stop()
+
+		rcfg, err := rf.resolve()
+		if err != nil {
+			return err
+		}
+
+		arc, err := openArchive(ctx, dir, rcfg)
+		if err != nil {
+			return err
+		}
+
+		data, err := arc.Read(archivePath)
+
+		// Whatever the read answered, a degraded mirror is context the reader
+		// needs: a miss may be explained by it, and a hit does not disprove it.
+		warnDegraded(cc.ErrOrStderr(), arc)
+
+		if err != nil {
+			if errors.Is(err, view.ErrNotFile) {
+				return fmt.Errorf("%w (try: %s list %s %s)", err, appName, dir, archivePath)
+			}
+
+			return describeNoOrg(err, arc)
+		}
+
+		_, err = cc.OutOrStdout().Write(data)
+		if err != nil {
+			return fmt.Errorf("write output: %w", err)
+		}
+
+		return nil
+	}
+
+	return cmd
 }
 
 // newUnsealCmd returns a command that extracts archived objects into a plain
@@ -159,37 +294,49 @@ failures; a fetch can still fail against a mirror that is configured.
 
 ` + inspectLong + `
 
+` + remoteLong + `
+
 A single argument names the archive directory; pass "." explicitly to address
 a path in the current directory. With --dry-run the plan, including how much it
 would fetch from the mirror, is summarized from the listing and nothing is
-written; --target is not required.`,
+written into the target; --target is not required. Sizing the plan can itself
+fetch a workspace's absent sealed indexes (roll-ups and sidecars) from the
+mirror, the one egress a dry run may cost.`,
 		Args: cobra.MaximumNArgs(2),
-		RunE: func(cc *cobra.Command, args []string) error {
-			dir, prefix := archiveArgs(args)
+	}
 
-			ctx, stop := signalContext(cc.Context())
-			defer stop()
+	rf := registerRemoteFlags(cmd)
 
-			arc, err := openArchive(ctx, dir)
-			if err != nil {
-				return hintLoneArg(err, "unseal", args)
-			}
+	cmd.RunE = func(cc *cobra.Command, args []string) error {
+		dir, prefix := archiveArgs(args)
 
-			if dryRun {
-				return unsealDryRun(cc.OutOrStdout(), cc.ErrOrStderr(), arc, prefix, target, jsonOut)
-			}
+		ctx, stop := signalContext(cc.Context())
+		defer stop()
 
-			if target == "" {
-				return view.ErrNoTarget
-			}
+		rcfg, err := rf.resolve()
+		if err != nil {
+			return err
+		}
 
-			err = checkTargetOutside(dir, target)
-			if err != nil {
-				return err
-			}
+		arc, err := openArchive(ctx, dir, rcfg)
+		if err != nil {
+			return hintLoneArg(err, "unseal", args)
+		}
 
-			return runUnsealCmd(ctx, cc, arc, prefix, target, verbose, jsonOut)
-		},
+		if dryRun {
+			return unsealDryRun(cc.OutOrStdout(), cc.ErrOrStderr(), arc, prefix, target, jsonOut)
+		}
+
+		if target == "" {
+			return view.ErrNoTarget
+		}
+
+		err = checkTargetOutside(dir, target)
+		if err != nil {
+			return err
+		}
+
+		return runUnsealCmd(ctx, cc, arc, prefix, target, verbose, jsonOut)
 	}
 
 	fs := cmd.Flags()
@@ -220,6 +367,9 @@ func runUnsealCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
 	}
 
 	sum, err := arc.Unseal(ctx, target, prefix, progress)
+
+	warnDegraded(errW, arc)
+
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			eprintf(errW, "unseal interrupted: %s (%s) written into %s\n",
@@ -261,12 +411,17 @@ func runUnsealCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
 // The prediction is a lower bound on the failures: a bundle that turns out to
 // be corrupt, a mirror that refuses the credentials it is offered, or an object
 // missing from the bucket all error only when something tries to read them,
-// which a dry run never does, so a clean dry run does not promise a clean run.
+// which sizing the plan does not, so a clean dry run does not promise a clean
+// run. The one egress a dry run may cost is the listing's own machinery: a
+// workspace whose sealed indexes (roll-ups, sidecars) are not on disk has them
+// fetched from the mirror so the plan covers its sealed objects at all.
 func unsealDryRun(out, errW io.Writer, arc *view.Archive, prefix, target string, jsonOut bool) error {
 	entries, err := arc.List(prefix)
 	if err != nil {
 		return describeNoOrg(err, arc)
 	}
+
+	warnDegraded(errW, arc)
 
 	mirrored := make(map[string]bool, len(arc.Orgs()))
 	for _, org := range arc.Orgs() {
@@ -314,8 +469,8 @@ func unsealDryRun(out, errW io.Writer, arc *view.Archive, prefix, target string,
 // tarball (the object is downloaded whole) and an overestimate for a member of
 // an evicted bundle, whose compressed span in the remote zip is what actually
 // crosses the wire. Only the bundle's central directory knows that span, and
-// reading it is a network round trip per bundle, which is the one thing a dry
-// run promises not to do.
+// reading it is a network round trip per bundle, which sizing the plan
+// deliberately skips.
 type unsealVolume struct {
 	bytes int64
 	files int
@@ -512,10 +667,17 @@ func showArgs(args []string) (string, string) {
 	return args[0], args[1]
 }
 
-// openArchive opens the archive at dir under ctx and wraps its organizations
-// in a [*view.Archive].
-func openArchive(ctx context.Context, dir string) (*view.Archive, error) {
-	orgs, err := view.OpenArchive(dir, view.WithContext(ctx))
+// openArchive opens the archive at dir under ctx, against the supplied mirror
+// when rcfg is non-nil, and wraps its organizations in a [*view.Archive].
+//
+//nolint:contextcheck // The context rides in through view.WithContext; remote reads derive from it.
+func openArchive(ctx context.Context, dir string, rcfg *remote.Config) (*view.Archive, error) {
+	opts := []view.ArchiveOption{view.WithContext(ctx)}
+	if rcfg != nil {
+		opts = append(opts, view.WithRemote(*rcfg))
+	}
+
+	orgs, err := view.OpenArchive(dir, opts...)
 	if err != nil {
 		return nil, err
 	}

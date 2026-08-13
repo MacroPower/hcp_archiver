@@ -54,12 +54,14 @@ type Entry struct {
 	Form Form
 	// Size is the object's content length in bytes, in every form.
 	Size int64
-	// Offloaded reports an object whose bytes were evicted to the remote
-	// store, so reading it needs network access: a bundle member is fetched
-	// from its remote bundle with ranged reads, a configuration-version
-	// tarball is downloaded whole. Neither is reachable in an organization
-	// that records no mirror (see [*Org.HasRemote]), where an unseal counts
-	// the object as one it could not recover.
+	// Offloaded reports an object whose bytes are only in the remote store,
+	// so reading it needs network access: a bundle member is fetched from its
+	// remote bundle with ranged reads, a configuration-version tarball is
+	// downloaded whole, and a warm object the mirror holds but the local tree
+	// does not yet is fetched and persisted locally by the read itself. None
+	// is reachable in an organization that records no mirror (see
+	// [*Org.HasRemote]), where an unseal counts the object as one it could
+	// not recover.
 	Offloaded bool
 }
 
@@ -109,6 +111,8 @@ func (o *Org) List(prefix string) ([]Entry, error) {
 		}
 	}
 
+	entries = o.appendRemoteEntries(entries, seen, rel)
+
 	slices.SortFunc(entries, func(a, b Entry) int {
 		return strings.Compare(a.Path, b.Path)
 	})
@@ -116,9 +120,46 @@ func (o *Org) List(prefix string) ([]Entry, error) {
 	return entries, nil
 }
 
+// appendRemoteEntries appends one entry per object the organization's mirror
+// holds at or beneath prefix that nothing local already claims, so a listing
+// over a partly or wholly absent tree is still the whole archive. Machinery
+// keys are hidden exactly as local machinery is; a stub key is skipped as
+// belt-and-braces (stubs are never mirrored, and the tarball one stands for
+// lists from its own key). The entries are flagged Offloaded: their bytes are
+// only in the mirror until a read pulls them down.
+func (o *Org) appendRemoteEntries(entries []Entry, seen map[string]struct{}, prefix string) []Entry {
+	for rel, info := range o.remoteKeysUnder(prefix) {
+		if _, ok := seen[rel]; ok {
+			continue
+		}
+
+		if isMachinery(rel) {
+			continue
+		}
+
+		if _, ok := store.RemoteStubTarget(rel); ok {
+			continue
+		}
+
+		seen[rel] = struct{}{}
+
+		entries = append(entries, Entry{
+			Org:       o.Name,
+			Path:      rel,
+			Form:      FormLoose,
+			Size:      info.Size,
+			Offloaded: true,
+		})
+	}
+
+	return entries
+}
+
 // Read returns the bytes at an archive-relative path, whichever physical form
 // holds it. A workspace-scoped path resolves through [Workspace.Open]; any
-// other path is a loose read. A path present in no form returns
+// other path is a loose read, and a loose object absent locally is fetched
+// from the organization's mirror when it has one, persisting at the same path
+// so the next read is local. A path present in no form returns
 // [ErrObjectNotFound]; a directory returns [ErrNotFile], whether it is
 // physically present or survives only as sealed objects beneath the path (a
 // fully sealed run directory). A configuration-version tarball evicted to the
@@ -144,7 +185,7 @@ func (o *Org) Read(relPath string) ([]byte, error) {
 
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return nil, o.describeMiss(rel)
+		return o.readThrough(rel, o.describeMiss(rel))
 	case err != nil:
 		return nil, fmt.Errorf("read %q: %w", rel, err)
 	}
@@ -178,6 +219,13 @@ func (o *Org) resolveRel(relPath string) (string, error) {
 		return "", fmt.Errorf("%w: %s is a directory", ErrNotFile, rel)
 	}
 
+	// A directory the mirror holds but the local tree does not yet is a
+	// directory all the same, so a bootstrap archive answers exactly what a
+	// fully local one would.
+	if errors.Is(err, fs.ErrNotExist) && o.remoteDirExists(rel) {
+		return "", fmt.Errorf("%w: %s is a directory", ErrNotFile, rel)
+	}
+
 	return rel, nil
 }
 
@@ -185,7 +233,10 @@ func (o *Org) resolveRel(relPath string) (string, error) {
 // says the object was moved to the mirror whole, which is a different answer
 // than never having been archived, and the one an operator can act on. The
 // mirrored key is named when the organization records where its mirror is,
-// since fetching the object directly is the only way to read it.
+// since fetching the object directly is the only way to read it. A bootstrap
+// archive holds no local stub, so the mirror's own inventory stands in for
+// one: a tarball the mirror lists is just as evicted, only proven from the
+// other side.
 //
 // A stub's mere existence is enough here, where a listing insists on parsing
 // one first. A read quotes no size it could get wrong, so a stub too damaged
@@ -198,7 +249,9 @@ func (o *Org) describeMiss(rel string) error {
 
 	_, err := os.Stat(o.AbsPath(store.RemoteStubPath(rel)))
 	if err != nil {
-		return fmt.Errorf("%w: %s", ErrObjectNotFound, rel)
+		if _, ok := o.remoteHas(rel); !ok {
+			return fmt.Errorf("%w: %s", ErrObjectNotFound, rel)
+		}
 	}
 
 	if o.remote == nil {

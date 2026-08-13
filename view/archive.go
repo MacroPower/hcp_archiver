@@ -2,9 +2,11 @@ package view
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 	"go.jacobcolvin.com/hcp_archiver/remote"
 )
 
@@ -44,6 +47,13 @@ var (
 	// error only where no fetch is possible, in an organization recording no
 	// mirror or over a stub too damaged to trust.
 	ErrRemoteOnly = errors.New("archived object is remote-only")
+
+	// ErrRemoteMismatch indicates a remote supplied through [WithRemote]
+	// disagrees with the mirror location an organization's marker records.
+	// Evicted surfaces live only at the recorded location, so a re-point must
+	// be an explicit migration, not an option the browser silently follows;
+	// the archiver refuses the same way before a run.
+	ErrRemoteMismatch = errors.New("supplied remote does not match the archive's recorded mirror")
 )
 
 // orgFile is the marker leaf identifying an organization's archive root.
@@ -79,6 +89,7 @@ type Org struct {
 //
 // Options of this type:
 //   - [WithContext]
+//   - [WithRemote]
 //   - [WithRemoteFactory]
 type ArchiveOption func(*archiveOptions)
 
@@ -86,6 +97,7 @@ type ArchiveOption func(*archiveOptions)
 type archiveOptions struct {
 	ctx       context.Context //nolint:containedctx // Plumbed into readers whose interfaces take none.
 	newClient remoteClientFactory
+	remoteCfg *remote.Config
 }
 
 // WithContext sets the context every remote bundle read of the opened
@@ -97,6 +109,24 @@ func WithContext(ctx context.Context) ArchiveOption {
 		if ctx != nil {
 			o.ctx = ctx
 		}
+	}
+}
+
+// WithRemote supplies the mirror location for an archive whose local files may
+// be partly or wholly absent. [OpenArchive] then unions the organizations it
+// finds on disk with those the mirror holds, materializing a mirror-only
+// organization's org.json and [remote.MarkerName] marker locally so later
+// opens need no supplied remote, and every organization's reads fall through
+// to the mirror, persisting what they fetch at its local archive path.
+//
+// The directory is treated as the archive root unless it already carries an
+// org.json, in which case it is one organization's root and the mirror is
+// consulted for that organization alone. An organization whose existing
+// marker records a different mirror location refuses with
+// [ErrRemoteMismatch]. It returns an [ArchiveOption].
+func WithRemote(cfg remote.Config) ArchiveOption {
+	return func(o *archiveOptions) {
+		o.remoteCfg = &cfg
 	}
 }
 
@@ -121,7 +151,11 @@ func WithRemoteFactory(factory func(ctx context.Context, cfg remote.Config) (*re
 //
 // An organization whose root carries a remote marker (its sealed bundles were
 // offloaded) reads those bundles on demand from its remote store; without the
-// marker every read is local and no client is ever constructed.
+// marker every read is local and no client is ever constructed. A remote
+// supplied through [WithRemote] goes further: the mirror's organizations are
+// unioned with the local ones and every read falls through to the mirror,
+// persisting what it fetches, so the archive opens even over an empty
+// directory.
 func OpenArchive(dir string, opts ...ArchiveOption) ([]*Org, error) {
 	options := archiveOptions{
 		ctx: context.Background(),
@@ -140,6 +174,16 @@ func OpenArchive(dir string, opts ...ArchiveOption) ([]*Org, error) {
 		return nil, fmt.Errorf("resolve %q: %w", dir, err)
 	}
 
+	if options.remoteCfg != nil {
+		return openWithRemote(abs, dir, options)
+	}
+
+	return openLocal(abs, dir, options)
+}
+
+// openLocal opens the archive from the local tree alone, the [OpenArchive]
+// path taken when no remote was supplied.
+func openLocal(abs, dir string, options archiveOptions) ([]*Org, error) {
 	ok, err := isOrgRoot(abs)
 	if err != nil {
 		return nil, err
@@ -154,33 +198,20 @@ func OpenArchive(dir string, opts ...ArchiveOption) ([]*Org, error) {
 		return []*Org{org}, nil
 	}
 
-	entries, err := os.ReadDir(abs)
+	names, err := localOrgNames(abs, dir)
 	if err != nil {
-		return nil, fmt.Errorf("read %q: %w", dir, err)
+		return nil, err
 	}
 
 	var orgs []*Org
 
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+	for _, name := range names {
+		org, orgErr := newOrg(name, filepath.Join(abs, name), options)
+		if orgErr != nil {
+			return nil, orgErr
 		}
 
-		sub := filepath.Join(abs, e.Name())
-
-		ok, err = isOrgRoot(sub)
-		if err != nil {
-			return nil, err
-		}
-
-		if ok {
-			org, orgErr := newOrg(e.Name(), sub, options)
-			if orgErr != nil {
-				return nil, orgErr
-			}
-
-			orgs = append(orgs, org)
-		}
+		orgs = append(orgs, org)
 	}
 
 	if len(orgs) == 0 {
@@ -192,6 +223,252 @@ func OpenArchive(dir string, opts ...ArchiveOption) ([]*Org, error) {
 	})
 
 	return orgs, nil
+}
+
+// localOrgNames returns the names of abs's immediate subdirectories that are
+// organization roots.
+func localOrgNames(abs, dir string) ([]string, error) {
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		return nil, fmt.Errorf("read %q: %w", dir, err)
+	}
+
+	var names []string
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+
+		ok, err := isOrgRoot(filepath.Join(abs, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+
+		if ok {
+			names = append(names, e.Name())
+		}
+	}
+
+	return names, nil
+}
+
+// openWithRemote opens the archive as the union of the local tree and the
+// supplied mirror: mirror-only organizations are materialized (directory,
+// org.json, marker), local organizations the mirror also holds get its remote
+// attached, and purely local organizations open as plain local organizations.
+// The mirror is listed once here; each organization's [orgRemote] is seeded
+// with its slice of that inventory.
+//
+// A mirror that cannot be listed degrades rather than failing the open, as
+// long as something local exists to browse: every local organization still
+// gets the remote attached (its own lazy listing retries, and its failure
+// surfaces through [*Org.RemoteWarning]), so an offline machine can keep
+// reading the content it has.
+func openWithRemote(abs, dir string, options archiveOptions) ([]*Org, error) {
+	cfg := *options.remoteCfg
+
+	singleOrg, err := isOrgRoot(abs)
+	if err != nil {
+		return nil, err
+	}
+
+	local := make(map[string]bool)
+
+	if singleOrg {
+		local[filepath.Base(abs)] = true
+	} else {
+		names, namesErr := localOrgNames(abs, dir)
+		if namesErr != nil {
+			return nil, namesErr
+		}
+
+		for _, name := range names {
+			local[name] = true
+		}
+	}
+
+	client, mirror, invErr := listMirrorOrgs(cfg, options)
+
+	if singleOrg {
+		// The directory names one organization; every other mirror org is out
+		// of scope.
+		maps.DeleteFunc(mirror, func(name string, _ map[string]remote.ObjectInfo) bool {
+			return name != filepath.Base(abs)
+		})
+	}
+
+	names := slices.Collect(maps.Keys(local))
+	for name := range mirror {
+		if !local[name] {
+			names = append(names, name)
+		}
+	}
+
+	slices.Sort(names)
+
+	if len(names) == 0 {
+		if invErr != nil {
+			return nil, fmt.Errorf("%w: %s holds nothing local and the mirror could not be listed: %w",
+				ErrNotArchive, dir, invErr)
+		}
+
+		return nil, fmt.Errorf("%w: %s (and the mirror holds no organizations)", ErrNotArchive, dir)
+	}
+
+	orgs := make([]*Org, 0, len(names))
+
+	for _, name := range names {
+		root := filepath.Join(abs, name)
+		if singleOrg {
+			root = abs
+		}
+
+		org, orgErr := remoteOrg(name, root, cfg, client, mirror[name], invErr != nil, options)
+		if orgErr != nil {
+			return nil, orgErr
+		}
+
+		orgs = append(orgs, org)
+	}
+
+	return orgs, nil
+}
+
+// listMirrorOrgs builds the shared client and lists the mirror's whole
+// inventory once, sliced per organization by the first key segment under the
+// configured prefix. An organization counts only when its slice holds an
+// org.json, the same marker that identifies a local org root. A client build
+// or listing failure comes back as the error alongside a nil map; the caller
+// degrades.
+func listMirrorOrgs(
+	cfg remote.Config, options archiveOptions,
+) (*remote.Client, map[string]map[string]remote.ObjectInfo, error) {
+	buildCtx, cancel := context.WithTimeout(options.ctx, remoteReadTimeout)
+	defer cancel()
+
+	client, err := options.newClient(buildCtx, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build remote client: %w", err)
+	}
+
+	root := cfg.Key("", "")
+	if root != "" {
+		root += "/"
+	}
+
+	// The listing runs under the browse context alone: a large mirror is many
+	// pages, and the client's stall watchdog already bounds a wedged one.
+	inventory, err := client.List(options.ctx, root)
+	if err != nil {
+		return client, nil, fmt.Errorf("list mirror inventory: %w", err)
+	}
+
+	byOrg := make(map[string]map[string]remote.ObjectInfo)
+
+	for rel, info := range relativeListing(inventory, root) {
+		name, orgRel, ok := strings.Cut(rel, "/")
+		if !ok || name == "" || orgRel == "" {
+			continue
+		}
+
+		if byOrg[name] == nil {
+			byOrg[name] = make(map[string]remote.ObjectInfo)
+		}
+
+		byOrg[name][orgRel] = info
+	}
+
+	maps.DeleteFunc(byOrg, func(_ string, listing map[string]remote.ObjectInfo) bool {
+		_, ok := listing[orgFile]
+
+		return !ok
+	})
+
+	return client, byOrg, nil
+}
+
+// remoteOrg builds one organization handle under a supplied remote: the
+// marker conflict check, the mirror-only materialization, and the seeded
+// remote all happen here. A local organization the mirror does not hold (and
+// whose absence is proven by a successful listing) opens as a plain local
+// org, honoring whatever marker it carries.
+func remoteOrg(
+	name, root string, cfg remote.Config, client *remote.Client,
+	listing map[string]remote.ObjectInfo, degraded bool, options archiveOptions,
+) (*Org, error) {
+	marker, hasMarker, err := remote.ReadMarker(root)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // The marker reader names the file and the fault.
+	}
+
+	if hasMarker && marker.Conflicts(cfg.Marker()) {
+		return nil, fmt.Errorf(
+			"%w: organization %q records its mirror at %q prefix %q, but the supplied remote names %q prefix %q",
+			ErrRemoteMismatch, name, marker.URL, marker.Prefix, cfg.URL, cfg.Prefix)
+	}
+
+	// A proven miss: the mirror answered and holds no such organization, so
+	// this one is purely local and gets no remote it could never use.
+	if listing == nil && !degraded {
+		return newOrg(name, root, options)
+	}
+
+	rem := newSeededOrgRemote(name, cfg, client, listing, options)
+
+	if listing != nil {
+		err = materializeOrgRoot(rem, root, cfg, marker, hasMarker)
+		if err != nil {
+			return nil, fmt.Errorf("materialize organization %q: %w", name, err)
+		}
+	}
+
+	return &Org{Name: name, root: root, remote: rem, ctx: options.ctx}, nil
+}
+
+// materializeOrgRoot lands the two files that make root a self-describing
+// organization root: its org.json (fetched if absent) and the remote marker
+// that lets later opens find the mirror without a supplied remote. A cleared
+// marker (URL "") is the operator's consent to re-record, the same consent
+// the archiver honors; a matching one is left exactly as it is.
+func materializeOrgRoot(rem *orgRemote, root string, cfg remote.Config, marker remote.Marker, hasMarker bool) error {
+	_, statErr := os.Stat(filepath.Join(root, orgFile))
+	if errors.Is(statErr, fs.ErrNotExist) {
+		err := rem.ensureLocal(root, orgFile)
+		if err != nil {
+			return err
+		}
+	}
+
+	if !hasMarker || marker.URL == "" {
+		return writeMarker(root, cfg)
+	}
+
+	return nil
+}
+
+// writeMarker records the supplied remote at the organization's archive root,
+// so later opens of this archive need no supplied remote at all. The marker
+// carries [remote.Marker.Partial]: the tree beside it is a browse cache the
+// mirror must keep standing in for, until a real archive run rewrites the
+// marker and the completeness it implies.
+func writeMarker(root string, cfg remote.Config) error {
+	marker := cfg.Marker()
+	marker.Partial = true
+
+	data, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal remote marker: %w", err)
+	}
+
+	data = append(data, '\n')
+
+	err = atomicfile.WriteFile(filepath.Join(root, remote.MarkerName), data)
+	if err != nil {
+		return fmt.Errorf("write remote marker: %w", err)
+	}
+
+	return nil
 }
 
 // newOrg builds one organization handle, loading its remote marker when one
@@ -260,18 +537,24 @@ func (o *Org) AbsPath(relPath string) string {
 	return filepath.Join(o.root, filepath.FromSlash(clean))
 }
 
-// ReadFile reads a loose file at an archive-relative path.
+// ReadFile reads a loose file at an archive-relative path. A file absent
+// locally is fetched from the organization's mirror when it has one,
+// persisting at the same path, so the next read is local.
 //
 // It suits the organization- and project-level objects, which are never
 // sealed; workspace-scoped objects go through [*Workspace.Open], which also
 // searches the sealed forms.
 func (o *Org) ReadFile(relPath string) ([]byte, error) {
 	data, err := os.ReadFile(o.AbsPath(relPath))
-	if err != nil {
+	if err == nil {
+		return data, nil
+	}
+
+	if !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("read %q: %w", relPath, err)
 	}
 
-	return data, nil
+	return o.readThrough(relPath, fmt.Errorf("read %q: %w", relPath, err))
 }
 
 // Projects returns the organization's project directory names, sorted.
@@ -320,16 +603,142 @@ func (o *Org) Workspace(project, name string) *Workspace {
 }
 
 // subdirs returns the sorted immediate subdirectory names of an
-// archive-relative directory, tolerating one that does not exist.
+// archive-relative directory, tolerating one that does not exist, merged with
+// the subdirectories the organization's mirror holds there, so a partly or
+// wholly absent local tree still lists whole.
 func (o *Org) subdirs(relPath string) ([]string, error) {
-	names, err := subdirNames(o.AbsPath(relPath))
+	entries, err := o.mergedChildren(relPath)
 	if err != nil {
 		return nil, err
 	}
 
-	slices.Sort(names)
+	var names []string
+
+	for _, e := range entries {
+		if e.Dir {
+			names = append(names, e.Name)
+		}
+	}
 
 	return names, nil
+}
+
+// looseNames returns the regular-file names directly under an archive-relative
+// directory, tolerating one that does not exist, merged with the file names the
+// organization's mirror holds there. Callers dedupe and sort.
+func (o *Org) looseNames(relPath string) ([]string, error) {
+	entries, err := o.mergedChildren(relPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var names []string
+
+	for _, e := range entries {
+		if !e.Dir {
+			names = append(names, e.Name)
+		}
+	}
+
+	return names, nil
+}
+
+// TreeEntry is one merged child of an archive directory: a subdirectory or a
+// loose file, whether it is on disk or known only to the organization's
+// mirror.
+//
+// Instances are produced by [*Org.Entries].
+type TreeEntry struct {
+	// Name is the child's leaf name; directories carry no trailing separator.
+	Name string
+	// Size is a file's length in bytes (from the mirror's record when the
+	// file is not local); zero for directories.
+	Size int64
+	// Dir reports a subdirectory.
+	Dir bool
+	// Remote reports a file the mirror holds that is not on disk yet; reading
+	// it fetches and persists it locally.
+	Remote bool
+}
+
+// Entries returns the merged children of an archive-relative directory,
+// directories first, each group sorted by name: the local listing unioned
+// with what the organization's mirror holds there, so a partly or wholly
+// absent tree browses whole. A directory absent on both sides returns its
+// local read error, where the tolerant enumerations ([*Org.subdirs],
+// [*Org.looseNames]) answer empty.
+func (o *Org) Entries(relDir string) ([]TreeEntry, error) {
+	entries, err := o.mergedChildren(relDir)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(entries) == 0 {
+		_, statErr := os.Stat(o.AbsPath(relDir))
+		if statErr != nil {
+			return nil, fmt.Errorf("read %q: %w", relDir, statErr)
+		}
+	}
+
+	return entries, nil
+}
+
+// mergedChildren is the one local-with-mirror merge behind [*Org.Entries],
+// [*Org.subdirs], and [*Org.looseNames]: the local directory listing
+// (tolerating an absent directory) unioned with the mirror's children, a
+// local child winning over its mirror record. Directories come first, each
+// group sorted by name.
+func (o *Org) mergedChildren(relDir string) ([]TreeEntry, error) {
+	dirSet := make(map[string]struct{})
+	files := make(map[string]TreeEntry)
+
+	local, err := os.ReadDir(o.AbsPath(relDir))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("read %q: %w", relDir, err)
+	}
+
+	for _, e := range local {
+		if e.IsDir() {
+			dirSet[e.Name()] = struct{}{}
+
+			continue
+		}
+
+		entry := TreeEntry{Name: e.Name()}
+
+		info, infoErr := e.Info()
+		if infoErr == nil {
+			entry.Size = info.Size()
+		}
+
+		files[e.Name()] = entry
+	}
+
+	remoteDirs, remoteFiles := o.remoteChildren(relDir)
+
+	for _, name := range remoteDirs {
+		dirSet[name] = struct{}{}
+	}
+
+	for name, size := range remoteFiles {
+		if _, ok := files[name]; ok {
+			continue
+		}
+
+		files[name] = TreeEntry{Name: name, Size: size, Remote: true}
+	}
+
+	entries := make([]TreeEntry, 0, len(dirSet)+len(files))
+
+	for _, name := range slices.Sorted(maps.Keys(dirSet)) {
+		entries = append(entries, TreeEntry{Name: name, Dir: true})
+	}
+
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		entries = append(entries, files[name])
+	}
+
+	return entries, nil
 }
 
 // Archive is a read handle on every organization under one archive directory.
@@ -450,6 +859,8 @@ func (a *Archive) Read(archivePath string) ([]byte, error) {
 // org-prefixed path; a per-file problem is counted in the summary's Errored
 // and the run continues. Cancellation stops the run between files, returning
 // the partial totals alongside the context's error.
+//
+//nolint:contextcheck // Index materialization fetches run under the stored browse context (see orgRemote).
 func (a *Archive) Unseal(ctx context.Context, target, prefix string, progress UnsealProgress) (UnsealSummary, error) {
 	if target == "" {
 		return UnsealSummary{}, ErrNoTarget

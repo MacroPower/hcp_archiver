@@ -1,7 +1,13 @@
 package remote
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -60,6 +66,50 @@ type Marker struct {
 	// Version is the marker schema version, [MarkerVersion] when written by
 	// this build.
 	Version int `json:"version"`
+	// Partial records that the local tree beside the marker is a browse cache
+	// materialized on demand from the mirror, holding any subset of it, so a
+	// reader must union the mirror's inventory into its listings and fall
+	// through to it on a miss. The archiver's own marker writes leave it
+	// unset: a tree the archiver wrote is complete locally, and its next run
+	// over a bootstrapped tree naturally promotes the marker to complete.
+	Partial bool `json:"partial,omitempty"`
+}
+
+// ReadMarker reads and validates the remote marker at an organization's
+// archive root, reporting whether one exists. A marker written by a newer
+// build is refused per the versioning contract; an absent marker is not an
+// error.
+func ReadMarker(root string) (Marker, bool, error) {
+	//nolint:gosec // The path is composed from the archive root being read.
+	data, err := os.ReadFile(filepath.Join(root, MarkerName))
+
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return Marker{}, false, nil
+	case err != nil:
+		return Marker{}, false, fmt.Errorf("read remote marker: %w", err)
+	}
+
+	var marker Marker
+
+	err = json.Unmarshal(data, &marker)
+	if err != nil {
+		return Marker{}, false, fmt.Errorf("parse remote marker %q: %w", MarkerName, err)
+	}
+
+	if marker.Version > MarkerVersion {
+		return Marker{}, false, fmt.Errorf("remote marker %q is version %d, newer than this build reads (%d)",
+			MarkerName, marker.Version, MarkerVersion)
+	}
+
+	return marker, true, nil
+}
+
+// Conflicts reports whether the marker records a different mirror location
+// than the one other names. A marker recording no bucket (a hand-cleared
+// file, the operator's consent to re-record) conflicts with nothing.
+func (m Marker) Conflicts(other Marker) bool {
+	return m.URL != "" && (m.URL != other.URL || m.Prefix != other.Prefix)
 }
 
 // Marker extracts the read-relevant fields of the [Config].

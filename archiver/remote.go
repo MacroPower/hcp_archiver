@@ -22,10 +22,11 @@ import (
 // a config edit the run silently follows.
 var ErrRemoteRelocated = errors.New("configured remote does not match the archive's recorded mirror")
 
-// remoteConfig maps the validated configuration surface onto the remote
+// RemoteConfig maps the validated configuration surface onto the remote
 // client's transport configuration — the one place the two shapes meet, so
-// the config package never imports a storage SDK.
-func remoteConfig(rc *config.RemoteConfig) remote.Config {
+// the config package never imports a storage SDK. The inspect commands share
+// it to open an archive against the configuration file's remote.
+func RemoteConfig(rc *config.RemoteConfig) remote.Config {
 	return remote.Config{
 		URL:         rc.URL,
 		Prefix:      rc.Prefix,
@@ -94,7 +95,7 @@ func (a *Archiver) syncOrg(
 // concurrent process re-point a marker another run then faithfully mirrors —
 // and it refuses a re-pointed remote outright (see checkExistingMarker).
 func (a *Archiver) writeRemoteMarker(ctx context.Context, env *collect.Env, st *store.Store) error {
-	cfg := remoteConfig(a.cfg.Remote)
+	cfg := RemoteConfig(a.cfg.Remote)
 
 	err := checkExistingMarker(st.Root(), cfg.Marker())
 	if err != nil {
@@ -155,11 +156,7 @@ func checkExistingMarker(root string, marker remote.Marker) error {
 			remote.MarkerName, existing.Version, remote.MarkerVersion)
 	}
 
-	if existing.URL == "" {
-		return nil
-	}
-
-	if existing.URL != marker.URL || existing.Prefix != marker.Prefix {
+	if existing.Conflicts(marker) {
 		return fmt.Errorf(
 			"%w: the archive records its mirror at %q prefix %q, but the configuration names %q prefix %q; "+
 				"evicted bundles live only at the recorded location — copy the old prefix to the new "+

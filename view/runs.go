@@ -1,10 +1,7 @@
 package view
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path"
 	"slices"
 	"strings"
@@ -145,7 +142,7 @@ func (w *Workspace) Runs() ([]Run, error) {
 func (w *Workspace) runIDs() ([]string, error) {
 	runsDir := path.Join(w.dir, "runs")
 
-	ids, err := subdirNames(w.org.AbsPath(runsDir))
+	ids, err := w.org.subdirs(runsDir)
 	if err != nil {
 		return nil, fmt.Errorf("list runs: %w", err)
 	}
@@ -187,7 +184,7 @@ func fillRun(run *Run, r *Resource) {
 func (w *Workspace) RunArtifacts(runID string) ([]string, error) {
 	runDir := path.Join(w.dir, "runs", runID)
 
-	names, err := looseNames(w.org.AbsPath(runDir))
+	names, err := w.org.looseNames(runDir)
 	if err != nil {
 		return nil, fmt.Errorf("list run artifacts: %w", err)
 	}
@@ -252,7 +249,7 @@ func (w *Workspace) StateVersions() ([]StateVersion, error) {
 func (w *Workspace) StateVersionNames() ([]string, error) {
 	svDir := path.Join(w.dir, "state-versions")
 
-	names, err := looseNames(w.org.AbsPath(svDir))
+	names, err := w.org.looseNames(svDir)
 	if err != nil {
 		return nil, fmt.Errorf("list state versions: %w", err)
 	}
@@ -352,50 +349,4 @@ func dedupe(names []string) []string {
 	slices.Sort(names)
 
 	return slices.Compact(names)
-}
-
-// subdirNames returns the immediate subdirectory names of dir, tolerating a dir
-// that does not exist.
-func subdirNames(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, nil
-	case err != nil:
-		return nil, fmt.Errorf("read %q: %w", dir, err)
-	}
-
-	var names []string
-
-	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
-		}
-	}
-
-	return names, nil
-}
-
-// looseNames returns the regular-file names directly under dir, tolerating a
-// dir that does not exist.
-func looseNames(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, nil
-	case err != nil:
-		return nil, fmt.Errorf("read %q: %w", dir, err)
-	}
-
-	var names []string
-
-	for _, e := range entries {
-		if !e.IsDir() {
-			names = append(names, e.Name())
-		}
-	}
-
-	return names, nil
 }

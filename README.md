@@ -147,14 +147,17 @@ Navigation descends with `enter`, returns with `esc`, filters any list with
 transparently, so an object displays the same whether it is still a loose file
 or has been sealed into an NDJSON roll-up or a zip bundle.
 
-For an archive mirrored to object storage (see
+For an archive the archiver wrote and mirrored to object storage (see
 [Mirroring the archive](#mirroring-the-archive-to-object-storage)),
 browsing and grep stay fully offline — the search layer, including every
 sidecar index, is local — and only opening a sealed member whose bundle was
 evicted reaches the remote store, fetching just that member with ranged reads
-rather than the whole bundle. That read path needs object-store credentials
-from the backend provider's default chain; a read-only identity scoped to the
-archive prefix is the right shape.
+rather than the whole bundle. (A tree bootstrapped _from_ a mirror is the one
+exception: it fetches what it lacks on demand, per
+[Reading an archive back from its mirror](#reading-an-archive-back-from-its-mirror).)
+That read path needs object-store credentials from the backend provider's
+default chain; a read-only identity scoped to the archive prefix is the right
+shape.
 
 Evicted configuration tarballs stay visible too: eviction leaves a small stub
 in each tarball's place, so `list` still reports the object at its true size,
@@ -217,7 +220,9 @@ byte figure is an upper bound: it counts each object's archived length, which
 is what a tarball costs exactly, while a member of an evicted bundle travels as
 its compressed span. The prediction is a lower bound on the failures, since a
 corrupt bundle, an unreachable mirror, or an object missing from the bucket all
-error only when something reads them, which a dry run never does. Both the text
+error only when something reads them, which sizing the plan does not (the one
+egress a dry run may spend is materializing a bootstrapped workspace's absent
+sealed indexes, so its plan can cover sealed objects at all). Both the text
 summary and the `errored` field of `--json` carry the count.
 
 `unseal -v` streams one line per recovered file to stderr, and per-file
@@ -309,6 +314,45 @@ choices are worth making deliberately:
   re-uploaded as the archive changes, which archival tiers' minimum-storage
   charges punish. Infrequent-access tiers that serve reads directly
   (S3 Standard-IA, Azure Cool) are the safe cost lever.
+
+### Reading an archive back from its mirror
+
+Every read command works even when the local files are partly or completely
+absent, as long as the mirror holds them. `view`, `list`, `show`, and `unseal`
+all accept the mirror's location three ways: `--remote <bucket-url>` (with
+`--remote-prefix` for the key prefix), `-c/--config` naming a configuration
+file whose `remote:` block records it, or `$HCP_ARCHIVER_CONFIG` pointing at
+that file.
+
+```bash
+mkdir restored && hcp_archiver view restored \
+  --remote 's3://the-bucket?region=us-east-1' --remote-prefix archives
+```
+
+Pointed at an empty directory, the command bootstraps it: the mirror's
+organizations are discovered from one listing, each gets its `org.json` and a
+`.remote.json` marker materialized locally, and the flags are never needed
+again, since later invocations find the mirror through the marker alone.
+Local files always win when present; anything absent is fetched from the
+mirror, verified against the digest its upload recorded, and persisted at its
+archive path, so everything read once is local from then on. Listings union
+the mirror's inventory into the local tree (`list` shows not-yet-fetched
+objects as `remote`), and the two evicted surfaces keep their usual behavior:
+bundle members are read with ranged requests without ever pulling the zip
+down, and configuration tarballs stay remote-only for reads while `unseal`
+streams them to its target.
+
+The bootstrapped tree is a browse cache, not a canonical archive: its marker
+records `"partial": true`, which is what tells later reads to keep falling
+through to the mirror. Running the archiver against the same directory
+collects and mirrors it properly, rewriting the marker and returning the tree
+to the fully-local read behavior of any archive the archiver wrote. A
+supplied `--remote` that disagrees with the mirror an existing marker records
+is refused, exactly as the archiver refuses a re-pointed `remote:` block; and
+if the mirror cannot be listed (offline, missing credentials), the commands
+degrade to local content and say so on stderr (or the browser's status line)
+rather than failing. Reads need the same object-store credentials as any
+evicted-bundle access, from the backend provider's default chain.
 
 ### Resuming and re-running
 

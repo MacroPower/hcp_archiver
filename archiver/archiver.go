@@ -208,7 +208,7 @@ func (a *Archiver) Run(ctx context.Context) error {
 	// work, rather than letting a bad bucket or credential set surface as
 	// per-object failures deep into the run.
 	if a.cfg.Remote != nil {
-		a.remote, err = remote.New(ctx, remoteConfig(a.cfg.Remote),
+		a.remote, err = remote.New(ctx, RemoteConfig(a.cfg.Remote),
 			remote.WithWireBytes(a.uploadWireBytes))
 		if err != nil {
 			return fmt.Errorf("build remote client: %w", err)

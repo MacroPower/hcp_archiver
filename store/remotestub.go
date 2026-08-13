@@ -73,3 +73,21 @@ func RemoteStubTarget(relPath string) (string, bool) {
 func IsConfigTarball(relPath string) bool {
 	return strings.HasPrefix(relPath, ConfigVersionsDirName+"/") && strings.HasSuffix(relPath, ".tar.gz")
 }
+
+// IsBundleZip reports whether an archive-relative path names a sealed bundle
+// zip: a .zip beneath a [BundlesDirName] segment. It is the other eviction
+// surface, the one whose sidecar index survives beside it, so its members
+// stay readable through ranged requests without the zip ever coming back.
+func IsBundleZip(relPath string) bool {
+	if !strings.HasSuffix(relPath, ".zip") {
+		return false
+	}
+
+	for seg := range strings.SplitSeq(relPath, "/") {
+		if seg == BundlesDirName {
+			return true
+		}
+	}
+
+	return false
+}

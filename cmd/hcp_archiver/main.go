@@ -212,31 +212,53 @@ func newRootCmd() *cobra.Command {
 // archive root or a single organization's directory; it defaults to the
 // current directory.
 func newViewCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "view [archive-dir]",
 		Short: "Browse an archive in an interactive terminal UI",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cc *cobra.Command, args []string) error {
-			dir := "."
-			if len(args) == 1 {
-				dir = args[0]
-			}
+		Long: `Browse an archive in an interactive terminal UI mirroring the HCP interface:
+organizations open into projects, workspaces, runs, and state versions. The
+directory may be the archive root or a single organization's directory; it
+defaults to the current directory.
 
-			ctx, stop := signalContext(cc.Context())
-			defer stop()
-
-			err := view.Browse(ctx, dir, cc.InOrStdin(), cc.OutOrStdout())
-			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return nil
-				}
-
-				return err
-			}
-
-			return nil
-		},
+` + remoteLong,
+		Args: cobra.MaximumNArgs(1),
 	}
+
+	rf := registerRemoteFlags(cmd)
+
+	cmd.RunE = func(cc *cobra.Command, args []string) error {
+		dir := "."
+		if len(args) == 1 {
+			dir = args[0]
+		}
+
+		ctx, stop := signalContext(cc.Context())
+		defer stop()
+
+		rcfg, err := rf.resolve()
+		if err != nil {
+			return err
+		}
+
+		var opts []view.ArchiveOption
+
+		if rcfg != nil {
+			opts = append(opts, view.WithRemote(*rcfg))
+		}
+
+		err = view.Browse(ctx, dir, cc.InOrStdin(), cc.OutOrStdout(), opts...)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil
+			}
+
+			return err
+		}
+
+		return nil
+	}
+
+	return cmd
 }
 
 // signalContext returns a context canceled on the first SIGINT or SIGTERM and

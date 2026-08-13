@@ -24,6 +24,8 @@ import (
 // tarball nor a loose state blob is ever buffered whole, since the unbounded
 // forms stream, while the bounded ones (a roll-up line, a bundle member) still
 // resolve to a slice behind this signature.
+//
+//nolint:contextcheck // Read-through fetches run under the stored browse context (see orgRemote).
 func (o *Org) writeObject(ctx context.Context, relPath string, w io.Writer) (int64, error) {
 	rel, err := o.resolveRel(relPath)
 	if err != nil {
@@ -36,6 +38,13 @@ func (o *Org) writeObject(ctx context.Context, relPath string, w io.Writer) (int
 
 	n, err := copyLoose(o.AbsPath(rel), rel, w)
 	if errors.Is(err, fs.ErrNotExist) {
+		// A warm object the mirror holds is pulled down to its archive path
+		// first, so the unseal both recovers it and leaves it referenceable
+		// locally; the evicted surfaces stream to the target alone.
+		if n, handled, copyErr := o.copyThrough(rel, w); handled {
+			return n, copyErr
+		}
+
 		return o.fetchOffloaded(ctx, rel, w)
 	}
 
@@ -52,6 +61,8 @@ func (o *Org) writeObject(ctx context.Context, relPath string, w io.Writer) (int
 // path answers. The last of those is deliberate: the stub's mere existence
 // proves the eviction happened, which is the fact an operator can act on, even
 // when nothing else about it can be believed.
+//
+//nolint:contextcheck // The stub-synthesis Head runs under the stored browse context (see orgRemote).
 func (o *Org) fetchOffloaded(ctx context.Context, rel string, w io.Writer) (int64, error) {
 	stub, ok := o.offloadedStub(rel)
 	if !ok {
@@ -63,15 +74,51 @@ func (o *Org) fetchOffloaded(ctx context.Context, rel string, w io.Writer) (int6
 
 // offloadedStub returns the eviction stub standing in for an absent object when
 // its bytes can actually be fetched: the path names the one surface eviction
-// leaves a stub for, the stub reads back truthfully, and the organization
-// records where its mirror is. Anything else leaves the refusal to
+// leaves a stub for and the organization records where its mirror is. Under a
+// merged remote, a local stub that is absent or refuses to read back
+// truthfully falls through to the mirror's own record of the tarball, so a
+// bootstrap archive (which holds no stubs at all; the sweep never mirrors
+// them) fetches with the same verification an eviction recorded: the size and
+// digest come from the upload the archiver itself verified. A complete
+// archive answers from its stubs alone, spending no probe on a path whose
+// absence its own tree already explains. Anything else leaves the refusal to
 // [*Org.describeMiss].
 func (o *Org) offloadedStub(rel string) (store.RemoteStub, bool) {
 	if o.remote == nil || !store.IsConfigTarball(rel) {
 		return store.RemoteStub{}, false
 	}
 
-	return o.readRemoteStub(store.RemoteStubPath(rel))
+	stub, ok := o.readRemoteStub(store.RemoteStubPath(rel))
+	if ok {
+		return stub, true
+	}
+
+	if !o.remote.merged {
+		return store.RemoteStub{}, false
+	}
+
+	return o.headStub(rel)
+}
+
+// headStub synthesizes an eviction stub from the mirror's record of the
+// tarball itself: one Head resolves the size and, when the upload recorded
+// one, the digest the fetch verifies against. A tarball the mirror does not
+// hold reports no stub, leaving the miss to [*Org.describeMiss], and so does
+// a probe the mirror could not answer at all (bad credentials, a timeout).
+// The two are deliberately indistinguishable here: the stub either proves a
+// fetch can be verified or it does not exist, and the probe's own fault
+// surfaces when something actually fetches.
+func (o *Org) headStub(rel string) (store.RemoteStub, bool) {
+	info, err := o.remote.head(rel)
+	if err != nil {
+		return store.RemoteStub{}, false
+	}
+
+	return store.RemoteStub{
+		Version: store.RemoteStubVersion,
+		Size:    info.Size,
+		SHA256:  info.SHA256,
+	}, true
 }
 
 // writeObject streams one workspace-scoped object into dst, mirroring
@@ -90,6 +137,8 @@ func (o *Org) offloadedStub(rel string) (store.RemoteStub, bool) {
 // call's. That is what makes the unseal progress screen's cancel stop the loop
 // between files without aborting an in-flight ranged GET, the behavior
 // [unsealProgressScreen.update] documents.
+//
+//nolint:contextcheck // See above; every remote read derives from the stored browse context.
 func (w *Workspace) writeObject(_ context.Context, rel string, dst io.Writer) (int64, error) {
 	n, err := copyLoose(w.org.AbsPath(rel), rel, dst)
 	if !errors.Is(err, fs.ErrNotExist) {
@@ -99,6 +148,13 @@ func (w *Workspace) writeObject(_ context.Context, rel string, dst io.Writer) (i
 	data, err := w.openSealed(rel)
 	if err != nil {
 		if errors.Is(err, ErrObjectNotFound) {
+			// The mirror may hold the loose object nothing local carries;
+			// fetching it to its archive path both recovers it and leaves it
+			// referenceable locally, matching [Workspace.Open]'s precedence.
+			if n, handled, copyErr := w.org.copyThrough(rel, dst); handled {
+				return n, copyErr
+			}
+
 			return 0, w.missOrDir(rel, err)
 		}
 

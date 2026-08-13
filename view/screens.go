@@ -733,25 +733,26 @@ func newResourceViewer(r Resource) (screen, error) {
 	return newYAMLViewerScreen(name, string(data)), nil
 }
 
-// newFilesScreen browses the loose archive tree at an archive-relative
-// directory; sealed objects surface through the workspace screens instead.
+// newFilesScreen browses the merged archive tree at an archive-relative
+// directory, local files beside those only the organization's mirror holds;
+// sealed objects surface through the workspace screens instead.
 func newFilesScreen(org *Org, dir string) (screen, error) {
-	entries, err := os.ReadDir(org.AbsPath(dir))
+	entries, err := org.Entries(dir)
 	if err != nil {
-		return nil, fmt.Errorf("read %q: %w", dir, err)
+		return nil, err
 	}
 
 	var rows []item
 
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.Dir {
 			continue
 		}
 
-		sub := path.Join(dir, e.Name())
+		sub := path.Join(dir, e.Name)
 
 		rows = append(rows, item{
-			title: e.Name() + "/",
+			title: e.Name + "/",
 			desc:  "directory",
 			open: func() (screen, error) {
 				return newFilesScreen(org, sub)
@@ -760,7 +761,7 @@ func newFilesScreen(org *Org, dir string) (screen, error) {
 	}
 
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.Dir {
 			continue
 		}
 
@@ -775,17 +776,15 @@ func newFilesScreen(org *Org, dir string) (screen, error) {
 	return newListScreen(crumb, rows), nil
 }
 
-// fileRow builds one loose file's browser row; binary blobs list without
-// opening.
-func fileRow(org *Org, dir string, e os.DirEntry) item {
-	name := e.Name()
+// fileRow builds one merged file's browser row; binary blobs list without
+// opening, and a file the mirror holds but the disk does not yet says so.
+func fileRow(org *Org, dir string, e TreeEntry) item {
+	name := e.Name
 	relPath := path.Join(dir, name)
 
-	desc := "file"
-
-	info, err := e.Info()
-	if err == nil {
-		desc = theme.HumanBytes(info.Size())
+	desc := theme.HumanBytes(e.Size)
+	if e.Remote {
+		desc += " · remote"
 	}
 
 	if _, ok := binaryExts[path.Ext(name)]; ok {

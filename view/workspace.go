@@ -91,12 +91,16 @@ func (w *Workspace) File(name string) string {
 }
 
 // Open reads the object at an archive-relative path, looking first for a loose
-// file, then in the workspace's roll-ups, then in its bundles. A path present
-// in no form returns [ErrObjectNotFound].
+// file, then in the workspace's roll-ups, then in its bundles, then in the
+// organization's mirror, from which a hit is fetched and persisted at the same
+// path so the next read is local. A path present in no form returns
+// [ErrObjectNotFound].
 //
 // The loose file wins when both exist: sealing removes a loose source only
 // after its sealed copy verifies, so a survivor from an interrupted seal is the
-// canonical copy.
+// canonical copy. The sealed forms win over the mirror for the mirror-image
+// reason: a loose key still in the mirror beside a local sealed copy is a
+// leftover the next sweep prunes, not the canonical bytes.
 func (w *Workspace) Open(relPath string) ([]byte, error) {
 	data, err := os.ReadFile(w.org.AbsPath(relPath))
 
@@ -107,7 +111,12 @@ func (w *Workspace) Open(relPath string) ([]byte, error) {
 		return nil, fmt.Errorf("read %q: %w", relPath, err)
 	}
 
-	return w.openSealed(relPath)
+	data, sealedErr := w.openSealed(relPath)
+	if sealedErr == nil || !errors.Is(sealedErr, ErrObjectNotFound) {
+		return data, sealedErr
+	}
+
+	return w.org.readThrough(relPath, sealedErr)
 }
 
 // openSealed reads the object at an archive-relative path from the workspace's
@@ -156,7 +165,10 @@ func (w *Workspace) readBundleMember(relBundle, relPath string) ([]byte, error) 
 }
 
 // Exists reports whether the object at an archive-relative path is present in
-// any physical form.
+// any physical form, counting a loose object the organization's mirror holds
+// but the local tree does not yet: [Workspace.Open] would serve it, so a
+// presence probe must agree. The mirror answer comes from the session's cached
+// inventory, never a per-call network round trip.
 func (w *Workspace) Exists(relPath string) (bool, error) {
 	_, err := os.Stat(w.org.AbsPath(relPath))
 
@@ -172,7 +184,11 @@ func (w *Workspace) Exists(relPath string) (bool, error) {
 		return false, err
 	}
 
-	_, ok := idx[relPath]
+	if _, ok := idx[relPath]; ok {
+		return true, nil
+	}
+
+	_, ok := w.org.remoteHas(relPath)
 
 	return ok, nil
 }
@@ -245,9 +261,14 @@ func (w *Workspace) index() (map[string]sealedRef, error) {
 		return w.idx, nil
 	}
 
+	err := w.materializeSealedIndex()
+	if err != nil {
+		return nil, err
+	}
+
 	idx := make(map[string]sealedRef)
 
-	err := w.indexRollups(idx)
+	err = w.indexRollups(idx)
 	if err != nil {
 		return nil, err
 	}
@@ -260,6 +281,48 @@ func (w *Workspace) index() (map[string]sealedRef, error) {
 	w.idx = idx
 
 	return idx, nil
+}
+
+// materializeSealedIndex fetches the workspace's absent sealed-form machinery
+// (its roll-ups and bundle sidecars, never the bundle zips) from the
+// organization's mirror before the index builds over the local files, so the
+// sealed index is complete even on a disk holding none of it. Roll-ups carry
+// their members' content, so this is where a bare listing of an absent tree
+// spends its egress; the sidecars are small.
+//
+// The candidate set comes from the merged listing helpers, so an organization
+// with no remote (or one whose remote is not merged, or one degrading around
+// an unreachable mirror) yields no candidates and the index builds over local
+// files alone. A fetch that does fail (the mirror answered its listing but
+// not a download) fails the index build: silently indexing without a known
+// sealed surface would report objects the archive holds as absent.
+func (w *Workspace) materializeSealedIndex() error {
+	for _, relDir := range []string{
+		path.Join(w.dir, store.RollupsDirName),
+		path.Join(w.dir, store.BundlesDirName),
+	} {
+		_, files := w.org.remoteChildren(relDir)
+
+		for name := range files {
+			if !strings.HasSuffix(name, ".ndjson") {
+				continue
+			}
+
+			rel := path.Join(relDir, name)
+
+			_, err := os.Stat(w.org.AbsPath(rel))
+			if err == nil {
+				continue
+			}
+
+			err = w.org.remote.ensureLocal(w.org.root, rel)
+			if err != nil {
+				return fmt.Errorf("fetch sealed index %q: %w", rel, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 // indexRollups records each roll-up line's path and byte offset, so a lookup

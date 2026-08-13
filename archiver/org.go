@@ -85,7 +85,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 
 	if a.remote != nil {
 		envOpts = append(envOpts,
-			collect.WithRemote(a.remote, remoteConfig(a.cfg.Remote), orgName),
+			collect.WithRemote(a.remote, RemoteConfig(a.cfg.Remote), orgName),
 		)
 	}
 

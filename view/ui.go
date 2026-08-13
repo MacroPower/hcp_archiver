@@ -40,13 +40,21 @@ const (
 )
 
 // Browse opens the archive at dir and drives the interactive browser on the
-// given terminal streams until the user quits or ctx is canceled.
+// given terminal streams until the user quits or ctx is canceled. Additional
+// [ArchiveOption]s (a [WithRemote] mirror, say) pass through to [OpenArchive];
+// the browse context always wins.
 //
 // A ctx cancellation (an external SIGINT) is returned as [context.Canceled]
 // wrapped so the command can map it to a graceful exit. The same ctx bounds
-// any remote bundle reads of an archive whose bundles were offloaded.
-func Browse(ctx context.Context, dir string, in io.Reader, out io.Writer) error {
-	orgs, err := OpenArchive(dir, WithContext(ctx))
+// any remote reads of an archive whose objects live in its mirror.
+//
+//nolint:contextcheck // The browse context rides in through WithContext; remote reads derive from it.
+func Browse(ctx context.Context, dir string, in io.Reader, out io.Writer, opts ...ArchiveOption) error {
+	openOpts := make([]ArchiveOption, 0, len(opts)+1)
+	openOpts = append(openOpts, opts...)
+	openOpts = append(openOpts, WithContext(ctx))
+
+	orgs, err := OpenArchive(dir, openOpts...)
 	if err != nil {
 		return err
 	}
@@ -133,16 +141,22 @@ type loadDoneMsg struct {
 type model struct {
 	status string
 	stack  []screen
+	// The archive's organizations, held for the one-time degraded-mirror
+	// warning: remoteWarned marks that the status line has already said the
+	// mirror could not be listed, so an offline session hears it once rather
+	// than on every screen.
+	orgs []*Org
 	// The loading indicator: spin renders on the status line while a screen
 	// build outlives loadingGrace, loading counts the in-flight builds,
 	// spinning marks the indicator visible, and epoch numbers the current
 	// generation of builds so an abandoned one settles into the void.
-	spin     spinner.Model
-	width    int
-	height   int
-	loading  int
-	spinning bool
-	epoch    int
+	spin         spinner.Model
+	width        int
+	height       int
+	loading      int
+	spinning     bool
+	remoteWarned bool
+	epoch        int
 }
 
 // newModel creates a new [model] opening at the organization list, or directly
@@ -156,7 +170,7 @@ func newModel(orgs []*Org) *model {
 	spin := spinner.New(spinner.WithSpinner(spinner.Dot))
 	spin.Style = theme.Accent
 
-	return &model{stack: []screen{root}, spin: spin}
+	return &model{stack: []screen{root}, orgs: orgs, spin: spin}
 }
 
 // Init performs no startup work; screens load their content when pushed.
@@ -265,7 +279,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinning = false
 		}
 
-		return m.Update(msg.msg)
+		mdl, cmd := m.Update(msg.msg)
+		m.noteRemoteWarning()
+
+		return mdl, cmd
 
 	case spinner.TickMsg:
 		if msg.ID == m.spin.ID() {
@@ -352,6 +369,28 @@ func (m *model) breadcrumb() string {
 	}
 
 	return strings.Join(crumbs, styleCrumbSep.Render(" "+theme.GlyphCrumb+" "))
+}
+
+// noteRemoteWarning surfaces a degraded mirror listing on the status line,
+// once per session: the screen the user just loaded may be showing local
+// content only, and saying so beats letting a partial tree read as the whole
+// archive. It runs after a settled load so the first screen that actually
+// consulted the mirror is the one that reports it, and it never overwrites an
+// error already on the line.
+func (m *model) noteRemoteWarning() {
+	if m.remoteWarned || m.status != "" {
+		return
+	}
+
+	for _, org := range m.orgs {
+		err := org.RemoteWarning()
+		if err != nil {
+			m.status = fmt.Sprintf("mirror unreachable; showing local content only (%v)", err)
+			m.remoteWarned = true
+
+			return
+		}
+	}
 }
 
 // abandonLoads walks away from every in-flight screen build: the epoch
