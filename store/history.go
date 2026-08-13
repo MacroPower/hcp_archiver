@@ -88,10 +88,10 @@ func (s *Store) BuryHistory(relPath string, fetchedAt, deletedAt time.Time) (boo
 
 // retainHistory runs the history side of one [Store.WriteJSONBytes] commit
 // (see [WithHistory]): when supersede is set (a changed write over an
-// existing file) the outgoing content is appended first, then any trailing
-// tombstone is closed with the incoming content. Every error returns before
-// the caller renames, so a version is never lost to a write that could not
-// record it.
+// existing file with content) the outgoing content is appended first, then any
+// trailing tombstone is closed with the incoming content. Every error returns
+// before the caller renames, so a version is never lost to a write that could
+// not record it.
 func (s *Store) retainHistory(
 	relPath, abs string,
 	existing, data []byte,
@@ -100,7 +100,11 @@ func (s *Store) retainHistory(
 ) error {
 	sidecar := s.AbsPath(s.HistoryPath(relPath))
 
-	if supersede {
+	// A zero-length file carries no version worth preserving, the same reading
+	// [Store.BuryHistory] takes. Superseding one would append a record whose
+	// content marshals away under omitempty, leaving a line readers can
+	// classify as neither a version nor a tombstone.
+	if supersede && len(existing) > 0 {
 		fetchedAt := cfg.fetchedAt
 		if fetchedAt.IsZero() {
 			fetchedAt = modTime(abs)

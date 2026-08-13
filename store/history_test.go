@@ -3,6 +3,7 @@ package store_test
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -132,6 +133,22 @@ func TestStore_WriteJSONBytes_WithHistory(t *testing.T) {
 		require.Len(t, recs, 1)
 		assert.True(t, mtime.Equal(recs[0].FetchedAt),
 			"the superseded record is stamped with the file's mtime")
+	})
+
+	t.Run("a zero-length existing file supersedes nothing", func(t *testing.T) {
+		t.Parallel()
+
+		// An empty file holds no version, and a record carrying it would lose
+		// its content field to omitempty: neither a version nor a tombstone.
+		s := store.New(t.TempDir())
+
+		require.NoError(t, os.MkdirAll(filepath.Dir(s.AbsPath(relPath)), 0o700))
+		require.NoError(t, os.WriteFile(s.AbsPath(relPath), nil, 0o600))
+
+		_, err := s.WriteJSONBytes(relPath, v1, store.WithHistory(fetchedAt, now))
+		require.NoError(t, err)
+
+		assert.False(t, sidecarExists(t, s, relPath))
 	})
 
 	t.Run("a history append that cannot land fails the write intact", func(t *testing.T) {
