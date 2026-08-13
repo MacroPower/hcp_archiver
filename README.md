@@ -231,12 +231,34 @@ remote-only by design. Eviction verification is layered: a bundle is
 uploaded only after it has sealed and read back intact locally, a write that
 dies mid-stream is aborted rather than committed as a truncated object, and
 the local file is removed only once a follow-up probe confirms the object at
-the expected size. Any failure leaves the local copy in place as canonical,
-warns, and is retried by the next run's sweep; sync failures never fail the
-run. Pointing a `remote:` block at an existing all-local archive migrates
-it: the next run's sweep uploads everything (a one-time pass that can take a
-while on a large archive; `sync_progress` log lines track it) and evicts
-every previously sealed bundle.
+the expected size. Pointing a `remote:` block at an existing all-local
+archive migrates it: the next run's sweep uploads everything (a one-time pass
+that can take a while on a large archive; `sync_progress` log lines track it)
+and evicts every previously sealed bundle.
+
+Any failure leaves the local copy in place as canonical and warns; no single
+file's failure aborts the sweep or the organization. What differs is the exit
+status. An upload before the close is an optimization: a bundle that fails to
+evict at its seal warns, defers to the close sweep, and never reaches the
+exit status on its own. The close sweep is what makes the mirror a guarantee,
+so a sweep that ends with anything unsettled (a file, the bucket listing, a
+prune) marks the run **incomplete** and exits non-zero. Unlike a single
+object's error, which is recorded and retried without failing the run, the
+mirror is the archive's long-term record: a scheduled run must not report
+success over one it knows is behind. Nothing is persisted for this, so the
+next run's sweep re-derives the gap from the store itself and a transient
+outage clears on the following run; an interrupted run keeps the clean exit
+described under [Resuming and re-running](#resuming-and-re-running) even when
+its sweep had already counted failures.
+
+One remote failure never clears itself. If the store already holds an object
+at an eviction key whose size or digest differs from the proven local bytes,
+the sweep refuses to overwrite remote history at that key: it keeps the local
+file canonical and warns (`sync_evict_error`, or `bundle_evict_error` at a
+seal boundary) that the `remote copy differs from the proven local file ...
+(needs manual inspection)`. It reports the mismatch again on every run, so
+the run keeps exiting non-zero until an operator inspects the diverged object
+and clears it by hand.
 
 Credentials are never configured in YAML. The `url` scheme selects the
 backend, and each backend authenticates through its provider's default chain:
