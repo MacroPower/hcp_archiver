@@ -14,12 +14,14 @@ import (
 
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/seal"
+	"go.jacobcolvin.com/hcp_archiver/store"
 	"go.jacobcolvin.com/hcp_archiver/view"
 )
 
 // buildUnsealArchive extends the standard fixture with the pieces an unseal
-// must skip — a ledger shard and an atomic writer's staging leftover — plus a
-// stack subtree, which only the project scope covers.
+// must skip (a ledger shard, an atomic writer's staging leftover, and the
+// identity sidecar the collector stamps into every name-keyed directory) plus
+// a stack subtree, which only the project scope covers.
 func buildUnsealArchive(t *testing.T) string {
 	t.Helper()
 
@@ -30,6 +32,11 @@ func buildUnsealArchive(t *testing.T) string {
 	writeFile(t, org, wsDir+"/runs/run-old/.atomicfile-123.tmp", "torn write")
 	writeFile(t, org, "projects/default/stacks/net/stack.json",
 		`{"data":{"id":"st-1","type":"stacks","attributes":{"name":"net"}}}`)
+
+	for _, dir := range []string{"projects/default", wsDir, "projects/default/stacks/net"} {
+		writeFile(t, org, dir+"/"+store.IdentityFileName,
+			`{"firstSeen":"2024-01-01T00:00:00Z","id":"obj-1"}`)
+	}
 
 	return root
 }
@@ -146,9 +153,34 @@ func TestUnseal_WorkspaceLocalForms(t *testing.T) {
 		assert.NotContains(t, p, ".sidecar", "sidecar indexes are omitted: %s", p)
 		assert.NotContains(t, p, ".ledger", "ledger shards are omitted: %s", p)
 		assert.NotContains(t, p, ".remote.json", "the remote marker is omitted: %s", p)
+		assert.NotContains(t, p, ".identity.json", "identity sidecars are omitted: %s", p)
 		assert.NotContains(t, p, ".atomicfile-", "staging leftovers are omitted: %s", p)
 		assert.True(t, strings.HasPrefix(p, "my-org/"+wsDir+"/"),
 			"a workspace unseal writes only under the workspace's mirrored path: %s", p)
+	}
+}
+
+func TestUnseal_RemoteOnlyTarballIsCountedNotSkipped(t *testing.T) {
+	t.Parallel()
+
+	// An evicted tarball has no in-tool read path, so an unseal cannot recover
+	// it. It must say so: an object missing from the plan would let the run
+	// report a clean recovery of an archive it had not fully recovered.
+	root := buildArchive(t)
+	evictTarball(t, root, "cv-9")
+
+	org := openOrg(t, root)
+	target := t.TempDir()
+
+	sum, err := view.NewArchive([]*view.Org{org}).Unseal(t.Context(), target, "my-org", nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, sum.Errored, "the object the run could not recover is counted")
+	assert.Positive(t, sum.Files, "the rest of the archive still recovered")
+
+	for _, p := range targetPaths(t, target) {
+		assert.NotContains(t, p, store.ConfigVersionsDirName,
+			"nothing is written for an object whose bytes are elsewhere: %s", p)
 	}
 }
 

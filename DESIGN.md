@@ -142,9 +142,14 @@ archive/<org>/
     gpg-keys/<namespace>/<key-id>.json            # ascii-armor public signing keys
                                                    #   (namespaced; ListPrivate)
   config-versions/<cv-id>.tar.gz    # deduped org-wide; runs reference by id
+  config-versions/<cv-id>.tar.gz.remote.json
+                                    # left once evicted; readers list the
+                                     #   absent tarball from it
 
   # --- project-scoped objects: everything a project owns nests beneath it ---
   projects/<project-name>/
+    .identity.json                  # binds this name-keyed directory to the id
+                                     #   it archives (also in workspaces, stacks)
     project.json                    # id, defaults (exec mode, agent pool,
                                      #   auto-destroy), tag bindings
     team-access.json                # project RBAC (TeamProjectAccess)
@@ -669,7 +674,11 @@ of the archive, in two modes with different semantics:
   in-flight unsealed work plus the run's still-unevicted tarballs (tarballs
   have no mid-run eviction driver, so they accumulate until the sweep), which
   is what lets a 5k+ workspace org's archive run on a machine that could
-  never hold the whole thing at once.
+  never hold the whole thing at once. Each eviction leaves something local
+  standing for what it removed, so the read side keeps seeing the object: a
+  bundle already leaves its sidecar index, and a tarball is given a small
+  `<id>.tar.gz.remote.json` stub recording the size and digest the eviction
+  proved.
 - **Sync** (incremental upload, local kept) mirrors everything else — loose
   files, roll-ups, sidecar indexes, ledger snapshots. Local disk stays the
   canonical search layer, so browsing and grep remain offline operations;
@@ -803,11 +812,15 @@ prune a mass deletion of live content. The classification ladder:
 3. `.ledger/log.ndjson`: skip — a stale remote log replayed onto a restored
    tree could resurrect old ledger state; the post-compaction `snapshot.json`
    (which the final flush guarantees is current) is the durable record;
-4. `bundles/*.zip` with its sidecar beside it: evict, the sweep-side backstop
+4. `config-versions/*.tar.gz.remote.json`: skip; the stub points at the
+   mirror from outside it, so a copy inside the mirror is wrong, since a
+   restore brings the tarball itself back and the restored stub would claim
+   it is still evicted;
+5. `bundles/*.zip` with its sidecar beside it: evict, the sweep-side backstop
    for seal-time eviction (a workspace filtered out of later runs, a prior
    upload failure, a remote newly pointed at an old archive);
-5. `bundles/*.zip` without a sidecar: skip (unverified orphan; never upload);
-6. `config-versions/*.tar.gz` recorded done with the ledger signature's size
+6. `bundles/*.zip` without a sidecar: skip (unverified orphan; never upload);
+7. `config-versions/*.tar.gz` recorded done with the ledger signature's size
    matching the local bytes: evict; with no settled ledger entry: skip with a
    warning (an unproven tarball is never synced either, because a synced copy
    at the eviction key could later pass a proper eviction's size gate and let
@@ -816,7 +829,26 @@ prune a mass deletion of live content. The classification ladder:
    an error and count a sweep failure — the proven record now disagrees with
    the file backing it, so the run must exit incomplete rather than clean
    over a corrupt, unmirrorable only-copy;
-7. everything else: sync incrementally.
+8. everything else: sync incrementally.
+
+An eviction writes that stub in the tarball's place, before the local delete,
+because the file is the only thing that leads a later sweep back to the path:
+a crash between the two leaves a stub beside a live tarball, which the next
+sweep re-evicts and rewrites, while a delete-first crash would leave a path
+nothing ever walks again. The stub records the size and digest the eviction
+proved, which is what the read side needs to list an object whose bytes are
+gone, and it closes, for the readers, the asymmetry `RecordOnlyLedgerPrefixes`
+records for the ledger: a sealed bundle leaves its sidecar behind, a tarball
+leaves nothing, so the tarball has to be given something. That declaration
+still stands, since a stub is unverified and an operator can delete it. An
+archive whose tarballs were evicted without stubs is repaired from the ledger
+at the close sweep, which already derives the set of remote-only tarballs in
+order to verify them against the store. That repair
+restores the read model, not custody: it asserts no more than the ledger entry
+it copies, and the same sweep's verification is what decides whether the remote
+copy is really there. It logs a warning but counts no sweep failure, since no
+bytes are at risk, the mirror holds the tarball and the ledger still proves it,
+and only the listing stays short.
 
 The incremental gate is driven by one upfront listing inventory of the org
 prefix (~1 request per 1000 keys, instead of a metadata probe per file) and

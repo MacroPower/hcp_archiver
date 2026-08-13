@@ -169,7 +169,7 @@ the listing and nothing is written; --target is not required.`,
 			}
 
 			if dryRun {
-				return unsealDryRun(cc.OutOrStdout(), arc, prefix, target, jsonOut)
+				return unsealDryRun(cc.OutOrStdout(), cc.ErrOrStderr(), arc, prefix, target, jsonOut)
 			}
 
 			if target == "" {
@@ -237,9 +237,17 @@ func runUnsealCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
 }
 
 // unsealDryRun summarizes an unseal from the listing without writing: the
-// listing carries the same entries in the same order with the same byte
-// totals as the plan the real run executes.
-func unsealDryRun(out io.Writer, arc *view.Archive, prefix, target string, jsonOut bool) error {
+// listing carries the same entries in the same order as the plan the real run
+// executes, so the totals predict it.
+//
+// An object the listing reports as remote-only counts as errored rather than
+// as a file to write, and when the plan holds any the dry run exits 1 the way
+// the run would. Each is named on stderr, where the real run streams its
+// per-file failures, so the answer to "which ones" does not need a second
+// command. The prediction is a lower bound on the failures: a bundle that
+// turns out to be corrupt errors only when something tries to read it, which a
+// dry run never does, so a clean dry run does not promise a clean run.
+func unsealDryRun(out, errW io.Writer, arc *view.Archive, prefix, target string, jsonOut bool) error {
 	entries, err := arc.List(prefix)
 	if err != nil {
 		return describeNoOrg(err, arc)
@@ -248,11 +256,28 @@ func unsealDryRun(out io.Writer, arc *view.Archive, prefix, target string, jsonO
 	var sum view.UnsealSummary
 
 	for _, e := range entries {
+		if e.RemoteOnly() {
+			sum.Errored++
+
+			eprintf(errW, "%s: cannot be unsealed; its bytes are in the remote store\n", e.ArchivePath())
+
+			continue
+		}
+
 		sum.Files++
 		sum.Bytes += e.Size
 	}
 
-	return writeUnsealSummary(out, sum, target, true, jsonOut)
+	err = writeUnsealSummary(out, sum, target, true, jsonOut)
+	if err != nil {
+		return err
+	}
+
+	if sum.Errored > 0 {
+		return fmt.Errorf("%w: %d of %d objects", ErrUnsealIncomplete, sum.Errored, sum.Errored+sum.Files)
+	}
+
+	return nil
 }
 
 // unsealReport is the wire shape of an unseal summary under --json.
@@ -297,7 +322,13 @@ func writeUnsealSummary(out io.Writer, sum view.UnsealSummary, target string, dr
 	}
 
 	if sum.Errored > 0 {
-		fmt.Fprintf(&b, "; %d errored", sum.Errored)
+		// A dry run has not tried anything yet, so nothing has errored; what it
+		// counted is what it can already tell will not come back.
+		if dryRun {
+			fmt.Fprintf(&b, "; %d not recoverable", sum.Errored)
+		} else {
+			fmt.Fprintf(&b, "; %d errored", sum.Errored)
+		}
 	}
 
 	b.WriteString("\n")
@@ -354,8 +385,8 @@ func writeEntriesJSON(out io.Writer, entries []view.Entry) error {
 }
 
 // writeEntriesText renders entries as aligned columns: size, form, path. An
-// offloaded bundle displays as "remote", flagging that reading it needs the
-// remote store.
+// evicted object displays as "remote", flagging that its bytes are in the
+// mirror rather than here.
 func writeEntriesText(out io.Writer, entries []view.Entry) error {
 	sizes := make([]string, len(entries))
 
@@ -381,10 +412,11 @@ func writeEntriesText(out io.Writer, entries []view.Entry) error {
 	return nil
 }
 
-// displayForm names an entry's physical form for the text listing, folding an
-// offloaded bundle into "remote".
+// displayForm names an entry's physical form for the text listing, folding
+// every evicted object into "remote": what matters to a reader of the listing
+// is that the bytes are not here, not which shape held them before they left.
 func displayForm(e view.Entry) string {
-	if e.Form == view.FormBundle && e.Offloaded {
+	if e.Offloaded {
 		return "remote"
 	}
 

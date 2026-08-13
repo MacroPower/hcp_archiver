@@ -11,8 +11,8 @@ import (
 // with a literal "Z", denotes UTC.
 const timeLayout = "20060102T150405"
 
-// Directory-name segments shared with the sweeps that classify archive files
-// by path shape, so the names have one owner.
+// Path-name segments the collector writes and that the sweeps and readers
+// match on, so the names have one owner.
 const (
 	// BundlesDirName is the workspace subdirectory holding sealed cold
 	// bundles and their sidecar indexes (see [Store.BundleDir]).
@@ -26,6 +26,13 @@ const (
 	// RollupsDirName is the workspace subdirectory holding NDJSON roll-ups
 	// (see [Store.RollupDir]).
 	RollupsDirName = "rollups"
+
+	// IdentityFileName is the sidecar, kept beside a name-keyed directory's
+	// archived objects, that binds the directory to the id of the object it
+	// archives. The dot prefix keeps it out of the way of the browsable tree,
+	// matching the co-located .ledger directory. The collector writes it; the
+	// readers filter it out of listings as the archive's own bookkeeping.
+	IdentityFileName = ".identity.json"
 )
 
 // Join composes archive-relative segments into a single clean forward-slash

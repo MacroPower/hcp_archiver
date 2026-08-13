@@ -136,7 +136,8 @@ var (
 // OffloadFile moves the local file at relPath to the remote store: it
 // re-proves the local bytes against the record that settled them, uploads
 // the file if the store does not already hold its key, re-confirms the
-// remote copy, and only then removes the local file.
+// remote copy, leaves the trace that outlives the file (see
+// [Env.writeRemoteStub]), and only then removes the local file.
 //
 // The gate runs at both ends of the transfer, because after the delete the
 // remote copy is the archive's only copy. Before any remote traffic the
@@ -155,7 +156,9 @@ var (
 // the next sweep with no persisted flags: an interrupted upload re-uploads
 // (an aborted parted upload is not an object), an upload that finished
 // before the local delete is found by the probe, matched digest for digest,
-// and evicted without re-uploading, and a finished eviction is a no-op.
+// and evicted without re-uploading, a stub written but not yet followed by
+// its delete leaves the file local and canonical for the next sweep to evict
+// and overwrite the stub, and a finished eviction is a no-op.
 func (e *Env) OffloadFile(ctx context.Context, relPath string) error {
 	// The run-wide eviction accounting lives here rather than at the callers
 	// (the seal boundary and the close sweep's evict loop), so each eviction
@@ -246,6 +249,11 @@ func (e *Env) offloadFile(ctx context.Context, relPath string) error {
 		}
 	}
 
+	err = e.writeRemoteStub(relPath, local.Size(), digests.SHA256)
+	if err != nil {
+		return err
+	}
+
 	err = os.Remove(absPath)
 	if err != nil {
 		return fmt.Errorf("remove evicted file: %w", err)
@@ -259,6 +267,108 @@ func (e *Env) offloadFile(ctx context.Context, relPath string) error {
 	)
 
 	return nil
+}
+
+// writeRemoteStub leaves the trace that outlives an evicted
+// configuration-version tarball, recording the size and digest the readers
+// need to list the object without the ledger or the network (see
+// [store.RemoteStub]). A sealed bundle is skipped: its sidecar index already
+// survives the zip and says the same thing.
+//
+// It runs before the local delete, not after, because the file is the only
+// thing that leads a later sweep back to this path: a crash between the two
+// leaves a stub beside a live tarball, which the next sweep re-evicts and
+// rewrites, while a delete-first crash would leave a path nothing ever walks
+// again. A write fault under config-versions/ (a permission problem, a
+// full disk) therefore aborts the eviction and counts a sweep failure, which
+// is the right trade on this side of a delete and the deliberate opposite of
+// [Env.backfillRemoteStubs], which repairs history rather than making it.
+func (e *Env) writeRemoteStub(relPath string, size int64, digest string) error {
+	if !isConfigTarball(relPath) {
+		return nil
+	}
+
+	stub := store.RemoteStub{
+		Version: store.RemoteStubVersion,
+		Size:    size,
+		SHA256:  digest,
+	}
+
+	_, err := e.store.WriteJSON(store.RemoteStubPath(relPath), stub)
+	if err != nil {
+		return fmt.Errorf("write eviction stub: %w", err)
+	}
+
+	return nil
+}
+
+// backfillRemoteStubs writes the eviction stub for every remote-only tarball
+// that has no stub file, so a tarball evicted without one gains its read-model
+// trace on the next sweep rather than staying invisible.
+//
+// The obligations map supplies the set to repair: it already names every
+// configuration-version tarball the ledger records done with no local file. It
+// also carries the sweep's evicted bundle zips, which have their sidecars for
+// a trace and are filtered out.
+//
+// The signature that settled each tarball supplies the stub's contents, and a
+// tarball whose record carries none is left alone, with a warning naming the
+// gap. Its size is unknowable here, and a stub claiming zero bytes would put a
+// size in the listing that no gzip tarball has ever had, the same lie the read
+// side's own guards exist to refuse.
+//
+// A failure here logs and counts nothing. No bytes are at risk: the mirror
+// holds the tarball and the ledger still proves it, so only the listing stays
+// short, which is a read-model gap rather than a custody one, and the next
+// sweep retries.
+//
+// It runs before the sweep verifies those same obligations against the store,
+// so a tarball the verify is about to find missing still gains a stub saying
+// its bytes are mirrored. That is the right order: the verify counts its own
+// failure and the run exits incomplete either way, while repairing only after
+// a clean verify would let one transient fault withhold the trace forever.
+func (e *Env) backfillRemoteStubs(ctx context.Context, obligations map[string]int64) {
+	for _, relPath := range slices.Sorted(maps.Keys(obligations)) {
+		if !isConfigTarball(relPath) {
+			continue
+		}
+
+		present, err := e.store.Exists(store.RemoteStubPath(relPath))
+
+		switch {
+		case err != nil:
+			// A probe that cannot answer leaves the repair undone; saying so is
+			// the only way a permanently inert backfill (a permission problem
+			// over the whole directory) is ever noticed.
+			e.logRemoteStubGap(ctx, relPath, err.Error())
+
+			continue
+
+		case present:
+			continue
+		}
+
+		entry, ok := e.ledger.Entry(relPath)
+		if !ok || entry.Signature == nil {
+			e.logRemoteStubGap(ctx, relPath, "ledger record carries no signature to size a stub from")
+
+			continue
+		}
+
+		err = e.writeRemoteStub(relPath, entry.Signature.Size, entry.Signature.Hash)
+		if err != nil {
+			e.logRemoteStubGap(ctx, relPath, err.Error())
+		}
+	}
+}
+
+// logRemoteStubGap reports a repair the backfill could not make, leaving one
+// remote-only tarball absent from listings.
+func (e *Env) logRemoteStubGap(ctx context.Context, relPath, reason string) {
+	e.logger.LogAttrs(ctx, slog.LevelWarn, "remote_stub_backfill_error",
+		slog.String("path", relPath),
+		slog.String("reason", reason),
+	)
 }
 
 // proveOffloadSource re-proves the local bytes at relPath against the record
@@ -472,20 +582,25 @@ const (
 // incomplete rather than clean over a corrupt only-copy. The ledger flock
 // target and the ledger's log.ndjson are never uploaded — a stale remote log
 // replayed onto a restored tree could resurrect old ledger state; the
-// post-compaction snapshot.json is the durable record. Everything else syncs
+// post-compaction snapshot.json is the durable record. Nor is an eviction
+// stub, which points at the mirror from outside it and would be wrong the
+// moment a restore brought its object back. Everything else syncs
 // incrementally, gated by one upfront listing inventory: an absent key or a
 // size change uploads; a size match compares the local MD5 against the
 // store's recorded digest (from the listing, or one Head on backends whose
 // listings omit it); with no digest recorded a size match is trusted.
 //
-// After the uploads, remote keys nothing local backs anymore are pruned, so
-// the mirror tracks local deletions and files later sealed into other forms;
-// evicted surfaces (bundle zips, configuration-version tarballs) are exempt
-// by shape, being remote-only by design. Per-file
-// failures are logged and counted, never fatal: local disk stays canonical
-// and the next run re-sweeps. A context cancellation stops the sweep early,
-// leaving the rest to the next run. A [WithSyncProgress] hook receives the
-// settle total once the tree is classified and one advance per settled file.
+// After the uploads, any remote-only tarball missing its stub is given one
+// from the ledger (see [Env.backfillRemoteStubs]), which repairs the read
+// model without counting against the run, and remote keys nothing local backs
+// anymore are pruned, so the mirror tracks local deletions and files later
+// sealed into other forms; evicted surfaces (bundle zips,
+// configuration-version tarballs) are exempt by shape, being remote-only by
+// design. Per-file failures are logged and counted, never fatal: local disk
+// stays canonical and the next run re-sweeps. A context cancellation stops the
+// sweep early, leaving the rest to the next run. A [WithSyncProgress] hook
+// receives the settle total once the tree is classified and one advance per
+// settled file.
 func (e *Env) SyncArchive(ctx context.Context, opts ...SyncOption) SyncStats {
 	if e.remote == nil {
 		return SyncStats{}
@@ -575,6 +690,7 @@ func (e *Env) SyncArchive(ctx context.Context, opts ...SyncOption) SyncStats {
 	e.syncFiles(ctx, sweep.sync, inventory, counters)
 
 	if ctx.Err() == nil {
+		e.backfillRemoteStubs(ctx, obligations)
 		e.verifyEvicted(ctx, inventory, obligations, sweep.aliases, counters)
 		e.pruneRemote(ctx, orgPrefix, inventory, sweep, counters)
 	}
@@ -1053,14 +1169,21 @@ func (e *Env) visitEligible(logical string, fn func(relPath string) error) error
 
 // syncEligible reports whether a file belongs to the mirror at all. Staging
 // temps are partial writes a crash left behind; the ledger's flock target
-// carries meaning only as a kernel lock; and the ledger's replay log is
-// dangerous to mirror — a stale remote log.ndjson restored over a newer
-// snapshot would replay resurrected ledger state. None is uploaded or
-// protected from pruning.
+// carries meaning only as a kernel lock; the ledger's replay log is
+// dangerous to mirror, since a stale remote log.ndjson restored over a newer
+// snapshot would replay resurrected ledger state; and an eviction stub points
+// at the mirror from outside it, so a copy inside the mirror is wrong: a
+// restore brings the tarball itself back, and the restored stub would claim it
+// is still evicted. None is uploaded or protected from pruning; the stub has
+// no key of its own to prune in any case.
 func syncEligible(relPath string) bool {
 	base := path.Base(relPath)
 
 	if atomicfile.IsTemp(base) {
+		return false
+	}
+
+	if _, ok := store.RemoteStubTarget(relPath); ok {
 		return false
 	}
 
@@ -1179,19 +1302,28 @@ func isBundleSidecar(relPath string) bool {
 	return ok && isBundleZip(stem)
 }
 
-// isConfigTarball reports an org-wide configuration-version tarball.
+// isConfigTarball reports an org-wide configuration-version tarball. The shape
+// is owned by [store.IsConfigTarball], which the read side keys its eviction
+// stubs on, so the sweep and the readers cannot disagree about what a tarball
+// is.
 func isConfigTarball(relPath string) bool {
-	return strings.HasPrefix(relPath, store.ConfigVersionsDirName+"/") && strings.HasSuffix(relPath, ".tar.gz")
+	return store.IsConfigTarball(relPath)
 }
 
 // RecordOnlyLedgerPrefixes names the archive prefixes whose ledger entries
 // may legitimately outlive their local files, for the composition root to
 // declare to [manifest.WithRecordOnlyPrefixes]. It lives beside the eviction
 // predicates because eviction is the reason: an evicted configuration-version
-// tarball leaves no local file, and its ledger entry is the only local proof
-// the remote copy exists, so the subtree's absence carries no deletion
-// signal. Sealed bundles are evicted too, but each leaves its sidecar behind,
-// so a workspace subtree with evicted bundles never reads as gone.
+// tarball leaves no local copy of its bytes, and its ledger entry is the only
+// local proof the remote copy exists, so the subtree's absence carries no
+// deletion signal. Sealed bundles are evicted too, but each leaves its sidecar
+// behind, so a workspace subtree with evicted bundles never reads as gone.
+//
+// The stub an eviction leaves ([store.RemoteStubSuffix]) does not replace
+// this declaration. It is a read-model trace, not a proof: it is unverified,
+// an operator can delete it, and an archive evicted by an older build has
+// none, so the subtree must stay legitimately sparse by declaration rather
+// than by whatever happens to be sitting in it.
 func RecordOnlyLedgerPrefixes() []string {
 	return []string{store.ConfigVersionsDirName}
 }

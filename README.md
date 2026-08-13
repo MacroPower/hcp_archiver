@@ -157,7 +157,10 @@ from the backend provider's default chain; a read-only identity scoped to the
 archive prefix is the right shape. Evicted configuration tarballs have no
 in-tool read path; fetch one directly from its mirrored key
 (`<prefix>/<org>/config-versions/<id>.tar.gz`) with any client for the
-backing store.
+backing store. They stay visible nonetheless: eviction leaves a small stub in
+each tarball's place, so `list` still reports the object at its true size,
+shown as `remote`; a read names the key to fetch; and an unseal counts it as
+one it could not recover rather than passing over it in silence.
 
 ### Listing and unsealing files
 
@@ -184,11 +187,13 @@ hcp_archiver unseal ./archive my-org --target ./restore
 ```
 
 `list` prints one line per object (size, physical form, path), with sealed
-members labeled by the form that carries them and evicted bundle members
-shown as `remote` (reading those needs object-store credentials, like the
-browser's evicted-read path):
+members labeled by the form that carries them and anything evicted to the
+mirror shown as `remote` (reading an evicted bundle member needs object-store
+credentials, like the browser's evicted-read path; an evicted configuration
+tarball has to be fetched from the bucket directly):
 
 ```
+4.1 KiB  remote  my-org/config-versions/cv-abc.tar.gz
   142 B  loose   my-org/org.json
    88 B  rollup  my-org/projects/default/workspaces/app/runs/run-new/config-version.json
    17 B  bundle  my-org/projects/default/workspaces/app/runs/run-new/plan.log
@@ -198,12 +203,19 @@ browser's evicted-read path):
 `--json` switches `list` to NDJSON (one object per line, with `path`, `org`,
 `form`, and `size` on every line, plus `container`, `modified`, and
 `offloaded` where they apply) and `unseal` to a JSON summary. `unseal
---dry-run` reports what a run would write without writing; its totals always
-match `list` over the same prefix. `unseal -v` streams one line per recovered
-file to stderr, and per-file failures always land there. A run in which every
-object recovers exits 0; if any object fails, the failures are counted and
-reported and the command exits 1. An interrupted run reports its partial
-totals to stderr and exits 0.
+--dry-run` reports what a run would write without writing, planning from the
+same listing over the same prefix, so it predicts the run it describes: every
+listed object is accounted for, either as one that would be written or as one
+already known to be unrecoverable, each of the latter named on stderr. It is a
+lower bound on the failures, since a bundle that turns out to be corrupt errors
+only when something reads it, which a dry run never does. Both the text summary
+and the `errored` field of `--json` carry that count.
+
+`unseal -v` streams one line per recovered file to stderr, and per-file
+failures always land there. A run in which every object recovers exits 0; if
+any object fails, the failures are counted and reported and the command exits
+with status 1, and a dry run whose plan already holds one exits the same way.
+An interrupted run reports its partial totals to stderr and exits 0.
 
 ### Mirroring the archive to object storage
 
@@ -398,10 +410,12 @@ Settings are grouped by how much they vary; see
 ├── 📁 hyok-configurations/<id>/         # HYOK + OIDC config, key versions (optional)
 ├── 📁 registry/                         # modules, no-code modules, providers, GPG keys
 ├── 📁 config-versions/
-│   └── 📄 <cv-id>.tar.gz                # deduped org-wide; runs reference by id
+│   ├── 📄 <cv-id>.tar.gz                # deduped org-wide; runs reference by id
+│   └── 📄 <cv-id>.tar.gz.remote.json    # only once evicted: the stub standing in for it
 │
 │   # project-scoped objects nest beneath the owning project
 └── 📁 projects/<project-name>/
+    ├── 📄 .identity.json                # binds this name-keyed directory to the id it archives
     ├── 📄 project.json                  # defaults + tag bindings
     ├── 📄 team-access.json              # project RBAC
     ├── 📄 effective-tag-bindings.json   # resolved bindings, including inherited

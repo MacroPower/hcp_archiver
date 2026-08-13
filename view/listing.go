@@ -1,6 +1,7 @@
 package view
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -30,7 +31,7 @@ type Form string
 
 // The three physical forms an archived object can be held in.
 const (
-	FormLoose  Form = "loose"  // plain file in the archive tree
+	FormLoose  Form = "loose"  // standalone object, present or evicted
 	FormRollup Form = "rollup" // one line of a workspace's NDJSON roll-up
 	FormBundle Form = "bundle" // member of a sealed zip bundle
 )
@@ -39,7 +40,8 @@ const (
 //
 // Instances are produced by [*Org.List] and [*Archive.List].
 type Entry struct {
-	// ModTime is the loose file's modification time; zero for a sealed object.
+	// ModTime is the loose file's modification time; zero for a sealed object
+	// and for an evicted one, neither of which has a local file to carry it.
 	ModTime time.Time
 	// Org is the owning organization's name.
 	Org string
@@ -52,8 +54,9 @@ type Entry struct {
 	Form Form
 	// Size is the object's content length in bytes, in every form.
 	Size int64
-	// Offloaded reports a bundle whose zip was evicted to the remote store, so
-	// reading the object needs network access.
+	// Offloaded reports an object whose bytes were evicted to the remote
+	// store, so reading it either needs network access or has no in-tool path
+	// at all (see [Entry.RemoteOnly]).
 	Offloaded bool
 }
 
@@ -63,16 +66,31 @@ func (e Entry) ArchivePath() string {
 	return path.Join(e.Org, e.Path)
 }
 
+// RemoteOnly reports an evicted object with no in-tool read path, so a read
+// fails with [ErrRemoteOnly] and an unseal cannot recover it.
+//
+// The two evictable surfaces differ here. A bundle member survives eviction
+// readable: the sidecar index stays behind, so the member is fetched from the
+// remote bundle with ranged reads. A configuration-version tarball is the
+// whole object, with nothing left to read it out of, so it must be fetched
+// from the mirror directly.
+func (e Entry) RemoteOnly() bool {
+	return e.Offloaded && e.Form == FormLoose
+}
+
 // List returns the org's archived objects at or beneath an archive-relative
 // path prefix, sorted by path.
 //
 // The listing is logical: one entry per object regardless of physical form,
 // with a loose file winning over its sealed copy (the [Workspace.Open]
 // precedence), and the archive's own machinery (roll-ups, bundles, sidecars,
-// ledger shards, the remote marker, staging leftovers) never appearing. An
-// empty prefix lists the whole organization; a prefix matching nothing returns
-// an empty listing without error; an unclean prefix (absolute, or carrying
-// ".." segments) returns [ErrInvalidPath].
+// ledger shards, the remote marker, identity sidecars, eviction stubs, staging
+// leftovers) never appearing. An object evicted to the remote store is still
+// listed, from whatever the eviction left behind: a bundle member from its
+// sidecar, a configuration-version tarball from its stub, both flagged
+// Offloaded. An empty prefix lists the whole organization; a prefix matching
+// nothing returns an empty listing without error; an unclean prefix (absolute,
+// or carrying ".." segments) returns [ErrInvalidPath].
 func (o *Org) List(prefix string) ([]Entry, error) {
 	rel, err := cleanRel(prefix)
 	if err != nil {
@@ -112,11 +130,15 @@ func (o *Org) List(prefix string) ([]Entry, error) {
 // other path is a loose read. A path present in no form returns
 // [ErrObjectNotFound]; a directory returns [ErrNotFile], whether it is
 // physically present or survives only as sealed objects beneath the path (a
-// fully sealed run directory).
+// fully sealed run directory). A configuration-version tarball evicted to the
+// mirror returns [ErrRemoteOnly], naming the mirrored key when the
+// organization records where its mirror is, since the archive holds that
+// object elsewhere rather than not at all.
 //
 // Unlike [*Org.List], Read applies no machinery filter: a physical file the
-// listing hides (the remote marker, a roll-up, a sidecar) is still readable by
-// its real path, which is useful for inspecting the archive's own files.
+// listing hides (the remote marker, an identity sidecar, an eviction stub, a
+// roll-up, a bundle sidecar) is still readable by its real path, which is
+// useful for inspecting the archive's own files.
 func (o *Org) Read(relPath string) ([]byte, error) {
 	rel, err := cleanRel(relPath)
 	if err != nil {
@@ -140,12 +162,40 @@ func (o *Org) Read(relPath string) ([]byte, error) {
 
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return nil, fmt.Errorf("%w: %s", ErrObjectNotFound, rel)
+		return nil, o.describeMiss(rel)
 	case err != nil:
 		return nil, fmt.Errorf("read %q: %w", rel, err)
 	}
 
 	return data, nil
+}
+
+// describeMiss names what an absent file means: an eviction stub beside it
+// says the object was moved to the mirror whole, which is a different answer
+// than never having been archived, and the one an operator can act on. The
+// mirrored key is named when the organization records where its mirror is,
+// since fetching the object directly is the only way to read it.
+//
+// A stub's mere existence is enough here, where a listing insists on parsing
+// one first. A read quotes no size it could get wrong, so a stub too damaged
+// to list is still evidence that eviction happened, and saying so beats
+// sending an operator to look for a collection bug.
+func (o *Org) describeMiss(rel string) error {
+	if !store.IsConfigTarball(rel) {
+		return fmt.Errorf("%w: %s", ErrObjectNotFound, rel)
+	}
+
+	_, err := os.Stat(o.AbsPath(store.RemoteStubPath(rel)))
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrObjectNotFound, rel)
+	}
+
+	if o.remote == nil {
+		return fmt.Errorf("%w: %s was evicted to the remote store", ErrRemoteOnly, rel)
+	}
+
+	return fmt.Errorf("%w: %s was evicted to the remote store; fetch it from %q",
+		ErrRemoteOnly, rel, o.remote.cfg.Key(o.Name, rel))
 }
 
 // readWorkspacePath reads one workspace-scoped path, upgrading a miss over a
@@ -206,11 +256,12 @@ func cleanRel(p string) (string, error) {
 	return s, nil
 }
 
-// looseEntries builds the loose-file entries at or beneath an archive-relative
-// prefix and the set of paths they claim, which the sealed pass dedups
-// against.
+// looseEntries builds the entries the filesystem alone accounts for at or
+// beneath an archive-relative prefix (the loose files, plus the objects an
+// eviction stub stands in for) and the set of paths they claim, which the
+// sealed pass dedups against.
 func (o *Org) looseEntries(prefix string) ([]Entry, map[string]struct{}, error) {
-	loose, err := o.looseFiles(prefix)
+	loose, stubs, err := o.looseFiles(prefix)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -241,7 +292,92 @@ func (o *Org) looseEntries(prefix string) ([]Entry, map[string]struct{}, error) 
 		entries = append(entries, entry)
 	}
 
-	return entries, seen, nil
+	return o.stubEntries(entries, seen, stubs, prefix), seen, nil
+}
+
+// stubEntries appends one entry per eviction stub, standing in for the object
+// whose bytes live only in the remote store. A stub whose object is
+// present locally is ignored: the file is authoritative and the stub is a
+// leftover, the same precedence a loose file has over its sealed copy.
+//
+// An accepted stub claims its target in seen, so the sealed pass dedups
+// against it exactly the way it does against a loose file.
+//
+// A stub [*Org.readRemoteStub] refuses, for any of the grounds it names, is
+// skipped rather than fatal, matching how a stat fault drops one loose file
+// instead of failing the listing. The listing is then short by that object,
+// which is what it would be with no stub at all.
+//
+// The prefix filter guards one case: a prefix naming a stub file resolves to
+// the sibling object beside it, which sits outside the requested scope and
+// must not be emitted.
+func (o *Org) stubEntries(entries []Entry, seen map[string]struct{}, stubs []string, prefix string) []Entry {
+	for _, rel := range stubs {
+		target, ok := store.RemoteStubTarget(rel)
+		if !ok || !underPrefix(target, prefix) {
+			continue
+		}
+
+		if _, claimed := seen[target]; claimed {
+			continue
+		}
+
+		stub, ok := o.readRemoteStub(rel)
+		if !ok {
+			continue
+		}
+
+		seen[target] = struct{}{}
+
+		entries = append(entries, Entry{
+			Org:       o.Name,
+			Path:      target,
+			Form:      FormLoose,
+			Size:      stub.Size,
+			Offloaded: true,
+		})
+	}
+
+	return entries
+}
+
+// readRemoteStub reads one eviction stub, reporting whether it can be rendered
+// truthfully. It is refused when it cannot be read or parsed; when its version
+// is newer than this build writes, so its fields cannot be trusted to mean what
+// they mean here; when its version is below 1, which no eviction ever wrote,
+// so the field was left unset or set to nonsense; and when it records a
+// negative size, which is not a length anything can have. A size of zero is
+// legal and listed as such: the writer records whatever the object measured,
+// and refusing it here would drop a genuinely empty object from listings, the
+// silent absence stubs exist to prevent.
+//
+// A refusal carries no reason because there is nowhere to carry one to: the
+// browser holds no logger, and the caller drops the object either way, exactly
+// as a stat fault drops one loose file. Rendering the stub anyway would be
+// worse than an unlisted object, since a wrong size is a figure an operator
+// reads, compares, and plans a restore against.
+func (o *Org) readRemoteStub(rel string) (store.RemoteStub, bool) {
+	data, err := os.ReadFile(o.AbsPath(rel))
+	if err != nil {
+		return store.RemoteStub{}, false
+	}
+
+	var stub store.RemoteStub
+
+	err = json.Unmarshal(data, &stub)
+	if err != nil {
+		return store.RemoteStub{}, false
+	}
+
+	if stub.Version < 1 || stub.Version > store.RemoteStubVersion {
+		return store.RemoteStub{}, false
+	}
+
+	if stub.Size < 0 {
+		return store.RemoteStub{}, false
+	}
+
+	return stub, true
 }
 
 // prefixWorkspaces returns the workspaces whose sealed objects can sit at or
@@ -390,17 +526,23 @@ func (o *Org) workspaceFor(rel string) *Workspace {
 
 // looseFiles returns the archive-relative (slash-separated) paths of the loose
 // files at or beneath an archive-relative path, so they dedup exactly against
-// the sealed-index keys. Machinery is skipped (see [isMachinery]); the walk
-// goes through [fsid.WalkFiles], which owns the archive's symlink-aliasing
-// rules and handles a file root, so a prefix naming one loose file lists it.
+// the sealed-index keys, and separately the eviction stubs found alongside
+// them. Machinery is skipped (see [isMachinery]); the walk goes through
+// [fsid.WalkFiles], which owns the archive's symlink-aliasing rules and
+// handles a file root, so a prefix naming one loose file lists it.
+//
+// Stubs come back separately because they are neither content nor ordinary
+// machinery: a stub is never listed as itself, but it is the only local
+// evidence of the object it stands in for, which the caller turns into that
+// object's entry.
 //
 // The stored browse context is the intended parent: the browser plans inside
 // tea.Cmds, which carry no context of their own, and a command-line caller
 // installs its own with [WithContext].
 //
 //nolint:contextcheck // See above; there is no caller context to pass.
-func (o *Org) looseFiles(relDir string) ([]string, error) {
-	var rels []string
+func (o *Org) looseFiles(relDir string) ([]string, []string, error) {
+	var rels, stubs []string
 
 	_, err := fsid.WalkFiles(o.context(), o.AbsPath(relDir), func(logical string) error {
 		rel, relErr := filepath.Rel(o.root, logical)
@@ -409,6 +551,13 @@ func (o *Org) looseFiles(relDir string) ([]string, error) {
 		}
 
 		slashed := filepath.ToSlash(rel)
+
+		if _, ok := store.RemoteStubTarget(slashed); ok {
+			stubs = append(stubs, slashed)
+
+			return nil
+		}
+
 		if isMachinery(slashed) {
 			return nil
 		}
@@ -420,22 +569,55 @@ func (o *Org) looseFiles(relDir string) ([]string, error) {
 
 	switch {
 	// A scope with no loose files at all (a fully coalesced workspace whose
-	// runs/ directory sealing removed) is empty, not an error.
+	// runs/ directory sealing removed) is empty, not an error. The absent path
+	// may also be an evicted object addressed directly, which is the natural
+	// thing to type after a read reports it remote-only, so its stub is looked
+	// for before the scope is called empty.
 	case errors.Is(err, fs.ErrNotExist):
-		return nil, nil
+		return nil, o.rootStub(relDir), nil
 	case err != nil:
-		return nil, fmt.Errorf("walk %q: %w", relDir, err)
+		return nil, nil, fmt.Errorf("walk %q: %w", relDir, err)
 	}
 
-	return rels, nil
+	return rels, stubs, nil
+}
+
+// rootStub returns the eviction stub standing in for relDir itself, for a walk
+// root that resolved to nothing. Only an evicted object leaves one, so any
+// other absent path yields none.
+func (o *Org) rootStub(relDir string) []string {
+	if !store.IsConfigTarball(relDir) {
+		return nil
+	}
+
+	stub := store.RemoteStubPath(relDir)
+
+	_, err := os.Stat(o.AbsPath(stub))
+	if err != nil {
+		return nil
+	}
+
+	return []string{stub}
 }
 
 // isMachinery reports whether a slash-separated archive-relative path names
 // the archive's own machinery rather than archived content: anything inside a
 // sealed-form directory ([store.BundlesDirName], [store.RollupsDirName]), a
 // [manifest.LedgerDirName] bookkeeping directory, the org-root remote marker,
-// or an atomic writer's staging leftover. Listings hide machinery and unseals
-// skip it; [*Org.Read] deliberately does not filter on it.
+// a directory's [store.IdentityFileName] sidecar, or an atomic writer's
+// staging leftover. Listings hide machinery and unseals skip it; [*Org.Read]
+// deliberately does not filter on it.
+//
+// The identity sidecar sits beside archived objects rather than in a
+// directory of its own, so it is matched by name at any depth: the collector
+// stamps one into every project, workspace, and stack directory to bind the
+// name-keyed directory to the id it archives, which is bookkeeping about the
+// archive rather than anything the archive collected.
+//
+// One shape of machinery is deliberately not matched here. An eviction stub is
+// hidden too, but [*Org.looseFiles] diverts it before this filter, because it
+// does not merely disappear: it becomes the entry for the object it stands in
+// for.
 func isMachinery(rel string) bool {
 	for seg := range strings.SplitSeq(rel, "/") {
 		switch seg {
@@ -446,5 +628,5 @@ func isMachinery(rel string) bool {
 
 	base := path.Base(rel)
 
-	return base == remote.MarkerName || atomicfile.IsTemp(base)
+	return base == remote.MarkerName || base == store.IdentityFileName || atomicfile.IsTemp(base)
 }

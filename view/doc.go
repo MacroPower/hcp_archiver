@@ -11,7 +11,9 @@
 // per-workspace NDJSON roll-ups, then in the sealed zip bundles via their
 // sidecar indexes, all keyed by the same archive-relative path the ledger
 // records. The browser therefore renders a freshly-collected tree and a fully
-// sealed one identically, and needs no network access and no ledger.
+// sealed one identically, and needs no ledger: everything it knows, it learns
+// from the tree. Only reading a member of a bundle whose zip was evicted to a
+// remote store touches the network.
 //
 // [Browse] starts the browser; [OpenArchive] exposes the read layer on its
 // own, and [Archive] layers org-prefixed addressing over it for logical

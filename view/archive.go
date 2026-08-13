@@ -32,6 +32,13 @@ var (
 	// archive-relative path: absolute, or carrying "..", ".", or empty
 	// segments.
 	ErrInvalidPath = errors.New("invalid archive path")
+
+	// ErrRemoteOnly indicates an archived object whose bytes were evicted to
+	// the remote store leaving nothing to read them out of locally, so the
+	// object is listed but not readable here and must be fetched from the
+	// mirror directly. It is distinct from a missing object: the archive holds
+	// the object, elsewhere.
+	ErrRemoteOnly = errors.New("archived object is remote-only")
 )
 
 // orgFile is the marker leaf identifying an organization's archive root.

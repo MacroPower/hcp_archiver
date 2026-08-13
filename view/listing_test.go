@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.jacobcolvin.com/hcp_archiver/store"
 	"go.jacobcolvin.com/hcp_archiver/view"
 )
 
@@ -169,10 +170,12 @@ func TestOrgList_MachineryNeverAppears(t *testing.T) {
 	t.Parallel()
 
 	// The extended fixture carries every machinery shape: bundles and their
-	// sidecars, roll-ups, a ledger shard, a staging leftover, plus an
-	// org-root remote marker this test adds.
+	// sidecars, roll-ups, a ledger shard, a staging leftover, identity
+	// sidecars, plus an org-root remote marker and an eviction stub this test
+	// adds.
 	root := buildUnsealArchive(t)
 	writeFile(t, filepath.Join(root, "my-org"), ".remote.json", viewMarker)
+	evictTarball(t, root, "cv-9")
 
 	org := openOrg(t, root)
 
@@ -185,9 +188,124 @@ func TestOrgList_MachineryNeverAppears(t *testing.T) {
 		assert.NotContains(t, p, "/rollups/", "roll-up files are hidden: %s", p)
 		assert.NotContains(t, p, ".sidecar", "sidecar indexes are hidden: %s", p)
 		assert.NotContains(t, p, ".ledger", "ledger shards are hidden: %s", p)
-		assert.NotContains(t, p, ".remote.json", "the remote marker is hidden: %s", p)
+		// A substring check, so it covers both the org marker and the
+		// per-object eviction stubs that share its spelling.
+		assert.NotContains(t, p, ".remote.json", "remote markers and stubs are hidden: %s", p)
+		assert.NotContains(t, p, ".identity.json", "identity sidecars are hidden: %s", p)
 		assert.NotContains(t, p, ".atomicfile-", "staging leftovers are hidden: %s", p)
 	}
+}
+
+func TestOrgList_EvictedTarball(t *testing.T) {
+	t.Parallel()
+
+	// A configuration-version tarball evicted to the remote store leaves no
+	// file at all, only its stub. The object still lists, at its true size and
+	// flagged, rather than reading as one the archive never collected.
+	root := buildArchive(t)
+	tarball := evictTarball(t, root, "cv-9")
+
+	org := openOrg(t, root)
+
+	entries, err := org.List("")
+	require.NoError(t, err)
+
+	e := entryByPath(t, entries, tarball)
+	assert.Equal(t, view.FormLoose, e.Form, "a tarball is a plain file wherever it lives")
+	assert.True(t, e.Offloaded)
+	assert.True(t, e.RemoteOnly(), "nothing local can read it back")
+	assert.EqualValues(t, len(tarballContent), e.Size, "the stub's recorded size works offline")
+	assert.Empty(t, e.Container)
+	assert.True(t, e.ModTime.IsZero(), "an evicted object has no local file to date it")
+
+	assert.NotContains(t, entryPaths(entries), store.RemoteStubPath(tarball),
+		"the stub stands in for the object without listing as one")
+}
+
+func TestOrgList_EvictedTarballPrefixes(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+	tarball := evictTarball(t, root, "cv-9")
+
+	org := openOrg(t, root)
+
+	// Addressing the evicted object directly is the natural thing to type
+	// after a read reports it remote-only, and it must find it: the path
+	// resolves to nothing on disk, so only the stub beside it answers.
+	entries, err := org.List(tarball)
+	require.NoError(t, err)
+	assert.Equal(t, []string{tarball}, entryPaths(entries))
+
+	// Addressing the stub is addressing machinery. Its object sits outside the
+	// requested prefix, so the listing is empty rather than answering with a
+	// path the caller did not ask about.
+	entries, err = org.List(store.RemoteStubPath(tarball))
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestOrgList_LocalTarballBeatsItsStub(t *testing.T) {
+	t.Parallel()
+
+	// A restore brings the tarball back beside a stub nothing cleaned up. The
+	// file is authoritative, exactly as a loose file wins over its sealed copy.
+	const restored = "restored tarball bytes"
+
+	root := buildArchive(t)
+	tarball := evictTarball(t, root, "cv-9")
+	writeFile(t, filepath.Join(root, "my-org"), tarball, restored)
+
+	org := openOrg(t, root)
+
+	entries, err := org.List(store.ConfigVersionsDirName)
+	require.NoError(t, err)
+	require.Equal(t, []string{tarball}, entryPaths(entries), "the object lists exactly once")
+
+	e := entries[0]
+	assert.False(t, e.Offloaded, "the bytes are here")
+	assert.EqualValues(t, len(restored), e.Size, "sized from the file, not the stale stub")
+	assert.False(t, e.ModTime.IsZero())
+}
+
+func TestOrgList_UnusableStubIsSkipped(t *testing.T) {
+	t.Parallel()
+
+	// A stub this build cannot trust reports nothing rather than a size it may
+	// have misread, and never fails the listing around it.
+	root := buildArchive(t)
+	org := filepath.Join(root, "my-org")
+
+	torn := store.ConfigVersionsDirName + "/cv-torn.tar.gz"
+	writeFile(t, org, store.RemoteStubPath(torn), "{not json")
+
+	future := store.ConfigVersionsDirName + "/cv-future.tar.gz"
+	writeFile(t, org, store.RemoteStubPath(future),
+		`{"version":9999,"size":12,"sha256":""}`)
+
+	negative := store.ConfigVersionsDirName + "/cv-negative.tar.gz"
+	writeFile(t, org, store.RemoteStubPath(negative),
+		`{"version":1,"size":-4,"sha256":""}`)
+
+	// A stub with no version field at all is not one any eviction wrote.
+	unversioned := store.ConfigVersionsDirName + "/cv-unversioned.tar.gz"
+	writeFile(t, org, store.RemoteStubPath(unversioned), `{}`)
+
+	// A zero size is not a damaged stub, it is an empty object, and dropping it
+	// would be the silent absence the stub exists to prevent.
+	empty := store.ConfigVersionsDirName + "/cv-empty.tar.gz"
+	writeFile(t, org, store.RemoteStubPath(empty), `{"version":1,"size":0,"sha256":""}`)
+
+	readable := evictTarball(t, root, "cv-ok")
+
+	entries, err := openOrg(t, root).List(store.ConfigVersionsDirName)
+	require.NoError(t, err)
+	assert.Equal(t, []string{empty, readable}, entryPaths(entries),
+		"an unreadable stub drops its object, not the listing")
+
+	e := entryByPath(t, entries, empty)
+	assert.True(t, e.Offloaded)
+	assert.Zero(t, e.Size, "an empty object lists at the size it has")
 }
 
 func TestOrgList_EntryMetadata(t *testing.T) {
@@ -278,6 +396,34 @@ func TestOrgRead_FullySealedDirectoryIsNotFile(t *testing.T) {
 
 	_, err := org.Read(wsDir + "/runs/run-new")
 	require.ErrorIs(t, err, view.ErrNotFile)
+}
+
+func TestOrgRead_EvictedTarballIsRemoteOnly(t *testing.T) {
+	t.Parallel()
+
+	// An evicted tarball is held by the archive, elsewhere. Saying "not found"
+	// would send an operator looking for a collection bug; the answer they can
+	// act on is where the bytes went.
+	root := buildArchive(t)
+	tarball := evictTarball(t, root, "cv-9")
+	writeFile(t, filepath.Join(root, "my-org"), ".remote.json", viewMarker)
+
+	_, err := openOrg(t, root).Read(tarball)
+	require.ErrorIs(t, err, view.ErrRemoteOnly)
+	assert.Contains(t, err.Error(), viewPrefix+"/my-org/"+tarball,
+		"the message names the key to fetch")
+
+	// Without a marker there is no key to name, but the object is no less
+	// remote-only.
+	bare := buildArchive(t)
+	bareTarball := evictTarball(t, bare, "cv-9")
+
+	_, err = openOrg(t, bare).Read(bareTarball)
+	require.ErrorIs(t, err, view.ErrRemoteOnly)
+
+	// A tarball with neither file nor stub was never archived here.
+	_, err = openOrg(t, bare).Read(store.ConfigVersionsDirName + "/cv-absent.tar.gz")
+	require.ErrorIs(t, err, view.ErrObjectNotFound)
 }
 
 func TestOrgRead(t *testing.T) {

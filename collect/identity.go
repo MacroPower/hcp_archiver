@@ -8,13 +8,9 @@ import (
 	"os"
 	"path"
 	"time"
-)
 
-// identityFileName is the sidecar, kept beside a name-keyed directory's
-// archived objects, that binds the directory to the id of the object it
-// archives. The dot prefix keeps it out of the way of the browsable tree,
-// matching the co-located .ledger directory.
-const identityFileName = ".identity.json"
+	"go.jacobcolvin.com/hcp_archiver/store"
+)
 
 // ErrIdentityMismatch reports that a name-keyed directory is owned by a
 // different object than the one being archived into it: the object that
@@ -87,7 +83,7 @@ func (e *Env) ClaimDir(dir, id string) (string, error) {
 
 // claimDirLocked is the body of [Env.ClaimDir] with the identity mutex held.
 func (e *Env) claimDirLocked(dir, id string) (string, error) {
-	relPath := e.store.Join(dir, identityFileName)
+	relPath := e.store.Join(dir, store.IdentityFileName)
 
 	current, err := e.readIdentity(relPath)
 
@@ -179,7 +175,7 @@ func (e *Env) reclaimRenamedBackLocked(dir, id string, current *Identity) (strin
 	cleared.RenamedTo = ""
 	cleared.RenamedAt = time.Time{}
 
-	err = e.writeIdentity(e.store.Join(dir, identityFileName), &cleared)
+	err = e.writeIdentity(e.store.Join(dir, store.IdentityFileName), &cleared)
 	if err != nil {
 		return "", err
 	}
@@ -194,7 +190,7 @@ func (e *Env) reclaimRenamedBackLocked(dir, id string, current *Identity) (strin
 // newBase. The stamp also gates the caller's rename warning to fire once
 // rather than on every later run.
 func (e *Env) markRenamed(parent, oldBase, newBase string) error {
-	relPath := e.store.Join(parent, oldBase, identityFileName)
+	relPath := e.store.Join(parent, oldBase, store.IdentityFileName)
 
 	old, err := e.readIdentity(relPath)
 	if err != nil {
@@ -280,7 +276,7 @@ func (e *Env) ownersUnderLocked(parent string) (map[string]string, error) {
 				continue
 			}
 
-			ident, rerr := e.readIdentity(e.store.Join(parent, entry.Name(), identityFileName))
+			ident, rerr := e.readIdentity(e.store.Join(parent, entry.Name(), store.IdentityFileName))
 			if rerr != nil || ident == nil || ident.RenamedTo != "" {
 				continue
 			}

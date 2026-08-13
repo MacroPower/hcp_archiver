@@ -21,7 +21,8 @@ import (
 
 var (
 	// ErrObjectNotFound indicates an archive-relative path is present in none of
-	// the archive's physical forms.
+	// the archive's physical forms, with no eviction stub standing in for it
+	// either (see [ErrRemoteOnly]).
 	ErrObjectNotFound = errors.New("object not found in archive")
 
 	// ErrRollupChecksum indicates a roll-up member's content does not hash to

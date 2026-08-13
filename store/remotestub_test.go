@@ -1,0 +1,72 @@
+package store_test
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.jacobcolvin.com/hcp_archiver/store"
+)
+
+func TestRemoteStubTarget(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		relPath string
+		want    string
+		isStub  bool
+	}{
+		"a tarball stub resolves to its tarball": {
+			relPath: "config-versions/cv-1.tar.gz.remote.json",
+			want:    "config-versions/cv-1.tar.gz",
+			isStub:  true,
+		},
+		"the tarball itself is not a stub": {
+			relPath: "config-versions/cv-1.tar.gz",
+		},
+		"the organization's remote marker is not a stub": {
+			relPath: ".remote.json",
+		},
+		"the suffix over a non-tarball is an ordinary object": {
+			relPath: "config-versions/notes.remote.json",
+		},
+		"the suffix outside config-versions is an ordinary object": {
+			relPath: "projects/p1/workspaces/w1/state.tar.gz.remote.json",
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			target, ok := store.RemoteStubTarget(tt.relPath)
+			assert.Equal(t, tt.isStub, ok)
+			assert.Equal(t, tt.want, target)
+		})
+	}
+}
+
+func TestRemoteStubPathRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(t.TempDir())
+	tarball := s.ConfigVersionTarball("cv-abc")
+
+	stub := store.RemoteStubPath(tarball)
+	assert.Equal(t, "config-versions/cv-abc.tar.gz.remote.json", stub)
+
+	target, ok := store.RemoteStubTarget(stub)
+	require.True(t, ok)
+	assert.Equal(t, tarball, target, "the stub names the object it stands in for")
+}
+
+func TestIsConfigTarball(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, store.IsConfigTarball("config-versions/cv-1.tar.gz"))
+	assert.False(t, store.IsConfigTarball("config-versions/cv-1.tar"))
+	assert.False(t, store.IsConfigTarball("config-versions"))
+	assert.False(t, store.IsConfigTarball("projects/p1/cv-1.tar.gz"),
+		"only the org-wide directory holds configuration-version tarballs")
+}

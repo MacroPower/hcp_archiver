@@ -59,6 +59,11 @@ type unsealEvent struct {
 // prefix as unseal jobs, in listing order. The jobs carry exactly [*Org.List]'s
 // entries — same dedup, same machinery filter, same order — so a listing is a
 // faithful dry run of the unseal it plans.
+//
+// That faithfulness is about what the run attempts, not about what it
+// recovers: a listed object can still fail its read, and one kind fails
+// predictably. [Entry.RemoteOnly] names the objects an unseal is certain to
+// lose, so a caller summarizing the plan can count them against it up front.
 func (o *Org) planUnseal(prefix string) ([]unsealJob, error) {
 	entries, err := o.List(prefix)
 	if err != nil {
@@ -89,11 +94,13 @@ func (o *Org) planProjectUnseal(project string) ([]unsealJob, error) {
 // unsealJobs writes jobs into target under org sequentially, handing each
 // outcome to emit, and returns the totals plus whether the run finished.
 //
-// A per-file problem — an unreadable member, an evicted bundle with no remote
-// configured, a member above the [maxMemberSize] read bound (which errors out
-// rather than silently truncates), an unsafe recorded name — increments
-// Errored and the run continues. The loop stops between files once ctx ends
-// or emit returns false, reporting an unfinished run.
+// A per-file problem increments Errored and the run continues: an unreadable
+// member, an evicted bundle with no remote configured, an evicted
+// configuration-version tarball (no in-tool read path at all,
+// [ErrRemoteOnly]), a member above the [maxMemberSize] read bound (which
+// errors out rather than silently truncates), an unsafe recorded name. The
+// loop stops between files once ctx ends or emit returns false, reporting an
+// unfinished run.
 func unsealJobs(
 	ctx context.Context,
 	org, target string,

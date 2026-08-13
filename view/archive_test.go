@@ -1,6 +1,9 @@
 package view_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.jacobcolvin.com/hcp_archiver/seal"
+	"go.jacobcolvin.com/hcp_archiver/store"
 	"go.jacobcolvin.com/hcp_archiver/view"
 )
 
@@ -26,6 +30,31 @@ func writeFile(t *testing.T, root, rel, content string) string {
 	require.NoError(t, os.WriteFile(abs, []byte(content), 0o600))
 
 	return abs
+}
+
+// tarballContent is the payload every fixture tarball's stub records.
+const tarballContent = "tarball bytes"
+
+// evictTarball models a configuration-version tarball evicted to the remote
+// store: the file itself is gone and only the stub the eviction left in its
+// place remains, recording the size and digest of [tarballContent]. It returns
+// the tarball's archive-relative path.
+func evictTarball(t *testing.T, root, cvID string) string {
+	t.Helper()
+
+	rel := store.ConfigVersionsDirName + "/" + cvID + ".tar.gz"
+	sum := sha256.Sum256([]byte(tarballContent))
+
+	stub, err := json.Marshal(store.RemoteStub{
+		Version: store.RemoteStubVersion,
+		Size:    int64(len(tarballContent)),
+		SHA256:  hex.EncodeToString(sum[:]),
+	})
+	require.NoError(t, err)
+
+	writeFile(t, filepath.Join(root, "my-org"), store.RemoteStubPath(rel), string(stub))
+
+	return rel
 }
 
 // runJSON renders a minimal archived run document.

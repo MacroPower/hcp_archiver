@@ -2,6 +2,7 @@ package collect_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -106,6 +107,20 @@ func (f syncFixture) exists(t *testing.T, relPath string) bool {
 	require.NoError(t, err)
 
 	return ok
+}
+
+// readStub reads and parses the eviction stub standing in for relPath.
+func (f syncFixture) readStub(t *testing.T, relPath string) store.RemoteStub {
+	t.Helper()
+
+	data, err := os.ReadFile(f.store.AbsPath(store.RemoteStubPath(relPath)))
+	require.NoError(t, err)
+
+	var stub store.RemoteStub
+
+	require.NoError(t, json.Unmarshal(data, &stub))
+
+	return stub
 }
 
 // sealBundle seals one member into a real verified bundle (zip plus sidecar)
@@ -563,6 +578,187 @@ func TestSyncArchiveEvictionRecordsDigests(t *testing.T) {
 	assert.Zero(t, tally.Uploaded)
 	assert.Equal(t, int64(len(data)), tally.UploadedBytes,
 		"the run tally includes the eviction's transferred bytes")
+}
+
+func TestSyncArchiveEvictedTarballLeavesAStub(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t)
+
+	data := []byte("tarball bytes")
+	f.writeDone(t, tarball, data)
+
+	stats := f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+	require.Equal(t, 1, stats.Evicted)
+	require.False(t, f.exists(t, tarball), "the evicted tarball is gone locally")
+
+	// The stub is what the readers see in the tarball's place: without it the
+	// object is indistinguishable from one never archived.
+	stub := f.readStub(t, tarball)
+	assert.Equal(t, store.RemoteStubVersion, stub.Version)
+	assert.EqualValues(t, len(data), stub.Size, "the stub carries the evicted size")
+	assert.Equal(t, manifest.SignatureOf(data).Hash, stub.SHA256,
+		"the stub carries the digest the eviction proved")
+
+	// The stub points at the mirror from outside it; a copy inside would be
+	// stale the moment a restore brings the tarball back.
+	_, ok := f.fake.Object(f.key(store.RemoteStubPath(tarball)))
+	assert.False(t, ok, "an eviction stub is never uploaded")
+
+	// A later sweep neither re-uploads it nor trips over it.
+	stats = f.env.SyncArchive(t.Context())
+	assert.Zero(t, stats.Failed)
+	assert.Zero(t, stats.Uploaded)
+}
+
+func TestSyncArchiveEvictedBundleLeavesNoStub(t *testing.T) {
+	t.Parallel()
+
+	const zip = "projects/prod/workspaces/api/bundles/logs.gen0001.zip"
+
+	f := newSyncFixture(t)
+
+	f.sealBundle(t, zip, "projects/prod/workspaces/api/runs/run-1/plan.log", []byte("plan output"))
+
+	stats := f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+	require.Equal(t, 1, stats.Evicted)
+
+	// The sidecar already outlives the zip and says the same thing a stub
+	// would, so a bundle gets none.
+	assert.False(t, f.exists(t, store.RemoteStubPath(zip)))
+	assert.True(t, f.exists(t, zip+seal.SidecarSuffix), "the sidecar is the bundle's trace")
+}
+
+func TestSyncArchiveStubFailureKeepsTheTarball(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t)
+
+	f.writeDone(t, tarball, []byte("tarball bytes"))
+
+	// A directory where the stub belongs makes the write fail the way a
+	// permission problem or a full disk would. The eviction must abort before
+	// the delete: releasing the only local copy while nothing local records
+	// where it went is exactly what the stub exists to prevent.
+	require.NoError(t, os.MkdirAll(f.store.AbsPath(store.RemoteStubPath(tarball)), 0o755))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Equal(t, 1, stats.Failed, "an eviction that cannot leave a trace counts against the run")
+	assert.Zero(t, stats.Evicted)
+	assert.True(t, f.exists(t, tarball), "the tarball stays local rather than becoming untraceable")
+}
+
+func TestSyncArchiveEvictionRewritesAStaleStub(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t)
+
+	data := []byte("tarball bytes")
+	f.writeDone(t, tarball, data)
+
+	// The state a crash between the stub write and the delete leaves behind: a
+	// stub, from an earlier attempt and describing other bytes, beside a
+	// tarball that is still local. The next sweep re-evicts and the stub must
+	// end up describing what was actually evicted.
+	_, err := f.store.WriteJSON(store.RemoteStubPath(tarball),
+		store.RemoteStub{Version: store.RemoteStubVersion, Size: 999, SHA256: "stale"})
+	require.NoError(t, err)
+
+	stats := f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+	require.Equal(t, 1, stats.Evicted)
+
+	stub := f.readStub(t, tarball)
+	assert.EqualValues(t, len(data), stub.Size)
+	assert.Equal(t, manifest.SignatureOf(data).Hash, stub.SHA256)
+}
+
+func TestSyncArchiveBackfillsAMissingStub(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t)
+
+	data := []byte("tarball bytes")
+	f.writeDone(t, tarball, data)
+
+	stats := f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+	require.Equal(t, 1, stats.Evicted)
+
+	// An archive whose tarball was evicted without a stub: it is remote-only
+	// and nothing local records it but the ledger.
+	require.NoError(t, os.Remove(f.store.AbsPath(store.RemoteStubPath(tarball))))
+
+	stats = f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed, "backfilling a stub is not an eviction or a fault")
+
+	stub := f.readStub(t, tarball)
+	assert.EqualValues(t, len(data), stub.Size, "the size comes from the ledger signature")
+	assert.Equal(t, manifest.SignatureOf(data).Hash, stub.SHA256)
+
+	_, ok := f.fake.Object(f.key(store.RemoteStubPath(tarball)))
+	assert.False(t, ok, "a backfilled stub is no more uploadable than a fresh one")
+
+	// Once every remote-only tarball has a stub the backfill is a no-op, not a
+	// rewrite: a sentinel planted here survives, so a converged archive is not
+	// churning its own files every sweep.
+	f.write(t, store.RemoteStubPath(tarball), []byte("sentinel"))
+
+	stats = f.env.SyncArchive(t.Context())
+	require.Zero(t, stats.Failed)
+
+	got, err := os.ReadFile(f.store.AbsPath(store.RemoteStubPath(tarball)))
+	require.NoError(t, err)
+	assert.Equal(t, "sentinel", string(got), "an existing stub is left alone")
+}
+
+func TestSyncArchiveBackfillFailureIsNotASweepFailure(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory mode this test makes the write fail with")
+	}
+
+	const tarball = "config-versions/cv-1.tar.gz"
+
+	f := newSyncFixture(t)
+
+	f.writeDone(t, tarball, []byte("tarball bytes"))
+
+	stats := f.env.SyncArchive(t.Context())
+	require.Equal(t, 1, stats.Evicted)
+
+	// A repair the sweep cannot make, unlike an eviction it cannot record, puts
+	// no bytes at risk: the mirror holds the tarball and the ledger still proves
+	// it, so only the listing stays short. The run must not exit incomplete over
+	// it.
+	//
+	// A read-only config-versions directory is what makes the write fail while
+	// the presence probe still answers: traversal survives, creation does not,
+	// so the backfill reaches its write and loses.
+	require.NoError(t, os.Remove(f.store.AbsPath(store.RemoteStubPath(tarball))))
+
+	dir := f.store.AbsPath(store.ConfigVersionsDirName)
+	require.NoError(t, os.Chmod(dir, 0o500))
+	t.Cleanup(func() {
+		require.NoError(t, os.Chmod(dir, 0o700))
+	})
+
+	stats = f.env.SyncArchive(t.Context())
+	assert.Zero(t, stats.Failed, "a read-model gap is not a custody failure")
+	assert.False(t, f.exists(t, store.RemoteStubPath(tarball)),
+		"the repair really was attempted and really did fail")
 }
 
 func TestSyncArchiveRefusesRottedTarball(t *testing.T) {

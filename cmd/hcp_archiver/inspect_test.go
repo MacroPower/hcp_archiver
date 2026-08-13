@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -318,6 +319,90 @@ func TestUnsealCmd_DryRunMatchesList(t *testing.T) {
 	assert.True(t, report.DryRun)
 	assert.Equal(t, wantFiles, report.Files, "dry-run totals match the listing")
 	assert.Equal(t, wantBytes, report.Bytes)
+}
+
+// evictMiniTarball leaves the stub of a configuration-version tarball evicted
+// to the remote store. The stub records the length of content, standing in
+// for bytes the archive no longer holds locally. It returns the tarball's
+// org-prefixed path.
+func evictMiniTarball(t *testing.T, root, content string) string {
+	t.Helper()
+
+	rel := "config-versions/cv-1.tar.gz"
+
+	writeMini(t, filepath.Join(root, "mini-org"), rel+".remote.json",
+		`{"version":1,"size":`+strconv.Itoa(len(content))+`,"sha256":""}`)
+
+	return "mini-org/" + rel
+}
+
+func TestListCmd_EvictedObjectsReadRemote(t *testing.T) {
+	t.Parallel()
+
+	// Both evictable surfaces render the same way: what a reader needs to know
+	// is that the bytes are not here, not which shape held them.
+	root := buildMiniArchive(t)
+	tarball := evictMiniTarball(t, root, "tarball bytes")
+	require.NoError(t, os.Remove(filepath.Join(root, "mini-org",
+		filepath.FromSlash(miniWs), "bundles", "logs.gen0001.zip")))
+
+	out, _, err := runCmd(t, "list", root)
+	require.NoError(t, err)
+
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		if strings.HasSuffix(line, tarball) || strings.HasSuffix(line, miniPlanPath) {
+			assert.Contains(t, line, "remote", "an evicted object reads remote: %s", line)
+		}
+	}
+
+	assert.Contains(t, out, tarball, "the evicted tarball is listed at all")
+	assert.NotContains(t, out, ".remote.json", "its stub is not")
+}
+
+func TestUnsealCmd_DryRunCountsRemoteOnlyObjects(t *testing.T) {
+	t.Parallel()
+
+	// The dry run predicts the run it plans. It cannot foresee every failure,
+	// but a remote-only object is one it can, so it counts it where the real
+	// run will and fails the same way.
+	root := buildMiniArchive(t)
+	evictMiniTarball(t, root, "tarball bytes")
+
+	listOut, _, err := runCmd(t, "list", root, "--json")
+	require.NoError(t, err)
+
+	wantEntries := len(strings.Split(strings.TrimSpace(listOut), "\n"))
+
+	out, _, err := runCmd(t, "unseal", root, "--dry-run", "--json")
+	require.ErrorIs(t, err, main.ErrUnsealIncomplete)
+
+	var report struct {
+		Files   int  `json:"files"`
+		Errored int  `json:"errored"`
+		DryRun  bool `json:"dryRun"`
+	}
+
+	require.NoError(t, json.Unmarshal([]byte(out), &report))
+	assert.True(t, report.DryRun)
+	assert.Equal(t, 1, report.Errored, "the evicted tarball cannot be recovered")
+	assert.Equal(t, wantEntries, report.Files+report.Errored,
+		"the plan still accounts for every listed object")
+
+	// The real run reaches the same verdict, by trying.
+	target := t.TempDir()
+
+	summary, _, err := runCmd(t, "unseal", root, "--target", target, "--json")
+	require.ErrorIs(t, err, main.ErrUnsealIncomplete)
+
+	require.NoError(t, json.Unmarshal([]byte(summary), &report))
+	assert.Equal(t, 1, report.Errored)
+
+	// The text summary says what a dry run can honestly say: nothing has been
+	// attempted, so nothing has errored yet.
+	text, _, err := runCmd(t, "unseal", root, "--dry-run")
+	require.ErrorIs(t, err, main.ErrUnsealIncomplete)
+	assert.Contains(t, text, "1 not recoverable")
+	assert.NotContains(t, text, "errored")
 }
 
 func TestUnsealCmd_DryRunText(t *testing.T) {
