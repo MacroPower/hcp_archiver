@@ -249,12 +249,12 @@ func (s *unsealProgressScreen) view() string {
 	} else {
 		fmt.Fprintf(&b, "%s unsealed %s: %s (%s) into %s\n",
 			theme.GlyphOK, s.label,
-			countNoun(s.summary.Files, "file", "files"),
+			theme.CountNoun(s.summary.Files, "file", "files"),
 			theme.HumanBytes(s.summary.Bytes), s.target)
 
 		if s.summary.Errored > 0 {
 			fmt.Fprintf(&b, "%s %s\n", theme.GlyphError,
-				countNoun(s.summary.Errored, "file errored", "files errored"))
+				theme.CountNoun(s.summary.Errored, "file errored", "files errored"))
 		}
 	}
 

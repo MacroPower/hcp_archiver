@@ -14,5 +14,7 @@
 // sealed one identically, and needs no network access and no ledger.
 //
 // [Browse] starts the browser; [OpenArchive] exposes the read layer on its
-// own.
+// own, and [Archive] layers org-prefixed addressing over it for logical
+// listing, single-object reads, and unsealing any scope back into loose
+// files.
 package view

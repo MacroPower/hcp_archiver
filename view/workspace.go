@@ -52,6 +52,7 @@ type sealedRef struct {
 	rollup string
 	bundle string
 	offset int64
+	size   int64
 }
 
 // rollupLine mirrors one roll-up record: the member's archive-relative path,
@@ -64,10 +65,11 @@ type rollupLine struct {
 }
 
 // sidecarLine mirrors one bundle sidecar record: the member's archive-relative
-// path and the bundle that holds it.
+// path, the bundle that holds it, and its content length.
 type sidecarLine struct {
 	Name   string `json:"name"`
 	Bundle string `json:"bundle"`
+	Size   int64  `json:"size"`
 }
 
 // Dir returns the workspace's archive-relative directory.
@@ -161,24 +163,56 @@ func (w *Workspace) Exists(relPath string) (bool, error) {
 }
 
 // sealedNames returns the archive-relative paths of the workspace's sealed
-// objects that sit under an archive-relative directory prefix.
+// objects strictly beneath an archive-relative directory prefix. A key equal
+// to the prefix itself (a corrupt record naming a directory) is dropped: the
+// callers derive child names from what follows the prefix.
 func (w *Workspace) sealedNames(dirPrefix string) ([]string, error) {
+	sealed, err := w.sealedUnder(dirPrefix)
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(sealed))
+
+	for _, se := range sealed {
+		if se.rel != dirPrefix {
+			names = append(names, se.rel)
+		}
+	}
+
+	return names, nil
+}
+
+// sealedEntry pairs one sealed object's archive-relative path with the
+// reference locating its bytes.
+type sealedEntry struct {
+	rel string
+	ref sealedRef
+}
+
+// sealedUnder returns the workspace's sealed objects at or beneath an
+// archive-relative path prefix. An empty prefix returns every sealed object.
+func (w *Workspace) sealedUnder(prefix string) ([]sealedEntry, error) {
 	idx, err := w.index()
 	if err != nil {
 		return nil, err
 	}
 
-	prefix := dirPrefix + "/"
+	var entries []sealedEntry
 
-	var names []string
-
-	for key := range idx {
-		if strings.HasPrefix(key, prefix) {
-			names = append(names, key)
+	for rel, ref := range idx {
+		if underPrefix(rel, prefix) {
+			entries = append(entries, sealedEntry{rel: rel, ref: ref})
 		}
 	}
 
-	return names, nil
+	return entries, nil
+}
+
+// underPrefix reports whether a slash-separated path sits at or beneath a
+// prefix, matching whole segments so "runs/run-1" never matches "runs/run-10".
+func underPrefix(p, prefix string) bool {
+	return prefix == "" || p == prefix || strings.HasPrefix(p, prefix+"/")
 }
 
 // index returns the workspace's sealed-object index, building it on first use
@@ -270,7 +304,7 @@ func indexRollupFile(file string, idx map[string]sealedRef) error {
 				continue
 			}
 
-			idx[rec.Path] = sealedRef{rollup: file, offset: offset}
+			idx[rec.Path] = sealedRef{rollup: file, offset: offset, size: int64(len(rec.Content))}
 			offset += int64(len(line))
 
 			continue
@@ -334,7 +368,7 @@ func indexSidecarFile(file, relBundles string, idx map[string]sealedRef) error {
 			// whole index; it simply fails to unmarshal and is skipped.
 			err = json.Unmarshal(line, &rec)
 			if err == nil {
-				idx[rec.Name] = sealedRef{bundle: path.Join(relBundles, rec.Bundle)}
+				idx[rec.Name] = sealedRef{bundle: path.Join(relBundles, rec.Bundle), size: rec.Size}
 			}
 
 			continue

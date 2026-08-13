@@ -26,15 +26,14 @@ func TestNewRootCmd(t *testing.T) {
 	assert.NotNil(t, cmd.Flags().Lookup("output"))
 	assert.NotNil(t, cmd.Flags().Lookup("progress"))
 
-	var found bool
-
+	registered := map[string]bool{}
 	for _, sub := range cmd.Commands() {
-		if sub.Name() == "version" {
-			found = true
-		}
+		registered[sub.Name()] = true
 	}
 
-	assert.True(t, found, "version subcommand is registered")
+	for _, name := range []string{"version", "view", "list", "show", "unseal"} {
+		assert.True(t, registered[name], "%s subcommand is registered", name)
+	}
 }
 
 func TestConfigFromArgs(t *testing.T) {

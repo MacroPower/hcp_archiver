@@ -7,6 +7,16 @@ import "fmt"
 // would only widen the column.
 const TimeLayout = "2006-01-02 15:04"
 
+// CountNoun renders "N singular" or "N plural", so a count reads the same on
+// every surface that reports one.
+func CountNoun(n int, singular, plural string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, singular)
+	}
+
+	return fmt.Sprintf("%d %s", n, plural)
+}
+
 // HumanBytes renders a byte count in binary (IEC) units to one decimal place,
 // so a size reads the same on every surface: the panel's byte and rate
 // readouts, the summary block, and the browser's list descriptions.

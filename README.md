@@ -159,6 +159,52 @@ in-tool read path; fetch one directly from its mirrored key
 (`<prefix>/<org>/config-versions/<id>.tar.gz`) with any client for the
 backing store.
 
+### Listing and unsealing files
+
+Three plain, scriptable commands cover the same read surface without an
+interactive session: `list` enumerates archived objects, `show` prints one
+object's exact bytes to stdout, and `unseal` extracts any scope back into a
+plain directory tree. All three read the physical forms transparently, so a
+freshly collected tree and a fully sealed one answer identically.
+
+Objects are addressed by org-prefixed archive paths (`<org>/<path>`), the same
+layout an unseal reproduces beneath its target, whether the command points at
+the archive root or a single organization's directory. Positional arguments
+bind left to right: with two arguments the first is the archive directory and
+the second the archive path; a single argument to `list` and `unseal` names
+the archive directory (pass `.` explicitly to address a path in the current
+directory), while a single argument to `show` is the archive path, read from
+the current directory.
+
+```bash
+hcp_archiver list ./archive                       # every object, every org
+hcp_archiver list ./archive my-org/projects       # any path prefix
+hcp_archiver show ./archive my-org/org.json       # exact bytes to stdout
+hcp_archiver unseal ./archive my-org --target ./restore
+```
+
+`list` prints one line per object (size, physical form, path), with sealed
+members labeled by the form that carries them and evicted bundle members
+shown as `remote` (reading those needs object-store credentials, like the
+browser's evicted-read path):
+
+```
+  142 B  loose   my-org/org.json
+   88 B  rollup  my-org/projects/default/workspaces/app/runs/run-new/config-version.json
+   17 B  bundle  my-org/projects/default/workspaces/app/runs/run-new/plan.log
+   12 B  remote  my-org/projects/default/workspaces/app/state-versions/20240101T000000Z-sv-1.tfstate.json
+```
+
+`--json` switches `list` to NDJSON (one object per line, with `path`, `org`,
+`form`, and `size` on every line, plus `container`, `modified`, and
+`offloaded` where they apply) and `unseal` to a JSON summary. `unseal
+--dry-run` reports what a run would write without writing; its totals always
+match `list` over the same prefix. `unseal -v` streams one line per recovered
+file to stderr, and per-file failures always land there. A run in which every
+object recovers exits 0; if any object fails, the failures are counted and
+reported and the command exits 1. An interrupted run reports its partial
+totals to stderr and exits 0.
+
 ### Mirroring the archive to object storage
 
 With a `remote:` block configured, the bucket converges on a **complete copy**

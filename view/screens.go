@@ -215,7 +215,7 @@ func newProjectsScreen(org *Org) (screen, error) {
 
 		rows = append(rows, item{
 			title: project,
-			desc:  countNoun(len(workspaces), "workspace", "workspaces"),
+			desc:  theme.CountNoun(len(workspaces), "workspace", "workspaces"),
 			open: func() (screen, error) {
 				return newWorkspacesScreen(org, project, workspaces)
 			},
@@ -373,14 +373,14 @@ func newWorkspaceScreen(ws *Workspace) (screen, error) {
 		},
 		{
 			title: "Runs",
-			desc:  countNoun(len(runIDs), "run", "runs"),
+			desc:  theme.CountNoun(len(runIDs), "run", "runs"),
 			open: func() (screen, error) {
 				return newRunsScreen(ws)
 			},
 		},
 		{
 			title: "States",
-			desc:  countNoun(len(stateNames), "state version", "state versions"),
+			desc:  theme.CountNoun(len(stateNames), "state version", "state versions"),
 			open: func() (screen, error) {
 				return newStatesScreen(ws)
 			},
@@ -827,15 +827,6 @@ func newFileViewer(org *Org, relPath string, ws *Workspace) (screen, error) {
 	}
 
 	return newViewerScreen(path.Base(relPath), string(data)), nil
-}
-
-// countNoun renders "N singular" or "N plural".
-func countNoun(n int, singular, plural string) string {
-	if n == 1 {
-		return fmt.Sprintf("%d %s", n, singular)
-	}
-
-	return fmt.Sprintf("%d %s", n, plural)
 }
 
 // firstLine returns the first line of s, truncated to a list-friendly width.

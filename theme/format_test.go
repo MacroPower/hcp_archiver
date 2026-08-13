@@ -9,6 +9,27 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/theme"
 )
 
+func TestCountNoun(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		want string
+		n    int
+	}{
+		"zero takes the plural":  {n: 0, want: "0 files"},
+		"one takes the singular": {n: 1, want: "1 file"},
+		"many take the plural":   {n: 42, want: "42 files"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, theme.CountNoun(tc.n, "file", "files"))
+		})
+	}
+}
+
 func TestHumanBytes(t *testing.T) {
 	t.Parallel()
 

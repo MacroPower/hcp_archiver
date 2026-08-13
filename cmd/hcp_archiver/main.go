@@ -199,6 +199,9 @@ func newRootCmd() *cobra.Command {
 
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newViewCmd())
+	cmd.AddCommand(newListCmd())
+	cmd.AddCommand(newShowCmd())
+	cmd.AddCommand(newUnsealCmd())
 
 	return cmd
 }
