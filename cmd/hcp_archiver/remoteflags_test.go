@@ -98,3 +98,20 @@ func TestResolveRemote_EnvironmentConfigPath(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, "s3://config-bucket?region=us-east-1", got.URL)
 }
+
+func TestResolveRemote_EnvironmentConfigPathMissingFile(t *testing.T) {
+	// The variable serves the archiver; a read-only command on a host without
+	// the file it names must keep working against a purely local archive.
+	t.Setenv(config.EnvConfigPath, "/nonexistent/hcp.yaml")
+
+	got, err := main.ResolveRemoteFromArgs(nil)
+	require.NoError(t, err)
+	assert.Nil(t, got, "an environment-named file absent on this host names no remote")
+}
+
+func TestResolveRemote_ExplicitConfigMissingFileRefuses(t *testing.T) {
+	t.Setenv(config.EnvConfigPath, "")
+
+	_, err := main.ResolveRemoteFromArgs([]string{"--config", "/nonexistent/hcp.yaml"})
+	require.Error(t, err, "an explicitly named file must exist")
+}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -79,14 +80,14 @@ type remoteFlags struct {
 // the [*remoteFlags] they write into.
 func registerRemoteFlags(cmd *cobra.Command) *remoteFlags {
 	rf := &remoteFlags{}
-	fs := cmd.Flags()
+	flags := cmd.Flags()
 
-	fs.StringVarP(&rf.configPath, flagConfig, "c", "",
+	flags.StringVarP(&rf.configPath, flagConfig, "c", "",
 		fmt.Sprintf("path to the YAML configuration file whose remote section names the mirror (defaults to $%s)",
 			config.EnvConfigPath))
-	fs.StringVar(&rf.url, flagRemote, "",
+	flags.StringVar(&rf.url, flagRemote, "",
 		"mirror bucket URL in gocloud.dev form (s3://, azblob://, file://); overrides the configuration file")
-	fs.StringVar(&rf.prefix, flagRemotePrefix, "",
+	flags.StringVar(&rf.prefix, flagRemotePrefix, "",
 		"key prefix the archive is mirrored under")
 
 	return rf
@@ -102,8 +103,11 @@ func (rf *remoteFlags) resolve() (*remote.Config, error) {
 	}
 
 	cfgPath := rf.configPath
+	fromEnv := false
+
 	if cfgPath == "" {
 		cfgPath = os.Getenv(config.EnvConfigPath)
+		fromEnv = cfgPath != ""
 	}
 
 	if cfgPath == "" {
@@ -115,6 +119,20 @@ func (rf *remoteFlags) resolve() (*remote.Config, error) {
 	}
 
 	file, err := config.LoadFile(cfgPath)
+
+	// An environment-named file that does not exist on this host names no
+	// remote: the variable serves the archiver, and a read-only command over
+	// a purely local archive must keep working on a machine without the file.
+	// An explicit --config, or a file that exists but will not parse, still
+	// refuses loudly.
+	if err != nil && fromEnv && errors.Is(err, fs.ErrNotExist) {
+		if rf.prefix != "" {
+			return nil, ErrPrefixNeedsRemote
+		}
+
+		return nil, nil //nolint:nilnil // Same local-only default as an unset variable.
+	}
+
 	if err != nil {
 		return nil, err //nolint:wrapcheck // Source-annotated configuration errors render as-is.
 	}
@@ -339,11 +357,11 @@ mirror, the one egress a dry run may cost.`,
 		return runUnsealCmd(ctx, cc, arc, prefix, target, verbose, jsonOut)
 	}
 
-	fs := cmd.Flags()
-	fs.StringVarP(&target, flagTarget, "t", "", "directory to write recovered files into")
-	fs.BoolVar(&dryRun, flagDryRun, false, "summarize what would be unsealed without writing")
-	fs.BoolVarP(&verbose, flagVerbose, "v", false, "stream one line per recovered file to stderr")
-	fs.BoolVar(&jsonOut, flagJSON, false, "emit the summary as JSON")
+	flags := cmd.Flags()
+	flags.StringVarP(&target, flagTarget, "t", "", "directory to write recovered files into")
+	flags.BoolVar(&dryRun, flagDryRun, false, "summarize what would be unsealed without writing")
+	flags.BoolVarP(&verbose, flagVerbose, "v", false, "stream one line per recovered file to stderr")
+	flags.BoolVar(&jsonOut, flagJSON, false, "emit the summary as JSON")
 
 	return cmd
 }
