@@ -196,6 +196,33 @@ func TestOrgList_MachineryNeverAppears(t *testing.T) {
 	}
 }
 
+func TestOrgList_WorkspaceNamedLikeMachinery(t *testing.T) {
+	t.Parallel()
+
+	// "bundles" and "rollups" are legal workspace and project display names.
+	// The machinery filter matches those directories positionally, so a
+	// workspace (or project) carrying one of the names keeps its content
+	// listed and unsealable rather than silently vanishing.
+	root := buildArchive(t)
+	org := filepath.Join(root, "my-org")
+
+	writeFile(t, org, "projects/default/workspaces/bundles/workspace.json",
+		`{"data":{"id":"ws-b","type":"workspaces","attributes":{"name":"bundles"}}}`)
+	writeFile(t, org, "projects/default/workspaces/rollups/variables.json", `{"data":[]}`)
+	writeFile(t, org, "projects/rollups/workspaces/w1/workspace.json",
+		`{"data":{"id":"ws-r","type":"workspaces","attributes":{"name":"w1"}}}`)
+
+	o := openOrg(t, root)
+
+	entries, err := o.List("")
+	require.NoError(t, err)
+
+	paths := entryPaths(entries)
+	assert.Contains(t, paths, "projects/default/workspaces/bundles/workspace.json")
+	assert.Contains(t, paths, "projects/default/workspaces/rollups/variables.json")
+	assert.Contains(t, paths, "projects/rollups/workspaces/w1/workspace.json")
+}
+
 func TestOrgList_EvictedTarball(t *testing.T) {
 	t.Parallel()
 

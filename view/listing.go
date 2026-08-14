@@ -675,11 +675,17 @@ func (o *Org) rootStub(relDir string) []string {
 
 // isMachinery reports whether a slash-separated archive-relative path names
 // the archive's own machinery rather than archived content: anything inside a
-// sealed-form directory ([store.BundlesDirName], [store.RollupsDirName]), a
+// workspace's sealed-form directory ([store.InSealedForm]), a
 // [manifest.LedgerDirName] bookkeeping directory, the org-root remote marker,
 // a directory's [store.IdentityFileName] sidecar, or an atomic writer's
 // staging leftover. Listings hide machinery and unseals skip it; [*Org.Read]
 // deliberately does not filter on it.
+//
+// The sealed-form match is positional: only the bundles/ and rollups/
+// directories sitting directly under a workspace level count, so a project or
+// workspace whose own display name is "bundles" or "rollups" keeps its
+// content listed. The ledger directory needs no such care, since its leading
+// dot cannot appear in an upstream display name; it is matched at any depth.
 //
 // The identity sidecar sits beside archived objects rather than in a
 // directory of its own, so it is matched by name at any depth: the collector
@@ -692,9 +698,12 @@ func (o *Org) rootStub(relDir string) []string {
 // does not merely disappear: it becomes the entry for the object it stands in
 // for.
 func isMachinery(rel string) bool {
+	if store.InSealedForm(rel) {
+		return true
+	}
+
 	for seg := range strings.SplitSeq(rel, "/") {
-		switch seg {
-		case store.BundlesDirName, store.RollupsDirName, manifest.LedgerDirName:
+		if seg == manifest.LedgerDirName {
 			return true
 		}
 	}
