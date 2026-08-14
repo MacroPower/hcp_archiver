@@ -1317,10 +1317,10 @@ func TestSyncArchivePruneAllowsMassReshape(t *testing.T) {
 	f.resume()
 
 	// The tool's own self-heal produces a mass re-shape: an interrupted run
-	// mirrored hundreds of loose run files, the next run sealed them all into
-	// roll-ups and bundles. The ledger still holds every entry — the archive
-	// owns the objects; only their loose remote copies are stale — so the
-	// disproportion guard must not mistake the re-shape for loss, or the
+	// mirrored hundreds of loose run files, the next run coalesced them all
+	// into the workspace's roll-up. The ledger holds every entry and the
+	// coalesced form sits in the workspace where the loose sources used to be,
+	// so the disproportion guard must not mistake the re-shape for loss, or the
 	// refusal would repeat every run forever on a healthy archive.
 	for i := range 150 {
 		relPath := fmt.Sprintf("projects/p/workspaces/w/runs/run-%03d/run.json", i)
@@ -1328,12 +1328,104 @@ func TestSyncArchivePruneAllowsMassReshape(t *testing.T) {
 		f.ledger.RecordDone(relPath, manifest.SignatureOf([]byte("loose copy")))
 	}
 
+	f.write(t, "projects/p/workspaces/w/rollups/runs.ndjson", []byte(`{"path":"runs/run-000/run.json"}`))
 	f.write(t, "org.json", []byte(`{"org":"acme"}`))
 
 	stats := f.env.SyncArchive(t.Context())
 
 	assert.Equal(t, 150, stats.Pruned,
-		"ledger-known stale keys are re-shape artifacts and prune freely at any scale")
+		"a seal's own artifacts explain the stale keys, which prune at any scale")
+	assert.Zero(t, stats.Failed)
+}
+
+func TestSyncArchivePruneRefusesMassLossUnderASurvivingLedger(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	// A partial restore brought the ledger back but not the data files it
+	// describes. Every mirrored key is now ledger-known and locally absent,
+	// which the ledger alone cannot tell from a re-shape -- but nothing local
+	// says a seal ever moved them: the workspace holds no bundle and no
+	// roll-up. The mirror is the only copy of the search layer at this point,
+	// so the sweep must refuse rather than delete it and let the run report a
+	// complete mirror over the hole.
+	for i := range 150 {
+		relPath := fmt.Sprintf("projects/p/workspaces/w/runs/run-%03d/run.json", i)
+		f.fake.SetObject(f.key(relPath), remotetest.Object{Data: []byte("only copy")})
+		f.ledger.RecordDone(relPath, manifest.SignatureOf([]byte("only copy")))
+	}
+
+	f.write(t, "org.json", []byte(`{"org":"acme"}`))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Pruned)
+	assert.Empty(t, f.fake.Deleted())
+	assert.Equal(t, 1, stats.Failed, "a refused prune must mark the run incomplete")
+
+	for i := range 150 {
+		_, present := f.fake.Object(f.key(fmt.Sprintf("projects/p/workspaces/w/runs/run-%03d/run.json", i)))
+		require.True(t, present, "the mirror's only copies survive the refusal")
+	}
+}
+
+func TestSyncArchivePruneRefusalIsScopedToTheUnbackedWorkspace(t *testing.T) {
+	t.Parallel()
+
+	const sealed = "projects/p/workspaces/sealed/runs/run-1/run.json"
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	// One workspace sealed its runs away and another lost its files with its
+	// ledger entries intact. The refusal covers the unbacked keys only: the
+	// sealed workspace's stale loose copy still prunes, so a mass loss in one
+	// corner of the archive does not freeze the mirror's convergence
+	// everywhere else.
+	f.fake.SetObject(f.key(sealed), remotetest.Object{Data: []byte("loose copy")})
+	f.ledger.RecordDone(sealed, manifest.SignatureOf([]byte("loose copy")))
+	f.write(t, "projects/p/workspaces/sealed/rollups/runs.ndjson", []byte(`{"path":"x"}`))
+
+	for i := range 150 {
+		relPath := fmt.Sprintf("projects/p/workspaces/lost/runs/run-%03d/run.json", i)
+		f.fake.SetObject(f.key(relPath), remotetest.Object{Data: []byte("only copy")})
+		f.ledger.RecordDone(relPath, manifest.SignatureOf([]byte("only copy")))
+	}
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Equal(t, 1, stats.Pruned)
+	assert.Equal(t, []string{f.key(sealed)}, f.fake.Deleted())
+	assert.Equal(t, 1, stats.Failed, "a refused prune must mark the run incomplete")
+}
+
+func TestSyncArchivePrunesUnderARenameAlias(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	// An operator moved a workspace subtree and left a rename symlink behind:
+	// the walk declines the alias and reports every file under the owner's
+	// name, so the mirror's alias-named keys are stale in bulk. The walk's own
+	// alias pairs explain them -- the bytes are local, spelled differently --
+	// so the disproportion guard must not read the rename as loss.
+	f.writeDone(t, "projects/prod/workspaces/api/workspace.json", []byte(`{"ws":"api"}`))
+
+	wsDir := filepath.Join(f.store.Root(), "projects", "prod", "workspaces")
+	require.NoError(t, os.Symlink(filepath.Join(wsDir, "api"), filepath.Join(wsDir, "renamed")))
+
+	for i := range 150 {
+		relPath := fmt.Sprintf("projects/prod/workspaces/renamed/runs/run-%03d/run.json", i)
+		f.fake.SetObject(f.key(relPath), remotetest.Object{Data: []byte("old name")})
+		f.ledger.RecordDone(relPath, manifest.SignatureOf([]byte("old name")))
+	}
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Equal(t, 150, stats.Pruned, "a rename alias explains its stale keys at any scale")
 	assert.Zero(t, stats.Failed)
 }
 

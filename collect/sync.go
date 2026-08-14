@@ -1009,15 +1009,55 @@ func (e *Env) listInventory(
 // treeSweep is one classification pass over the archive tree: the files to
 // evict, the files to sync, the remote key of every file the mirror must not
 // prune, the evicted bundles whose remote presence the sweep must verify,
+// the workspace subtrees whose sealed-form machinery the walk still sees,
 // and the rename-alias prefix pairs the walk declined to follow, which the
 // verification uses to credit an only-copy uploaded under a pre-rename name.
 type treeSweep struct {
 	keep        map[string]struct{}
+	sealed      map[string]struct{}
 	aliases     map[string]string
 	evict       []string
 	sync        []string
 	suspect     []string
 	evictedZips []string
+}
+
+// markSealed records the workspace owning relPath as one whose seal machinery
+// is still on disk, the local evidence [Env.pruneRemote] reads as a re-shape.
+func (s *treeSweep) markSealed(relPath string) {
+	if ws, ok := workspacePrefix(relPath); ok {
+		s.sealed[ws] = struct{}{}
+	}
+}
+
+// reshaped reports whether the walk found local evidence that the archive
+// itself moved the object at relPath out of its loose form, rather than the
+// file being lost from under a surviving ledger entry:
+//
+//   - its workspace still holds sealed-form files (a bundle, a sidecar a
+//     finished eviction left behind, a roll-up). A seal writes the coalesced
+//     form and only then removes its loose sources, all within the one
+//     workspace subtree, so that machinery is what a re-shape leaves and what
+//     a lost subtree cannot fake.
+//   - it lives under a rename alias the walk declined to follow, so its
+//     subtree walked under the owner's name instead: the bytes are local,
+//     spelled differently.
+//
+// Everything else is unbacked, whatever the ledger remembers about it.
+func (s *treeSweep) reshaped(relPath string) bool {
+	if ws, ok := workspacePrefix(relPath); ok {
+		if _, sealed := s.sealed[ws]; sealed {
+			return true
+		}
+	}
+
+	for alias := range s.aliases {
+		if strings.HasPrefix(relPath, alias+"/") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // classifyTree walks the store root and sorts every regular file into the
@@ -1030,11 +1070,22 @@ type treeSweep struct {
 // A bundle sidecar whose zip is no longer beside it is the local record of a
 // finished eviction — the zip's only copy is the store — so the walk also
 // collects those zips' paths for the sweep's remote-presence verification.
+//
+// Every sealed-form file also marks its workspace as one a seal has re-shaped
+// (see [treeSweep.reshaped]), which is what lets the prune tell a loose key a
+// seal superseded from one whose local file was lost.
 func (e *Env) classifyTree(ctx context.Context, counters *syncCounters) (*treeSweep, error) {
-	sweep := &treeSweep{keep: make(map[string]struct{})}
+	sweep := &treeSweep{
+		keep:   make(map[string]struct{}),
+		sealed: make(map[string]struct{}),
+	}
 
 	aliases, err := e.walkEligible(ctx, "", func(relPath string) error {
 		sweep.keep[e.RemoteKey(relPath)] = struct{}{}
+
+		if store.InSealedForm(relPath) {
+			sweep.markSealed(relPath)
+		}
 
 		if isBundleSidecar(relPath) {
 			e.recordEvictedZip(ctx, sweep, relPath, counters)
@@ -1321,11 +1372,28 @@ func RecordOnlyLedgerPrefixes() []string {
 // subtree (projects/<project>/workspaces/<workspace>/...), the scope whose
 // mirror converges at the workspace's seal boundary rather than as written.
 func underWorkspaceSubtree(relPath string) bool {
-	const minSegments = 5 // projects/<p>/workspaces/<ws>/<file>
+	_, ok := workspacePrefix(relPath)
+
+	return ok
+}
+
+// workspacePrefix returns the archive-relative prefix of the workspace subtree
+// holding relPath (projects/<project>/workspaces/<workspace>), reporting false
+// for a path that lives outside any workspace. It is the seal's scope: a seal
+// writes its bundles and roll-ups into the same workspace whose loose sources
+// it removes, so the prefix is the unit local re-shape evidence is grouped by.
+func workspacePrefix(relPath string) (string, bool) {
+	const (
+		minSegments  = 5 // projects/<p>/workspaces/<ws>/<file>
+		prefixLength = 4
+	)
 
 	segs := strings.Split(relPath, "/")
+	if len(segs) < minSegments || segs[0] != "projects" || segs[2] != "workspaces" {
+		return "", false
+	}
 
-	return len(segs) >= minSegments && segs[0] == "projects" && segs[2] == "workspaces"
+	return strings.Join(segs[:prefixLength], "/"), true
 }
 
 // eagerScope reports whether a freshly committed file syncs to the remote the
@@ -1709,22 +1777,29 @@ const pruneGuardFloor = 100
 //
 //   - a run whose ledger opened empty against a non-empty inventory is a
 //     fresh or wrong --output pointed at an existing mirror; restore the
-//     prefix (ledger included) before re-rooting an archive, or the
-//     mirror-only history would be deleted wholesale. This refuses the
-//     whole prune.
-//   - a delete set of **ledger-unknown** keys past [pruneGuardFloor] that
+//     whole prefix, data files and ledger together, before re-rooting an
+//     archive, or the mirror-only history would be deleted wholesale. This
+//     refuses the whole prune.
+//   - a delete set of **unbacked** keys past [pruneGuardFloor] that
 //     outnumbers the keys the walk matched means most of the mirror has no
 //     local trace at all — loss, or a deliberate mass deletion that must be
-//     an explicit act. This refuses only the unknown keys.
+//     an explicit act. This refuses only the unbacked keys.
 //
-// Provenance splits the stale set for that second guard: a key whose
-// relpath the ledger still holds an entry for is a re-shape artifact, not a
-// loss — the archive still owns the object; its loose remote copy went
-// stale because a seal coalesced or bundled it (the tool's own self-heal
-// after an interrupted run produces thousands of these at once) — so known
-// keys prune freely at any scale, and only keys the ledger has never heard
-// of (a deleted or lost subtree took its shard too) face the disproportion
-// test.
+// Provenance splits the stale set for that second guard, and clearing it
+// takes both halves: a ledger entry for the key's relpath (the archive did
+// own the object) and local evidence that the archive re-shaped it rather
+// than lost it (see [treeSweep.reshaped]), which is its workspace's seal
+// machinery still on disk, or a rename alias spelling its subtree under
+// another name. Such a key is a re-shape artifact whose loose remote copy a
+// seal superseded, and the tool's own self-heal after an interrupted run
+// produces thousands at once, so they prune freely at any scale.
+//
+// The ledger entry alone proves nothing. A ledger restored ahead of the data
+// files it describes (the very order the refusal above asks for) leaves every
+// key ledger-known and locally absent, which is the mass loss these guards
+// exist to catch. So a key the ledger remembers but nothing local explains
+// faces the disproportion test alongside the keys the ledger never heard of
+// (a deleted or lost subtree took its shard too).
 func (e *Env) pruneRemote(
 	ctx context.Context,
 	orgPrefix string,
@@ -1733,9 +1808,9 @@ func (e *Env) pruneRemote(
 	counters *syncCounters,
 ) {
 	var (
-		staleKnown   []string
-		staleUnknown []string
-		matched      int
+		staleReshaped []string
+		staleUnbacked []string
+		matched       int
 	)
 
 	for key := range inventory {
@@ -1772,45 +1847,47 @@ func (e *Env) pruneRemote(
 			continue
 		}
 
-		if _, known := e.ledger.Entry(relPath); known {
-			staleKnown = append(staleKnown, key)
+		if _, known := e.ledger.Entry(relPath); known && sweep.reshaped(relPath) {
+			staleReshaped = append(staleReshaped, key)
 		} else {
-			staleUnknown = append(staleUnknown, key)
+			staleUnbacked = append(staleUnbacked, key)
 		}
 	}
 
-	if len(staleKnown)+len(staleUnknown) == 0 {
+	if len(staleReshaped)+len(staleUnbacked) == 0 {
 		return
 	}
 
 	if !e.ledger.Tally().Resumed {
 		e.logger.LogAttrs(ctx, slog.LevelError, "sync_prune_refused",
-			slog.Int("keys", len(staleKnown)+len(staleUnknown)),
+			slog.Int("keys", len(staleReshaped)+len(staleUnbacked)),
 			slog.String("detail", "this run opened an empty ledger against a non-empty mirror; "+
-				"a fresh --output must not prune an existing mirror's history — restore the "+
-				"remote prefix locally (ledger included) before re-rooting the archive"),
+				"a fresh --output must not prune an existing mirror's history. Restore the whole "+
+				"remote prefix locally, data files and ledger together, before re-rooting the "+
+				"archive"),
 		)
 		counters.failed.Add(1)
 
 		return
 	}
 
-	stale := staleKnown
+	stale := staleReshaped
 
 	switch {
-	case len(staleUnknown) > pruneGuardFloor && len(staleUnknown) > matched:
+	case len(staleUnbacked) > pruneGuardFloor && len(staleUnbacked) > matched:
 		e.logger.LogAttrs(ctx, slog.LevelError, "sync_prune_refused",
-			slog.Int("keys", len(staleUnknown)),
+			slog.Int("keys", len(staleUnbacked)),
 			slog.Int("matched", matched),
-			slog.String("detail", "most of the mirror has no local trace (not even a ledger entry); "+
-				"refusing a mass deletion — if the local tree is incomplete, restore it from the "+
-				"remote prefix; if this is a deliberate mass deletion, remove the keys from the "+
+			slog.String("detail", "most of the mirror has no local file backing it, and no seal or "+
+				"rename explains where those files went; refusing a mass deletion. If the local "+
+				"tree is incomplete, restore it from the remote prefix (the data files, not the "+
+				"ledger alone); if this is a deliberate mass deletion, remove the keys from the "+
 				"bucket by hand"),
 		)
 		counters.failed.Add(1)
 
 	default:
-		stale = append(stale, staleUnknown...)
+		stale = append(stale, staleUnbacked...)
 	}
 
 	if len(stale) == 0 {
