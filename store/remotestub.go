@@ -75,19 +75,23 @@ func IsConfigTarball(relPath string) bool {
 }
 
 // IsBundleZip reports whether an archive-relative path names a sealed bundle
-// zip: a .zip beneath a [BundlesDirName] segment. It is the other eviction
-// surface, the one whose sidecar index survives beside it, so its members
-// stay readable through ranged requests without the zip ever coming back.
+// zip: a .zip directly inside a workspace's [BundlesDirName] directory, the
+// one place the collector writes them. It is the other eviction surface, the
+// one whose sidecar index survives beside it, so its members stay readable
+// through ranged requests without the zip ever coming back.
+//
+// The match is positional, like [InSealedForm]: a .zip elsewhere in the tree
+// (including under a workspace whose own name is "bundles") is an ordinary
+// archived object, not an eviction surface.
 func IsBundleZip(relPath string) bool {
+	const zipIdx = 5 // projects/<project>/workspaces/<workspace>/bundles/<zip>
+
 	if !strings.HasSuffix(relPath, ".zip") {
 		return false
 	}
 
-	for seg := range strings.SplitSeq(relPath, "/") {
-		if seg == BundlesDirName {
-			return true
-		}
-	}
+	segs := strings.Split(relPath, "/")
 
-	return false
+	return len(segs) == zipIdx+1 && segs[0] == "projects" && segs[2] == "workspaces" &&
+		segs[zipIdx-1] == BundlesDirName
 }

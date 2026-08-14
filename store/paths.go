@@ -35,6 +35,21 @@ const (
 	IdentityFileName = ".identity.json"
 )
 
+// InSealedForm reports whether an archive-relative path lies in a workspace's
+// sealed-form machinery: the [BundlesDirName] or [RollupsDirName] directory
+// sitting directly under a workspace level
+// (projects/<project>/workspaces/<workspace>/). The match is positional rather
+// than by segment name alone, so a project or workspace whose own display name
+// collides with the directory names is never mistaken for machinery.
+func InSealedForm(relPath string) bool {
+	const sealedIdx = 4 // projects/<project>/workspaces/<workspace>/<sealed>
+
+	segs := strings.Split(relPath, "/")
+
+	return len(segs) > sealedIdx && segs[0] == "projects" && segs[2] == "workspaces" &&
+		(segs[sealedIdx] == BundlesDirName || segs[sealedIdx] == RollupsDirName)
+}
+
 // Join composes archive-relative segments into a single clean forward-slash
 // path, confining the result to the root so no ".." can escape.
 //

@@ -70,3 +70,82 @@ func TestIsConfigTarball(t *testing.T) {
 	assert.False(t, store.IsConfigTarball("projects/p1/cv-1.tar.gz"),
 		"only the org-wide directory holds configuration-version tarballs")
 }
+
+func TestIsBundleZip(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		relPath string
+		want    bool
+	}{
+		"a zip directly under a workspace's bundles directory": {
+			relPath: "projects/p1/workspaces/w1/bundles/runs.gen0001.zip",
+			want:    true,
+		},
+		"a non-zip in the bundles directory": {
+			relPath: "projects/p1/workspaces/w1/bundles/runs.gen0001.zip.ndjson",
+		},
+		"a zip in a workspace named bundles": {
+			relPath: "projects/p1/workspaces/bundles/runs/run-1/artifact.zip",
+		},
+		"a zip at a workspace root named bundles": {
+			relPath: "projects/p1/workspaces/bundles/artifact.zip",
+		},
+		"a zip nested below the bundles directory": {
+			relPath: "projects/p1/workspaces/w1/bundles/deep/runs.gen0001.zip",
+		},
+		"a zip outside any workspace": {
+			relPath: "bundles/runs.gen0001.zip",
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, store.IsBundleZip(tt.relPath))
+		})
+	}
+}
+
+func TestInSealedForm(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		relPath string
+		want    bool
+	}{
+		"a file in a workspace's bundles directory": {
+			relPath: "projects/p1/workspaces/w1/bundles/runs.gen0001.zip",
+			want:    true,
+		},
+		"a file in a workspace's rollups directory": {
+			relPath: "projects/p1/workspaces/w1/rollups/runs.ndjson",
+			want:    true,
+		},
+		"the bundles directory itself": {
+			relPath: "projects/p1/workspaces/w1/bundles",
+			want:    true,
+		},
+		"an object in a workspace named bundles": {
+			relPath: "projects/p1/workspaces/bundles/variables.json",
+		},
+		"an object in a workspace named rollups": {
+			relPath: "projects/p1/workspaces/rollups/workspace.json",
+		},
+		"an object in a project named rollups": {
+			relPath: "projects/rollups/workspaces/w1/workspace.json",
+		},
+		"an org-level path naming bundles": {
+			relPath: "bundles/notes.json",
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, store.InSealedForm(tt.relPath))
+		})
+	}
+}

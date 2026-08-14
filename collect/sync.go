@@ -1273,10 +1273,11 @@ func (e *Env) classifyTarball(ctx context.Context, relPath string) syncAction {
 	return actionSuspect
 }
 
-// isBundleZip reports a sealed-bundle zip: a .zip directly under a bundles/
-// directory.
+// isBundleZip reports a sealed-bundle zip. The shape is owned by
+// [store.IsBundleZip], which the read side keys its fetch eligibility on, so
+// the sweep and the readers cannot disagree about what a bundle zip is.
 func isBundleZip(relPath string) bool {
-	return strings.HasSuffix(relPath, ".zip") && path.Base(path.Dir(relPath)) == store.BundlesDirName
+	return store.IsBundleZip(relPath)
 }
 
 // isBundleSidecar reports a sealed bundle's sidecar index: the sidecar
