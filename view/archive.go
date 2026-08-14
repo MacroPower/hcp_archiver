@@ -478,9 +478,20 @@ func remoteOrg(
 // mutation a read-only command has no business making. The current session
 // still reads through either way, since the seeded remote is merged
 // regardless of what the marker records.
+//
+// Absence is the only stat outcome that stands in for "not yet materialized":
+// any other fault reading that org.json (a permission or I/O fault, a symlink
+// cycle) refuses the open, since proceeding would skip both the fetch and the
+// marker write and still report the organization as established.
 func materializeOrgRoot(rem *orgRemote, root string, cfg remote.Config, marker remote.Marker, hasMarker bool) error {
-	_, statErr := os.Stat(filepath.Join(root, orgFile))
+	orgPath := filepath.Join(root, orgFile)
+
+	_, statErr := os.Stat(orgPath)
+
 	orgAbsent := errors.Is(statErr, fs.ErrNotExist)
+	if statErr != nil && !orgAbsent {
+		return fmt.Errorf("stat %q: %w", orgPath, statErr)
+	}
 
 	if orgAbsent {
 		err := rem.ensureLocal(root, orgFile)
