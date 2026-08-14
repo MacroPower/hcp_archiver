@@ -13,7 +13,9 @@
 // and its byte-slice and streaming forms) stages, flushes, and renames as
 // above. Append-only durable records ([Append]) commit each record on a newline
 // boundary and drop any torn trailing fragment a crash leaves past it, in place
-// and without a rename. The on-disk object tree rides the first; the durable run
+// and without a rename; because that happens in place rather than behind a
+// rename, appending to one path is a single-writer operation the caller
+// serializes. The on-disk object tree rides the first; the durable run
 // ledger uses both, taking the rename path for its compacted snapshot and the
 // append path for the log beside it, so neither reimplements these. Keeping this
 // a standalone leaf means the ledger can obtain crash-safety without depending

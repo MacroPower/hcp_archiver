@@ -219,67 +219,69 @@ func stage(f *os.File, tmpName, name string, mode fs.FileMode, fn func(io.Writer
 //
 // Any missing parent directory of name is created with the directory mode (see
 // [WithDirMode]), and every directory created for it is flushed, so a first
-// append into a fresh subtree is durable; a created file takes the file mode
-// (see [WithFileMode]).
+// append into a fresh subtree is durable; a file with no records yet takes the
+// file mode (see [WithFileMode]), while one that already holds records keeps the
+// mode it was given then.
+//
+// Append is single-writer per path: it reads the file's tail, trims it, and
+// writes at the resulting boundary without holding any lock, so two appends
+// running at once against one name interleave that read-modify-write and can
+// overwrite each other's records. A caller appending from several goroutines, or
+// from several processes, serializes the calls itself. Nothing Append does on an
+// error path unlinks or truncates a committed record, so a violation of this
+// contract costs interleaved writes, never the destruction of a batch already
+// reported durable.
 func Append(name string, data []byte, opts ...Option) (int64, error) {
+	return appendSync(name, data, syncDir, opts...)
+}
+
+// appendSync is [Append] with the directory-sync function injected, so a test
+// can fail the flush that guards a first append and observe what the target is
+// left holding. Every directory flush the append makes, including the ones for
+// directories it creates, goes through sync.
+func appendSync(name string, data []byte, sync func(string) error, opts ...Option) (int64, error) {
 	cfg := resolveConfig(opts...)
 
 	dir := filepath.Dir(name)
 
-	err := mkdirAllSynced(dir, cfg.dirMode)
+	err := mkdirAllSync(dir, cfg.dirMode, sync)
 	if err != nil {
 		return 0, err
 	}
 
-	// Open exclusively first to learn whether this call creates the file, which
-	// decides both whether the mode needs enforcing and whether the parent
-	// directory needs syncing below.
-	created := true
-
 	//nolint:gosec // The append target is chosen by the caller by design.
-	f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, cfg.fileMode)
-	if errors.Is(err, fs.ErrExist) {
-		created = false
-
-		//nolint:gosec // The append target is chosen by the caller by design.
-		f, err = os.OpenFile(name, os.O_RDWR, cfg.fileMode)
-	}
-
+	f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE, cfg.fileMode)
 	if err != nil {
 		return 0, fmt.Errorf("open append target %q: %w", name, err)
 	}
 
-	// A freshly created file is masked by umask on open, so chmod it to land
-	// exactly the requested mode, matching Write; an existing target keeps the
-	// mode it was first created with. Its new directory entry is then flushed
-	// before any data is written, because a later append that finds the file
-	// already present skips the directory sync below, trusting that the creating
-	// append made the entry durable here. Syncing only after a successful data
-	// write would break that trust: a creating append that failed before the
-	// sync would leave an entry that no later append ever flushes. So on a
-	// setup failure the empty file is removed, forcing a retry back onto the
-	// creating path that re-runs this sync rather than the existing-file path
-	// that skips it. A plain append changes only the file's own data, already
-	// flushed by appendCommitted, so it needs no directory sync at all.
-	if created {
-		err = f.Chmod(cfg.fileMode)
+	size, err := fileSize(f, name)
+	if err != nil {
+		f.Close() //nolint:errcheck,gosec // Best-effort close on the stat-failure path.
+
+		return 0, err
+	}
+
+	// An empty target holds no committed record, so it is still in the state a
+	// first append leaves behind, whether this call created it or an earlier
+	// attempt did, and it needs that first append's setup run over it. Keying the
+	// setup on emptiness rather than on which call won the create is what makes it
+	// repeatable, and that is what lets the failure path below leave the file
+	// alone: an attempt that dies before the flush leaves an empty file the next
+	// append re-initializes on its own, so nothing has to be unlinked to force a
+	// retry back onto this path. Unlinking would be the destructive choice, since
+	// under a violated single-writer contract the target may already hold another
+	// writer's committed, success-reported records.
+	if size == 0 {
+		err = initRecordFile(f, name, dir, cfg.fileMode, sync)
 		if err != nil {
-			f.Close()       //nolint:errcheck,gosec // Best-effort close on the chmod-failure path.
-			os.Remove(name) //nolint:errcheck,gosec // Best-effort drop so a retry re-creates and re-syncs it.
+			f.Close() //nolint:errcheck,gosec // Best-effort close on the setup-failure path.
 
-			return 0, fmt.Errorf("chmod append target %q: %w", name, err)
-		}
-
-		err = syncDir(dir)
-		if err != nil {
-			f.Close()       //nolint:errcheck,gosec // Best-effort close on the sync-failure path.
-			os.Remove(name) //nolint:errcheck,gosec // Best-effort drop so a retry re-creates and re-syncs it.
-
-			return 0, fmt.Errorf("sync parent directory %q: %w", dir, err)
+			return 0, err
 		}
 	}
 
-	start, err := appendCommitted(f, data)
+	start, err := appendCommitted(f, size, data)
 	if err != nil {
 		return 0, err
 	}
@@ -287,11 +289,45 @@ func Append(name string, data []byte, opts ...Option) (int64, error) {
 	return start, nil
 }
 
-// appendCommitted trims any torn trailing fragment from f, writes data at the
-// resulting record boundary, and flushes it, returning the offset the write
-// began at. It closes f on every path, mirroring [stage].
-func appendCommitted(f *os.File, data []byte) (int64, error) {
-	start, opErr := lastRecordBoundary(f)
+// initRecordFile runs the setup an append-only file needs before its first
+// record lands: the mode a create masked by umask is enforced, matching [Write],
+// and the file's directory entry is flushed while the file is still empty.
+//
+// The flush has to happen here rather than after the data is written, because an
+// append that finds records already present skips it, trusting the entry to have
+// been made durable before those records existed. Flushing only on the way out
+// would break that trust, leaving an entry no later append ever flushes. A file
+// that already holds records needs neither step: its data is flushed by
+// [appendCommitted] and its entry was flushed the first time through here.
+func initRecordFile(f *os.File, name, dir string, mode fs.FileMode, sync func(string) error) error {
+	err := f.Chmod(mode)
+	if err != nil {
+		return fmt.Errorf("chmod append target %q: %w", name, err)
+	}
+
+	err = sync(dir)
+	if err != nil {
+		return fmt.Errorf("sync parent directory %q: %w", dir, err)
+	}
+
+	return nil
+}
+
+// fileSize returns the current length of f, open at name.
+func fileSize(f *os.File, name string) (int64, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat append target %q: %w", name, err)
+	}
+
+	return info.Size(), nil
+}
+
+// appendCommitted trims any torn trailing fragment from the size-byte file f,
+// writes data at the resulting record boundary, and flushes it, returning the
+// offset the write began at. It closes f on every path, mirroring [stage].
+func appendCommitted(f *os.File, size int64, data []byte) (int64, error) {
+	start, opErr := lastRecordBoundary(f, size)
 	if opErr == nil {
 		opErr = f.Truncate(start)
 	}
@@ -316,18 +352,14 @@ func appendCommitted(f *os.File, data []byte) (int64, error) {
 	return start, nil
 }
 
-// lastRecordBoundary returns the offset just past f's final newline, the end of
-// its last committed record. It scans backward from the end so a large log costs
-// one read rather than a whole-file scan; a file with no newline yields 0.
-func lastRecordBoundary(f *os.File) (int64, error) {
-	info, err := f.Stat()
-	if err != nil {
-		return 0, fmt.Errorf("stat append target: %w", err)
-	}
-
+// lastRecordBoundary returns the offset just past the final newline in the
+// size-byte file f, the end of its last committed record. It scans backward from
+// the end so a large log costs one read rather than a whole-file scan; a file
+// with no newline yields 0.
+func lastRecordBoundary(f *os.File, size int64) (int64, error) {
 	// A freshly created (empty) file has no record boundary and the scan below
 	// would not run, so skip the scratch allocation on that first-append path.
-	if info.Size() == 0 {
+	if size == 0 {
 		return 0, nil
 	}
 
@@ -335,11 +367,11 @@ func lastRecordBoundary(f *os.File) (int64, error) {
 
 	buf := make([]byte, chunk)
 
-	for off := info.Size(); off > 0; {
+	for off := size; off > 0; {
 		n := min(int64(chunk), off)
 		off -= n
 
-		_, err = f.ReadAt(buf[:n], off)
+		_, err := f.ReadAt(buf[:n], off)
 		if err != nil && !errors.Is(err, io.EOF) {
 			return 0, fmt.Errorf("scan for record boundary: %w", err)
 		}

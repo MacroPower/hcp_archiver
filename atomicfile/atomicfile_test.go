@@ -383,6 +383,142 @@ func TestAppend_createsParentDir(t *testing.T) {
 	assert.Equal(t, []byte("line\n"), got)
 }
 
+func TestAppend_appliesFileMode(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		existing []byte
+		opts     []atomicfile.Option
+		want     fs.FileMode
+	}{
+		"created file takes the default mode": {
+			opts: nil,
+			want: atomicfile.DefaultFileMode,
+		},
+		// 0o660 carries a group-write bit the common 0o022 umask strips from the
+		// open, so landing it proves the explicit chmod ran.
+		"created file takes the requested mode": {
+			opts: []atomicfile.Option{atomicfile.WithFileMode(0o660)},
+			want: 0o660,
+		},
+		"empty file is still uninitialized and takes the requested mode": {
+			existing: []byte{},
+			opts:     []atomicfile.Option{atomicfile.WithFileMode(0o660)},
+			want:     0o660,
+		},
+		"file already holding records keeps the mode it was created with": {
+			existing: []byte("committed\n"),
+			opts:     []atomicfile.Option{atomicfile.WithFileMode(0o660)},
+			want:     0o600,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			target := filepath.Join(t.TempDir(), "log.ndjson")
+
+			if tc.existing != nil {
+				require.NoError(t, os.WriteFile(target, tc.existing, 0o600))
+			}
+
+			_, err := atomicfile.Append(target, []byte("line\n"), tc.opts...)
+			require.NoError(t, err)
+
+			info, err := os.Stat(target)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, info.Mode().Perm())
+		})
+	}
+}
+
+func TestAppend_setupFailureLeavesTargetIntact(t *testing.T) {
+	t.Parallel()
+
+	committed := []byte("another writer's committed batch\n")
+
+	tests := map[string]struct {
+		// Runs inside the flush that guards a first append, standing in for
+		// whatever lands in that window before the flush reports its failure.
+		duringSync func(t *testing.T, target string)
+		want       []byte
+	}{
+		"records a concurrent writer committed inside the window": {
+			duringSync: func(t *testing.T, target string) {
+				t.Helper()
+
+				require.NoError(t, os.WriteFile(target, committed, 0o600))
+			},
+			want: committed,
+		},
+		"an empty target nothing else touched": {
+			duringSync: func(*testing.T, string) {},
+			want:       []byte{},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			target := filepath.Join(t.TempDir(), "log.ndjson")
+
+			fail := func(string) error {
+				tc.duringSync(t, target)
+
+				return errBoom
+			}
+
+			_, err := atomicfile.AppendSync(target, []byte("mine\n"), fail)
+			require.ErrorIs(t, err, errBoom)
+
+			// The failure path never unlinks or truncates the target: a writer that
+			// raced in and was told its batch was durable must still find it there,
+			// and this call's own batch, never written, must not be there.
+			got, readErr := os.ReadFile(target)
+			require.NoError(t, readErr)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestAppend_retryAfterSetupFailureReinitializes(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "log.ndjson")
+
+	_, err := atomicfile.AppendSync(target, []byte("mine\n"), func(string) error { return errBoom })
+	require.ErrorIs(t, err, errBoom)
+
+	var synced []string
+
+	rec := func(d string) error {
+		synced = append(synced, d)
+
+		return nil
+	}
+
+	start, err := atomicfile.AppendSync(target, []byte("mine\n"), rec, atomicfile.WithFileMode(0o660))
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), start)
+
+	// The abandoned attempt left the file present but empty, and emptiness is what
+	// marks it uninitialized, so the retry re-runs the setup the failure skipped:
+	// the directory entry is flushed and the mode enforced, neither of which a
+	// file already holding records would get.
+	assert.Equal(t, []string{dir}, synced, "the retry flushes the target's directory")
+
+	info, err := os.Stat(target)
+	require.NoError(t, err)
+	assert.Equal(t, fs.FileMode(0o660), info.Mode().Perm())
+
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("mine\n"), got)
+}
+
 func TestAppend_trimsTornTailBeforeAppending(t *testing.T) {
 	t.Parallel()
 
