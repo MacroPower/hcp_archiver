@@ -169,6 +169,13 @@ func (w *Workspace) readBundleMember(relBundle, relPath string) ([]byte, error) 
 // but the local tree does not yet: [Workspace.Open] would serve it, so a
 // presence probe must agree. The mirror answer comes from the session's cached
 // inventory, never a per-call network round trip.
+//
+// A mirror key naming an evicted surface answers false, since agreeing with
+// the read is the whole point: the inventory holds a workspace's bundle zips
+// and the organization's configuration tarballs, but read-through refuses to
+// materialize either, so Open reports them absent whatever the mirror knows.
+// Their contents are still reachable by their own paths, a bundle's members
+// through the sidecar that stays local beside it.
 func (w *Workspace) Exists(relPath string) (bool, error) {
 	_, err := os.Stat(w.org.AbsPath(relPath))
 
@@ -186,6 +193,13 @@ func (w *Workspace) Exists(relPath string) (bool, error) {
 
 	if _, ok := idx[relPath]; ok {
 		return true, nil
+	}
+
+	// Credit the mirror only where read-through would honor it: fetchEligible is
+	// the same guard [*Org.fetchThrough] applies, so a key it refuses can never
+	// answer present here.
+	if !fetchEligible(relPath) {
+		return false, nil
 	}
 
 	_, ok := w.org.remoteHas(relPath)

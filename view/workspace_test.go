@@ -1,6 +1,8 @@
 package view_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.jacobcolvin.com/hcp_archiver/remote/remotetest"
+	"go.jacobcolvin.com/hcp_archiver/store"
 	"go.jacobcolvin.com/hcp_archiver/view"
 )
 
@@ -24,6 +28,69 @@ func appendSidecarLine(t *testing.T, root, bundle, line string) {
 	_, err = f.WriteString(line + "\n")
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
+}
+
+// mirrorTarball puts a configuration-version tarball in the fake's inventory
+// with no local counterpart, the evicted surface a bare fixture has none of.
+// It returns the tarball's archive-relative path.
+func mirrorTarball(t *testing.T, fake *remotetest.Fake, cvID string) string {
+	t.Helper()
+
+	rel := store.ConfigVersionsDirName + "/" + cvID + ".tar.gz"
+	sum := sha256.Sum256([]byte(tarballContent))
+
+	fake.SetObject(viewPrefix+"/my-org/"+rel, remotetest.Object{
+		Data:     []byte(tarballContent),
+		Metadata: map[string]string{"sha256": hex.EncodeToString(sum[:])},
+	})
+
+	return rel
+}
+
+func TestWorkspaceExistsAgreesWithOpen(t *testing.T) {
+	t.Parallel()
+
+	// A probe on a bootstrap tree answers from the merged inventory, which
+	// carries the evicted surfaces beside the warm layer. Crediting one showed
+	// an object present that every read then reported absent.
+	tests := map[string]struct {
+		rel  string
+		want bool
+	}{
+		"mirror-only loose json":     {rel: wsDir + "/workspace.json", want: true},
+		"mirror-only rolled-up json": {rel: cvPath, want: true},
+		"mirror-only bundle zip":     {rel: wsDir + "/" + store.BundlesDirName + "/logs.gen0001.zip"},
+		"mirror-only config tarball": {rel: store.ConfigVersionsDirName + "/cv-9.tar.gz"},
+		"nothing anywhere":           {rel: wsDir + "/runs/run-absent/run.json"},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			fake := buildMirroredArchive(t)
+			mirrorTarball(t, fake, "cv-9")
+
+			orgs, _ := openBootstrap(t, fake)
+			ws := orgs[0].Workspace("default", "app")
+
+			// Probe before the read: an Open that lands persists its bytes, which
+			// would make a later probe true for the wrong reason.
+			ok, err := ws.Exists(tt.rel)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, ok)
+
+			_, openErr := ws.Open(tt.rel)
+			if tt.want {
+				require.NoError(t, openErr, "a probe answering true names bytes Open serves")
+
+				return
+			}
+
+			require.ErrorIs(t, openErr, view.ErrObjectNotFound,
+				"a probe answering false names what Open refuses")
+		})
+	}
 }
 
 func TestWorkspaceIndexSkipsRollupLineNamingNoPath(t *testing.T) {
