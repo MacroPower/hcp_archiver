@@ -214,6 +214,83 @@ func TestOpenArchive_PartialLocalMergeAddsMirrorOrgs(t *testing.T) {
 		"a mirror-only organization is materialized")
 }
 
+func TestOpenArchive_MirrorOrgNameConfinedToTheArchive(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		// The org segment is what a crafted listing key carries where the
+		// organization name belongs, in "<prefix>/<org>/org.json".
+		org string
+		// A true want records that the segment names a real organization; the
+		// rest are refused, since joining them onto the archive root reaches
+		// the root itself or somewhere above it.
+		want bool
+	}{
+		"parent":          {org: ".."},
+		"self":            {org: "."},
+		"parent chain":    {org: "../.."},
+		"windows parent":  {org: `..\..`},
+		"windows nested":  {org: `sub\..\..`},
+		"control byte":    {org: "other\norg"},
+		"plain name":      {org: "other-org", want: true},
+		"dotted name":     {org: "..leading", want: true},
+		"name with a dot": {org: "acme.corp", want: true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			fake := buildMirroredArchive(t)
+			cfg := viewRemoteConfig()
+			body := remotetest.Object{Data: []byte(`{"data":{"id":"org-2","type":"organizations"}}`)}
+
+			// Two objects, the pair a mirror-controlling attacker plants: the
+			// listing key whose first segment becomes the organization name,
+			// and the object the materialization's own fetch key resolves to
+			// once path.Join cleans it, so an unconfined open completes its
+			// write rather than merely attempting it.
+			fake.SetObject(viewPrefix+"/"+tc.org+"/org.json", body)
+			fake.SetObject(cfg.Key(tc.org, "org.json"), body)
+
+			// A nested directory, so the parent an escaping join lands in is
+			// the test's own and observably empty.
+			dir := filepath.Join(t.TempDir(), "archive")
+
+			orgs, err := view.OpenArchive(dir,
+				view.WithContext(t.Context()),
+				view.WithRemote(cfg),
+				view.WithRemoteFactory(fakeFactory(fake)),
+			)
+			require.NoError(t, err)
+
+			var names []string
+
+			for _, org := range orgs {
+				names = append(names, org.Name)
+			}
+
+			if tc.want {
+				assert.Contains(t, names, tc.org)
+				assert.FileExists(t, filepath.Join(dir, tc.org, "org.json"),
+					"a well-named mirror organization still materializes")
+
+				return
+			}
+
+			assert.Equal(t, []string{"my-org"}, names,
+				"the crafted segment names no organization")
+
+			for _, leaf := range []string{"org.json", remote.MarkerName} {
+				assert.NoFileExists(t, filepath.Join(dir, leaf),
+					"materialization never writes over the archive root itself")
+				assert.NoFileExists(t, filepath.Join(filepath.Dir(dir), leaf),
+					"materialization never writes outside the archive root")
+			}
+		})
+	}
+}
+
 func TestOpenArchive_RemoteMismatchRefused(t *testing.T) {
 	t.Parallel()
 

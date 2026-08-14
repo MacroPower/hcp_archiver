@@ -312,6 +312,13 @@ func openWithRemote(abs, dir string, options archiveOptions) ([]*Org, error) {
 		}
 	}
 
+	// Both sources are already segment-clean (a directory entry's name, a
+	// filtered listing key), so this is the join site's own guarantee: nothing
+	// a later caller adds to the union can resolve outside abs.
+	names = slices.DeleteFunc(names, func(name string) bool {
+		return !orgSegment(name)
+	})
+
 	slices.Sort(names)
 
 	if len(names) == 0 {
@@ -375,7 +382,7 @@ func listMirrorOrgs(
 
 	for rel, info := range relativeListing(inventory, root) {
 		name, orgRel, ok := strings.Cut(rel, "/")
-		if !ok || name == "" || orgRel == "" {
+		if !ok || orgRel == "" || !orgSegment(name) {
 			continue
 		}
 
@@ -393,6 +400,30 @@ func listMirrorOrgs(
 	})
 
 	return client, byOrg, nil
+}
+
+// orgSegment reports whether name is usable as one organization's directory
+// beneath the archive root: a single clean path segment.
+//
+// The mirror names organizations, and a bucket key is arbitrary bytes: a key
+// like "<prefix>/../org.json" yields the name "..", which joined onto the
+// archive root resolves to its parent, so materializing that organization
+// would create its org.json and marker outside the archive entirely. This is
+// the refusing counterpart of [*Org.AbsPath]'s confinement, chosen because
+// there is no honest organization the offending name could be cleaned into.
+// Both separators are rejected, not only the running platform's, so a mirror
+// written on one system cannot escape when browsed from the other, and
+// control characters with them, since a mirror names the directory the browse
+// cache lands in. It is the browse side of the rule the archiver enforces on
+// the names it writes, [go.jacobcolvin.com/hcp_archiver/config.ValidateOrganizationName].
+func orgSegment(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+
+	control := func(r rune) bool { return r < 0x20 || r == 0x7f }
+
+	return !strings.ContainsAny(name, `/\`) && !strings.ContainsFunc(name, control)
 }
 
 // remoteOrg builds one organization handle under a supplied remote: the
