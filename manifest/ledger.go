@@ -178,6 +178,13 @@ func WithRecordOnlyPrefixes(prefixes ...string) Option {
 // the loss reported to the logger (see [WithLogger]), since every log record
 // is re-derived by re-walking. A per-shard log a pre-release layout wrote is
 // refused with [ErrLegacyLayout] rather than read.
+//
+// A replay that discarded a deleted subtree's records (see [Ledger.replayWAL])
+// folds before returning: the discard lives in memory, so the log that still
+// carries those records is compacted into the surviving shards' snapshots and
+// removed, making the operator's deletion durable before the run can re-create
+// the subtree it demanded a re-archive of. A fold that cannot complete fails
+// the load.
 func Load(root string, opts ...Option) (*Ledger, error) {
 	l := &Ledger{
 		now:              time.Now,
@@ -295,6 +302,26 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 			}
 
 			l.cumulative[e.Status]++
+		}
+	}
+
+	// A discard removes records from memory only; the log they came from still
+	// holds them, so the discard is not durable until the log is gone. Fold
+	// before the ledger is handed back: the run is about to re-create the
+	// deleted subtree as it re-fetches it, and a kill before the first fold
+	// would leave the next load stating a present subtree and replaying the
+	// very records this load discarded -- the honored deletion silently
+	// un-honoring itself, with stale done entries answering every fetch
+	// decision with a skip. The fold writes each replayed shard's snapshot and
+	// then removes the log, so the surviving records keep their durability
+	// while the discarded ones cannot come back. A fold that cannot complete
+	// refuses the load rather than running on with the resurrection armed.
+	if l.discardedRecords > 0 {
+		err = l.fold(true)
+		if err != nil {
+			_ = l.Close() //nolint:errcheck // The load error takes precedence.
+
+			return nil, fmt.Errorf("retire discarded log: %w", err)
 		}
 	}
 
@@ -571,7 +598,9 @@ func (l *Ledger) walPath() string {
 // re-archive, and resurrecting the subtree's entries from the log would
 // answer every fetch decision with a skip and freeze the deletion forever.
 // The discard is logged and costs a re-fetch — every log record is re-derived
-// by re-walking — which is the safe direction. Only a positively absent
+// by re-walking — which is the safe direction. It is a memory-only edit here;
+// the discarded records still sit in the log, so [Load] folds the log away
+// before the run starts (see there). Only a positively absent
 // subtree discards; a stat fault surfaces as an error, matching discovery's
 // no-silent-drop policy. Org-root records always replay: their subtree is the
 // archive root itself, which holds the log being replayed. So do records

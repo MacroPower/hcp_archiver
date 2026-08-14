@@ -1432,37 +1432,149 @@ func TestLoad_RecordOnlyPrefixKeepsRecordsWithoutFiles(t *testing.T) {
 	// copies exist: the subtree can be sparse or absent without that absence
 	// meaning anything. A declared record-only prefix therefore replays even
 	// with no directory on disk, while the same records discard when the
-	// prefix is not declared.
-	root := t.TempDir()
-
+	// prefix is not declared. Each case builds its own root, because a load
+	// that discards retires the log it discarded from.
 	const tarball = "config-versions/cv-1.tar.gz"
 
-	first, err := manifest.Load(root)
-	require.NoError(t, err)
+	tests := map[string]struct {
+		opts      []manifest.Option
+		wantFetch bool
+	}{
+		"declared": {
+			opts:      []manifest.Option{manifest.WithRecordOnlyPrefixes("config-versions")},
+			wantFetch: false,
+		},
+		"undeclared": {
+			wantFetch: true,
+		},
+	}
 
-	first.StartRun()
-	first.RecordDone(tarball, manifest.Signature{Size: 1})
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	// Flush without finishing the run, as an interrupted process would have,
-	// so the record stays in the org-level log; the config-versions directory
-	// itself is never created, as full eviction would leave it.
-	require.NoError(t, first.Flush())
-	require.NoError(t, first.Close())
+			root := t.TempDir()
 
-	plain, err := manifest.Load(root)
-	require.NoError(t, err)
-	assert.True(t, plain.ShouldFetch(tarball),
-		"an undeclared prefix's records discard with the missing subtree")
-	require.NoError(t, plain.Close())
+			first, err := manifest.Load(root)
+			require.NoError(t, err)
 
-	declared, err := manifest.Load(root,
-		manifest.WithRecordOnlyPrefixes("config-versions"))
-	require.NoError(t, err)
+			first.StartRun()
+			first.RecordDone(tarball, manifest.Signature{Size: 1})
 
-	t.Cleanup(func() { require.NoError(t, declared.Close()) })
+			// Flush without finishing the run, as an interrupted process would
+			// have, so the record stays in the org-level log; the
+			// config-versions directory itself is never created, as full
+			// eviction would leave it.
+			require.NoError(t, first.Flush())
+			require.NoError(t, first.Close())
 
-	assert.False(t, declared.ShouldFetch(tarball),
-		"a record-only prefix's records replay without any local files")
+			reloaded, err := manifest.Load(root, tc.opts...)
+			require.NoError(t, err)
+
+			t.Cleanup(func() { require.NoError(t, reloaded.Close()) })
+
+			assert.Equal(t, tc.wantFetch, reloaded.ShouldFetch(tarball),
+				"a record-only prefix's records replay without any local files; "+
+					"an undeclared prefix's discard with the missing subtree")
+		})
+	}
+}
+
+func TestLoad_DiscardedRecordsStayDiscardedAcrossLoads(t *testing.T) {
+	t.Parallel()
+
+	// A discard is only honored in memory: the records it skipped stay in the
+	// org-level log until a fold retires it. The run that follows re-creates
+	// the deleted subtree the moment it re-fetches into it, so a load that
+	// left the log behind would let the next one -- after a kill before any
+	// fold -- stat a present subtree and replay the very records the
+	// operator's deletion retired, freezing the deletion behind stale done
+	// entries and a re-armed early stop. The answers must therefore be the
+	// same whether or not the subtree has come back.
+	const (
+		wsPrefix = "projects/p/workspaces/w/runs"
+		wsEntry  = wsPrefix + "/r1/run.json"
+		orgEntry = "org.json"
+	)
+
+	watermark := time.Date(2024, 5, 1, 0, 0, 0, 0, time.UTC)
+
+	tests := map[string]struct {
+		recreated bool
+	}{
+		"subtree stays deleted":      {recreated: false},
+		"run re-creates the subtree": {recreated: true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			root := t.TempDir()
+			wsDir := filepath.Join(root, "projects", "p", "workspaces", "w")
+			require.NoError(t, os.MkdirAll(wsDir, 0o755))
+
+			first, err := manifest.Load(root)
+			require.NoError(t, err)
+
+			coll := first.Collection(wsPrefix)
+
+			first.StartRun()
+			first.RecordDone(wsEntry, manifest.Signature{Size: 1})
+			first.RecordDone(orgEntry, manifest.Signature{Size: 1})
+			coll.MarkComplete()
+			coll.SetSettled(true)
+			coll.AdvanceHighWaterMark(watermark)
+
+			// Flush without finishing the run, as an interrupted process would
+			// have: the records stay in the org-level log rather than folding
+			// into snapshots.
+			require.NoError(t, first.Flush())
+			require.NoError(t, first.Close())
+
+			require.NoError(t, os.RemoveAll(wsDir))
+
+			second, err := manifest.Load(root)
+			require.NoError(t, err)
+
+			assert.Equal(t, 4, second.Tally().RecordsDiscarded,
+				"the deleted shard's entry, watermark, completion, and settlement discard")
+
+			_, logFile := rootShardFiles(root)
+			assert.NoFileExists(t, logFile,
+				"the load folds the log away, so the discard outlives this process")
+
+			require.NoError(t, second.Close())
+
+			if tc.recreated {
+				// The run re-fetches into the deleted workspace, which
+				// re-creates its directory long before any fold of its own.
+				require.NoError(t, os.MkdirAll(wsDir, 0o755))
+			}
+
+			third, err := manifest.Load(root)
+			require.NoError(t, err)
+
+			t.Cleanup(func() { require.NoError(t, third.Close()) })
+
+			reColl := third.Collection(wsPrefix)
+
+			assert.True(t, third.ShouldFetch(wsEntry),
+				"the deleted object re-archives")
+			assert.False(t, reColl.Complete(),
+				"the deleted collection's completion does not return")
+			assert.False(t, reColl.Settled(),
+				"the deleted collection's settlement does not re-arm the early stop")
+			assert.True(t, reColl.HighWaterMark().IsZero(),
+				"the deleted collection's watermark does not re-arm the early stop")
+			assert.False(t, third.ShouldFetch(orgEntry),
+				"the surviving shard's records folded into its snapshot")
+			assert.Equal(t, 1, third.Tally().Done,
+				"only the surviving record seeds the tally")
+			assert.Zero(t, third.Tally().RecordsDiscarded,
+				"the retired log leaves nothing to discard a second time")
+		})
+	}
 }
 
 func TestLedger_EntryDurableTracksTheFlushLifecycle(t *testing.T) {
