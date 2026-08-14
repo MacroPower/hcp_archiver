@@ -165,7 +165,11 @@ func WithHistoryLimit(count int, oldest time.Time) WalkOption {
 // the walk before that element archives. Completion is recorded once that
 // in-bounds slice is fully walked, so the seal phase can bundle it, but
 // settlement is withheld, so the early stop stays disabled and a later wider
-// limit still pages down into the excluded tail.
+// limit still pages down into the excluded tail. The count bound counts
+// distinct elements: a collection that gains an element between two page
+// fetches re-lists the previous page's last element, and spending a position on
+// that duplicate would stop the walk short of the configured count, so an
+// already-walked element is skipped rather than counted twice.
 //
 // Within a page the elements' Archive closures run concurrently, so any free
 // worker can serve a large collection rather than one walking it alone; the
@@ -201,6 +205,21 @@ func Walk[T any](
 	unsettled := false
 	listedCount := 0
 
+	// A collection that gains an element between two page fetches shifts every
+	// listed element one place older, so the next page re-lists the previous
+	// page's last element. Counting that duplicate again would spend a position
+	// in the count bound on an element already walked and stop the walk one
+	// element short of the window the caller asked for, so a re-listed element is
+	// skipped: it has already been counted, archived, and folded into the mark.
+	// The set is kept only for a count-bounded walk, the one place a listing
+	// position decides anything; an unbounded walk pages to the end of the
+	// listing either way and pays no memory to remember it.
+	var walked map[string]struct{}
+
+	if cfg.historyCount > 0 {
+		walked = make(map[string]struct{})
+	}
+
 	for pageNum := 1; ; pageNum++ {
 		items, hasNext, err := page(ctx, pageNum)
 		if err != nil {
@@ -219,6 +238,12 @@ func Walk[T any](
 		for _, listed := range items {
 			item := describe(listed)
 
+			// An element this walk already handled is a page-overlap duplicate,
+			// not a position of its own.
+			if _, dup := walked[item.RelPath]; dup {
+				continue
+			}
+
 			// The first element outside every configured history bound starts the
 			// excluded tail; it is not archived and does not advance the mark.
 			if cfg.bounded() && !cfg.withinBounds(listedCount, item.CreatedAt) {
@@ -228,6 +253,10 @@ func Walk[T any](
 			}
 
 			listedCount++
+
+			if walked != nil {
+				walked[item.RelPath] = struct{}{}
+			}
 
 			col.AdvanceHighWaterMark(item.CreatedAt)
 

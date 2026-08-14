@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -915,6 +917,40 @@ func TestEnvBlobRetry(t *testing.T) {
 				}
 			},
 			wantAttempts:  3,
+			wantStatus:    manifest.StatusErrored,
+			wantTransient: true,
+		},
+		"a mid-stream connection reset is retried to success": {
+			retries: 2,
+			fetch: func(attempts *int) func(context.Context) (io.Reader, error) {
+				return func(_ context.Context) (io.Reader, error) {
+					*attempts++
+					if *attempts == 1 {
+						reset := &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+
+						return io.MultiReader(strings.NewReader("partial"), iotest.ErrReader(reset)), nil
+					}
+
+					return strings.NewReader(fullPayload), nil
+				}
+			},
+			wantAttempts: 2,
+			wantStatus:   manifest.StatusDone,
+			wantContent:  fullPayload,
+		},
+		"a body truncated short of its length exhausts retries as transient": {
+			retries: 1,
+			fetch: func(attempts *int) func(context.Context) (io.Reader, error) {
+				return func(_ context.Context) (io.Reader, error) {
+					*attempts++
+
+					return io.MultiReader(
+						strings.NewReader("partial"),
+						iotest.ErrReader(io.ErrUnexpectedEOF),
+					), nil
+				}
+			},
+			wantAttempts:  2,
 			wantStatus:    manifest.StatusErrored,
 			wantTransient: true,
 		},
@@ -1926,6 +1962,83 @@ func TestWalkHistoryLimit(t *testing.T) {
 				"only a walk that reaches the collection's true end records settlement")
 		})
 	}
+}
+
+func TestWalkCountBoundSkipsRelistedElements(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
+
+	// Four fresh terminal elements listed newest-first, two per page, walked
+	// under a newest-three count bound. A fifth element is created upstream
+	// between the first and second page fetches, which shifts the listing one
+	// place older and makes page two open on the element page one closed with. A
+	// walk that spends a count position on that duplicate stops a place early and
+	// leaves r2 unarchived, though it sat third-newest for the whole walk.
+	r5 := walkItem{relPath: "runs/r5/run.json", createdAt: base.Add(5 * time.Hour), terminal: true}
+	r4 := walkItem{relPath: "runs/r4/run.json", createdAt: base.Add(4 * time.Hour), terminal: true}
+	r3 := walkItem{relPath: "runs/r3/run.json", createdAt: base.Add(3 * time.Hour), terminal: true}
+	r2 := walkItem{relPath: "runs/r2/run.json", createdAt: base.Add(2 * time.Hour), terminal: true}
+	r1 := walkItem{relPath: "runs/r1/run.json", createdAt: base.Add(1 * time.Hour), terminal: true}
+
+	const pageSize = 2
+
+	env, _, ledger := newEnv(t)
+
+	pager := func(_ context.Context, page int) ([]walkItem, bool, error) {
+		listing := []walkItem{r4, r3, r2, r1}
+		if page > 1 {
+			listing = append([]walkItem{r5}, listing...)
+		}
+
+		start := (page - 1) * pageSize
+		if start >= len(listing) {
+			return nil, false, nil
+		}
+
+		return listing[start:min(start+pageSize, len(listing))], start+pageSize < len(listing), nil
+	}
+
+	// The walk archives elements concurrently, so the tally takes a lock.
+	var (
+		archivedMu sync.Mutex
+		archived   = map[string]int{}
+	)
+
+	describe := func(it walkItem) collect.Item {
+		return collect.Item{
+			RelPath:   it.relPath,
+			CreatedAt: it.createdAt,
+			Terminal:  it.terminal,
+			Archive: func(ctx context.Context) error {
+				return env.Object(ctx, it.relPath, func(_ context.Context) (any, error) {
+					archivedMu.Lock()
+					defer archivedMu.Unlock()
+
+					archived[it.relPath]++
+
+					return cannedProject(), nil
+				})
+			},
+		}
+	}
+
+	err := collect.Walk(t.Context(), env, env.Collection("runs"), pager, describe,
+		collect.WithHistoryLimit(3, time.Time{}))
+	require.NoError(t, err)
+
+	for _, relPath := range []string{r4.relPath, r3.relPath, r2.relPath} {
+		assert.Equal(t, 1, archived[relPath],
+			"%s is among the newest three distinct elements and archives once", relPath)
+	}
+
+	assert.Len(t, archived, 3, "the bound admits three distinct elements, not three listings")
+	assert.Zero(t, archived[r1.relPath], "the fourth-newest element stays in the excluded tail")
+
+	assert.True(t, ledger.Collection("runs").Complete(),
+		"a fully-walked bounded slice records completion")
+	assert.False(t, ledger.Collection("runs").Settled(),
+		"a limit-stopped walk withholds settlement")
 }
 
 func TestWalkPropagatesPageError(t *testing.T) {
