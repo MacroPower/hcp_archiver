@@ -544,17 +544,27 @@ func (o *Org) AbsPath(relPath string) string {
 // It suits the organization- and project-level objects, which are never
 // sealed; workspace-scoped objects go through [*Workspace.Open], which also
 // searches the sealed forms.
+//
+// The path is validated exactly as [*Org.Read] validates it: one carrying
+// ".." or absolute segments is refused with [ErrInvalidPath] rather than
+// cleaned, so the read-through's mirror key can never resolve outside the
+// organization's prefix.
 func (o *Org) ReadFile(relPath string) ([]byte, error) {
-	data, err := os.ReadFile(o.AbsPath(relPath))
+	rel, err := cleanRel(relPath)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(o.AbsPath(rel))
 	if err == nil {
 		return data, nil
 	}
 
 	if !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("read %q: %w", relPath, err)
+		return nil, fmt.Errorf("read %q: %w", rel, err)
 	}
 
-	return o.readThrough(relPath, fmt.Errorf("read %q: %w", relPath, err))
+	return o.readThrough(rel, fmt.Errorf("read %q: %w", rel, err))
 }
 
 // Projects returns the organization's project directory names, sorted.

@@ -206,6 +206,27 @@ func TestReadFile_ReadThroughPersistsAndStaysLocal(t *testing.T) {
 	assert.Equal(t, heads, fake.HeadCalls(), "the second read is served from disk")
 }
 
+func TestReadFile_TraversalRefused(t *testing.T) {
+	t.Parallel()
+
+	fake := buildMirroredArchive(t)
+
+	// Seed a key in a sibling organization's namespace: a ".." path that
+	// slipped through would collapse into it via the mirror key's path.Join.
+	fake.SetObject(viewPrefix+"/other-org/secret.json", remotetest.Object{
+		Data: []byte(`{"leak":true}`),
+	})
+
+	orgs, dir := openBootstrap(t, fake)
+
+	_, err := orgs[0].ReadFile("../other-org/secret.json")
+	require.ErrorIs(t, err, view.ErrInvalidPath,
+		"a path escaping the organization is refused, not cleaned into a sibling's key")
+
+	assert.NoFileExists(t, filepath.Join(dir, "my-org", "other-org", "secret.json"),
+		"nothing is fetched or persisted for a refused path")
+}
+
 func TestRead_ReadThroughPersists(t *testing.T) {
 	t.Parallel()
 
