@@ -34,19 +34,53 @@ func pageName(since time.Time, page int) string {
 	return fmt.Sprintf("%s-p%09d.json", stamp, page)
 }
 
-// eventsAfter returns the items whose timestamp is strictly newer than since,
-// preserving the API's order.
+// archivedIDs holds the ids of the audit events a walk has already persisted
+// under its Since cursor, the second half of the freshness test [eventsAfter]
+// applies.
+//
+// The cursor alone cannot express it: the watermark is a single instant, while a
+// resumed walk carries per-page state -- the settled pages' stored events, which
+// are strictly newer than the cursor and so pass the timestamp test even though
+// they are already archived.
+type archivedIDs map[string]struct{}
+
+// record folds the events persisted for one page into the set. Events without an
+// id are ignored: they cannot be matched against a re-listed event, and an empty
+// key would suppress every other id-less event.
+func (a archivedIDs) record(items []*tfe.AuditTrail) {
+	for _, it := range items {
+		if it != nil && it.ID != "" {
+			a[it.ID] = struct{}{}
+		}
+	}
+}
+
+// holds reports whether the event id is already archived under the cursor.
+func (a archivedIDs) holds(id string) bool {
+	_, ok := a[id]
+
+	return ok
+}
+
+// eventsAfter returns the items whose timestamp is strictly newer than since and
+// that archived does not already hold, preserving the API's order.
 //
 // The API floors the Since cursor to whole-second precision on the wire (jsonapi
 // renders a [time.Time] as RFC3339), so a walk resuming from a sub-second
 // watermark re-lists the events already archived in the watermark's second.
 // Dropping them keeps a page from duplicating a prior run's trailing second
 // under a fresh page name.
-func eventsAfter(items []*tfe.AuditTrail, since time.Time) []*tfe.AuditTrail {
+//
+// The archived set covers the other source of re-listed events: pagination
+// shift. Events arriving between runs push the listing back a slot, so a page
+// the walk has not settled yet lists events a settled sibling page already
+// holds. They are strictly newer than the unadvanced cursor, so only their ids
+// distinguish them from genuinely new events.
+func eventsAfter(items []*tfe.AuditTrail, since time.Time, archived archivedIDs) []*tfe.AuditTrail {
 	fresh := make([]*tfe.AuditTrail, 0, len(items))
 
 	for _, it := range items {
-		if it != nil && it.Timestamp.After(since) {
+		if it != nil && it.Timestamp.After(since) && !archived.holds(it.ID) {
 			fresh = append(fresh, it)
 		}
 	}

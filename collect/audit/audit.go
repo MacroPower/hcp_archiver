@@ -114,6 +114,17 @@ func (c *Collector) collectConfig(ctx context.Context) error {
 // event sorts later than every persisted one, so the cursor advances only up to
 // what was persisted and the new event is captured on the following run, once
 // the advanced cursor lists it under a fresh page name.
+//
+// Those same persisted events are also what a page still to be written must be
+// filtered against. Events arriving between runs shift the newest-first listing
+// back a slot, so a page the prior run never settled re-lists events its settled
+// sibling already holds; writing them verbatim would archive the same event in
+// two page files under one cursor. The walk therefore carries the ids of
+// everything persisted for this cursor so far and treats a re-listed one as
+// already archived. Accumulating them page by page is enough to cover the whole
+// cursor: a shift can only push an event onto a later page, and every page is
+// visited in order, so the page holding an event is always reached before the
+// page that re-lists it.
 func (c *Collector) collectTrails(ctx context.Context) error {
 	st := c.env.Store()
 	key := st.AuditTrailDir()
@@ -122,17 +133,26 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 
 	var newest time.Time
 
+	archived := archivedIDs{}
+
 	for page := 1; ; {
 		list, listErr := c.listPage(ctx, since, page)
 
-		// Keep only events strictly newer than the watermark, dropping the
-		// already-archived events the whole-second wire cursor re-lists when a walk
-		// resumes from a sub-second watermark.
+		// Keep only events strictly newer than the watermark and not already
+		// persisted under this cursor, dropping both the events the whole-second
+		// wire cursor re-lists when a walk resumes from a sub-second watermark and
+		// the ones a shifted page carries over from a settled sibling.
 		var fresh []*tfe.AuditTrail
 
 		if listErr == nil {
-			fresh = eventsAfter(list.Items, since)
+			fresh = eventsAfter(list.Items, since, archived)
 		}
+
+		relPath := st.AuditTrailFile(pageName(since, page))
+
+		// Whether Object will persist fresh or short-circuit on an already-settled
+		// page is fixed by the ledger before the call decides it.
+		settled := c.pageShortCircuited(relPath)
 
 		// Write the page unless it lists cleanly but carries only already-archived
 		// events -- an empty page among them. Skipping such a page avoids
@@ -142,13 +162,6 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 		// empty page never ends the walk: only the pagination reporting no next
 		// page does, and a non-empty later page may still follow an empty one.
 		if listErr != nil || len(fresh) > 0 {
-			relPath := st.AuditTrailFile(pageName(since, page))
-
-			// Whether Object will persist fresh or short-circuit on an
-			// already-settled page is fixed by the ledger before the call decides
-			// it.
-			settled := c.pageShortCircuited(relPath)
-
 			halt, err := c.archiveTrailPage(ctx, relPath, fresh, listErr)
 			if err != nil {
 				return err
@@ -157,13 +170,21 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 			if halt {
 				return nil
 			}
+		}
 
-			t, halt := c.persistedNewest(key, relPath, fresh, settled)
+		// A page already settled under this cursor is accounted for even when the
+		// filter left it with nothing fresh: its stored events are the ones a
+		// shifted later page re-lists, so they must join the archived set, and they
+		// are persisted, so they are a valid source for the watermark.
+		if settled || len(fresh) > 0 {
+			persisted, halt := c.persistedEvents(key, relPath, fresh, settled)
 			if halt {
 				return nil
 			}
 
-			if t.After(newest) {
+			archived.record(persisted)
+
+			if t := newestTimestamp(persisted); t.After(newest) {
 				newest = t
 			}
 		}
@@ -254,39 +275,36 @@ func (c *Collector) archiveTrailPage(
 	return false, nil
 }
 
-// persistedNewest returns the newest timestamp actually archived for a page --
-// the source the watermark advances from -- and whether a read-back failure
-// forces the walk to halt.
+// persistedEvents returns the events actually archived for a page -- the source
+// both the watermark and the walk's archived-id set draw from -- and whether a
+// read-back failure forces the walk to halt.
 //
 // A page Object short-circuited this run kept its stored events (the re-listed
-// set was never written), so its newest is read back from the stored file; a
-// freshly written page persisted its fresh events, so those are the source.
-// Sourcing from the raw re-listed items instead would step the cursor past an
-// event the short-circuited write never persisted, dropping it. A short-circuited
-// page is Done (a list error no longer settles a page absent; see
-// archiveTrailPage), search-layer JSON that is never evicted, so a read-back
-// failure is not expected; if it happens, the page contributes nothing to the
-// watermark and the walk halts, so a transient read error cannot advance the
-// cursor.
-func (c *Collector) persistedNewest(
+// set was never written), so they are read back from the stored file; a freshly
+// written page persisted its fresh events, so those are the source. Sourcing
+// from the raw re-listed items instead would step the cursor past an event the
+// short-circuited write never persisted, dropping it. A short-circuited page is
+// Done (a list error no longer settles a page absent; see archiveTrailPage),
+// search-layer JSON that is never evicted, so a read-back failure is not
+// expected; if it happens, the page contributes nothing to the watermark and the
+// walk halts, so a transient read error cannot advance the cursor.
+func (c *Collector) persistedEvents(
 	key, relPath string,
 	fresh []*tfe.AuditTrail,
 	settled bool,
-) (time.Time, bool) {
-	persisted := fresh
-
-	if settled {
-		stored, err := c.readPersistedPage(relPath)
-		if err != nil {
-			c.env.MarkSurfaceDropped(key, err)
-
-			return time.Time{}, true
-		}
-
-		persisted = stored
+) ([]*tfe.AuditTrail, bool) {
+	if !settled {
+		return fresh, false
 	}
 
-	return newestTimestamp(persisted), false
+	stored, err := c.readPersistedPage(relPath)
+	if err != nil {
+		c.env.MarkSurfaceDropped(key, err)
+
+		return nil, true
+	}
+
+	return stored, false
 }
 
 // pageShortCircuited reports whether [collect.Env.Object] will skip its write

@@ -498,6 +498,114 @@ func TestCollectTrailsResumeDoesNotStepPastAnUnpersistedEvent(t *testing.T) {
 	assert.Equal(t, c.Timestamp, f.watermark())
 }
 
+// shiftFixture stages the resume both shift tests share: a first run that
+// archives pages 1 and 2 under the zero cursor and then halts on a terminal list
+// error at page 3, leaving the watermark unmoved and page 3 unsettled.
+func shiftFixture(t *testing.T, events []*tfe.AuditTrail) *resumeFixture {
+	t.Helper()
+
+	f := newResumeFixture(t)
+
+	f.setPages(map[int]trailPage{
+		1: {events: events[0:3], nextPage: 2},
+		2: {events: events[3:6], nextPage: 3},
+		3: {status: http.StatusBadRequest},
+	})
+	f.run(t)
+
+	require.True(t, f.watermark().IsZero(), "the halted run does not advance the cursor")
+	require.Equal(t, []string{"ev-9", "ev-8", "ev-7"}, pageEventIDs(t, f.store, time.Time{}, 1))
+	require.Equal(t, []string{"ev-6", "ev-5", "ev-4"}, pageEventIDs(t, f.store, time.Time{}, 2))
+
+	return f
+}
+
+// requireNoPageFile asserts the walk wrote no page file at the cursor and page
+// number, the shape of a page skipped for carrying only archived events.
+func requireNoPageFile(t *testing.T, f *resumeFixture, since time.Time, page int) {
+	t.Helper()
+
+	relPath := f.store.AuditTrailFile(audit.PageName(since, page))
+
+	_, err := os.Stat(f.store.AbsPath(relPath))
+	assert.Truef(t, os.IsNotExist(err), "%s should not be written", relPath)
+}
+
+// descendingEvents builds n events named ev-1..ev-n a second apart and returns
+// them newest first, the order the trail endpoint lists in.
+func descendingEvents(base time.Time, n int) []*tfe.AuditTrail {
+	events := make([]*tfe.AuditTrail, 0, n)
+	for i := n; i >= 1; i-- {
+		events = append(events, event("ev-"+strconv.Itoa(i), base.Add(time.Duration(i)*time.Second)))
+	}
+
+	return events
+}
+
+func TestCollectTrailsResumeDoesNotDuplicateShiftedEvents(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	events := descendingEvents(base, 11)
+
+	// Run 1 settled pages 1 and 2 over events 9..4 and halted at page 3. Events 10
+	// and 11 then arrive, shifting the newest-first listing back two slots: page 3
+	// now lists 5 and 4, which page 2's stored file already holds, alongside the
+	// genuinely unarchived 3. Only 3 may be written, or the trail would carry 5
+	// and 4 in two page files under one cursor.
+	f := shiftFixture(t, events[2:])
+
+	f.setPages(map[int]trailPage{
+		1: {events: events[0:3], nextPage: 2},
+		2: {events: events[3:6], nextPage: 3},
+		3: {events: events[6:9], nextPage: 4},
+		4: {events: events[9:11], nextPage: 0},
+	})
+	f.run(t)
+
+	assert.Equal(t, []string{"ev-3"}, pageEventIDs(t, f.store, time.Time{}, 3),
+		"a shifted page archives only the events no sibling page holds")
+	assert.Equal(t, []string{"ev-2", "ev-1"}, pageEventIDs(t, f.store, time.Time{}, 4))
+	assert.Equal(t, []string{"ev-9", "ev-8", "ev-7"}, pageEventIDs(t, f.store, time.Time{}, 1),
+		"the settled pages keep their stored events")
+	assert.Equal(t, []string{"ev-6", "ev-5", "ev-4"}, pageEventIDs(t, f.store, time.Time{}, 2))
+
+	assert.Equal(t, base.Add(9*time.Second), f.watermark(),
+		"the watermark tracks the newest persisted event, not the re-listed 10 and 11")
+}
+
+func TestCollectTrailsResumeSkipsAWhollyShiftedPage(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	events := descendingEvents(base, 12)
+
+	// Three events arriving between runs shift the listing by a whole page, so the
+	// settled page 2 re-lists page 1's stored events and has nothing fresh left
+	// after the filter. Its own stored events must still join the archived set, or
+	// the unsettled page 3 -- which now lists exactly them -- would write a
+	// duplicate of the page 2 file.
+	f := shiftFixture(t, events[3:])
+
+	f.setPages(map[int]trailPage{
+		1: {events: events[0:3], nextPage: 2},
+		2: {events: events[3:6], nextPage: 3},
+		3: {events: events[6:9], nextPage: 4},
+		4: {events: events[9:12], nextPage: 0},
+	})
+	f.run(t)
+
+	requireNoPageFile(t, f, time.Time{}, 3)
+
+	assert.Equal(t, []string{"ev-3", "ev-2", "ev-1"}, pageEventIDs(t, f.store, time.Time{}, 4),
+		"the page past the shift still archives its unseen events")
+	assert.Equal(t, []string{"ev-9", "ev-8", "ev-7"}, pageEventIDs(t, f.store, time.Time{}, 1))
+	assert.Equal(t, []string{"ev-6", "ev-5", "ev-4"}, pageEventIDs(t, f.store, time.Time{}, 2))
+
+	assert.Equal(t, base.Add(9*time.Second), f.watermark(),
+		"the watermark tracks the newest persisted event, not the re-listed 10 through 12")
+}
+
 // TestPageNameDistinctAcrossSubSecondCursors pins the property the resume
 // depends on: two walks whose cursors differ by less than a second still get
 // distinct page names, so the later walk cannot settle its events under a name

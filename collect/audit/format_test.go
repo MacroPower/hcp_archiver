@@ -78,6 +78,99 @@ func TestPageNameDistinguishesSameSecondCursors(t *testing.T) {
 	assert.Less(t, audit.PageName(early, 1), audit.PageName(late, 1))
 }
 
+func TestEventsAfter(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
+
+	ev := func(id string, ts time.Time) *tfe.AuditTrail {
+		return &tfe.AuditTrail{ID: id, Timestamp: ts}
+	}
+
+	tests := map[string]struct {
+		since    time.Time
+		items    []*tfe.AuditTrail
+		archived []*tfe.AuditTrail
+		want     []string
+	}{
+		"nothing archived keeps every newer event in order": {
+			items: []*tfe.AuditTrail{
+				ev("ev-2", base.Add(2*time.Hour)),
+				ev("ev-1", base.Add(time.Hour)),
+			},
+			since: base,
+			want:  []string{"ev-2", "ev-1"},
+		},
+		"events at or before the cursor are dropped": {
+			items: []*tfe.AuditTrail{
+				ev("ev-new", base.Add(time.Nanosecond)),
+				ev("ev-at-mark", base),
+				ev("ev-old", base.Add(-time.Hour)),
+			},
+			since: base,
+			want:  []string{"ev-new"},
+		},
+		"a shifted page drops the events its settled sibling holds": {
+			items: []*tfe.AuditTrail{
+				ev("ev-5", base.Add(5*time.Hour)),
+				ev("ev-4", base.Add(4*time.Hour)),
+				ev("ev-3", base.Add(3*time.Hour)),
+			},
+			archived: []*tfe.AuditTrail{
+				ev("ev-5", base.Add(5*time.Hour)),
+				ev("ev-4", base.Add(4*time.Hour)),
+			},
+			since: base,
+			want:  []string{"ev-3"},
+		},
+		"a page holding only archived events keeps nothing": {
+			items: []*tfe.AuditTrail{
+				ev("ev-2", base.Add(2*time.Hour)),
+				ev("ev-1", base.Add(time.Hour)),
+			},
+			archived: []*tfe.AuditTrail{
+				ev("ev-1", base.Add(time.Hour)),
+				ev("ev-2", base.Add(2*time.Hour)),
+			},
+			since: base,
+			want:  []string{},
+		},
+		"nil entries are skipped": {
+			items: []*tfe.AuditTrail{
+				nil,
+				ev("ev-1", base.Add(time.Hour)),
+				nil,
+			},
+			since: base,
+			want:  []string{"ev-1"},
+		},
+		"an id-less event is never taken for archived": {
+			items: []*tfe.AuditTrail{
+				ev("", base.Add(time.Hour)),
+				ev("", base.Add(2*time.Hour)),
+			},
+			archived: []*tfe.AuditTrail{ev("", base.Add(time.Hour))},
+			since:    base,
+			want:     []string{"", ""},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			fresh := audit.EventsAfter(tc.items, tc.since, tc.archived)
+
+			ids := make([]string, len(fresh))
+			for i, e := range fresh {
+				ids[i] = e.ID
+			}
+
+			assert.Equal(t, tc.want, ids)
+		})
+	}
+}
+
 func TestNewestTimestamp(t *testing.T) {
 	t.Parallel()
 
