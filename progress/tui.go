@@ -498,22 +498,37 @@ func (m *tuiModel) render(snap snapshot) string {
 // region and the footer, so the footer stays glued to the frame's last rows
 // rather than bouncing with the live task count. Only a terminal too short
 // for the held height pulls it back down, the one resize the renderer must
-// handle anyway (the task budget keeps the natural content within the screen,
-// so the clamped frame never truncates a live row).
+// handle anyway.
+//
+// A terminal shorter than the panel's chrome (see [chromeLines]) cannot hold
+// even an empty task region, since the budget shrinks task rows and nothing
+// else, so there the composed frame is cut to the screen: the topmost rows
+// give way, the end the inline renderer truncates at itself, so the frame the
+// model reports and the rows the screen holds stay in agreement rather than
+// leaving the renderer to reconcile a view taller than the terminal on every
+// repaint.
 func (m *tuiModel) composeFrame(body, footer []string) []string {
-	m.frame = max(m.frame, len(body)+len(footer))
+	natural := len(body) + len(footer)
+
+	m.frame = max(m.frame, natural)
 	if m.height > 0 {
 		m.frame = min(m.frame, m.height)
 	}
 
-	lines := make([]string, 0, m.frame)
+	lines := make([]string, 0, max(m.frame, natural))
 	lines = append(lines, body...)
 
 	for len(lines)+len(footer) < m.frame {
 		lines = append(lines, "")
 	}
 
-	return append(lines, footer...)
+	lines = append(lines, footer...)
+
+	if len(lines) > m.frame {
+		lines = lines[len(lines)-m.frame:]
+	}
+
+	return lines
 }
 
 // chromeLines is how many non-task lines the panel renders around the task

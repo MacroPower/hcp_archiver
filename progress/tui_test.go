@@ -532,6 +532,38 @@ func TestRenderPanel_RemoteTaskLinesFitTerminalHeight(t *testing.T) {
 	assert.Contains(t, ansi.Strip(rendered), "☁")
 }
 
+func TestRenderPanel_ShorterThanChromeFitsTerminal(t *testing.T) {
+	t.Parallel()
+
+	// Below the chrome's own height the task budget has nothing left to give
+	// (it shrinks task rows and nothing else), so the frame is cut to the
+	// screen rather than rendering taller than the terminal on every repaint.
+	// The topmost rows give way, so the footer survives the cut.
+	for _, height := range []int{1, 2, 3, 4, 5} {
+		panel := remotePanel()
+		panel.Tasks = []progress.PanelTask{{Name: "acme/ws-00", Total: 10, Done: 3}}
+
+		rendered := progress.RenderPanelAt(panel, 80, height)
+		lines := strings.Split(rendered, "\n")
+
+		require.Len(t, lines, height, "frame fits a %d-row terminal", height)
+		assert.Contains(t, ansi.Strip(lines[len(lines)-1]), "☁",
+			"the remote readout holds the last row at %d rows", height)
+	}
+}
+
+func TestRenderPanel_ShortTerminalHoldsAcrossFrames(t *testing.T) {
+	t.Parallel()
+
+	// The held height is a ratchet, so a frame rendered while the pool was
+	// wide must not carry a taller panel onto a terminal that cannot hold it.
+	frames := progress.RenderPanelFrames(80, 3, tasksPanel(8), tasksPanel(1))
+
+	for i, frame := range frames {
+		assert.Len(t, strings.Split(frame, "\n"), 3, "frame %d fits the terminal", i)
+	}
+}
+
 func TestRenderPanel_RemoteHeightHoldsOnShortTerminal(t *testing.T) {
 	t.Parallel()
 
