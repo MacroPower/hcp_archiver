@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +42,62 @@ func TestWithLogSink_DropsNilSinks(t *testing.T) {
 			assert.Equal(t, tc.want, r.sink)
 		})
 	}
+}
+
+// fakeTerminal is a writer carrying the shape Bubble Tea inspects an output
+// for (see [terminalFile]), so the guard's passthrough can be exercised
+// without a real tty.
+type fakeTerminal struct {
+	buf strings.Builder
+	fd  uintptr
+}
+
+//nolint:wrapcheck // A stand-in terminal reports what its buffer reports.
+func (f *fakeTerminal) Write(p []byte) (int, error) { return f.buf.Write(p) }
+func (f *fakeTerminal) Read([]byte) (int, error)    { return 0, io.EOF }
+func (f *fakeTerminal) Close() error                { return nil }
+func (f *fakeTerminal) Fd() uintptr                 { return f.fd }
+
+func TestTermGuard_RevocationSilencesAnAbandonedProgram(t *testing.T) {
+	t.Parallel()
+
+	// A program the shutdown escalation abandoned may unwedge later and finish
+	// unwinding onto a terminal its successor now owns; the revocation is what
+	// keeps those writes off the shared screen.
+	buf := &strings.Builder{}
+	out, guard := guardTerminal(buf)
+
+	_, err := io.WriteString(out, "live frame")
+	require.NoError(t, err)
+
+	guard.revoked.Store(true)
+
+	n, err := io.WriteString(out, "zombie teardown")
+	require.NoError(t, err, "a revoked program unwinds rather than erroring")
+	assert.Equal(t, len("zombie teardown"), n, "a discarded write is not a short write")
+
+	assert.Equal(t, "live frame", buf.String(),
+		"the abandoned program's writes never reach the terminal")
+}
+
+func TestGuardTerminal_CarriesTheTerminalShape(t *testing.T) {
+	t.Parallel()
+
+	// Bubble Tea queries the window size and detects the color profile through
+	// the output's descriptor, so a guarded terminal must still read as one:
+	// only its writes are intercepted.
+	f := &fakeTerminal{fd: 7}
+	out, guard := guardTerminal(f)
+
+	file, ok := out.(terminalFile)
+	require.True(t, ok, "the guarded writer is still a terminal file")
+	assert.Equal(t, uintptr(7), file.Fd(), "the real descriptor carries through")
+
+	guard.revoked.Store(true)
+
+	_, err := io.WriteString(out, "zombie teardown")
+	require.NoError(t, err)
+	assert.Empty(t, f.buf.String(), "revocation guards the terminal's writes too")
 }
 
 func TestTuiError(t *testing.T) {

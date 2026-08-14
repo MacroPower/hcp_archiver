@@ -754,10 +754,11 @@ const quitGrace = 2 * time.Second
 // the log sink for the program's lifetime so log lines queue for the panel to
 // print, and on return revokes the model's feed and deactivates the sink,
 // which flushes any uncommitted lines to the sink's fallback so nothing is
-// lost and restores the stderr path before the next org logs. The revocation
-// covers the abandonment path: a wedged program left behind may tick again
-// later, and its feed going dead is what keeps it from stealing lines a
-// successor panel now owns.
+// lost and restores the stderr path before the next org logs. The program's
+// terminal writes are revoked on return too (see [termGuard]). Both
+// revocations exist for the abandonment path: a wedged program left behind may
+// tick again later, and its feed and its terminal going dead together are what
+// keep it out of the stream a successor panel now owns.
 func (r *Reporter) runTUI(ctx context.Context) error {
 	var feed *feedGuard
 
@@ -778,9 +779,12 @@ func (r *Reporter) runTUI(ctx context.Context) error {
 		modelFeed = feed
 	}
 
+	out, terminal := guardTerminal(r.w)
+	defer terminal.revoked.Store(true)
+
 	program := tea.NewProgram(
 		newTUIModel(r.lockedTake, r.interrupt, modelFeed),
-		tea.WithOutput(r.w),
+		tea.WithOutput(out),
 		tea.WithInput(r.in),
 		tea.WithoutSignalHandler(),
 	)
@@ -819,8 +823,78 @@ func (r *Reporter) runTUI(ctx context.Context) error {
 		// terminal write holds it wedged past any escalation). Abandon it:
 		// the goroutines stay parked either way, and hanging the run's
 		// shutdown on them is the one outcome this path exists to prevent.
+		// The deferred revocations take the terminal and the log feed away
+		// from it on the way out, so a program that unwedges later unwinds
+		// against a dead writer rather than over its successor's screen.
 		return nil
 	}
+}
+
+// terminalFile is the shape Bubble Tea inspects an output writer for to
+// recognize a terminal (charmbracelet/x/term.File, satisfied structurally so
+// this package takes no dependency on it): the program queries the window size
+// and restores the terminal state through the descriptor, and the color
+// profile is detected the same way. A guarded writer carries the shape through
+// so guarding the panel's writes costs it neither.
+type terminalFile interface {
+	io.ReadWriteCloser
+	Fd() uintptr
+}
+
+// termGuard is the revocable terminal writer the reporter hands its panel's
+// program. Revoking discards everything the program writes from then on: the
+// shutdown escalation abandons a program whose renderer is wedged mid-write,
+// and a terminal that resumes draining afterwards would otherwise let that
+// renderer's remaining frames and its unwinding teardown sequences land over
+// the summary block and the next organization's panel, the interleaving on the
+// shared terminal that the feed guard prevents on the shared sink.
+//
+// Writes pass through untouched, errors included, so the program cannot tell
+// the guard from the writer it stands in for. Create instances with
+// [guardTerminal].
+type termGuard struct {
+	w       io.Writer
+	revoked atomic.Bool
+}
+
+// Write passes p to the terminal, or discards it once revoked, reporting the
+// write consumed either way so a revoked program unwinds on a quiet writer
+// rather than a short-write error.
+func (g *termGuard) Write(p []byte) (int, error) {
+	if g.revoked.Load() {
+		return len(p), nil
+	}
+
+	//nolint:wrapcheck // The guard stands in for the writer; a wrap would show.
+	return g.w.Write(p)
+}
+
+// guardTerminal returns the writer to hand the panel's program and the
+// [termGuard] revoking it. A w that is the terminal file the program inspects
+// is wrapped in a stand-in carrying that shape, so only the writes are
+// guarded; anything else is guarded directly.
+func guardTerminal(w io.Writer) (io.Writer, *termGuard) {
+	g := &termGuard{w: w}
+
+	if f, ok := w.(terminalFile); ok {
+		return &guardedTerminal{terminalFile: f, guard: g}, g
+	}
+
+	return g, g
+}
+
+// guardedTerminal is a [terminalFile] whose writes route through a
+// [termGuard]; every other method is the underlying terminal's own, so Bubble
+// Tea sizes and restores the real terminal while the reporter keeps the power
+// to cut the panel off from it.
+type guardedTerminal struct {
+	terminalFile
+	guard *termGuard
+}
+
+// Write routes the terminal write through the guard.
+func (t *guardedTerminal) Write(p []byte) (int, error) {
+	return t.guard.Write(p)
 }
 
 // feedGuard is the revocable [logFeed] the reporter hands its panel's model.
