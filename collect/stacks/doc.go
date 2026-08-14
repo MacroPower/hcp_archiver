@@ -16,6 +16,16 @@
 // This traversal pivots on deployment groups, unlike the workspace-and-run
 // model, which is why the package stands apart from the core project walk.
 //
+// Every path a stack writes nests under its project's display name, which the
+// stack listing does not carry, so the name is read per project and cached. Only
+// an answer later runs repeat may key that path: a project with no name of its
+// own, or one that is gone, stands in with its id, while a name that merely
+// failed to read leaves the stack skipped whole with its surface dropped. The
+// skip is what keeps a blip from materializing an id-keyed copy of the stack
+// beside the name-keyed one a later run writes, which nothing would ever
+// reconcile, since directory claims detect a rename only among siblings and the
+// two trees hang off different projects.
+//
 // The configuration and run walks freeze terminal elements and stop revisiting
 // them, so every child enumeration beneath one (a configuration's deployment
 // groups, a group's runs walk, a terminal run's steps) runs under a persisted

@@ -2,6 +2,7 @@ package stacks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -18,6 +19,15 @@ import (
 
 // name identifies this collector in progress output and logs.
 const name = "stacks"
+
+// ErrProjectUnresolved reports that a stack's project name did not read back on
+// an answer a later run is bound to repeat, so the stack has no directory to
+// archive under this run. A stack's whole archive path hangs off its project's
+// display name, and only a stable stand-in (a stack naming no project, a project
+// that reads back nameless, a project that is gone) may key that path; a blip, a
+// rate limit, or a scope gap a broader token closes leaves the stack skipped
+// with its surface dropped instead.
+var ErrProjectUnresolved = errors.New("project name unresolved")
 
 // Collector archives the stacks deployment model for one organization.
 //
@@ -117,7 +127,8 @@ func (c *Collector) Collect(ctx context.Context) error {
 	// stack listing by project id, but the filter names projects, and a stack's
 	// project name is known only once the project behind it reads back, so the
 	// filter applies per stack rather than narrowing the listing.
-	stacks, err := tfeclient.Paginate(ctx, c.env.Client(),
+	stacks, err := tfeclient.Paginate(
+		ctx, c.env.Client(),
 		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.Stack, *tfe.Pagination, error) {
 			l, e := tc.Stacks.List(ctx, c.org, &tfe.StackListOptions{ListOptions: o})
 			if e != nil {
@@ -152,11 +163,24 @@ func (c *Collector) Collect(ctx context.Context) error {
 }
 
 // collectStack archives one stack: its metadata, configurations, named
-// deployments, and states. A stack the project filter excludes is skipped whole.
-// Only a context cancellation propagates; a list-level failure within one
-// collection is logged and skipped.
+// deployments, and states. A stack the project filter excludes, or one whose
+// project name did not resolve, is skipped whole. Only a context cancellation
+// propagates; a list-level failure within one collection is logged and skipped.
 func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
-	resolved := c.resolveProject(ctx, stack)
+	resolved, err := c.resolveProject(ctx, stack)
+	if err != nil {
+		// The stack's entire archive path hangs off its project's name, so a
+		// name that did not read back leaves nothing to key it on. Archiving
+		// under the id anyway is worse than skipping: the next run resolves the
+		// real name and re-archives the stack under it, while the rename
+		// detection behind ClaimDir compares only siblings under one parent, so
+		// the id-keyed tree is never stamped as superseded and stays behind
+		// looking live while it silently goes stale. Skipping records the
+		// surface instead, which marks the run incomplete and leaves the stack
+		// to a later pass that can name its project.
+		return c.tolerate(ctx, c.env.Store().StackDir(resolved.name, stack.Name), err)
+	}
+
 	project := resolved.name
 
 	// Skip ahead of the claim below. An excluded stack then costs nothing past
@@ -167,15 +191,17 @@ func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 	// identity of its own and no workspaces.
 	if !c.projectFilter.Admits(project) {
 		// An exclusion the filter never really judged is a scope gap, not a
-		// genuine exclusion: the project's name did not resolve (a read blip
-		// or a permission gap), so the filter compared against a bare id and
-		// an in-scope stack may have been dropped. Recording the surface makes
-		// the run report incomplete rather than closing clean over it.
+		// genuine exclusion: the project carries no name of its own (the stack
+		// names no project, or the project reads back nameless or gone), so the
+		// filter compared against a stand-in and an in-scope stack may have been
+		// dropped. Recording the surface makes the run report incomplete rather
+		// than closing clean over it.
 		if !resolved.named {
 			c.env.MarkSurfaceDropped(c.env.Store().StackDir(project, stack.Name),
 				fmt.Errorf("stack %q: project %s name unresolved, so the project filter cannot judge it",
 					stack.Name, project))
-			c.log.WarnContext(ctx, "stack project name unresolved; excluded by the project filter",
+			c.log.WarnContext(
+				ctx, "stack project name unresolved; excluded by the project filter",
 				slog.String("stack", stack.Name),
 				slog.String("project", project),
 			)
@@ -189,7 +215,8 @@ func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 	// ClaimDir), so a reused name never overwrites the deleted stack's archive.
 	renamedFrom, err := c.env.ClaimDir(c.env.Store().StackDir(project, stack.Name), stack.ID)
 	if err != nil {
-		c.log.ErrorContext(ctx, "stack directory not claimed; skipping",
+		c.log.ErrorContext(
+			ctx, "stack directory not claimed; skipping",
 			slog.String("stack", stack.Name),
 			slog.Any("error", err),
 		)
@@ -198,7 +225,8 @@ func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 	}
 
 	if renamedFrom != "" {
-		c.log.WarnContext(ctx, "stack was renamed; its prior archive is kept",
+		c.log.WarnContext(
+			ctx, "stack was renamed; its prior archive is kept",
 			slog.String("stack", stack.Name),
 			slog.String("previous_name", renamedFrom),
 		)
@@ -239,25 +267,27 @@ func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 // resolveProject resolves the display name of a stack's project, caching every
 // stable answer. A stack normally carries a project relation; without one the
 // sentinel "unknown-project" fills the segment, and when the project reads back
-// with no name the id does. Either way the returned [resolvedProject] marks the
-// segment unnamed.
+// with no name, or is gone, the id does. Either way the returned
+// [resolvedProject] marks the segment unnamed, and the answer is one every later
+// run repeats, so the segment it keys is stable across runs.
 //
-// A read failure is a transient blip or a permission gap, not a stable answer,
-// so it falls back to the id for this stack without caching it. That keeps a
-// single blip on one stack from freezing the whole project's stacks under the
-// id, and lets a later stack or a re-run under a broader token still resolve
-// the real name. Only a project that genuinely reads back without a name caches
-// the id, since that answer is stable. Concurrent stacks that miss the cache on
-// the same project may each read it; both cache the same stable answer, so the
-// duplicate read is harmless.
-func (c *Collector) resolveProject(ctx context.Context, stack *tfe.Stack) resolvedProject {
+// A read that fails on anything else is not an answer at all: a blip, a rate
+// limit, or a scope gap a broader token closes all read back differently later,
+// so nothing is cached and [ErrProjectUnresolved] is returned rather than a
+// segment the next run would contradict. The returned [resolvedProject] still
+// carries the id, for naming the stack in a report, but never for keying an
+// archive path.
+//
+// Concurrent stacks that miss the cache on the same project may each read it;
+// both cache the same stable answer, so the duplicate read is harmless.
+func (c *Collector) resolveProject(ctx context.Context, stack *tfe.Stack) (resolvedProject, error) {
 	if stack.Project == nil || stack.Project.ID == "" {
-		return resolvedProject{name: "unknown-project"}
+		return resolvedProject{name: "unknown-project"}, nil
 	}
 
 	id := stack.Project.ID
 	if cached, ok := c.cachedProject(id); ok {
-		return cached
+		return cached, nil
 	}
 
 	var project *tfe.Project
@@ -270,19 +300,30 @@ func (c *Collector) resolveProject(ctx context.Context, stack *tfe.Stack) resolv
 		return wrap(e)
 	})
 	if err != nil {
-		return resolvedProject{name: id}
+		if !tfeclient.IsTerminal(err) {
+			return resolvedProject{name: id}, fmt.Errorf("%w: project %s: %w", ErrProjectUnresolved, id, err)
+		}
+
+		// A project that is gone answers as stably as one that reads back
+		// nameless: no later run resolves a name for it, so the id caches and
+		// stands in for the segment, and the stack keeps archiving where it
+		// always has.
+		c.cacheProject(id, resolvedProject{name: id})
+
+		//nolint:nilerr // A terminal read answers stably; the id stands in.
+		return resolvedProject{name: id}, nil
 	}
 
 	if project == nil || project.Name == "" {
 		c.cacheProject(id, resolvedProject{name: id})
 
-		return resolvedProject{name: id}
+		return resolvedProject{name: id}, nil
 	}
 
 	resolved := resolvedProject{name: project.Name, named: true}
 	c.cacheProject(id, resolved)
 
-	return resolved
+	return resolved, nil
 }
 
 // cachedProject reads a project id's cached lookup, reporting whether one is
@@ -320,7 +361,8 @@ func (c *Collector) tolerate(ctx context.Context, surface string, err error) err
 
 	c.env.MarkSurfaceDropped(surface, err)
 
-	c.log.WarnContext(ctx, "skipping stacks object after failure",
+	c.log.WarnContext(
+		ctx, "skipping stacks object after failure",
 		slog.String("org", c.org),
 		slog.String("surface", surface),
 		slog.Any("cause", err),
