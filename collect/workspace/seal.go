@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -27,9 +28,13 @@ var (
 		"cost-estimate.log": {},
 	}
 
-	// Immutable run-child filenames, each mapped to the roll-up it coalesces into;
-	// run.json is absent because it is mutable: it coalesces into runsRollup
-	// through its own terminal-status gate rather than by filename alone.
+	// Frozen run-child filenames, each mapped to the roll-up it coalesces into;
+	// run.json is absent because it is mutable for as long as its run is in
+	// flight: it coalesces into runsRollup through its own terminal-status gate
+	// rather than by filename alone. The mutable comments.json needs no such
+	// gate, since its run is already terminal: a comment added later
+	// re-materializes the loose file and appends a newer roll-up line, which
+	// readers prefer over the older one.
 	runRollups = map[string]string{
 		"config-version.json":         "config-versions.ndjson",
 		"config-version-ingress.json": "config-versions.ndjson",
@@ -515,6 +520,13 @@ func (c *Collector) reconcileSealed(
 // read-back verifies, so a name in the map is proven to live in a verified
 // bundle. Sidecars are read in generation order, so a later generation's entry
 // wins for a name that recurs, though names are not expected to recur.
+//
+// That order is the parsed generation number, not the filename: the generation
+// field is zero-padded to four digits and widens beyond them, so "gen10000"
+// sorts lexically before "gen9999" and a recurring name past the boundary would
+// take the older generation's digest, inverting the invariant reconcileSealed
+// depends on. Equal numbers fall back to the filename, keeping the read order
+// deterministic.
 func (c *Collector) sealedDigests(bundlesDir, prefix string) (map[string]string, error) {
 	names, err := listNames(bundlesDir, func(e fs.DirEntry) bool {
 		return !e.IsDir() &&
@@ -525,7 +537,12 @@ func (c *Collector) sealedDigests(bundlesDir, prefix string) (map[string]string,
 		return nil, fmt.Errorf("list %s sidecars: %w", prefix, err)
 	}
 
-	slices.Sort(names)
+	slices.SortFunc(names, func(a, b string) int {
+		return cmp.Or(
+			cmp.Compare(parseGeneration(a, prefix), parseGeneration(b, prefix)),
+			strings.Compare(a, b),
+		)
+	})
 
 	out := make(map[string]string)
 

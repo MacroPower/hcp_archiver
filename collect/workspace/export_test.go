@@ -39,6 +39,16 @@ func (c *Collector) ArchiveUser(ctx context.Context, u *tfe.User) error {
 	return c.archiveUser(ctx, u)
 }
 
+// ArchiveComments exposes archiveComments to the external test package.
+func (c *Collector) ArchiveComments(ctx context.Context, project, ws string, run *tfe.Run) error {
+	return c.archiveComments(ctx, project, ws, run)
+}
+
+// SealedDigests exposes sealedDigests to the external test package.
+func (c *Collector) SealedDigests(bundlesDir, prefix string) (map[string]string, error) {
+	return c.sealedDigests(bundlesDir, prefix)
+}
+
 // ArchiveRunEvents exposes archiveRunEvents to the external test package.
 func (c *Collector) ArchiveRunEvents(ctx context.Context, project, ws string, run *tfe.Run) error {
 	return c.archiveRunEvents(ctx, project, ws, run)

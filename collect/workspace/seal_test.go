@@ -2,8 +2,11 @@ package workspace_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 
@@ -13,6 +16,7 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/collect"
 	"go.jacobcolvin.com/hcp_archiver/collect/workspace"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/seal"
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
@@ -537,4 +541,104 @@ func TestSealWorkspace_RunJSONResealAppendsNewerLine(t *testing.T) {
 	assert.Equal(t, string(runJSON("force_canceled")), lines[1],
 		"the newest line carries the updated content")
 	assert.False(t, f.exists(relPath))
+}
+
+// writeSidecar commits the sidecar index of one sealed generation of prefix,
+// recording name at digest. It is the marker sealedDigests reads, so writing it
+// alone models a generation whose zip has since been evicted to a remote store.
+func (f sealFixture) writeSidecar(t *testing.T, project, ws, prefix string, gen int, name, digest string) {
+	t.Helper()
+
+	bundle := fmt.Sprintf("%s.gen%04d.zip", prefix, gen)
+
+	line, err := json.Marshal(seal.Entry{Name: name, Bundle: bundle, SHA256: digest})
+	require.NoError(t, err)
+
+	_, err = f.store.WriteBytes(
+		f.store.Join(f.store.BundleDir(project, ws), bundle+seal.SidecarSuffix),
+		append(line, '\n'),
+	)
+	require.NoError(t, err)
+}
+
+// digestOf returns the lowercase hex SHA-256 of data, the form a sidecar entry
+// records.
+func digestOf(data []byte) string {
+	sum := sha256.Sum256(data)
+
+	return hex.EncodeToString(sum[:])
+}
+
+// genDigest is a stand-in digest that identifies the generation that recorded
+// it, for tests that care only which sidecar won a name.
+func genDigest(gen int) string {
+	return fmt.Sprintf("digest-of-gen%d", gen)
+}
+
+func TestSealedDigestsReadsInGenerationOrder(t *testing.T) {
+	t.Parallel()
+
+	// The generation field is zero-padded to four digits and widens past them, so
+	// a lexical read order would put gen10000 before gen9999 and hand a recurring
+	// name the older generation's digest.
+	tests := map[string]struct {
+		gens []int
+		want int
+	}{
+		"one generation":                       {gens: []int{1}, want: 1},
+		"ascending generations":                {gens: []int{1, 2, 3}, want: 3},
+		"widths that sort the same either way": {gens: []int{998, 999}, want: 999},
+		"across the padding boundary":          {gens: []int{9999, 10000}, want: 10000},
+		"past the padding boundary":            {gens: []int{9999, 10000, 10001}, want: 10001},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSealFixture(t)
+			st := f.store
+			project, ws := "prod", "api"
+			member := st.RunFile(project, ws, "run-1", "plan.log")
+
+			for _, gen := range tc.gens {
+				f.writeSidecar(t, project, ws, "logs", gen, member, genDigest(gen))
+			}
+
+			sealed, err := f.collector.SealedDigests(st.AbsPath(st.BundleDir(project, ws)), "logs")
+			require.NoError(t, err)
+
+			assert.Equal(t, genDigest(tc.want), sealed[member],
+				"the highest generation's entry wins for a recurring name")
+		})
+	}
+}
+
+func TestSealWorkspace_ReconcilesPastThePaddingBoundary(t *testing.T) {
+	t.Parallel()
+
+	f := newSealFixture(t)
+	st := f.store
+	project, ws := "prod", "api"
+
+	planLog := st.RunFile(project, ws, "run-1", "plan.log")
+	superseded := []byte("first output")
+	current := []byte("second output, different bytes")
+
+	// Two generations either side of the padding boundary sealed the same name,
+	// the newer holding the bytes a failed removal stranded on disk. Read in
+	// generation order the survivor is proven sealed and dropped; read lexically
+	// gen9999's stale digest wins, the survivor looks divergent, and its name is
+	// duplicated into a third bundle.
+	f.writeSidecar(t, project, ws, "logs", 9999, planLog, digestOf(superseded))
+	f.writeSidecar(t, project, ws, "logs", 10000, planLog, digestOf(current))
+
+	f.writeDone(t, planLog, current)
+	f.markComplete(project, ws)
+
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	assert.False(t, f.exists(st.Join(st.BundleDir(project, ws), "logs.gen10001.zip")),
+		"a survivor the newest generation already sealed is not sealed again")
+	assert.False(t, f.exists(planLog), "the reconciled stranded source is removed")
 }

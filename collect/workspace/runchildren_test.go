@@ -507,3 +507,63 @@ func TestArchiveTFPolicyOutcomesNoEvaluations(t *testing.T) {
 		assert.False(t, exists, "%s should not be written for a no-policy run", p)
 	}
 }
+
+func TestArchiveComments(t *testing.T) {
+	t.Parallel()
+
+	// Each pass lists the comment ids the API answers on that pass; the archive
+	// must reflect the last of them, since a comment can be left on a run long
+	// after it finished and the archiver would otherwise never look again.
+	tests := map[string]struct {
+		passes [][]string
+		want   []string
+	}{
+		"the first pass archives the run's comments": {
+			passes: [][]string{{"comment-1"}},
+			want:   []string{"comment-1"},
+		},
+		"a comment left on a run archived with none is still captured": {
+			passes: [][]string{{}, {"comment-2"}},
+			want:   []string{"comment-2"},
+		},
+		"a comment left on a run archived with one joins it": {
+			passes: [][]string{{"comment-1"}, {"comment-1", "comment-2"}},
+			want:   []string{"comment-1", "comment-2"},
+		},
+		"an unchanged list leaves the archive as it was": {
+			passes: [][]string{{"comment-1"}, {"comment-1"}},
+			want:   []string{"comment-1"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var hits int
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v2/runs/run-1/comments", func(w http.ResponseWriter, _ *http.Request) {
+				ids := tc.passes[min(hits, len(tc.passes)-1)]
+				hits++
+
+				comments := make([]*tfe.Comment, len(ids))
+				for i, id := range ids {
+					comments[i] = &tfe.Comment{ID: id, Body: "body of " + id}
+				}
+
+				writeJSONAPI(t, w, marshalJSONAPI(t, comments))
+			})
+
+			f := newWSFixture(t, mux)
+			run := &tfe.Run{ID: "run-1"}
+
+			for range tc.passes {
+				require.NoError(t, f.collector.ArchiveComments(t.Context(), "proj", "ws", run))
+			}
+
+			assert.Equal(t, len(tc.passes), hits, "comments are re-listed on every pass, never settled once")
+			assert.Equal(t, tc.want, f.dataIDs(t, f.store.RunFile("proj", "ws", "run-1", "comments.json")))
+		})
+	}
+}
