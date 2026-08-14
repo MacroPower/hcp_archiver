@@ -25,9 +25,11 @@ const msgListSkipped = "org-scoped list read did not complete; skipping collecti
 // It treats this metadata as mutable: every run re-reads the organization
 // record, teams, memberships, VCS connections, governance objects, and the
 // remaining org-level configuration and overwrites the stored copy when the
-// payload changes. The raw Sentinel or OPA policy source is the one immutable
-// artifact and is fetched only once. Create instances with [New]; it satisfies
-// [collect.Collector].
+// payload changes. The raw Sentinel or OPA policy source is archived per
+// revision instead: each revision is immutable and fetched only once, and a
+// policy whose source is replaced archives the replacement under a name of its
+// own (see [Collector.policySourcePath]). Create instances with [New]; it
+// satisfies [collect.Collector].
 type Collector struct {
 	env  *collect.Env
 	org  string

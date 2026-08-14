@@ -14,7 +14,8 @@
 //
 // It also captures the governance objects: policy sets with their current and
 // newest version and their parameters, each policy's raw source alongside its
-// metadata, variable sets with their variables, and
+// metadata (one file per source revision the archive observes, since an upload
+// replaces a policy's source in place), variable sets with their variables, and
 // organization run-task definitions. The remaining org-level
 // configuration rounds it out: agent pools with their allowed and excluded
 // workspaces and allowed projects, per-token-type max-TTL policies, and reserved

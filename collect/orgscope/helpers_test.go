@@ -2,8 +2,11 @@ package orgscope_test
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,6 +15,7 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/collect/orgscope"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/store"
+	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
 // orgFixture builds an org-scoped collector over a temp-dir store and ledger, so
@@ -35,6 +39,45 @@ func newOrgFixture(t *testing.T) orgFixture {
 
 	return orgFixture{
 		collector: orgscope.New(collect.NewEnv(nil, st, ledger), "example-org"),
+		store:     st,
+		ledger:    ledger,
+	}
+}
+
+// newOrgFixtureServer builds an org-scoped collector over a client pointed at a
+// fake server serving mux, so the archive paths that fetch can be exercised end
+// to end. The ledger reads its clock from now, fixing the fetch time every
+// recorded outcome carries.
+func newOrgFixtureServer(t *testing.T, mux *http.ServeMux, now time.Time) orgFixture {
+	t.Helper()
+
+	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	client, err := tfeclient.New(
+		tfeclient.WithToken("test-token"),
+		tfeclient.WithAddress(srv.URL),
+		tfeclient.WithServerErrorRetry(0, 0),
+	)
+	require.NoError(t, err)
+
+	st := store.New(t.TempDir())
+
+	ledger, err := manifest.Load(st.Root(), manifest.WithClock(func() time.Time { return now }))
+	require.NoError(t, err)
+
+	ledger.StartRun()
+
+	// A zero confirm delay keeps the 404-confirming re-probe from sleeping in
+	// tests.
+	env := collect.NewEnv(client, st, ledger, collect.WithAbsentConfirm(0))
+
+	return orgFixture{
+		collector: orgscope.New(env, "example-org"),
 		store:     st,
 		ledger:    ledger,
 	}

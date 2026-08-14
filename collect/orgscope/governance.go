@@ -3,6 +3,7 @@ package orgscope
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/hashicorp/go-tfe"
 )
@@ -176,13 +177,13 @@ func (c *Collector) archivePolicy(ctx context.Context, policy *tfe.Policy) error
 		return err
 	}
 
-	return c.collectPolicySource(ctx, policy.ID, policy.Kind)
+	return c.collectPolicySource(ctx, policy)
 }
 
-// collectPolicySource archives the raw policy source as immutable bytes, picking
-// the file extension from the policy kind.
-func (c *Collector) collectPolicySource(ctx context.Context, policyID string, kind tfe.PolicyKind) error {
-	relPath := c.env.Store().Policy(policyID, policyExt(kind))
+// collectPolicySource archives the raw source of the policy's current revision
+// as immutable bytes, under the name [Collector.policySourcePath] picks.
+func (c *Collector) collectPolicySource(ctx context.Context, policy *tfe.Policy) error {
+	relPath := c.policySourcePath(policy)
 
 	err := c.env.Bytes(ctx, relPath, func(ctx context.Context) ([]byte, error) {
 		var src []byte
@@ -190,7 +191,7 @@ func (c *Collector) collectPolicySource(ctx context.Context, policyID string, ki
 		derr := c.env.Client().Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
 			var e error
 
-			src, e = tc.Policies.Download(ctx, policyID)
+			src, e = tc.Policies.Download(ctx, policy.ID)
 			if e != nil {
 				return fmt.Errorf("download policy source: %w", e)
 			}
@@ -208,6 +209,57 @@ func (c *Collector) collectPolicySource(ctx context.Context, policyID string, ki
 	}
 
 	return nil
+}
+
+// policySourcePath returns the path the policy's current source revision is
+// archived under, picking the file extension from the policy kind.
+//
+// A policy's source is replaceable: an upload rewrites the content the same
+// policy id downloads and moves the policy's updated-at, while the id and every
+// other name it is known by stay put. One file per policy would therefore freeze
+// the first revision an archive ever saw (the source is archived as immutable
+// bytes, fetched once and never re-read) beside mutable metadata that keeps
+// reporting the policy changed. Each revision instead earns a name of its own:
+// the source keeps the plain <id>.<ext> name until an updated-at newer than the
+// recorded fetch arrives, and every revision observed after that lands beside it
+// as <id>.<updated-at>.<ext>. The stamps sort lexically, so the last name is the
+// current source and no revision is overwritten by the one that replaced it.
+//
+// The comparison is against the plain file's fetch time throughout rather than
+// the newest revision's, so a revision already archived resolves to the same
+// name on every later run and the ledger settles its one fetch. A policy whose
+// plain name has not settled keeps it, whether nothing is archived there yet or
+// a failed capture is still awaiting its retry, so the retry lands on the entry
+// the ledger is waiting for rather than stranding it unsettled under a new name.
+// An unset updated-at is never newer than a recorded fetch, so it too keeps the
+// plain name. Two uploads inside one second share a stamp, so the archive keeps
+// whichever revision it reached first; the second is captured only once a later
+// upload moves the stamp again.
+func (c *Collector) policySourcePath(policy *tfe.Policy) string {
+	st := c.env.Store()
+	ext := policyExt(policy.Kind)
+	relPath := st.Policy(policy.ID, ext)
+
+	entry, ok := c.env.Entry(relPath)
+	if !ok || c.env.ShouldFetch(relPath) || !policy.UpdatedAt.After(entry.FetchedAt) {
+		return relPath
+	}
+
+	// The revision stamp composes into the extension rather than into the id, so
+	// the store stays the one place a policy id is sanitized into a path segment.
+	return st.Policy(policy.ID, policyRevision(policy.UpdatedAt)+"."+ext)
+}
+
+// policyRevisionLayout formats a policy's updated-at into the stamp naming one
+// revision of its source. It carries no colons and, paired with a literal "Z",
+// denotes UTC, so the names stay filesystem-safe and sort by revision, the same
+// shape the store stamps onto state-version filenames.
+const policyRevisionLayout = "20060102T150405"
+
+// policyRevision returns the stamp naming the source revision an updated-at
+// identifies (see [policyRevisionLayout]).
+func policyRevision(updatedAt time.Time) string {
+	return updatedAt.UTC().Format(policyRevisionLayout) + "Z"
 }
 
 // policyExt returns the source-file extension for a policy of the given kind.
