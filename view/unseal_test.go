@@ -101,11 +101,12 @@ func targetPaths(t *testing.T, target string) []string {
 	return paths
 }
 
-// appendRollupLine appends one raw NDJSON line to a fixture roll-up file.
-func appendRollupLine(t *testing.T, root, rollup, line string) {
+// appendRollupLine appends one raw NDJSON line to the fixture's
+// config-versions roll-up file.
+func appendRollupLine(t *testing.T, root, line string) {
 	t.Helper()
 
-	abs := filepath.Join(root, "my-org", filepath.FromSlash(wsDir), "rollups", rollup)
+	abs := filepath.Join(root, "my-org", filepath.FromSlash(wsDir), "rollups", "config-versions.ndjson")
 
 	f, err := os.OpenFile(abs, os.O_APPEND|os.O_WRONLY, 0o600)
 	require.NoError(t, err)
@@ -404,7 +405,7 @@ func TestUnseal_PathTraversalRejected(t *testing.T) {
 	// filter cannot drop it: only writeUnsealed's validation stands between it
 	// and the join.
 	escape := wsDir + "/../../../../../../escape"
-	appendRollupLine(t, root, "config-versions.ndjson", `{"path":"`+escape+`","content":"boom"}`)
+	appendRollupLine(t, root, `{"path":"`+escape+`","content":"boom"}`)
 
 	org := openOrg(t, root)
 
@@ -443,7 +444,7 @@ func TestUnseal_NewestRollupLineWins(t *testing.T) {
 	// A member re-frozen after its content changed appends a newer line under
 	// the same path; the unseal must reproduce the newest. The line carries no
 	// digest, matching a hand-built fixture, so it is served as-is.
-	appendRollupLine(t, root, "config-versions.ndjson", `{"path":"`+rel+`","content":"updated content"}`)
+	appendRollupLine(t, root, `{"path":"`+rel+`","content":"updated content"}`)
 
 	org := openOrg(t, root)
 	target := t.TempDir()
@@ -515,7 +516,7 @@ func TestUnseal_RollupChecksumMismatch(t *testing.T) {
 	// A newest line whose content no longer hashes to its recorded digest
 	// models rot inside the roll-up; serving it silently would hand back
 	// corrupt bytes as if archived.
-	appendRollupLine(t, root, "config-versions.ndjson",
+	appendRollupLine(t, root,
 		`{"path":"`+rel+`","sha256":"`+strings.Repeat("0", 64)+`","content":"rotten"}`)
 
 	org := openOrg(t, root)

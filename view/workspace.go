@@ -350,7 +350,8 @@ func (w *Workspace) indexRollups(idx map[string]sealedRef) error {
 // torn trailing line without its newline commit marker is ignored, matching the
 // writer's crash semantics, and a corrupt mid-file line is skipped rather than
 // failing the whole index, so one damaged sealed file does not hide the
-// workspace's intact loose runs and state versions.
+// workspace's intact loose runs and state versions. A line naming no path counts
+// as corrupt whether or not it parses as JSON.
 func indexRollupFile(file string, idx map[string]sealedRef) error {
 	//nolint:gosec // The path is composed from the archive root being browsed.
 	f, err := os.Open(file)
@@ -375,8 +376,15 @@ func indexRollupFile(file string, idx map[string]sealedRef) error {
 			// A single corrupt line (bit rot, a partial restore) must not dead-end
 			// the workspace: skip it and keep indexing. The offset still advances so
 			// later lines index at their true byte offset.
+			//
+			// A record that decodes but names no path ("null", "{}", an empty
+			// "path") is corrupt in the same way and is skipped with it: indexing
+			// one would key a sealed object at the empty path, which sits under
+			// every prefix, so each whole-organization listing would carry an entry
+			// naming nothing and each unseal would report it as a file it could not
+			// write, on every run.
 			err = json.Unmarshal(line, &rec)
-			if err != nil {
+			if err != nil || rec.Path == "" {
 				offset += int64(len(line))
 
 				continue
@@ -418,7 +426,8 @@ func (w *Workspace) indexBundles(idx map[string]sealedRef) error {
 }
 
 // indexSidecarFile scans one sidecar index, recording each member against its
-// bundle's archive-relative path.
+// bundle's archive-relative path. A line naming no member or no bundle counts as
+// corrupt whether or not it parses as JSON.
 func indexSidecarFile(file, relBundles string, idx map[string]sealedRef) error {
 	//nolint:gosec // The path is composed from the archive root being browsed.
 	f, err := os.Open(file)
@@ -444,8 +453,13 @@ func indexSidecarFile(file, relBundles string, idx map[string]sealedRef) error {
 			// bufio.Scanner keeps a merged or oversized garbage run (bit rot, a
 			// partial restore) from raising a hard ErrTooLong that would fail the
 			// whole index; it simply fails to unmarshal and is skipped.
+			//
+			// A record naming no member or no bundle is skipped alongside it: an
+			// empty name would key a member at the empty path, which every listing
+			// and unseal then carries, and an empty bundle would point a member at
+			// the bundles directory itself rather than at a zip.
 			err = json.Unmarshal(line, &rec)
-			if err == nil {
+			if err == nil && rec.Name != "" && rec.Bundle != "" {
 				idx[rec.Name] = sealedRef{bundle: path.Join(relBundles, rec.Bundle), size: rec.Size}
 			}
 
