@@ -279,7 +279,14 @@ func openWithRemote(abs, dir string, options archiveOptions) ([]*Org, error) {
 		local[filepath.Base(abs)] = true
 	} else {
 		names, namesErr := localOrgNames(abs, dir)
-		if namesErr != nil {
+
+		switch {
+		// A directory that does not exist yet holds nothing local, which is
+		// the bootstrap case, not a fault: the mirror supplies the
+		// organizations and the first fetch creates the directory. Any other
+		// read fault still refuses the open.
+		case errors.Is(namesErr, fs.ErrNotExist):
+		case namesErr != nil:
 			return nil, namesErr
 		}
 

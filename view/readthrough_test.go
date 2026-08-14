@@ -124,6 +124,28 @@ func TestOpenArchive_BootstrapFromEmptyDir(t *testing.T) {
 	assert.Contains(t, string(marker), `"partial": true`)
 }
 
+func TestOpenArchive_BootstrapFromMissingDir(t *testing.T) {
+	t.Parallel()
+
+	fake := buildMirroredArchive(t)
+
+	// The most natural first invocation of the restore flow names a directory
+	// that does not exist yet; it bootstraps exactly like an empty one.
+	dir := filepath.Join(t.TempDir(), "restore", "archive")
+
+	orgs, err := view.OpenArchive(dir,
+		view.WithContext(t.Context()),
+		view.WithRemote(viewRemoteConfig()),
+		view.WithRemoteFactory(fakeFactory(fake)),
+	)
+	require.NoError(t, err)
+	require.Len(t, orgs, 1)
+	assert.Equal(t, "my-org", orgs[0].Name)
+
+	assert.FileExists(t, filepath.Join(dir, "my-org", "org.json"),
+		"the bootstrap creates the directory on the first fetch")
+}
+
 func TestOpenArchive_BootstrappedMarkerCarriesTheRemote(t *testing.T) {
 	t.Parallel()
 
