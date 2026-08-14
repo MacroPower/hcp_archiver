@@ -1,0 +1,12 @@
+# Variable sets
+
+## shared-set
+
+- **ID**: vs-1
+- **Description**: org-wide values
+- **Global**: true
+
+| Key | Category | HCL | Value |
+| --- | --- | --- | --- |
+| proxy_url | env |  | http://proxy |
+| api_token | env |  | (sensitive) |

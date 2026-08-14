@@ -1,0 +1,12 @@
+# Policy sets
+
+## security
+
+- **ID**: ps-1
+- **Kind**: sentinel
+- **Global**: false
+- **Policies**: 2
+
+| Key | Category | HCL | Value |
+| --- | --- | --- | --- |
+| license_key | policy-set |  | (sensitive) |

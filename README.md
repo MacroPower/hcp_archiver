@@ -232,6 +232,32 @@ with status 1, and a dry run whose plan already holds one exits the same way.
 An interrupted run reports its partial totals to stderr and exits 0; a fetch
 cut off mid-object leaves no partial file behind.
 
+### Exporting a browsable site
+
+`export` renders an archive's metadata as a tree of markdown files that a
+static site generator with directory-based navigation (mkdocs and its kin)
+builds without configuration: every directory carries an `index.md`, so the
+generated tree navigates as-is.
+
+```bash
+hcp_archiver export ./archive --target ./site
+```
+
+Pages carry metadata only: organization, team, variable-set, policy-set,
+project, workspace, and stack settings, variable tables (a sensitive
+variable shows its key with a `(sensitive)` marker, its stored value never
+read), and run and state-version history. Content that can embed secret
+values -- state blobs, plan and apply logs, cost estimates -- is represented
+by presence alone: names, sizes, and timestamps, never bytes. A workspace's
+archived readme is copied beside its page verbatim. The tree is written
+world-readable, curated for sharing, unlike the owner-only archive.
+
+The target is created when absent and refused when non-empty; `--force`
+replaces its contents (refusing when the archive itself sits beneath the
+target). Like the other read commands, the export reads the physical forms
+transparently; exporting a sealed archive whose roll-ups were offloaded
+fetches that metadata back from the mirror.
+
 ### Mirroring the archive to object storage
 
 With a `remote:` block configured, the bucket converges on a **complete copy**

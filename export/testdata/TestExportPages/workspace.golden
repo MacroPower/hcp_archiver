@@ -1,0 +1,37 @@
+# app
+
+- **ID**: ws-1
+- **Description**: the app
+- **Terraform version**: 1.9.0
+- **Execution mode**: remote
+- **Auto apply**: false
+- **Resource count**: 7
+- **Created**: 2024-01-01 00:00
+- **VCS repo**: acme/app
+
+See the workspace's [readme](readme.md).
+
+## Variables
+
+| Key | Category | HCL | Value |
+| --- | --- | --- | --- |
+| region | terraform | false | us-east-1 |
+| token | env |  | (sensitive) |
+
+## Runs
+
+2 archived runs. Artifact contents are withheld; the backup holds them in full.
+
+| ID | Created | Status | Message | Source | Terraform | Destroy | Changes | Archived artifacts |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| run-new | 2024-02-01 10:00 | applied | deploy \|pipes\| &amp; &lt;b&gt;markup&lt;/b&gt; | tfe-api | 1.9.0 | false | true | plan.log, config-version.json |
+| run-old | 2024-01-01 10:00 | errored | first attempt | tfe-api | 1.9.0 | false | true | apply.log |
+
+## State versions
+
+2 archived state versions. State contents are withheld; the backup holds them in full.
+
+| ID | Created | Serial | Status | Size | Archived blobs |
+| --- | --- | --- | --- | --- | --- |
+| sv-2 | 2024-01-02 03:04 | 3 | finalized | 123 B | raw |
+| sv-1 | 2024-01-01 00:00 | 2 | finalized | 123 B | raw |

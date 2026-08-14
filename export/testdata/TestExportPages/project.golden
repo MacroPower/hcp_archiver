@@ -1,0 +1,17 @@
+# default
+
+- **ID**: prj-1
+- **Description**: the default project
+- **Created**: 2023-06-02 00:00
+
+## Workspaces
+
+| Workspace |
+| --- |
+| [app](workspaces/app/index.md) |
+
+## Stacks
+
+| Stack |
+| --- |
+| [net](stacks/net/index.md) |

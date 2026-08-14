@@ -37,10 +37,10 @@ var (
 	// could not be read or written.
 	ErrUnsealIncomplete = errors.New("some objects could not be unsealed")
 
-	// ErrTargetInArchive indicates an unseal target sits inside the archive
-	// directory being read, where recovered files would be written into the
+	// ErrTargetInArchive indicates an unseal or export target sits inside the
+	// archive directory being read, where the written files would land in the
 	// archive itself.
-	ErrTargetInArchive = errors.New("unseal target must be outside the archive directory")
+	ErrTargetInArchive = errors.New("target must be outside the archive directory")
 
 	// ErrPrefixNeedsRemote indicates --remote-prefix was given with nothing to
 	// apply it to: no --remote URL and no configuration file naming a remote.
