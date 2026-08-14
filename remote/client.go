@@ -32,6 +32,14 @@ var (
 
 	// ErrNotFound indicates the object at a key does not exist in the store.
 	ErrNotFound = errors.New("object not found in remote store")
+
+	// ErrObjectChanged indicates a write replaced the object at a key while
+	// [Client.Download] was streaming it, so the transfer was abandoned part
+	// way rather than resumed against the new version and delivered as a
+	// splice of the two. It impugns neither the bytes that reached the
+	// destination nor the object now at the key: the recovery is to discard
+	// the partial stream and download the settled object afresh.
+	ErrObjectChanged = errors.New("object changed during download")
 )
 
 // maxUploadParts is the smallest part-count ceiling among the backends that

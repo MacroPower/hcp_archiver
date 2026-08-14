@@ -33,6 +33,12 @@ func MD5Sum(data []byte) []byte {
 
 // Object is one stored object with the metadata the fake serves.
 type Object struct {
+	// ModTime is the object's last modification time, reported on a head and
+	// on every read the way the backends report theirs. A zero value models a
+	// store recording none, and a write through the client leaves it zero;
+	// a test proving a resumed download notices a replaced object stores the
+	// new version through [Fake.SetObject] with a later one.
+	ModTime time.Time
 	// Metadata is the object's recorded key-value metadata, nil when the
 	// write carried none.
 	Metadata map[string]string
@@ -318,6 +324,7 @@ func (f *Fake) Attributes(ctx context.Context, key string) (*driver.Attributes, 
 	return &driver.Attributes{
 		Size:     int64(len(obj.Data)),
 		MD5:      obj.MD5,
+		ModTime:  obj.ModTime,
 		Metadata: maps.Clone(obj.Metadata),
 	}, nil
 }
@@ -459,9 +466,12 @@ func (f *Fake) NewRangeReader(
 		end = min(offset+length, size)
 	}
 
+	// The attributes describe the whole object the range was cut from, not the
+	// span served, which is what lets a resumed download tell a replacement
+	// under the key from the object it began reading.
 	r := &fakeReader{
 		Reader: bytes.NewReader(obj.Data[offset:end]),
-		attrs:  driver.ReaderAttributes{Size: size, ModTime: time.Time{}},
+		attrs:  driver.ReaderAttributes{Size: size, ModTime: obj.ModTime},
 	}
 
 	if takeFault(f.RangeBodyErr, &f.rangeBodyFails, f.RangeBodyErrN) {
@@ -574,6 +584,7 @@ func (f *Fake) Copy(_ context.Context, dstKey, srcKey string, _ *driver.CopyOpti
 	f.objects[dstKey] = Object{
 		Data:     slices.Clone(obj.Data),
 		MD5:      slices.Clone(obj.MD5),
+		ModTime:  obj.ModTime,
 		Metadata: maps.Clone(obj.Metadata),
 	}
 	f.copies = append(f.copies, CopyRecord{Src: srcKey, Dst: dstKey})

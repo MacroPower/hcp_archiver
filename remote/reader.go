@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
 
 // ReadAt reads len(p) bytes of the object at key starting at off, in a single
@@ -92,6 +93,20 @@ func (c *Client) ReadAt(ctx context.Context, key string, size int64, p []byte, o
 // request is still a bounded range, so a resumed download reads the remainder
 // and nothing more.
 //
+// A resume appends to bytes w already holds, so it may only read the object
+// those bytes came from. Each attempt pins the version it opened (see
+// [objectVersion]), and a resume finding a different one abandons the
+// transfer with [ErrObjectChanged] rather than delivering a splice of two
+// versions: a stream that hashes to neither, which every caller here would
+// report as a healthy object gone corrupt. The pin binds only once a byte has
+// landed, so a replacement observed before that re-pins and streams whole; a
+// download holding nothing is free to serve what the key now holds, exactly
+// as a fresh call would. The signal is the length and modification time every
+// backend reports on a read, no portable precondition being available for a
+// ranged one, so a replacement of identical length within the modification
+// time's resolution reads as unchanged. The caller's own digest check remains
+// the last word on content, as it already is.
+//
 // A store that serves fewer than size bytes and ends cleanly returns that
 // count with a nil error, since a short object is not a transient fault and
 // retrying it would only short-serve again. The length check therefore belongs
@@ -108,7 +123,10 @@ func (c *Client) Download(ctx context.Context, key string, size int64, w io.Writ
 		return 0, nil
 	}
 
-	var n int64
+	var (
+		n      int64
+		served objectVersion
+	)
 
 	dst := destWriter{w: w}
 
@@ -133,6 +151,19 @@ func (c *Client) Download(ctx context.Context, key string, size int64, w io.Writ
 				_ = r.Close()
 			}()
 
+			// The bytes already in w cannot be taken back, so this range may only
+			// extend the version they came from. Until one lands there is nothing
+			// to splice, and whatever the key holds now becomes the pin.
+			opened := objectVersion{modTime: r.ModTime(), size: r.Size()}
+
+			switch {
+			case n == 0:
+				served = opened
+			case !served.matches(opened):
+				return fmt.Errorf("%w: %w after %d bytes: %s became %s",
+					errPermanent, ErrObjectChanged, n, served, opened)
+			}
+
 			// Each delivered chunk is progress, so a multi-gigabyte object stays
 			// alive while it moves and a wedged body stalls out and resumes.
 			copied, err := io.Copy(dst, countingReader{r: r, touch: touch})
@@ -150,6 +181,33 @@ func (c *Client) Download(ctx context.Context, key string, size int64, w io.Writ
 	}
 
 	return n, nil
+}
+
+// objectVersion identifies which version of an object one read opened, as
+// the change signal a resumed download pins its later ranges to. It carries
+// the object's length and modification time, the whole of the version
+// identity a read exposes portably: gocloud's reader surfaces neither an
+// ETag nor a generation, and its ranged read takes no precondition, so the
+// attributes riding every response are what a resume has to compare. Two
+// reads of an object nothing has touched report the same pair.
+type objectVersion struct {
+	modTime time.Time
+	size    int64
+}
+
+// matches reports whether other opened the same version of the object as v.
+func (v objectVersion) matches(other objectVersion) bool {
+	return v.size == other.size && v.modTime.Equal(other.modTime)
+}
+
+// String renders the version as the mid-download replacement error names it:
+// the length always, and the modification time when the backend reports one.
+func (v objectVersion) String() string {
+	if v.modTime.IsZero() {
+		return fmt.Sprintf("%d bytes", v.size)
+	}
+
+	return fmt.Sprintf("%d bytes modified %s", v.size, v.modTime.UTC().Format(time.RFC3339))
 }
 
 // errPermanent marks a failure that is none of the store's doing and would

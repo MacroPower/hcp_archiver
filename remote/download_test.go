@@ -2,9 +2,11 @@ package remote_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -120,6 +122,100 @@ func TestDownloadResumesMidBodyFailure(t *testing.T) {
 	assert.GreaterOrEqual(t, ranges[1].Offset, int64(delivered))
 	assert.Equal(t, int64(len(tarball)), ranges[1].Offset+ranges[1].Length,
 		"the resumed range ends at the object's end")
+}
+
+// A download's first attempt fails mid-body and the resume finds another
+// object under the key, the race a sweep's re-upload runs against a viewer's
+// fetch. The resume may not append that object's tail to the prefix already
+// delivered: the splice would hash to neither version, and every caller reads
+// such a stream as a healthy object gone corrupt.
+//
+// The after object stands in for the re-upload, written over the key as the
+// resume opens its range; delivered is how many bytes the first attempt's
+// body serves before it fails, a zero failing it before its first byte
+// reaches the destination.
+func TestDownloadObjectReplacedMidTransfer(t *testing.T) {
+	t.Parallel()
+
+	var (
+		stored  = time.Date(2026, time.August, 14, 9, 0, 0, 0, time.UTC)
+		rewrote = stored.Add(time.Minute)
+		// The replacement matches tarball's length exactly, so nothing but the
+		// modification time distinguishes it: a splice of the two would measure
+		// right and read wrong.
+		replacement = []byte(strings.Repeat("a different tarball's bytes\n", 4000))
+	)
+
+	tests := map[string]struct {
+		after     *remotetest.Object
+		want      []byte
+		err       error
+		delivered int64
+	}{
+		"replaced with content of the same length": {
+			delivered: 5000,
+			after:     &remotetest.Object{Data: replacement, ModTime: rewrote},
+			err:       remote.ErrObjectChanged,
+		},
+		"replaced with a shorter object": {
+			delivered: 5000,
+			after:     &remotetest.Object{Data: replacement[:9000], ModTime: stored},
+			err:       remote.ErrObjectChanged,
+		},
+		"untouched between the attempts": {
+			delivered: 5000,
+			want:      tarball,
+		},
+		"replaced before a byte lands": {
+			// Nothing reached the destination, so there is no prefix to splice
+			// onto and the resume is free to serve whatever the key now holds.
+			delivered: 0,
+			after:     &remotetest.Object{Data: replacement, ModTime: rewrote},
+			want:      replacement,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			client, fake := newRetryClient(t, 3)
+			fake.SetObject("cv-1.tar.gz", remotetest.Object{Data: tarball, ModTime: stored})
+
+			fake.RangeBodyErr = errors.New("connection reset")
+			fake.RangeBodyErrAfter = test.delivered
+			fake.RangeBodyErrN = 1
+
+			opens := 0
+			fake.RangeHook = func(context.Context) {
+				opens++
+
+				if opens == 2 && test.after != nil {
+					fake.SetObject("cv-1.tar.gz", *test.after)
+				}
+			}
+
+			var got bytes.Buffer
+
+			n, err := client.Download(t.Context(), "cv-1.tar.gz", int64(len(tarball)), &got)
+
+			require.Len(t, fake.Ranges(), 2,
+				"the first attempt fails mid-body and the resume settles the transfer either way")
+
+			if test.err != nil {
+				require.ErrorIs(t, err, test.err)
+				assert.True(t, bytes.HasPrefix(tarball, got.Bytes()),
+					"only the version the download began on reached the destination")
+				assert.EqualValues(t, got.Len(), n, "the count is what really landed")
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.EqualValues(t, len(test.want), n)
+			assert.Equal(t, test.want, got.Bytes(), "the bytes are one version's, whole")
+		})
+	}
 }
 
 // errWriter is a destination that refuses every byte, the shape a full disk
