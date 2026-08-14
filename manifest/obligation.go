@@ -37,14 +37,26 @@ func (o *Obligation) Key() string {
 // flushed batch (see [walRecordClass]), so no crash point persists a skip
 // signal for work whose marker was lost. Opening an already-pending or
 // already-failed marker changes nothing, so a retry does not churn the entry.
+//
+// The failed marker survives an [Obligation.Fail] racing the open, too: the
+// ledger tests the marker's status and records under one hold of its write
+// lock (see [Ledger.openObligation]), so a failure recorded concurrently
+// cannot be downgraded to a bare pending marker with its cause and transient
+// classification cleared.
 func (o *Obligation) Open() {
-	if e, ok := o.l.Entry(o.key); ok && e.Status == StatusErrored {
-		// The failed marker is already unsettled and carries its cause; the
-		// retry now underway rewrites it through Settle or Fail.
-		return
-	}
+	o.l.openObligation(o.key)
+}
 
-	o.l.MirrorReference(o.key, false)
+// openObligation records the obligation marker at key [StatusPending] unless
+// the marker already stands open: pending, so a retry does not churn it, or
+// errored, in which case it is already unsettled and carries its cause, and
+// the retry now underway rewrites it through [Obligation.Settle] or
+// [Obligation.Fail].
+func (l *Ledger) openObligation(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.openGateLocked(key, StatusPending, StatusErrored)
 }
 
 // Settle closes the obligation: the work finished and nothing beneath it

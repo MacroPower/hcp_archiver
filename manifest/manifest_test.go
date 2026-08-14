@@ -2,6 +2,7 @@ package manifest_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -1196,6 +1197,118 @@ func TestLedger_PendingGateSurvivesReload(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, manifest.StatusPending, entry.Status)
 	assert.True(t, reloaded.Collection(runsPrefix).HasUnsettled(), "a pending gate re-widens the walk on resume")
+}
+
+func TestObligation_MarkerLifecycle(t *testing.T) {
+	t.Parallel()
+
+	const (
+		groupsPrefix = "projects/p/stacks/s/configurations"
+		marker       = groupsPrefix + "/groups.listing"
+	)
+
+	ledger, err := manifest.Load(t.TempDir())
+	require.NoError(t, err)
+
+	ledger.StartRun()
+
+	ob := ledger.Obligation(marker)
+	require.Equal(t, marker, ob.Key())
+
+	// Opening persists the intent ahead of the work, and the pending marker holds
+	// its enclosing collection open.
+	ob.Open()
+
+	entry, ok := ledger.Entry(marker)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusPending, entry.Status)
+	assert.True(t, ledger.Collection(groupsPrefix).HasUnsettled())
+
+	// Re-opening an already-pending marker changes nothing, so a retry does not
+	// churn the entry.
+	ob.Open()
+
+	entry, ok = ledger.Entry(marker)
+	require.True(t, ok)
+	assert.Equal(t, 1, entry.Attempts, "an already-pending marker is not re-recorded")
+
+	ob.Settle()
+
+	entry, ok = ledger.Entry(marker)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusReferenceCleared, entry.Status)
+	assert.False(t, ledger.Collection(groupsPrefix).HasUnsettled(), "a settled marker closes the collection")
+
+	// A failure regresses the settled marker: the marker reflects the newest
+	// outcome, so the enumeration is retried on a later pass.
+	ob.Fail(errors.New("list groups: boom"), true)
+
+	entry, ok = ledger.Entry(marker)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, entry.Status)
+	assert.True(t, ledger.Collection(groupsPrefix).HasUnsettled())
+
+	// Opening the failed marker leaves the record alone: it is already unsettled
+	// and carries the cause the next Settle or Fail rewrites.
+	failed := entry.Attempts
+
+	ob.Open()
+
+	entry, ok = ledger.Entry(marker)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, entry.Status)
+	assert.Equal(t, "list groups: boom", entry.LastError)
+	assert.True(t, entry.Transient)
+	assert.Equal(t, failed, entry.Attempts, "a failed marker is not re-recorded")
+}
+
+func TestObligation_OpenKeepsAConcurrentFailure(t *testing.T) {
+	t.Parallel()
+
+	const markers = 200
+
+	cause := errors.New("list groups: boom")
+
+	ledger, err := manifest.Load(t.TempDir())
+	require.NoError(t, err)
+
+	ledger.StartRun()
+
+	// One Open racing one Fail has two orders and both end errored: an Open that
+	// reaches the ledger first records the pending marker the Fail then
+	// overwrites, and an Open that reaches it second finds the failure and leaves
+	// it alone. Testing the marker's status outside the lock that records it
+	// admits a third outcome, in which the Fail lands between the test and the
+	// record and is overwritten by a bare pending marker, losing the cause and
+	// the transient classification the retry pass reports.
+	for i := range markers {
+		marker := fmt.Sprintf("projects/p/stacks/s/configurations/c%d/groups.listing", i)
+		ob := ledger.Obligation(marker)
+
+		var wg sync.WaitGroup
+
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+
+			ob.Open()
+		}()
+
+		go func() {
+			defer wg.Done()
+
+			ob.Fail(cause, true)
+		}()
+
+		wg.Wait()
+
+		entry, ok := ledger.Entry(marker)
+		require.True(t, ok)
+		require.Equal(t, manifest.StatusErrored, entry.Status, "the racing open must not downgrade the failure")
+		require.Equal(t, cause.Error(), entry.LastError, "the cause survives the racing open")
+		require.True(t, entry.Transient, "the transient classification survives the racing open")
+	}
 }
 
 func TestLedger_DroppedSurfaces(t *testing.T) {

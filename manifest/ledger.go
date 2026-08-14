@@ -915,41 +915,65 @@ func (l *Ledger) MirrorReference(key string, settled bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	var e *Entry
+	if !settled {
+		// Open the gate; leave an already-pending one untouched so a re-walk does
+		// not re-dirty it. A gate cleared on a prior run but whose foreign write
+		// has since failed again is re-opened here, so a transient cross-shard
+		// disagreement self-heals.
+		l.openGateLocked(key, StatusPending)
 
+		return
+	}
+
+	// Clear an open or absence-marked gate; leave a missing or already-cleared
+	// one untouched so a reference that always succeeded never creates or
+	// re-dirties an entry. An absence-marked gate clears here once its mirrored
+	// target is restored, so the retry-absent trace retires with the absence it
+	// stood for. The cleared gate settles the walk but is kept out of the object
+	// tally.
+	sh, ok := l.lookupShard(key)
+	if !ok {
+		return
+	}
+
+	e, ok := sh.entries[key]
+	if !ok {
+		return
+	}
+
+	if !e.Status.Settled() || e.Status == StatusReferenceAbsent {
+		l.recordLocked(key, StatusReferenceCleared, clearGateError)
+	}
+}
+
+// openGateLocked records the gate at key [StatusPending] unless its current
+// status is one of preserve, the statuses whose record already stands for
+// outstanding work and must survive the open.
+//
+// The caller holds the write lock across both the status test and the record,
+// which is what keeps the pair atomic: a status a concurrent record writes
+// either precedes the test, and is preserved, or follows the record, and wins.
+// A decision taken from a status sampled before the lock (a [Ledger.Entry]
+// read, say) would instead leave a window for that record to land in and then
+// be overwritten by a bare pending gate carrying none of its detail.
+func (l *Ledger) openGateLocked(key string, preserve ...Status) {
 	if sh, ok := l.lookupShard(key); ok {
-		e = sh.entries[key]
-	}
-
-	clearErr := func(_ time.Time, ent *Entry) {
-		ent.LastError = ""
-		ent.LastErrorAt = time.Time{}
-		ent.Transient = false
-	}
-
-	if settled {
-		// Clear an open or absence-marked gate; leave a missing or already-
-		// cleared one untouched so a reference that always succeeded never
-		// creates or re-dirties an entry. An absence-marked gate clears here
-		// once its mirrored target is restored, so the retry-absent trace
-		// retires with the absence it stood for. The cleared gate settles the
-		// walk but is kept out of the object tally.
-		if e != nil && (!e.Status.Settled() || e.Status == StatusReferenceAbsent) {
-			l.recordLocked(key, StatusReferenceCleared, clearErr)
+		if e, ok := sh.entries[key]; ok && slices.Contains(preserve, e.Status) {
+			return
 		}
-
-		return
 	}
 
-	// Open the gate; leave an already-pending one untouched so a re-walk does not
-	// re-dirty it. A gate cleared on a prior run but whose foreign write has since
-	// failed again is re-opened here, so a transient cross-shard disagreement
-	// self-heals.
-	if e != nil && e.Status == StatusPending {
-		return
-	}
+	l.recordLocked(key, StatusPending, clearGateError)
+}
 
-	l.recordLocked(key, StatusPending, clearErr)
+// clearGateError resets the failure fields of a reference gate or obligation
+// marker, whose status alone carries what the marker mirrors: a gate re-opened
+// after an earlier failure would otherwise keep the cause of a fetch it no
+// longer describes.
+func clearGateError(_ time.Time, e *Entry) {
+	e.LastError = ""
+	e.LastErrorAt = time.Time{}
+	e.Transient = false
 }
 
 // MirrorReferenceAbsent marks the reference gate at key settled over an
@@ -971,11 +995,7 @@ func (l *Ledger) MirrorReferenceAbsent(key string) {
 		}
 	}
 
-	l.recordLocked(key, StatusReferenceAbsent, func(_ time.Time, ent *Entry) {
-		ent.LastError = ""
-		ent.LastErrorAt = time.Time{}
-		ent.Transient = false
-	})
+	l.recordLocked(key, StatusReferenceAbsent, clearGateError)
 }
 
 // ReferencePending reports whether a reference gate at key exists and is
