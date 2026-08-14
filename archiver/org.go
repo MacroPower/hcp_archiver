@@ -178,9 +178,12 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 	// called explicitly on the normal path so its outcome reaches the caller,
 	// and deferred for the panic path so an unwinding run still flushes and
 	// releases the ledger; the sync.Once keeps the two from running it twice.
+	// Marker promotion is gated on collectClean, set only when collectOrg
+	// returned without cancellation, so the panic path never promotes.
 	var (
-		closeOnce  sync.Once
-		syncFailed int
+		closeOnce    sync.Once
+		syncFailed   int
+		collectClean bool
 	)
 
 	closeRun := func() {
@@ -233,6 +236,24 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 				)
 			}
 
+			// A partial marker (a bootstrapped browse cache) is promoted to
+			// complete only over a fully clean close: the collectors finished
+			// uncanceled, no surface was dropped, and the sweep settled with
+			// zero failures, so the mirror provably holds nothing the local
+			// tree does not account for. Anything less leaves it partial,
+			// which costs later opens only a mirror union, never hidden
+			// objects.
+			if a.remote != nil && collectClean && ctx.Err() == nil &&
+				syncFailed == 0 && !orgIncomplete(ledger.Tally()) {
+				perr := a.promoteRemoteMarker(ctx, env, st)
+				if perr != nil {
+					a.logger.LogAttrs(ctx, slog.LevelWarn, "remote_marker_promote_error",
+						slog.String("org", orgName),
+						slog.String("error", perr.Error()),
+					)
+				}
+			}
+
 			// The reporter stops only after the sweep: its panel's final render
 			// erases itself, so the summary below prints on a clean tail.
 			cancelReporter()
@@ -268,6 +289,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 	// the ledger and return non-nil only on cancellation.
 	collectErr := a.collectOrg(ctx, env, reporter, orgName)
 	tally := ledger.Tally()
+	collectClean = collectErr == nil
 
 	closeRun()
 

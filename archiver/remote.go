@@ -5,10 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
-	"os"
-	"path/filepath"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
 	"go.jacobcolvin.com/hcp_archiver/config"
@@ -96,13 +93,49 @@ func (a *Archiver) syncOrg(
 // and it refuses a re-pointed remote outright (see checkExistingMarker).
 func (a *Archiver) writeRemoteMarker(ctx context.Context, env *collect.Env, st *store.Store) error {
 	cfg := RemoteConfig(a.cfg.Remote)
+	marker := cfg.Marker()
 
-	err := checkExistingMarker(st.Root(), cfg.Marker())
+	existing, hasExisting, err := checkExistingMarker(st.Root(), marker)
 	if err != nil {
 		return err
 	}
 
-	data, err := json.MarshalIndent(cfg.Marker(), "", "  ")
+	// A partial marker stays partial here: this write happens before anything
+	// is collected, so it cannot speak for the tree's completeness. Rewriting
+	// a bootstrapped browse cache's marker complete at this point would hide
+	// every mirror-only object from later flag-less opens the moment the run
+	// is interrupted or filtered. Promotion to complete belongs to the close
+	// (see [Archiver.promoteRemoteMarker]), after the sweep has proven the
+	// local tree accounts for everything the mirror holds.
+	if hasExisting {
+		marker.Partial = existing.Partial
+	}
+
+	return a.persistMarker(ctx, env, st, marker)
+}
+
+// promoteRemoteMarker rewrites a partial marker as complete at the run's
+// close. It runs only after a clean close sweep: the sweep mirrors every
+// local file and prunes every remote key nothing local backs (counting each
+// refusal into its failed tally), so a sweep that settled with zero failures
+// proves the mirror holds nothing the local tree and its eviction records do
+// not account for, which is exactly what a complete marker asserts. An absent
+// or already-complete marker is left alone.
+func (a *Archiver) promoteRemoteMarker(ctx context.Context, env *collect.Env, st *store.Store) error {
+	existing, ok, err := remote.ReadMarker(st.Root())
+	if err != nil || !ok || !existing.Partial {
+		return err //nolint:wrapcheck // The marker reader names the file and the fault.
+	}
+
+	marker := RemoteConfig(a.cfg.Remote).Marker()
+
+	return a.persistMarker(ctx, env, st, marker)
+}
+
+// persistMarker writes marker at the organization's archive root and mirrors
+// it eagerly through the environment's as-written motion.
+func (a *Archiver) persistMarker(ctx context.Context, env *collect.Env, st *store.Store, marker remote.Marker) error {
+	data, err := json.MarshalIndent(marker, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal remote marker: %w", err)
 	}
@@ -132,32 +165,16 @@ func (a *Archiver) writeRemoteMarker(ctx context.Context, env *collect.Env, st *
 //
 // A marker that does not exist, or records nothing (a hand-cleared file, the
 // deletion consent above), passes; a marker written by a newer build refuses
-// per the versioning contract.
-func checkExistingMarker(root string, marker remote.Marker) error {
-	//nolint:gosec // The path is composed from the archive root being managed.
-	data, err := os.ReadFile(filepath.Join(root, remote.MarkerName))
-
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil
-	case err != nil:
-		return fmt.Errorf("read existing remote marker: %w", err)
-	}
-
-	var existing remote.Marker
-
-	err = json.Unmarshal(data, &existing)
-	if err != nil {
-		return fmt.Errorf("parse existing remote marker %q: %w", remote.MarkerName, err)
-	}
-
-	if existing.Version > remote.MarkerVersion {
-		return fmt.Errorf("existing remote marker %q is version %d, newer than this build writes (%d)",
-			remote.MarkerName, existing.Version, remote.MarkerVersion)
+// per the versioning contract. The existing marker is returned alongside so
+// the rewrite can carry its [remote.Marker.Partial] flag forward.
+func checkExistingMarker(root string, marker remote.Marker) (remote.Marker, bool, error) {
+	existing, ok, err := remote.ReadMarker(root)
+	if err != nil || !ok {
+		return remote.Marker{}, false, err //nolint:wrapcheck // The marker reader names the file and the fault.
 	}
 
 	if existing.Conflicts(marker) {
-		return fmt.Errorf(
+		return remote.Marker{}, false, fmt.Errorf(
 			"%w: the archive records its mirror at %q prefix %q, but the configuration names %q prefix %q; "+
 				"evicted bundles live only at the recorded location — copy the old prefix to the new "+
 				"location, then update or delete %s to consent (the close sweep verifies every evicted "+
@@ -165,5 +182,5 @@ func checkExistingMarker(root string, marker remote.Marker) error {
 			ErrRemoteRelocated, existing.URL, existing.Prefix, marker.URL, marker.Prefix, remote.MarkerName)
 	}
 
-	return nil
+	return existing, true, nil
 }

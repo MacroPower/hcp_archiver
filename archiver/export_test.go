@@ -8,6 +8,8 @@ var (
 	SyncOrg = (*Archiver).syncOrg
 	// WriteRemoteMarker exposes (*Archiver).writeRemoteMarker for tests.
 	WriteRemoteMarker = (*Archiver).writeRemoteMarker
+	// PromoteRemoteMarker exposes (*Archiver).promoteRemoteMarker for tests.
+	PromoteRemoteMarker = (*Archiver).promoteRemoteMarker
 	// ResolveOrgs exposes resolveOrgs for tests.
 	ResolveOrgs = resolveOrgs
 	// ProjectNameFor exposes projectNameFor for tests.

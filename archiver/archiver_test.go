@@ -492,3 +492,65 @@ func TestWriteRemoteMarkerSameRemoteRewrites(t *testing.T) {
 	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), env, st),
 		"an unchanged remote config rewrites its own marker freely")
 }
+
+func TestWriteRemoteMarkerPreservesPartial(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, _ := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	// A bootstrapped browse cache carries a partial marker. The run's opening
+	// rewrite happens before anything is collected, so it must not promote the
+	// tree to complete: an interrupted or filtered run would then hide every
+	// mirror-only object from later flag-less opens.
+	_, err := st.WriteBytes(remote.MarkerName,
+		[]byte(`{"prefix":"hcp","version":1,"partial":true}`+"\n"))
+	require.NoError(t, err)
+
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), env, st))
+
+	marker, ok, err := remote.ReadMarker(st.Root())
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.True(t, marker.Partial, "the opening rewrite carries the partial flag forward")
+}
+
+func TestPromoteRemoteMarker(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	_, err := st.WriteBytes(remote.MarkerName,
+		[]byte(`{"prefix":"hcp","version":1,"partial":true}`+"\n"))
+	require.NoError(t, err)
+
+	require.NoError(t, archiver.PromoteRemoteMarker(a, t.Context(), env, st))
+
+	marker, ok, err := remote.ReadMarker(st.Root())
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.False(t, marker.Partial, "a clean close promotes the marker to complete")
+
+	_, mirrored := fake.Object("hcp/acme/" + remote.MarkerName)
+	assert.True(t, mirrored, "the promoted marker mirrors eagerly")
+}
+
+func TestPromoteRemoteMarkerLeavesCompleteAlone(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	_, err := st.WriteBytes(remote.MarkerName,
+		[]byte(`{"prefix":"hcp","version":1}`+"\n"))
+	require.NoError(t, err)
+
+	require.NoError(t, archiver.PromoteRemoteMarker(a, t.Context(), env, st))
+
+	_, mirrored := fake.Object("hcp/acme/" + remote.MarkerName)
+	assert.False(t, mirrored, "an already-complete marker is not rewritten")
+}

@@ -69,9 +69,10 @@ type Marker struct {
 	// Partial records that the local tree beside the marker is a browse cache
 	// materialized on demand from the mirror, holding any subset of it, so a
 	// reader must union the mirror's inventory into its listings and fall
-	// through to it on a miss. The archiver's own marker writes leave it
-	// unset: a tree the archiver wrote is complete locally, and its next run
-	// over a bootstrapped tree naturally promotes the marker to complete.
+	// through to it on a miss. The archiver preserves the flag when it
+	// rewrites the marker at the start of a run and promotes it to complete
+	// only at a fully clean close, once the sweep has proven the local tree
+	// accounts for everything the mirror holds.
 	Partial bool `json:"partial,omitempty"`
 }
 
