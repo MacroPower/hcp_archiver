@@ -152,6 +152,13 @@ func TestCollectSkipsStackWhoseProjectNameIsUnresolved(t *testing.T) {
 	// evidence that a stack was dropped on an answer the filter never got.
 	assert.Len(t, rec.Events(unresolvedWarning), 1,
 		"an exclusion the operator did not ask for is announced")
+
+	// The drop is a scope gap the filter never judged, so it must mark the run
+	// incomplete rather than letting it close reporting a complete archive.
+	dropped := f.ledger.DroppedSurfaces()
+	require.Len(t, dropped, 1)
+	assert.Equal(t, st.StackDir("prj-blip", "alpha"), dropped[0].Surface)
+	assert.Positive(t, f.ledger.Tally().SurfacesDropped)
 }
 
 func TestCollectArchivesUnresolvedProjectWithoutFilter(t *testing.T) {

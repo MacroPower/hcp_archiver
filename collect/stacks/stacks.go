@@ -166,10 +166,15 @@ func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 	// the project directory appearing around it reads back as a project with no
 	// identity of its own and no workspaces.
 	if !c.projectFilter.Admits(project) {
-		// Nothing records this as a dropped surface, so the run still closes
-		// reporting a complete archive; the warning is the only evidence that an
-		// in-scope stack was lost to a read blip rather than genuinely excluded.
+		// An exclusion the filter never really judged is a scope gap, not a
+		// genuine exclusion: the project's name did not resolve (a read blip
+		// or a permission gap), so the filter compared against a bare id and
+		// an in-scope stack may have been dropped. Recording the surface makes
+		// the run report incomplete rather than closing clean over it.
 		if !resolved.named {
+			c.env.MarkSurfaceDropped(c.env.Store().StackDir(project, stack.Name),
+				fmt.Errorf("stack %q: project %s name unresolved, so the project filter cannot judge it",
+					stack.Name, project))
 			c.log.WarnContext(ctx, "stack project name unresolved; excluded by the project filter",
 				slog.String("stack", stack.Name),
 				slog.String("project", project),
