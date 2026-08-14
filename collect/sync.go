@@ -1902,6 +1902,16 @@ const pruneGuardFloor = 100
 // index proving a remote-only zip's members, so a local subtree loss must
 // not cascade into deleting the proof for bytes only the bucket still holds.
 //
+// A key the mirror must never hold at all, one whose path the [syncEligible]
+// gate refuses, is stale whatever the local tree holds, and prunes at any
+// scale: nothing here ever uploaded it, and the eligible tree is disjoint
+// from those paths, so no local file backs such a key and neither the
+// presence fence nor the disproportion guard below has anything to say about
+// it. That is what makes the gate's promise real for the dangerous one, the
+// ledger's replay log: a log.ndjson an out-of-band copy seeded into the
+// mirror is deleted rather than left for a later disaster recovery to restore
+// beside a newer snapshot and replay into resurrected ledger state.
+//
 // Two guards refuse pruning, each the fingerprint of a local tree that is
 // not the tree the mirror mirrors — where "nothing local backs it" means
 // loss, not deletion — and each counts a failure so the run exits
@@ -1941,9 +1951,10 @@ func (e *Env) pruneRemote(
 	counters *syncCounters,
 ) {
 	var (
-		staleReshaped []string
-		staleUnbacked []string
-		matched       int
+		staleReshaped   []string
+		staleUnbacked   []string
+		staleIneligible []string
+		matched         int
 	)
 
 	for key := range inventory {
@@ -1955,6 +1966,17 @@ func (e *Env) pruneRemote(
 
 		relPath, ok := strings.CutPrefix(key, orgPrefix)
 		if !ok || evictedSurface(relPath) || isBundleSidecar(relPath) {
+			continue
+		}
+
+		// A path the mirror gate refuses has no local counterpart that could
+		// back it: the local file of the same name is the ledger's own log or
+		// flock target, a staging temp, or an eviction stub, none of which this
+		// tool ever uploads. So the fence below is skipped rather than left to
+		// protect a copy the mirror must not hold.
+		if !syncEligible(relPath) {
+			staleIneligible = append(staleIneligible, key)
+
 			continue
 		}
 
@@ -1987,13 +2009,13 @@ func (e *Env) pruneRemote(
 		}
 	}
 
-	if len(staleReshaped)+len(staleUnbacked) == 0 {
+	if len(staleReshaped)+len(staleUnbacked)+len(staleIneligible) == 0 {
 		return
 	}
 
 	if !e.ledger.Tally().Resumed {
 		e.logger.LogAttrs(ctx, slog.LevelError, "sync_prune_refused",
-			slog.Int("keys", len(staleReshaped)+len(staleUnbacked)),
+			slog.Int("keys", len(staleReshaped)+len(staleUnbacked)+len(staleIneligible)),
 			slog.String("detail", "this run opened an empty ledger against a non-empty mirror; "+
 				"a fresh --output must not prune an existing mirror's history. Restore the whole "+
 				"remote prefix locally, data files and ledger together, before re-rooting the "+
@@ -2004,7 +2026,7 @@ func (e *Env) pruneRemote(
 		return
 	}
 
-	stale := staleReshaped
+	stale := slices.Concat(staleReshaped, staleIneligible)
 
 	switch {
 	case len(staleUnbacked) > pruneGuardFloor && len(staleUnbacked) > matched:

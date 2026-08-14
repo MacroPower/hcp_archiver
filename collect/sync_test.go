@@ -1451,6 +1451,74 @@ func TestSyncArchivePruneExemptsBundleSidecars(t *testing.T) {
 	assert.Zero(t, stats.Failed)
 }
 
+func TestSyncArchivePrunesKeysTheMirrorMustNotHold(t *testing.T) {
+	t.Parallel()
+
+	// A mirror seeded out of band (an aws s3 sync of a local archive) holds
+	// keys this tool never uploads. The local file of the same name is not
+	// their backing -- it is the ledger's own log or flock target, a staging
+	// temp, an eviction stub -- so the presence fence must not protect them.
+	// The replay log is why this matters: restoring a mirror that kept one
+	// would replay stale ledger state over the newer snapshot beside it.
+	tests := map[string]struct {
+		relPath string
+		want    bool
+	}{
+		"the ledger's replay log": {
+			relPath: ".ledger/log.ndjson",
+			want:    true,
+		},
+		"a shard's replay log": {
+			relPath: "projects/prod/workspaces/api/.ledger/log.ndjson",
+			want:    true,
+		},
+		"the ledger's flock target": {
+			relPath: ".ledger/lock",
+			want:    true,
+		},
+		"a staging temp a crash left behind": {
+			relPath: "projects/prod/workspaces/api/.atomicfile-123.tmp",
+			want:    true,
+		},
+		"an eviction stub, which points at the mirror from outside it": {
+			relPath: "config-versions/cv-1.tar.gz" + store.RemoteStubSuffix,
+			want:    true,
+		},
+		"the ledger snapshot, which the mirror does hold": {
+			relPath: ".ledger/snapshot.json",
+			want:    false,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSyncFixture(t)
+			f.resume()
+
+			f.write(t, tc.relPath, []byte("local copy"))
+			f.write(t, "org.json", []byte(`{"org":"acme"}`))
+			f.fake.SetObject(f.key(tc.relPath), remotetest.Object{Data: []byte("seeded copy")})
+
+			stats := f.env.SyncArchive(t.Context())
+			require.Zero(t, stats.Failed)
+
+			_, present := f.fake.Object(f.key(tc.relPath))
+
+			if tc.want {
+				assert.Equal(t, 1, stats.Pruned)
+				assert.False(t, present, "a key the mirror must not hold prunes past its local file")
+
+				return
+			}
+
+			assert.Zero(t, stats.Pruned)
+			assert.True(t, present, "a mirrored file's local copy still protects its key")
+		})
+	}
+}
+
 func TestSyncArchiveFollowsSymlinkedDirectories(t *testing.T) {
 	t.Parallel()
 
