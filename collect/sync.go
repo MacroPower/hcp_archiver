@@ -116,8 +116,9 @@ func (c *syncCounters) stats() SyncStats {
 	}
 }
 
-// Sentinel errors reported by [Env.OffloadFile] when the eviction's verify
-// gate refuses the custody transfer.
+// Sentinel errors the custody gates report when they refuse a transfer: the
+// eviction's verify gate, whose refusals [Env.OffloadFile] returns, and the
+// rename heal's confirm.
 var (
 	// ErrOffloadUnproven indicates a cold surface whose local bytes no longer
 	// match the proof that settled them (a bundle's sidecar digests, a
@@ -131,6 +132,15 @@ var (
 	// inspection. The mismatch never resolves on its own: the sweep refuses
 	// to overwrite remote history at the key, so every run re-reports it.
 	ErrRemoteCopyMismatch = errors.New("remote copy differs from the proven local file")
+
+	// The rename heal reports errHealUnconfirmable for a copy nothing
+	// available can prove: neither object records a digest to compare and the
+	// surface's record carries no signature to read it back against. Reporting
+	// it leaves the historical copy in place, so a heal never releases an
+	// only-copy on size alone. It stays unexported because no caller receives
+	// it: the heal logs its own failures and counts nothing (see
+	// [Env.healHistoricalKey]).
+	errHealUnconfirmable = errors.New("healed copy cannot be proven")
 )
 
 // OffloadFile moves the local file at relPath to the remote store: it
@@ -805,7 +815,7 @@ func (e *Env) verifyEvicted(
 			counters.failed.Add(1)
 
 		case histKey != "":
-			e.healHistoricalKey(ctx, histKey, relPath, info)
+			e.healHistoricalKey(ctx, histKey, relPath)
 
 		default:
 			e.releaseHistoricalKeys(ctx, inventory, aliases, relPath)
@@ -923,29 +933,20 @@ func aliasRewrites(aliases map[string]string, relPath string) []string {
 }
 
 // healHistoricalKey converges a credited only-copy onto its current name: a
-// server-side copy from the historical key, a metadata confirm of the fresh
-// copy, and only then the historical key's delete. Until the copy lands, the
-// credit depends on the rename link surviving on disk — an operator tidying
-// the stale link away would turn an intact archive into a permanent false
-// hole — so the heal trades that standing dependency for one converged
-// object. Every step fails safe: a fault leaves the historical copy in
-// place, logs, and counts nothing, since the credit already succeeded. A
+// copy from the historical key, proven to carry the credited content (see
+// [Env.healCopy]), and only then the historical key's delete. Until the copy
+// lands, the credit depends on the rename link surviving on disk — an operator
+// tidying the stale link away would turn an intact archive into a permanent
+// false hole — so the heal trades that standing dependency for one converged
+// object. Every step fails safe: a fault leaves the historical copy
+// in place, logs, and counts nothing, since the credit already succeeded. A
 // failed copy retries here next sweep; a failed delete retries through
 // [Env.releaseHistoricalKeys], where the next sweep's direct hit at the
 // current key proves the release safe.
-func (e *Env) healHistoricalKey(ctx context.Context, histKey, relPath string, info remote.ObjectInfo) {
+func (e *Env) healHistoricalKey(ctx context.Context, histKey, relPath string) {
 	dst := e.RemoteKey(relPath)
 
-	err := e.remote.Copy(ctx, histKey, dst)
-	if err == nil {
-		var head remote.ObjectInfo
-
-		head, err = e.remote.Head(ctx, dst)
-		if err == nil && head.Size != info.Size {
-			err = fmt.Errorf("healed copy holds %d bytes, want %d", head.Size, info.Size)
-		}
-	}
-
+	err := e.healCopy(ctx, histKey, dst, relPath)
 	if err != nil {
 		if ctx.Err() == nil {
 			e.logger.LogAttrs(ctx, slog.LevelWarn, "evicted_object_heal_error",
@@ -977,6 +978,138 @@ func (e *Env) healHistoricalKey(ctx context.Context, histKey, relPath string, in
 		slog.String("path", relPath),
 		slog.String("from", histKey),
 	)
+}
+
+// healCopy duplicates the historical only-copy onto its current key and
+// returns only once the fresh copy is proven to carry the credited content
+// (see [Env.confirmHealedCopy]), so its caller's delete runs behind a confirm
+// rather than behind a copy that merely reported success.
+//
+// The historical key is read for its recorded digests before the copy: the
+// inventory listing that credited the obligation carries no metadata, and
+// those digests are half of what can confirm the fresh copy, the surface's
+// ledger signature being the other half. A surface with neither is not copied
+// at all: no proof exists to release the historical copy behind, so the sweep
+// leaves the object where it is instead of paying a copy every run for a
+// convergence it can never finish.
+//
+// A copy that lands but fails its confirm is removed again. Leaving it would
+// put an unproven object at the key the next sweep looks for the obligation
+// at, and that sweep's direct hit would release the historical copy through
+// [Env.releaseHistoricalKeys] on the strength of the very object this confirm
+// refused.
+func (e *Env) healCopy(ctx context.Context, histKey, dst, relPath string) error {
+	src, err := e.remote.Head(ctx, histKey)
+	if err != nil {
+		return fmt.Errorf("read historical copy: %w", err)
+	}
+
+	want := e.recordedDigest(relPath)
+
+	if want == "" && src.SHA256 == "" && len(src.MD5) == 0 {
+		return fmt.Errorf("%w: %q records no digest at its historical key and its record carries "+
+			"no signature to read a copy back against", errHealUnconfirmable, relPath)
+	}
+
+	err = e.remote.Copy(ctx, histKey, dst)
+	if err != nil {
+		return fmt.Errorf("copy onto current key: %w", err)
+	}
+
+	err = e.confirmHealedCopy(ctx, relPath, dst, src, want)
+	if err != nil {
+		e.discardHealedCopy(ctx, relPath, dst)
+
+		return err
+	}
+
+	return nil
+}
+
+// recordedDigest returns the SHA-256 the ledger recorded for the surface at
+// relPath, empty when its record carries none: a sealed bundle's sidecar
+// records its members' digests rather than the zip's, and an entry can
+// predate signatures entirely.
+func (e *Env) recordedDigest(relPath string) string {
+	entry, ok := e.ledger.Entry(relPath)
+	if !ok || entry.Signature == nil {
+		return ""
+	}
+
+	return entry.Signature.Hash
+}
+
+// discardHealedCopy removes a healed copy its confirm refused, so the next
+// sweep meets the same pre-heal state this one did: the historical copy
+// credited through the rename link, and nothing unproven standing at the
+// current key. A delete that fails only warns, since the confirm's own
+// failure is what the caller reports, and the object it leaves behind is the
+// one the heal would have left in any case before this cleanup existed.
+func (e *Env) discardHealedCopy(ctx context.Context, relPath, dst string) {
+	_, err := e.remote.Delete(ctx, []string{dst})
+	if err == nil || ctx.Err() != nil {
+		return
+	}
+
+	e.logger.LogAttrs(ctx, slog.LevelWarn, "evicted_object_heal_error",
+		slog.String("path", relPath),
+		slog.String("key", dst),
+		slog.String("error", fmt.Errorf("discard unconfirmed copy: %w", err).Error()),
+	)
+}
+
+// confirmHealedCopy proves the object now at dst carries the content credited
+// at the historical key, wantSHA256 being the surface's recorded signature or
+// empty when its record carries none. Both keys hold copies of a surface with
+// no local bytes left to hash, and releasing the one the archive has been
+// living on because the other is the same size is the rule the eviction gate
+// refuses to break (see [Env.offloadFile]); the heal is that same custody
+// transfer one key over, so it reads the same ladder from the remote side:
+//
+//   - a source recording a digest carries it to the destination, where a
+//     streamed copy re-verifies the bytes against it at commit and a
+//     server-side copy never touches them. Comparing what the two objects
+//     record then proves the current key holds that verified copy, egress-free.
+//   - a digestless source streams unverified, so the confirm escalates to the
+//     record that settled the surface: the fresh copy is read back whole and
+//     hashed against its signature (see [Env.confirmRemoteContent]), the same
+//     escalation an eviction pays when it meets a digestless remote copy, and
+//     paid once for a heal that then converges permanently.
+//
+// Size is the screen both rungs open with, never the gate on its own.
+func (e *Env) confirmHealedCopy(
+	ctx context.Context,
+	relPath, dst string,
+	src remote.ObjectInfo,
+	wantSHA256 string,
+) error {
+	head, err := e.remote.Head(ctx, dst)
+	if err != nil {
+		return fmt.Errorf("read healed copy: %w", err)
+	}
+
+	if head.Size != src.Size {
+		return fmt.Errorf("%w: healed copy %q holds %d bytes, want %d (needs manual inspection)",
+			ErrRemoteCopyMismatch, dst, head.Size, src.Size)
+	}
+
+	if (src.SHA256 != "" && head.SHA256 != "") || (len(src.MD5) > 0 && len(head.MD5) > 0) {
+		return confirmRemoteCopy(head, src.Size, remote.Digests{SHA256: src.SHA256, MD5: src.MD5}, dst)
+	}
+
+	if wantSHA256 == "" {
+		return fmt.Errorf("%w: neither copy of %q records a comparable digest and its record "+
+			"carries no signature to read the healed copy back against", errHealUnconfirmable, relPath)
+	}
+
+	e.logger.LogAttrs(ctx, slog.LevelWarn, "evicted_object_heal_readback",
+		slog.String("path", relPath),
+		slog.String("key", dst),
+		slog.String("detail", "the copied object records no digest; "+
+			"reading it back whole to prove its content before the historical copy is released"),
+	)
+
+	return e.confirmRemoteContent(ctx, dst, head.Size, wantSHA256)
 }
 
 // listInventory runs one scoped inventory listing for a sync pass, settling

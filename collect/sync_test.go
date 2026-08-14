@@ -1629,7 +1629,13 @@ func TestSyncArchiveHealsAnEvictedZipOntoItsCurrentKey(t *testing.T) {
 	)
 
 	f.write(t, sidecar, []byte(`{"name":"member.json"}`))
-	f.fake.SetObject(f.key(oldZip), remotetest.Object{Data: []byte("zipbytes")})
+
+	// The eviction that wrote the historical copy recorded its digest, the
+	// proof the heal's confirm compares the fresh copy against.
+	f.fake.SetObject(f.key(oldZip), remotetest.Object{
+		Data: []byte("zipbytes"),
+		MD5:  remotetest.MD5Sum([]byte("zipbytes")),
+	})
 
 	wsDir := filepath.Join(f.store.Root(), "projects", "prod", "workspaces")
 	link := filepath.Join(wsDir, "zeta-old")
@@ -1668,7 +1674,10 @@ func TestSyncArchiveKeepsTheHistoricalCopyWhenTheHealFails(t *testing.T) {
 	)
 
 	f.write(t, sidecar, []byte(`{"name":"member.json"}`))
-	f.fake.SetObject(f.key(oldZip), remotetest.Object{Data: []byte("zipbytes")})
+	f.fake.SetObject(f.key(oldZip), remotetest.Object{
+		Data: []byte("zipbytes"),
+		MD5:  remotetest.MD5Sum([]byte("zipbytes")),
+	})
 
 	f.fake.CopyErr = errors.New("copy boom")
 
@@ -1685,6 +1694,121 @@ func TestSyncArchiveKeepsTheHistoricalCopyWhenTheHealFails(t *testing.T) {
 
 	_, ok := f.fake.Object(f.key(oldZip))
 	assert.True(t, ok)
+}
+
+func TestSyncArchiveHealConfirmsTheCopyBeforeReleasingIt(t *testing.T) {
+	t.Parallel()
+
+	const (
+		tarball = "config-versions/sub/cv-1.tar.gz"
+		histRel = "config-versions/old/cv-1.tar.gz"
+		content = "tarball bytes"
+	)
+
+	// The historical copy predates recorded digest metadata (an older build's
+	// upload, or a store that dropped it), so the copy onto the current key
+	// streams with nothing verifying it at commit. Size is all the sweep can
+	// see from the listing, and size is what same-size rot preserves, so the
+	// confirm reads the fresh copy back and hashes it against the signature
+	// that settled the tarball before the archive's other copy is released.
+	tests := map[string]struct {
+		stored string
+		want   bool
+	}{
+		"a copy that hashes to the record is released": {
+			stored: content,
+			want:   true,
+		},
+		"a same-size copy that hashes to something else is not": {
+			stored: "tarball bytez",
+			want:   false,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSyncFixture(t)
+			f.resume()
+
+			// An unproven neighbor keeps the tarball's directory on disk, so
+			// the rename link beside it is one the walk declines rather than a
+			// dangling symlink.
+			f.write(t, "config-versions/sub/cv-2.tar.gz", []byte("neighbor"))
+
+			cvDir := filepath.Join(f.store.Root(), "config-versions")
+			require.NoError(t, os.Symlink(
+				filepath.Join(cvDir, "sub"),
+				filepath.Join(cvDir, "old"),
+			))
+
+			// The tarball is evicted: its ledger record is the local side's
+			// only proof, and the mirror holds its bytes under the pre-rename
+			// name.
+			f.ledger.RecordDone(tarball, manifest.SignatureOf([]byte(content)))
+			require.NoError(t, f.ledger.Flush())
+			f.fake.SetObject(f.key(histRel), remotetest.Object{Data: []byte(tc.stored)})
+
+			stats := f.env.SyncArchive(t.Context())
+			require.Zero(t, stats.Failed, "the historical key satisfies the only-copy obligation")
+
+			historical, ok := f.fake.Object(f.key(histRel))
+			healed, healedOK := f.fake.Object(f.key(tarball))
+
+			if tc.want {
+				assert.False(t, ok, "the historical copy is released behind the proven one")
+				require.True(t, healedOK, "the only-copy converges onto the current key")
+				assert.Equal(t, []byte(content), healed.Data)
+
+				return
+			}
+
+			require.True(t, ok, "an unproven copy never releases the archive's other one")
+			assert.Equal(t, []byte(tc.stored), historical.Data)
+			assert.False(t, healedOK,
+				"the refused copy is removed, or the next sweep would credit the obligation at it")
+		})
+	}
+}
+
+func TestSyncArchiveHealLeavesACopyNothingCanProve(t *testing.T) {
+	t.Parallel()
+
+	const (
+		sidecar = "projects/prod/workspaces/api/bundles/logs.gen0001.zip.sidecar.ndjson"
+		curZip  = "projects/prod/workspaces/api/bundles/logs.gen0001.zip"
+		oldZip  = "projects/prod/workspaces/zeta-old/bundles/logs.gen0001.zip"
+	)
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	// A digestless zip: the store recorded none for the object, and a bundle's
+	// sidecar records its members' digests rather than the zip's, so no proof
+	// exists that a copy onto the current key carries these bytes. Converging
+	// anyway would release the archive's only copy on size, so the sweep
+	// copies nothing and keeps living off the rename link.
+	f.write(t, sidecar, []byte(`{"name":"member.json"}`))
+	f.fake.SetObject(f.key(oldZip), remotetest.Object{Data: []byte("zipbytes")})
+
+	wsDir := filepath.Join(f.store.Root(), "projects", "prod", "workspaces")
+	require.NoError(t, os.Symlink(
+		filepath.Join(wsDir, "api"),
+		filepath.Join(wsDir, "zeta-old"),
+	))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Zero(t, stats.Failed, "the credit stands whether or not the heal can converge")
+	assert.Empty(t, f.fake.Copies(), "an unprovable heal is never paid for")
+	assert.Empty(t, f.fake.Deleted())
+
+	_, ok := f.fake.Object(f.key(oldZip))
+	assert.True(t, ok, "the only copy stays where the credit found it")
+
+	_, ok = f.fake.Object(f.key(curZip))
+	assert.False(t, ok)
 }
 
 func TestSyncArchiveCanceledContextUploadsNothing(t *testing.T) {
@@ -2343,7 +2467,10 @@ func TestSyncArchiveHealsAcrossStackedRenames(t *testing.T) {
 	)
 
 	f.write(t, sidecar, []byte(`{"name":"member.json"}`))
-	f.fake.SetObject(f.key(oldZip), remotetest.Object{Data: []byte("zipbytes")})
+	f.fake.SetObject(f.key(oldZip), remotetest.Object{
+		Data: []byte("zipbytes"),
+		MD5:  remotetest.MD5Sum([]byte("zipbytes")),
+	})
 
 	projDir := filepath.Join(f.store.Root(), "projects")
 	require.NoError(t, os.Symlink(filepath.Join(projDir, "newp"), filepath.Join(projDir, "oldp")))
@@ -2379,7 +2506,10 @@ func TestSyncArchiveReleasesAHistoricalCopyLeftByAFailedDelete(t *testing.T) {
 	)
 
 	f.write(t, sidecar, []byte(`{"name":"member.json"}`))
-	f.fake.SetObject(f.key(oldZip), remotetest.Object{Data: []byte("zipbytes")})
+	f.fake.SetObject(f.key(oldZip), remotetest.Object{
+		Data: []byte("zipbytes"),
+		MD5:  remotetest.MD5Sum([]byte("zipbytes")),
+	})
 
 	f.fake.DeleteErr = errors.New("delete boom")
 	f.fake.DeleteErrKeys = []string{f.key(oldZip)}
