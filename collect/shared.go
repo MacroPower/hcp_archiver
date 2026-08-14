@@ -60,7 +60,7 @@ func (e *Env) ArchiveShared(ctx context.Context, relPath string, archive func(co
 	if claimed {
 		shared.err = archive(ctx)
 		close(shared.done)
-		e.releaseShared(relPath)
+		e.releaseShared(relPath, shared.err != nil)
 
 		return shared.err
 	}
@@ -91,17 +91,24 @@ func (e *Env) claimShared(relPath string) (*sharedOnce, bool) {
 	return shared, true
 }
 
-// releaseShared drops the claim on relPath when the archive it covered left the
-// object unsettled, so the next caller retries it rather than inheriting a
-// failure the run is still trying to recover from. A settled object keeps its
-// claim, which is what makes the repeats free.
+// releaseShared drops the claim on relPath when the archive it covered left
+// the object unsettled or returned an error, so the next caller retries it
+// rather than inheriting a failure the run is still trying to recover from.
+// Only a claim whose archive succeeded over a settled object is kept, which
+// is what makes the repeats free.
+//
+// The failed check matters even over a settled entry: a claimant whose own
+// context died over an object a prior run already settled returns its
+// cancellation without unsettling anything, and a claim kept then would
+// publish that cancellation to every later caller of the path (in workspaces
+// whose contexts are still live) for the rest of the run.
 //
 // Only the claimant releases, and only once the archive has returned, so the
 // entry it deletes is always its own: a caller reaching the map in the window
 // between the two finds the finished claim and waits on it rather than
 // installing a second one.
-func (e *Env) releaseShared(relPath string) {
-	if !e.ledger.ShouldFetch(relPath) {
+func (e *Env) releaseShared(relPath string, failed bool) {
+	if !failed && !e.ledger.ShouldFetch(relPath) {
 		return
 	}
 

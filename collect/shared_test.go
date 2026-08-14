@@ -145,6 +145,31 @@ func TestArchiveShared(t *testing.T) {
 		assert.Equal(t, manifest.StatusDone, entry.Status)
 	})
 
+	t.Run("an error over a settled object is not memoized", func(t *testing.T) {
+		t.Parallel()
+
+		env, _, _ := newEnv(t)
+
+		// Settle the object outside any claim, as a prior run's loaded ledger
+		// would have: the object is Done but no claim stands for it yet.
+		require.NoError(t, env.Mutable(t.Context(), relPath, func(context.Context) (any, error) {
+			return cannedProject(), nil
+		}))
+
+		// A claimant erring without unsettling anything (a cancellation from
+		// its own dying context is the real shape) must not leave its error
+		// standing for every later caller of the path.
+		require.ErrorIs(t, env.ArchiveShared(t.Context(), relPath, func(context.Context) error {
+			return errArchive
+		}), errArchive)
+
+		require.NoError(t, env.ArchiveShared(t.Context(), relPath, func(context.Context) error {
+			// The object is still settled, so the fresh claim archives freely
+			// and the repeat costs one call, not an inherited failure.
+			return nil
+		}), "a later caller with a live context recovers")
+	})
+
 	t.Run("distinct paths archive independently", func(t *testing.T) {
 		t.Parallel()
 
