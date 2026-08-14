@@ -3,6 +3,7 @@ package progress_test
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -138,6 +139,65 @@ func TestLogWriter_OverflowDropsOldestAndMarks(t *testing.T) {
 
 	lines, _ = w.Peek()
 	assert.Empty(t, lines, "the commit clears the batch and its marker")
+}
+
+// fillQueue writes n numbered lines under prefix to w.
+func fillQueue(t *testing.T, w *progress.LogWriter, prefix string, n int) {
+	t.Helper()
+
+	for i := range n {
+		_, err := fmt.Fprintf(w, "%s-%05d\n", prefix, i)
+		require.NoError(t, err)
+	}
+}
+
+func TestLogWriter_OverflowSparesLinesTheBatchIsPrinting(t *testing.T) {
+	t.Parallel()
+
+	// A peeked batch prints from its own copy, so a burst that trims those
+	// lines out of the queue costs nothing: they are in scrollback. Counting
+	// them would open the next batch with a marker for lines the operator can
+	// see, overstating how much of the log was lost.
+	w := progress.NewLogWriter(&bytes.Buffer{})
+	w.Activate()
+
+	fillQueue(t, w, "batch", progress.MaxQueuedLogLines)
+
+	peeked, cursor := w.Peek()
+	require.Len(t, peeked, progress.MaxQueuedLogLines, "the whole queue goes to the panel")
+
+	// The burst lands while that batch is still printing, trimming every line
+	// it holds out of the queue.
+	fillQueue(t, w, "burst", progress.MaxQueuedLogLines)
+
+	w.Commit(cursor)
+
+	lines, _ := w.Peek()
+	require.Len(t, lines, progress.MaxQueuedLogLines, "no marker joins the burst")
+	assert.Equal(t, "burst-00000", lines[0], "printed lines are not counted as lost")
+}
+
+func TestLogWriter_OverflowCountsOnlyLinesNoPeekSaw(t *testing.T) {
+	t.Parallel()
+
+	// The same burst, one line larger: that one line was never handed out, so
+	// it is a genuine loss and the marker reports it alone.
+	w := progress.NewLogWriter(&bytes.Buffer{})
+	w.Activate()
+
+	fillQueue(t, w, "batch", progress.MaxQueuedLogLines)
+
+	_, cursor := w.Peek()
+
+	fillQueue(t, w, "burst", progress.MaxQueuedLogLines+1)
+
+	w.Commit(cursor)
+
+	lines, _ := w.Peek()
+	require.Len(t, lines, progress.MaxQueuedLogLines+1, "the marker leads the batch")
+	assert.True(t, strings.HasSuffix(lines[0], " 1 log lines dropped"),
+		"only the unseen line counts, got %q", lines[0])
+	assert.Equal(t, "burst-00001", lines[1], "the oldest surviving line follows the marker")
 }
 
 func TestSplitLogLines(t *testing.T) {

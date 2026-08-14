@@ -70,6 +70,10 @@ type LogWriter struct {
 	// committed or dropped, so a commit cursor identifies exactly the lines
 	// its peek saw even when overflow trimmed the queue in between.
 	head uint64
+	// The cursor the last peek handed out. Lines below it are already in the
+	// panel's hands and print whether or not they are still queued, so
+	// overflow trimming them is not a loss to report.
+	peekCursor uint64
 	// Lines lost to overflow but not yet reported by a printed marker, and
 	// the portion of that count carried by the outstanding peek's marker.
 	dropped     int
@@ -102,6 +106,7 @@ func (w *LogWriter) Peek() ([]string, uint64) {
 	defer w.mu.Unlock()
 
 	cursor := w.head + uint64(len(w.queue))
+	w.peekCursor = cursor
 
 	if len(w.queue) == 0 && w.dropped == 0 {
 		return nil, cursor
@@ -177,9 +182,20 @@ func (w *LogWriter) Write(p []byte) (int, error) {
 
 		w.queue = append(w.queue, splitLogLines(p)...)
 		if excess := len(w.queue) - maxQueuedLogLines; excess > 0 {
+			// Lines an outstanding peek already handed to the panel print from
+			// that batch's own copy, so trimming them costs nothing and only
+			// the lines no peek ever saw count toward the marker. A burst
+			// large enough to trim past the peek would otherwise report the
+			// whole batch lost while it sits in scrollback.
+			var peeked uint64
+
+			if w.peekCursor > w.head {
+				peeked = min(w.peekCursor-w.head, uint64(excess))
+			}
+
 			w.queue = w.queue[excess:]
 			w.head += uint64(excess)
-			w.dropped += excess
+			w.dropped += excess - int(peeked)
 		}
 
 		return len(p), nil
