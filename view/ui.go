@@ -134,9 +134,13 @@ type statusMsg struct {
 
 // loadStartMsg announces a screen build entering flight: the root model counts
 // it, schedules the loading indicator's grace timer, and runs build, whose
-// result comes back as a [loadDoneMsg].
+// result comes back as a [loadDoneMsg]. The epoch is the load generation
+// current where the announcing command was dispatched, not where it lands: a
+// pop or an abandon can be processed in between, and the load belongs to the
+// stack the user was looking at when they launched it.
 type loadStartMsg struct {
 	build tea.Cmd
+	epoch int
 }
 
 // loadGraceMsg fires when [loadingGrace] elapses; a build still in flight then
@@ -264,9 +268,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case loadStartMsg:
+		// A stale epoch is a load the user walked away from between the
+		// keypress that launched it and this announcement: the screen it was
+		// launched from is gone or covered, so the build never even starts.
+		if msg.epoch != m.epoch {
+			return m, nil
+		}
+
 		m.loading++
 
-		build := stampEpoch(msg.build, m.epoch)
+		build := stampDone(msg.build, m.epoch)
 
 		// A build joining one already in flight rides the earlier grace timer
 		// (or the spinner it already showed); only the first arms a fresh one.
@@ -353,7 +364,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	return m, m.top().update(msg)
+	// Whatever the active screen asks for is dispatched under the epoch it
+	// asked under, so a load it launches is judged against the stack as it
+	// stood at the keypress rather than as it stands when the announcement
+	// happens to arrive.
+	return m, stampStart(m.top().update(msg), m.epoch)
 }
 
 // View renders the breadcrumb, the status line, and the active screen in the
@@ -462,7 +477,8 @@ func closeScreen(s screen) {
 // problem on the status line instead of descending. A constructor may fetch
 // from the remote store, so the command announces the load first; the root
 // model counts it, shows a spinner if the build outlives [loadingGrace], and
-// runs the build itself.
+// runs the build itself. The announcement carries no epoch of its own: the
+// root model stamps it as it dispatches the command (see [stampStart]).
 func push(open func() (screen, error)) tea.Cmd {
 	return func() tea.Msg {
 		return loadStartMsg{build: buildScreen(open)}
@@ -482,10 +498,44 @@ func buildScreen(open func() (screen, error)) tea.Cmd {
 	}
 }
 
-// stampEpoch marks a build's settling message with the epoch it launched
-// under, so the root model can tell a live outcome from one whose load was
-// abandoned mid-flight.
-func stampEpoch(build tea.Cmd, epoch int) tea.Cmd {
+// stampStart marks the load a screen's command announces with the epoch
+// current where the command was dispatched. Bubble Tea runs commands on
+// goroutines feeding the same queue as the input reader, so a pop or an
+// abandon can be processed between the keypress and the [loadStartMsg] it
+// produced; stamping at dispatch is what lets the root model recognize such an
+// announcement as belonging to a stack the user has already left. A command
+// batching a push alongside other work is wrapped through, since the runtime
+// dispatches the batch's commands separately.
+func stampStart(cmd tea.Cmd, epoch int) tea.Cmd {
+	if cmd == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		switch msg := cmd().(type) {
+		case loadStartMsg:
+			msg.epoch = epoch
+
+			return msg
+
+		case tea.BatchMsg:
+			batch := make(tea.BatchMsg, len(msg))
+			for i, c := range msg {
+				batch[i] = stampStart(c, epoch)
+			}
+
+			return batch
+
+		default:
+			return msg
+		}
+	}
+}
+
+// stampDone marks a build's settling message with the epoch it launched under,
+// so the root model can tell a live outcome from one whose load was abandoned
+// mid-flight.
+func stampDone(build tea.Cmd, epoch int) tea.Cmd {
 	return func() tea.Msg {
 		msg := build()
 		if done, ok := msg.(loadDoneMsg); ok {

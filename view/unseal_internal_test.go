@@ -339,7 +339,7 @@ func TestModelAbandonedUnsealScreenIsCanceled(t *testing.T) {
 	built := newUnsealProgressScreen(org, t.TempDir(), nil, "workspace app")
 	m := newTestModel(stubScreen{name: "root"})
 
-	_, cmd := m.Update(announce(t, push(func() (screen, error) { return built, nil })))
+	_, cmd := m.Update(announce(t, m, push(func() (screen, error) { return built, nil })))
 	staleDone := settleLoad(t, cmd)
 
 	m.abandonLoads()

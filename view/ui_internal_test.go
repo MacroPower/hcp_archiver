@@ -80,14 +80,41 @@ func settleLoad(t *testing.T, cmd tea.Cmd) tea.Msg {
 	return nil
 }
 
-// announce unwraps a push command's load announcement.
-func announce(t *testing.T, cmd tea.Cmd) loadStartMsg {
+// announce dispatches a push command the way the root model does when the
+// active screen returns it, and unwraps the load announcement: the epoch it
+// carries is the one current at dispatch, so a test can abandon the load
+// before feeding the announcement back into Update.
+func announce(t *testing.T, m *model, cmd tea.Cmd) loadStartMsg {
 	t.Helper()
 
-	start, ok := cmd().(loadStartMsg)
+	start, ok := stampStart(cmd, m.epoch)().(loadStartMsg)
 	require.True(t, ok, "a push command announces its load first")
 
 	return start
+}
+
+// loadScreen is a [stubScreen] that launches a screen build on any key, the
+// way a list row's enter does, and records whether the build ever ran. With
+// batch set it returns the push alongside other work, the shape the runtime
+// dispatches as separate commands.
+type loadScreen struct {
+	stubScreen
+	batch bool
+	built bool
+}
+
+func (s *loadScreen) update(tea.Msg) tea.Cmd {
+	load := push(func() (screen, error) {
+		s.built = true
+
+		return stubScreen{name: "child"}, nil
+	})
+
+	if s.batch {
+		return tea.Batch(load, func() tea.Msg { return nil })
+	}
+
+	return load
 }
 
 // closeStub is a [stubScreen] implementing the teardown hook, counting the
@@ -224,14 +251,14 @@ func TestModelStaleGraceStartsNoSecondSpinnerChain(t *testing.T) {
 	m := newTestModel(stubScreen{name: "root"})
 
 	first := push(func() (screen, error) { return stubScreen{name: "first"}, nil })
-	firstStart := announce(t, first)
+	firstStart := announce(t, m, first)
 
 	m.Update(firstStart)
 	m.Update(firstStart.build())
 
 	second := push(func() (screen, error) { return stubScreen{name: "second"}, nil })
 
-	m.Update(announce(t, second))
+	m.Update(announce(t, m, second))
 
 	_, tick := m.Update(loadGraceMsg{})
 	require.NotNil(t, tick, "the first grace to arrive starts the chain")
@@ -273,7 +300,7 @@ func TestModelEscAbandonsInFlightLoad(t *testing.T) {
 
 	stale := push(func() (screen, error) { return stubScreen{name: "stale"}, nil })
 
-	_, cmd := m.Update(announce(t, stale))
+	_, cmd := m.Update(announce(t, m, stale))
 	staleDone := settleLoad(t, cmd)
 
 	m.Update(loadGraceMsg{})
@@ -299,7 +326,7 @@ func TestModelEscAbandonsInFlightLoad(t *testing.T) {
 	// A load after the abandonment settles normally.
 	fresh := push(func() (screen, error) { return stubScreen{name: "fresh"}, nil })
 
-	_, cmd = m.Update(announce(t, fresh))
+	_, cmd = m.Update(announce(t, m, fresh))
 	m.Update(settleLoad(t, cmd))
 
 	assert.Len(t, m.stack, 2, "a fresh load still pushes")
@@ -316,8 +343,8 @@ func TestModelPushAbandonsSiblingLoad(t *testing.T) {
 	firstCmd := push(func() (screen, error) { return stubScreen{name: "child"}, nil })
 	secondCmd := push(func() (screen, error) { return stubScreen{name: "child"}, nil })
 
-	_, first := m.Update(announce(t, firstCmd))
-	_, second := m.Update(announce(t, secondCmd))
+	_, first := m.Update(announce(t, m, firstCmd))
+	_, second := m.Update(announce(t, m, secondCmd))
 	require.Equal(t, 2, m.loading, "both builds are counted")
 
 	firstDone := settleLoad(t, first)
@@ -339,7 +366,7 @@ func TestModelPopAbandonsInFlightLoad(t *testing.T) {
 
 	stale := push(func() (screen, error) { return stubScreen{name: "stale"}, nil })
 
-	_, cmd := m.Update(announce(t, stale))
+	_, cmd := m.Update(announce(t, m, stale))
 	staleDone := settleLoad(t, cmd)
 
 	// The child pops (a backspace routed to it, say) while its load is still
@@ -352,6 +379,96 @@ func TestModelPopAbandonsInFlightLoad(t *testing.T) {
 	// user already left, so it never pushes onto the parent.
 	m.Update(staleDone)
 	assert.Len(t, m.stack, 1)
+}
+
+func TestModelPopAbandonsALoadStillAnnouncingItself(t *testing.T) {
+	t.Parallel()
+
+	// Enter on a row, then esc, faster than the push command settles: Bubble
+	// Tea gives no ordering guarantee between the key reader and a command's
+	// result, so the pop can be processed while the announcement is still
+	// queued. Judged where it lands, the load would look fresh and push its
+	// screen onto the parent the user just returned to.
+	ls := &loadScreen{stubScreen: stubScreen{name: "child"}}
+	m := newTestModel(stubScreen{name: "root"}, ls)
+
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	require.NotNil(t, cmd, "enter launches the load")
+
+	// The esc reaches the screen (nothing is counted as in flight yet, so the
+	// root model does not consume it) and pops it.
+	m.Update(popMsg{})
+	require.Len(t, m.stack, 1)
+
+	start, ok := cmd().(loadStartMsg)
+	require.True(t, ok)
+
+	_, build := m.Update(start)
+	assert.Nil(t, build, "the abandoned announcement launches no build")
+	assert.Equal(t, 0, m.loading)
+	assert.False(t, ls.built, "the constructor never runs")
+	assert.Len(t, m.stack, 1, "and nothing pushes onto the screen below")
+}
+
+func TestModelEscAbandonsALoadStillAnnouncingItself(t *testing.T) {
+	t.Parallel()
+
+	// A second enter during a slow build: its announcement is still queued when
+	// esc abandons everything in flight, so the load the user canceled must not
+	// enter flight behind the abandon.
+	ls := &loadScreen{stubScreen: stubScreen{name: "root"}}
+	m := newTestModel(ls)
+
+	slow := push(func() (screen, error) { return stubScreen{name: "slow"}, nil })
+	m.Update(announce(t, m, slow))
+	require.Equal(t, 1, m.loading, "the first build is in flight")
+
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	require.NotNil(t, cmd)
+
+	m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	require.Equal(t, 0, m.loading, "the esc abandons the loads in flight")
+
+	start, ok := cmd().(loadStartMsg)
+	require.True(t, ok)
+
+	m.Update(start)
+	assert.Equal(t, 0, m.loading, "the canceled load never enters flight")
+	assert.False(t, ls.built, "its constructor never runs")
+	assert.Len(t, m.stack, 1, "and its screen never pushes")
+}
+
+func TestModelStampsALoadBatchedWithOtherWork(t *testing.T) {
+	t.Parallel()
+
+	// A screen returning its push alongside other work batches the two, and the
+	// runtime dispatches the batch's commands separately: the announcement
+	// inside must carry the dispatch epoch too, or a live load would read as
+	// one launched before the current generation and be dropped.
+	ls := &loadScreen{stubScreen: stubScreen{name: "child"}, batch: true}
+	m := newTestModel(stubScreen{name: "root"}, ls)
+
+	m.abandonLoads()
+
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	require.NotNil(t, cmd)
+
+	batch, ok := cmd().(tea.BatchMsg)
+	require.True(t, ok, "the screen's commands stay batched")
+
+	var start loadStartMsg
+
+	for _, c := range batch {
+		if s, ok := c().(loadStartMsg); ok {
+			start = s
+		}
+	}
+
+	require.NotNil(t, start.build, "the batch carries the load announcement")
+	assert.Equal(t, m.epoch, start.epoch)
+
+	m.Update(start)
+	assert.Equal(t, 1, m.loading, "a live batched load enters flight")
 }
 
 func TestModelQuitClosesEveryStackedScreen(t *testing.T) {
@@ -414,7 +531,7 @@ func TestModelAbandonedLoadClosesTheScreenItBuilt(t *testing.T) {
 
 	cmd := push(func() (screen, error) { return built, nil })
 
-	_, start := m.Update(announce(t, cmd))
+	_, start := m.Update(announce(t, m, cmd))
 	staleDone := settleLoad(t, start)
 
 	m.abandonLoads()
