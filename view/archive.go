@@ -756,8 +756,8 @@ func (o *Org) Entries(relDir string) ([]TreeEntry, error) {
 // mergedChildren is the one local-with-mirror merge behind [*Org.Entries],
 // [*Org.subdirs], and [*Org.looseNames]: the local directory listing
 // (tolerating an absent directory) unioned with the mirror's children, a
-// local child winning over its mirror record. Directories come first, each
-// group sorted by name.
+// local child winning over its mirror record whichever form the two take, so
+// a name is emitted once. Directories come first, each group sorted by name.
 func (o *Org) mergedChildren(relDir string) ([]TreeEntry, error) {
 	dirSet := make(map[string]struct{})
 	files := make(map[string]TreeEntry)
@@ -786,12 +786,26 @@ func (o *Org) mergedChildren(relDir string) ([]TreeEntry, error) {
 
 	remoteDirs, remoteFiles := o.remoteChildren(relDir)
 
+	// The local child wins whichever form it takes: a mirror record of the
+	// other kind is dropped rather than emitted beside it, so one name never
+	// lists twice and no enumeration offers a directory to descend into that
+	// is a file on disk. Diverged layouts make the cross-kind collision real
+	// (a mirror holding keys beneath a name the local tree holds as a file),
+	// and the local tree is the form every read of that name resolves to.
 	for _, name := range remoteDirs {
+		if _, ok := files[name]; ok {
+			continue
+		}
+
 		dirSet[name] = struct{}{}
 	}
 
 	for name, size := range remoteFiles {
 		if _, ok := files[name]; ok {
+			continue
+		}
+
+		if _, ok := dirSet[name]; ok {
 			continue
 		}
 
