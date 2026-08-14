@@ -26,7 +26,7 @@ func scrollKey(msg tea.Msg, top, bottom func()) (tea.Cmd, bool) {
 	case keyEsc, keyBackspace:
 		return pop(), true
 	case "q":
-		return tea.Quit, true
+		return quit(), true
 	case "g", "home":
 		top()
 

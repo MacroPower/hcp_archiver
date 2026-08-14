@@ -106,8 +106,25 @@ type initializer interface {
 	init() tea.Cmd
 }
 
+// closer is the optional screen hook for teardown: a screen owning something
+// that outlives its own update loop (an unseal run's goroutine and the context
+// bounding it) implements it, and the root model closes the screen as it
+// leaves the stack. Screens never see the quit that ends the program, so this
+// is the only place such a run can be stopped.
+//
+// See [*unsealProgressScreen] for an implementation.
+type closer interface {
+	close()
+}
+
 // popMsg returns to the screen above; on the root screen it quits.
 type popMsg struct{}
+
+// quitMsg ends the browser. Screens signal it rather than returning tea.Quit
+// themselves so every exit runs the root model's teardown first: the runtime
+// swallows a quit command without ever routing it back through Update, and a
+// screen torn down by the program's exit alone would strand whatever it owns.
+type quitMsg struct{}
 
 // statusMsg surfaces a non-fatal problem (an unreadable file, a malformed
 // document) on the status line without leaving the current screen.
@@ -224,13 +241,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.abandonLoads()
 
 		if len(m.stack) == 1 {
-			return m, tea.Quit
+			cmd := m.teardown()
+
+			return m, cmd
 		}
+
+		closeScreen(m.top())
 
 		m.stack = m.stack[:len(m.stack)-1]
 		m.status = ""
 
 		return m, nil
+
+	case quitMsg:
+		cmd := m.teardown()
+
+		return m, cmd
 
 	case statusMsg:
 		m.status = msg.err.Error()
@@ -269,8 +295,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case loadDoneMsg:
 		// A stale epoch is a load abandoned while it was in flight: the user
-		// has walked away, so the outcome is dropped rather than applied.
+		// has walked away, so the outcome is dropped rather than applied. The
+		// screen it built still exists and may already own a cancelable run's
+		// context, so it is closed on its way to the void.
 		if msg.epoch != m.epoch {
+			if built, ok := msg.msg.(pushMsg); ok {
+				closeScreen(built.s)
+			}
+
 			return m, nil
 		}
 
@@ -305,7 +337,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = ""
 
 		if msg.String() == "ctrl+c" {
-			return m, tea.Quit
+			cmd := m.teardown()
+
+			return m, cmd
 		}
 
 		// Esc during a screen build abandons the load and stays put; the key
@@ -402,6 +436,28 @@ func (m *model) abandonLoads() {
 	m.spinning = false
 }
 
+// teardown closes every stacked screen and returns the command that ends the
+// program. A quit taken at the root model -- a ctrl+c, or a screen signaling
+// [quitMsg] -- never reaches the screens themselves, so without this an unseal
+// still running under the top screen would keep its goroutine blocked on a
+// channel whose receiver left with the program.
+func (m *model) teardown() tea.Cmd {
+	for _, s := range m.stack {
+		closeScreen(s)
+	}
+
+	return tea.Quit
+}
+
+// closeScreen runs a screen's teardown hook when it has one. Closing is
+// idempotent, so a screen closed on its way off the stack and again by a quit
+// that follows costs nothing.
+func closeScreen(s screen) {
+	if c, ok := s.(closer); ok {
+		c.close()
+	}
+}
+
 // push wraps a screen constructor into a command, surfacing a construction
 // problem on the status line instead of descending. A constructor may fetch
 // from the remote store, so the command announces the load first; the root
@@ -446,5 +502,14 @@ func stampEpoch(build tea.Cmd, epoch int) tea.Cmd {
 func pop() tea.Cmd {
 	return func() tea.Msg {
 		return popMsg{}
+	}
+}
+
+// quit returns the command that ends the browser, routed through the root
+// model so the stack is torn down before the program stops. Screens use it in
+// place of tea.Quit.
+func quit() tea.Cmd {
+	return func() tea.Msg {
+		return quitMsg{}
 	}
 }

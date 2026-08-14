@@ -132,8 +132,8 @@ type unsealProgressScreen struct {
 
 // newUnsealProgressScreen creates a new [unsealProgressScreen] extracting jobs
 // into target for the scope named label. The run's context is a cancelable
-// child of the org's browse context, so both the screen's own cancel and an
-// external SIGINT stop the loop; work does not start until
+// child of the org's browse context, so [unsealProgressScreen.close] and an
+// external SIGINT alike stop the loop; work does not start until
 // [unsealProgressScreen.init] runs.
 func newUnsealProgressScreen(org *Org, target string, jobs []unsealJob, label string) *unsealProgressScreen {
 	ctx, cancel := context.WithCancel(org.context())
@@ -176,11 +176,10 @@ func (s *unsealProgressScreen) listen() tea.Cmd {
 }
 
 // update folds events into the counters, advances the spinner, and handles
-// cancel and navigation keys. Canceling mid-run stops the loop between files;
-// an in-flight remote ranged GET runs under the browse context (the
-// orgRemote's), not this screen's child, so it finishes or times out on its
-// own — only the loop stops promptly. The model-level ctrl+c quit bypasses
-// the screen entirely; runUnseal's ctx-guarded sends cover that path.
+// navigation keys. Both back keys and q leave the screen, which is what stops
+// the run: the root model closes the screen on its way off the stack (see
+// [unsealProgressScreen.close]), so the cancellation is the same whichever key
+// ends the run and whether the screen or the model decided it.
 func (s *unsealProgressScreen) update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case unsealEvent:
@@ -219,18 +218,27 @@ func (s *unsealProgressScreen) update(msg tea.Msg) tea.Cmd {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case keyEsc, keyBackspace:
-			s.cancel()
-
 			return pop()
 
 		case "q":
-			s.cancel()
-
-			return tea.Quit
+			return quit()
 		}
 	}
 
 	return nil
+}
+
+// close cancels the run: the loop stops between files and [runUnseal]'s
+// ctx-guarded sends unblock, so the goroutine finishes rather than waiting on
+// a channel nothing drains any more. An in-flight remote ranged GET runs under
+// the browse context (the orgRemote's), not this screen's child, so it
+// finishes or times out on its own -- only the loop stops promptly.
+//
+// The screen is closed by the root model whenever it leaves the stack, which
+// covers the paths the screen cannot see: a ctrl+c handled above it, and a
+// screen built by a load the user walked away from before it settled.
+func (s *unsealProgressScreen) close() {
+	s.cancel()
 }
 
 // view renders live progress while the run is going and totals once it ends,

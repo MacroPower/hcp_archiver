@@ -90,6 +90,20 @@ func announce(t *testing.T, cmd tea.Cmd) loadStartMsg {
 	return start
 }
 
+// closeStub is a [stubScreen] implementing the teardown hook, counting the
+// closes the root model runs on it.
+type closeStub struct {
+	stubScreen
+	closed int
+}
+
+func (s *closeStub) close() { s.closed++ }
+
+// ctrlC is the interrupt key press, the one the root model handles itself.
+func ctrlC() tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl})
+}
+
 // newTestModel builds a root model over a stub stack with a real spinner, the
 // way newModel would, without needing an archive on disk.
 func newTestModel(stack ...screen) *model {
@@ -338,6 +352,76 @@ func TestModelPopAbandonsInFlightLoad(t *testing.T) {
 	// user already left, so it never pushes onto the parent.
 	m.Update(staleDone)
 	assert.Len(t, m.stack, 1)
+}
+
+func TestModelQuitClosesEveryStackedScreen(t *testing.T) {
+	t.Parallel()
+
+	// A ctrl+c is handled by the root model and never reaches the screens, so
+	// the whole stack -- not just the top -- is torn down here or nowhere.
+	root := &closeStub{stubScreen: stubScreen{name: "root"}}
+	top := &closeStub{stubScreen: stubScreen{name: "child"}}
+	m := newTestModel(root, top)
+
+	_, cmd := m.Update(ctrlC())
+	require.NotNil(t, cmd)
+	assert.IsType(t, tea.QuitMsg{}, cmd(), "the interrupt still ends the program")
+	assert.Equal(t, 1, root.closed)
+	assert.Equal(t, 1, top.closed)
+}
+
+func TestModelQuitMsgClosesEveryStackedScreen(t *testing.T) {
+	t.Parallel()
+
+	// The q key: a screen signals the quit rather than ending the program
+	// itself, so the same teardown runs.
+	root := &closeStub{stubScreen: stubScreen{name: "root"}}
+	m := newTestModel(root)
+
+	_, cmd := m.Update(quit()())
+	require.NotNil(t, cmd)
+	assert.IsType(t, tea.QuitMsg{}, cmd())
+	assert.Equal(t, 1, root.closed)
+}
+
+func TestModelPopClosesTheScreenItLeaves(t *testing.T) {
+	t.Parallel()
+
+	root := &closeStub{stubScreen: stubScreen{name: "root"}}
+	child := &closeStub{stubScreen: stubScreen{name: "child"}}
+	m := newTestModel(root, child)
+
+	m.Update(popMsg{})
+	require.Len(t, m.stack, 1)
+	assert.Equal(t, 1, child.closed, "the screen left behind is torn down")
+	assert.Equal(t, 0, root.closed, "the screen returned to stays live")
+
+	// Popping the root quits, which closes it on the way out.
+	_, cmd := m.Update(popMsg{})
+	require.NotNil(t, cmd)
+	assert.IsType(t, tea.QuitMsg{}, cmd())
+	assert.Equal(t, 1, root.closed)
+}
+
+func TestModelAbandonedLoadClosesTheScreenItBuilt(t *testing.T) {
+	t.Parallel()
+
+	// A build the user walked away from still constructed its screen, which
+	// may already own something cancelable; dropping the outcome without
+	// closing it would strand that for the browse context's whole lifetime.
+	built := &closeStub{stubScreen: stubScreen{name: "stale"}}
+	m := newTestModel(stubScreen{name: "root"})
+
+	cmd := push(func() (screen, error) { return built, nil })
+
+	_, start := m.Update(announce(t, cmd))
+	staleDone := settleLoad(t, start)
+
+	m.abandonLoads()
+	m.Update(staleDone)
+
+	assert.Len(t, m.stack, 1, "the abandoned screen never pushes")
+	assert.Equal(t, 1, built.closed, "the screen it built is closed instead")
 }
 
 func TestModelRoutesSpinnerTicksByID(t *testing.T) {

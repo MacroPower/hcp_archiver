@@ -98,7 +98,7 @@ func (s *listScreen) update(msg tea.Msg) tea.Cmd {
 			return nil
 
 		case "q":
-			return tea.Quit
+			return quit()
 
 		case "u":
 			if it, ok := s.list.SelectedItem().(item); ok && it.unseal != nil {

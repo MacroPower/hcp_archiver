@@ -254,13 +254,99 @@ func TestUnsealProgressScreenEscCancelsMidRun(t *testing.T) {
 
 	org := &Org{Name: "my-org"}
 	s := newUnsealProgressScreen(org, t.TempDir(), nil, "workspace app")
+	m := newTestModel(stubScreen{name: "root"}, s)
 
 	cmd := pressOn(s, tea.Key{Code: tea.KeyEscape})
 	require.NotNil(t, cmd)
 
-	_, ok := cmd().(popMsg)
-	assert.True(t, ok, "esc pops the screen")
-	require.Error(t, s.ctx.Err(), "esc cancels the run context")
+	msg, ok := cmd().(popMsg)
+	require.True(t, ok, "esc pops the screen")
+
+	m.Update(msg)
+
+	require.Len(t, m.stack, 1)
+	require.Error(t, s.ctx.Err(), "leaving the screen cancels the run context")
+}
+
+func TestUnsealProgressScreenQuitKeyRoutesThroughTheModel(t *testing.T) {
+	t.Parallel()
+
+	// The q key must not end the program from the screen itself: the runtime
+	// would swallow the quit and the run's context would never be canceled.
+	org := &Org{Name: "my-org"}
+	s := newUnsealProgressScreen(org, t.TempDir(), nil, "workspace app")
+	m := newTestModel(stubScreen{name: "root"}, s)
+
+	cmd := pressOn(s, tea.Key{Code: 'q', Text: "q"})
+	require.NotNil(t, cmd)
+
+	msg, ok := cmd().(quitMsg)
+	require.True(t, ok, "q asks the root model to quit")
+
+	_, cmd = m.Update(msg)
+	require.NotNil(t, cmd)
+	assert.IsType(t, tea.QuitMsg{}, cmd())
+	require.Error(t, s.ctx.Err(), "the teardown cancels the run context")
+}
+
+func TestModelQuitStopsAnActiveUnseal(t *testing.T) {
+	t.Parallel()
+
+	// The interrupt lands mid-run with nothing draining the events channel,
+	// exactly as it does once the program stops reading: without the model's
+	// teardown, runUnseal blocks on its next send forever and the remaining
+	// files are silently never unsealed.
+	org := &Org{Name: "my-org"}
+	jobs := []unsealJob{
+		{rel: "a.json", write: writeBytesJob("a")},
+		{rel: "b.json", write: writeBytesJob("b")},
+	}
+
+	s := newUnsealProgressScreen(org, t.TempDir(), jobs, "workspace app")
+	m := newTestModel(stubScreen{name: "root"}, s)
+
+	s.init()
+
+	_, cmd := m.Update(ctrlC())
+	require.NotNil(t, cmd)
+	assert.IsType(t, tea.QuitMsg{}, cmd())
+	require.Error(t, s.ctx.Err(), "the interrupt cancels the run context")
+
+	// The goroutine closing its channel is what proves it is not stranded on a
+	// send no receiver will ever take.
+	deadline := time.After(10 * time.Second)
+
+	for {
+		select {
+		case _, ok := <-s.events:
+			if !ok {
+				return
+			}
+
+		case <-deadline:
+			t.Fatal("the unseal goroutine outlived the quit that stopped its run")
+		}
+	}
+}
+
+func TestModelAbandonedUnsealScreenIsCanceled(t *testing.T) {
+	t.Parallel()
+
+	// The screen's context is a child of the browse context from construction,
+	// before init ever runs, so a build the user walked away from leaks it into
+	// the browse context's lifetime unless the drop closes the screen.
+	org := &Org{Name: "my-org"}
+	built := newUnsealProgressScreen(org, t.TempDir(), nil, "workspace app")
+	m := newTestModel(stubScreen{name: "root"})
+
+	_, cmd := m.Update(announce(t, push(func() (screen, error) { return built, nil })))
+	staleDone := settleLoad(t, cmd)
+
+	m.abandonLoads()
+	m.Update(staleDone)
+
+	require.Len(t, m.stack, 1, "the abandoned screen never pushes")
+	assert.Error(t, built.ctx.Err(), "the dropped screen's run context is canceled")
 }
 
 func TestRunUnsealCanceledWithoutReceiverDoesNotStrand(t *testing.T) {
