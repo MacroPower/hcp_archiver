@@ -143,11 +143,34 @@ func WithInput(in io.Reader) Option {
 // reporter activates sink for the panel's lifetime and the panel drains its
 // queued lines into the stream above itself, so log lines and the live panel
 // share one renderer. Without it the UI still runs, but concurrent log writes
-// to the same terminal can corrupt the panel. It returns an [Option].
+// to the same terminal can corrupt the panel. A nil sink leaves the UI without
+// one, a nil [*LogWriter] included: it arrives here as a non-nil interface
+// that every later nil check would wave through before the panel dereferenced
+// it. It returns an [Option].
 func WithLogSink(sink LogSink) Option {
 	return func(r *Reporter) {
+		if nilSink(sink) {
+			return
+		}
+
 		r.sink = sink
 	}
+}
+
+// nilSink reports whether sink carries nothing to route log lines through,
+// covering both an untyped nil and a nil pointer to this package's
+// implementation. Callers form the interface at their own boundary (the
+// archiver forwards whatever it was handed), so the typed nil is caught here,
+// where the sink is optional, rather than at the panic its first method call
+// would raise.
+func nilSink(sink LogSink) bool {
+	if sink == nil {
+		return true
+	}
+
+	w, ok := sink.(*LogWriter)
+
+	return ok && w == nil
 }
 
 // WithInterrupt sets the callback the terminal UI invokes when the operator

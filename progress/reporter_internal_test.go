@@ -3,6 +3,7 @@ package progress
 import (
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"testing"
 	"time"
@@ -12,6 +13,35 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 )
+
+func TestWithLogSink_DropsNilSinks(t *testing.T) {
+	t.Parallel()
+
+	sink := NewLogWriter(io.Discard)
+
+	tests := map[string]struct {
+		sink LogSink
+		want LogSink
+	}{
+		"an untyped nil leaves the reporter without a sink": {sink: nil},
+		"a nil writer does not survive as a live interface": {sink: (*LogWriter)(nil)},
+		"a real sink is kept":                               {sink: sink, want: sink},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// A typed nil passes every later `sink != nil` check, so the panel
+			// would reach it and dereference a nil receiver on Activate.
+			var r Reporter
+
+			WithLogSink(tc.sink)(&r)
+
+			assert.Equal(t, tc.want, r.sink)
+		})
+	}
+}
 
 func TestTuiError(t *testing.T) {
 	t.Parallel()
