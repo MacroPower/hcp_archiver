@@ -2,7 +2,11 @@ package workspace_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -145,6 +149,95 @@ func TestCollectRunsBypassesTheGeneralGate(t *testing.T) {
 
 	cancel()
 	wg.Wait()
+}
+
+// runShiftListing is a live runs listing served two at a time, which drops one
+// run once the walk has fetched its first page: the upstream deletion that
+// shifts every later run up a slot while the walk is busy archiving the page it
+// already has. All the runs are in flight, so archiving one writes its summary
+// and issues no further request.
+type runShiftListing struct {
+	drop    string
+	ids     []string
+	mu      sync.Mutex
+	fetched bool
+}
+
+// serve answers one page of the listing, landing the pending deletion in the
+// window after the first page has been fetched.
+func (l *runShiftListing) serve(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.fetched && l.drop != "" {
+		l.ids = slices.DeleteFunc(l.ids, func(id string) bool { return id == l.drop })
+		l.drop = ""
+	}
+
+	l.fetched = true
+
+	const size = 2
+
+	page, err := strconv.Atoi(r.URL.Query().Get("page[number]"))
+	if err != nil || page < 1 {
+		page = 1
+	}
+
+	start := min((page-1)*size, len(l.ids))
+	end := min(start+size, len(l.ids))
+
+	const run = `{"id":%q,"type":"runs","attributes":{"created-at":"2026-07-08T01:00:00Z","status":"planning"}}`
+
+	items := make([]string, 0, size)
+	for _, id := range l.ids[start:end] {
+		items = append(items, fmt.Sprintf(run, id))
+	}
+
+	next := "null"
+	if end < len(l.ids) {
+		next = strconv.Itoa(page + 1)
+	}
+
+	writeJSONAPI(t, w, fmt.Sprintf(
+		`{"data":[%s],"meta":{"pagination":{"current-page":%d,"next-page":%s,"total-count":%d}}}`,
+		strings.Join(items, ","), page, next, len(l.ids)))
+}
+
+// TestCollectRunsClosesAListingShiftGap walks a workspace whose runs listing
+// loses a run between the first page and the second. Under a plain page-number
+// pager the deletion pulls the run that would have led page 2 into the range
+// page 1 already covered, so it is never listed: no ledger entry, nothing for
+// the unsettled-child scan to find, and a collection recorded complete and
+// settled over the gap.
+func TestCollectRunsClosesAListingShiftGap(t *testing.T) {
+	t.Parallel()
+
+	live := &runShiftListing{
+		ids:  []string{"run-5", "run-4", "run-3", "run-2", "run-1"},
+		drop: "run-5",
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/workspaces/ws-1/runs", func(w http.ResponseWriter, r *http.Request) {
+		live.serve(t, w, r)
+	})
+
+	// The walk fetches the listing several times over: the pages themselves plus
+	// the re-list the shift forces. A loose ceiling on the runs-list governor
+	// keeps the test off its production pacing of thirty requests a minute.
+	f := newWSFixtureClient(t, mux, []tfeclient.Option{tfeclient.WithRunsListRateLimit(1000)}, nil)
+
+	err := f.collector.CollectRuns(t.Context(), "proj", &tfe.Workspace{ID: "ws-1", Name: "ws"}, nil)
+	require.NoError(t, err)
+
+	// The deleted run-5 is archived from the page fetched before it went away,
+	// and run-3 is the run the shift would otherwise have skipped.
+	for _, id := range []string{"run-5", "run-4", "run-3", "run-2", "run-1"} {
+		assert.Equal(t, manifest.StatusDone, f.status("projects/proj/workspaces/ws/runs/"+id+"/run.json"),
+			"%s should be archived despite the listing shifting mid-walk", id)
+	}
 }
 
 func TestHasNextPage(t *testing.T) {

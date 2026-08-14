@@ -27,40 +27,44 @@ func (c *Collector) collectRuns(ctx context.Context, project string, ws *tfe.Wor
 	wsID := ws.ID
 	wsName := ws.Name
 
-	pager := func(ctx context.Context, page int) ([]*tfe.Run, bool, error) {
-		var list *tfe.RunList
+	// A run can be deleted upstream while the walk archives a page, which shifts
+	// the listing under a page-number pager; the stable pager re-lists rather
+	// than let the shift skip a run (see [stablePager]).
+	pager := newStablePager(func(run *tfe.Run) string { return run.ID },
+		func(ctx context.Context, page int) ([]*tfe.Run, *tfe.Pagination, error) {
+			var list *tfe.RunList
 
-		// DoRunsList, not Do: the runs list endpoint is metered in its own bucket
-		// of 30 requests per minute, and a slot is held across the wait for that
-		// bucket's token, so drawing this walk's slots from the general gate
-		// would park one for seconds at a time.
-		err := c.env.Client().DoRunsList(ctx, func(ctx context.Context, tc *tfe.Client) error {
-			// Each request fetches the maximum page rather than the default 20:
-			// a fifth of the spend from the walk's scarcest budget.
-			l, e := tc.Runs.List(ctx, wsID, &tfe.RunListOptions{
-				ListOptions: tfe.ListOptions{PageNumber: page, PageSize: tfeclient.MaxPageSize},
-				Include: []tfe.RunIncludeOpt{
-					tfe.RunPlan,
-					tfe.RunApply,
-					tfe.RunConfigVer,
-					tfe.RunCreatedBy,
-					tfe.RunCostEstimate,
-				},
+			// DoRunsList, not Do: the runs list endpoint is metered in its own bucket
+			// of 30 requests per minute, and a slot is held across the wait for that
+			// bucket's token, so drawing this walk's slots from the general gate
+			// would park one for seconds at a time.
+			err := c.env.Client().DoRunsList(ctx, func(ctx context.Context, tc *tfe.Client) error {
+				// Each request fetches the maximum page rather than the default 20:
+				// a fifth of the spend from the walk's scarcest budget.
+				l, e := tc.Runs.List(ctx, wsID, &tfe.RunListOptions{
+					ListOptions: tfe.ListOptions{PageNumber: page, PageSize: tfeclient.MaxPageSize},
+					Include: []tfe.RunIncludeOpt{
+						tfe.RunPlan,
+						tfe.RunApply,
+						tfe.RunConfigVer,
+						tfe.RunCreatedBy,
+						tfe.RunCostEstimate,
+					},
+				})
+				list = l
+
+				if e != nil {
+					return fmt.Errorf("list runs: %w", e)
+				}
+
+				return nil
 			})
-			list = l
-
-			if e != nil {
-				return fmt.Errorf("list runs: %w", e)
+			if err != nil {
+				return nil, nil, fmt.Errorf("list runs page %d: %w", page, err)
 			}
 
-			return nil
+			return list.Items, list.Pagination, nil
 		})
-		if err != nil {
-			return nil, false, fmt.Errorf("list runs page %d: %w", page, err)
-		}
-
-		return list.Items, hasNextPage(list.Pagination), nil
-	}
 
 	describe := func(run *tfe.Run) collect.Item {
 		return collect.Item{
@@ -78,7 +82,7 @@ func (c *Collector) collectRuns(ctx context.Context, project string, ws *tfe.Wor
 		}
 	}
 
-	return wrapArchive(key, collect.Walk(ctx, c.env, c.env.Collection(key), pager, describe,
+	return wrapArchive(key, collect.Walk(ctx, c.env, c.env.Collection(key), pager.page, describe,
 		collect.WithHistoryLimit(c.runHistoryCount, c.runHistoryOldest)))
 }
 

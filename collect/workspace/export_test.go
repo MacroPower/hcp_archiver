@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/hashicorp/go-tfe"
+
+	"go.jacobcolvin.com/hcp_archiver/collect"
 )
 
 // ArchiveConfigurationVersion exposes archiveConfigurationVersion to the
@@ -80,6 +82,15 @@ func (c *Collector) CollectStateVersions(
 	progress func(n int),
 ) error {
 	return c.collectStateVersions(ctx, project, ws, progress)
+}
+
+// NewStablePager exposes a newStablePager over fetch to the external test
+// package as the [collect.Pager] a walk consumes.
+func NewStablePager[T any](
+	id func(T) string,
+	fetch func(context.Context, int) ([]T, *tfe.Pagination, error),
+) collect.Pager[T] {
+	return newStablePager(id, fetch).page
 }
 
 // HasNextPage exposes hasNextPage to the external test package.

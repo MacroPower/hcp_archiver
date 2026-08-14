@@ -8,6 +8,14 @@
 // separate runs-list gate, since the server meters that endpoint far more
 // tightly; everything else, run children included, draws on the general gate.
 //
+// Both histories are paged by page number over a listing that stays live while
+// the walk archives it, so an element deleted upstream between two page fetches
+// shifts every later element up a slot and would drop the one that had been
+// about to lead the next page out of the walk entirely, silently and for good.
+// Both walks therefore page through a stable pager, which watches the listing's
+// reported total for a drop, re-lists from the boundary the shift could have
+// reached back to, and serves each element at most once.
+//
 // # Projects and workspace settings
 //
 // For each project it captures the project record (default execution mode,

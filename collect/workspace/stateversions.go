@@ -28,32 +28,36 @@ func (c *Collector) collectStateVersions(
 	wsName := ws.Name
 	org := c.org
 
-	pager := func(ctx context.Context, page int) ([]*tfe.StateVersion, bool, error) {
-		var list *tfe.StateVersionList
+	// A state version can be deleted through the API while the walk is between
+	// pages, which shifts the listing under a page-number pager; the stable pager
+	// re-lists rather than let the shift skip a version (see [stablePager]).
+	pager := newStablePager(func(sv *tfe.StateVersion) string { return sv.ID },
+		func(ctx context.Context, page int) ([]*tfe.StateVersion, *tfe.Pagination, error) {
+			var list *tfe.StateVersionList
 
-		err := c.env.Client().Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
-			l, e := tc.StateVersions.List(ctx, &tfe.StateVersionListOptions{
-				// Request the max page size against the metered list bucket, as
-				// the runs pager does, so a deep state-version history costs the
-				// fewest round-trips.
-				ListOptions:  tfe.ListOptions{PageNumber: page, PageSize: tfeclient.MaxPageSize},
-				Organization: org,
-				Workspace:    wsName,
+			err := c.env.Client().Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
+				l, e := tc.StateVersions.List(ctx, &tfe.StateVersionListOptions{
+					// Request the max page size against the metered list bucket, as
+					// the runs pager does, so a deep state-version history costs the
+					// fewest round-trips.
+					ListOptions:  tfe.ListOptions{PageNumber: page, PageSize: tfeclient.MaxPageSize},
+					Organization: org,
+					Workspace:    wsName,
+				})
+				list = l
+
+				if e != nil {
+					return fmt.Errorf("list state versions: %w", e)
+				}
+
+				return nil
 			})
-			list = l
-
-			if e != nil {
-				return fmt.Errorf("list state versions: %w", e)
+			if err != nil {
+				return nil, nil, fmt.Errorf("list state versions page %d: %w", page, err)
 			}
 
-			return nil
+			return list.Items, list.Pagination, nil
 		})
-		if err != nil {
-			return nil, false, fmt.Errorf("list state versions page %d: %w", page, err)
-		}
-
-		return list.Items, hasNextPage(list.Pagination), nil
-	}
 
 	describe := func(sv *tfe.StateVersion) collect.Item {
 		return collect.Item{
@@ -71,7 +75,7 @@ func (c *Collector) collectStateVersions(
 		}
 	}
 
-	return wrapArchive(key, collect.Walk(ctx, c.env, c.env.Collection(key), pager, describe))
+	return wrapArchive(key, collect.Walk(ctx, c.env, c.env.Collection(key), pager.page, describe))
 }
 
 // archiveStateVersion archives one state version: the raw state blob, the
@@ -134,10 +138,4 @@ func (c *Collector) archiveStateVersion(ctx context.Context, project, ws string,
 				Include: []tfe.StateVersionIncludeOpt{tfe.SVrun},
 			})
 		})
-}
-
-// hasNextPage reports whether pagination points at a further page, tolerating a
-// nil pagination from an endpoint that omits it.
-func hasNextPage(p *tfe.Pagination) bool {
-	return p != nil && p.NextPage != 0
 }
