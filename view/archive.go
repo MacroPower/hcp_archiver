@@ -438,16 +438,27 @@ func remoteOrg(
 // that lets later opens find the mirror without a supplied remote. A cleared
 // marker (URL "") is the operator's consent to re-record, the same consent
 // the archiver honors; a matching one is left exactly as it is.
+//
+// The partial marker is written only when this open is what materialized the
+// organization (its org.json was absent, so the tree is a browse cache from
+// the first byte) or on the cleared-marker consent above. An established
+// local organization that merely lacks a marker is left unmarked: stamping it
+// partial would flip every later flag-less open into merged network mode, a
+// mutation a read-only command has no business making. The current session
+// still reads through either way, since the seeded remote is merged
+// regardless of what the marker records.
 func materializeOrgRoot(rem *orgRemote, root string, cfg remote.Config, marker remote.Marker, hasMarker bool) error {
 	_, statErr := os.Stat(filepath.Join(root, orgFile))
-	if errors.Is(statErr, fs.ErrNotExist) {
+	orgAbsent := errors.Is(statErr, fs.ErrNotExist)
+
+	if orgAbsent {
 		err := rem.ensureLocal(root, orgFile)
 		if err != nil {
 			return err
 		}
 	}
 
-	if !hasMarker || marker.URL == "" {
+	if (hasMarker && marker.URL == "") || (!hasMarker && orgAbsent) {
 		return writeMarker(root, cfg)
 	}
 

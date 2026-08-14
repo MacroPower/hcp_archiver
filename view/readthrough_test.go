@@ -124,6 +124,27 @@ func TestOpenArchive_BootstrapFromEmptyDir(t *testing.T) {
 	assert.Contains(t, string(marker), `"partial": true`)
 }
 
+func TestOpenArchive_EstablishedOrgStaysUnmarked(t *testing.T) {
+	t.Parallel()
+
+	// A local organization that already carries its org.json but no marker is
+	// not a browse cache: a read-only open with a supplied remote must not
+	// stamp it partial and flip every later flag-less open into merged mode.
+	fake := buildMirroredArchive(t)
+	root := buildArchive(t)
+
+	orgs, err := view.OpenArchive(root,
+		view.WithContext(t.Context()),
+		view.WithRemote(viewRemoteConfig()),
+		view.WithRemoteFactory(fakeFactory(fake)),
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, orgs)
+
+	assert.NoFileExists(t, filepath.Join(root, "my-org", remote.MarkerName),
+		"a read-only open leaves an established organization's root unmutated")
+}
+
 func TestOpenArchive_BootstrapFromMissingDir(t *testing.T) {
 	t.Parallel()
 
