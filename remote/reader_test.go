@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -102,6 +103,83 @@ func TestReadAtAbsent(t *testing.T) {
 	buf := make([]byte, 4)
 	_, err := client.ReadAt(t.Context(), "missing.zip", 12, buf, 0)
 	require.ErrorIs(t, err, remote.ErrNotFound)
+}
+
+func TestReadAtShortObject(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		err     error
+		want    string
+		stored  int
+		size    int64
+		off     int64
+		buf     int
+		reopens int
+	}{
+		"object truncated below the read": {
+			stored: 10, size: 100, off: 0, buf: 100,
+			err: remote.ErrShortObject,
+		},
+		"span runs past the object end": {
+			stored: 10, size: 20, off: 8, buf: 8,
+			err: remote.ErrShortObject,
+		},
+		"span inside a truncated object": {
+			stored: 10, size: 100, off: 2, buf: 5,
+			want: "23456",
+		},
+		"object longer than the size read against": {
+			stored: 20, size: 10, off: 0, buf: 10,
+			want: "0123456789",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// The retry budget is armed, so an attempt count above one is the
+			// classifier reading a permanent length as a transient blip.
+			client, fake := newRetryClient(t, remote.DefaultRetries)
+			data := []byte(strings.Repeat("0123456789", 1+tc.stored/10))
+			fake.SetObject("k", remotetest.Object{Data: data[:tc.stored]})
+
+			buf := make([]byte, tc.buf)
+
+			n, err := client.ReadAt(t.Context(), "k", tc.size, buf, tc.off)
+			if tc.err != nil {
+				require.ErrorIs(t, err, tc.err)
+				assert.Zero(t, n, "a span past the object's end fills nothing")
+				assert.Len(t, fake.Ranges(), 1,
+					"a length that cannot change should settle on the first attempt")
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, string(buf[:n]))
+		})
+	}
+}
+
+func TestReadAtRetriesShortBody(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newRetryClient(t, remote.DefaultRetries)
+	fake.SetObject("k", remotetest.Object{Data: []byte("0123456789")})
+
+	fake.RangeBodyErr = errors.New("connection reset")
+	fake.RangeBodyErrN = 1
+	fake.RangeBodyErrAfter = 3
+
+	buf := make([]byte, 10)
+
+	n, err := client.ReadAt(t.Context(), "k", 10, buf, 0)
+	require.NoError(t, err, "a body cut short of an object long enough is transient")
+	assert.Equal(t, 10, n)
+	assert.Equal(t, "0123456789", string(buf))
+	assert.Len(t, fake.Ranges(), 2, "the reopened range should refill p from off")
 }
 
 func TestReadAtEdges(t *testing.T) {

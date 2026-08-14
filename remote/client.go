@@ -33,6 +33,15 @@ var (
 	// ErrNotFound indicates the object at a key does not exist in the store.
 	ErrNotFound = errors.New("object not found in remote store")
 
+	// ErrShortObject indicates the object at a key holds fewer bytes than the
+	// size [Client.ReadAt] was given to read it against, so the span asked for
+	// runs past its end. It reports a mismatch between the object and the
+	// length a caller carries for it (a truncated mirror copy, or a size
+	// cached across a foreign overwrite), never a fault of the store or the
+	// path to it: the recovery is to re-measure the object with [Client.Head]
+	// and read it against what it now holds.
+	ErrShortObject = errors.New("object shorter than the size read against")
+
 	// ErrObjectChanged indicates a write replaced the object at a key while
 	// [Client.Download] was streaming it, so the transfer was abandoned part
 	// way rather than resumed against the new version and delivered as a

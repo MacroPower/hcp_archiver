@@ -16,6 +16,13 @@ import (
 // bounded retries, so one blip does not surface as a failed screen or a
 // failed sweep.
 //
+// An object holding fewer bytes than size is a different matter: the span
+// asked for runs past its end, and would on every reopen, so the read reports
+// [ErrShortObject] from the attempt that observes it rather than spending the
+// retry budget on a length nothing can change. The store's own reported
+// length settles it, so a body cut short of an object that is long enough
+// still reads as the transient fault it is.
+//
 // It honors the [io.ReaderAt] contract — a non-nil error whenever it fills
 // less than all of p, with [io.EOF] marking a read clipped by the object's
 // end — so a caller can adapt it to [io.ReaderAt] with a context of its
@@ -54,6 +61,15 @@ func (c *Client) ReadAt(ctx context.Context, key string, size int64, p []byte, o
 				//nolint:errcheck // Read-only body; the ReadFull result is what matters.
 				_ = r.Close()
 			}()
+
+			// The length riding the response is what tells a short object from
+			// a short body: the first can never fill p, however often the
+			// range reopens, so it settles here instead of reaching io.ReadFull
+			// as an EOF the classifier would read as one more blip.
+			if off+want > r.Size() {
+				return fmt.Errorf("%w: %w: %s holds %d bytes, read against %d",
+					errPermanent, ErrShortObject, key, r.Size(), size)
+			}
 
 			// Each delivered chunk is progress, so a large member span stays
 			// alive while it moves and a wedged body stalls out and refills.
@@ -210,13 +226,15 @@ func (v objectVersion) String() string {
 	return fmt.Sprintf("%d bytes modified %s", v.size, v.modTime.UTC().Format(time.RFC3339))
 }
 
-// errPermanent marks a failure that is none of the store's doing and would
-// recur identically on another attempt, so [retryable] refuses it whatever
-// code the driver would otherwise leave on it. It exists for the one fault
-// that reaches this package from the far side of a transfer: a caller's
-// destination refusing the bytes a download delivers (a full disk under an
-// unseal target) classifies unknown, which would otherwise re-request the
-// whole object only to fail on the same write.
+// errPermanent marks a failure that would recur identically on another
+// attempt, so [retryable] refuses it whatever code the driver would otherwise
+// leave on it. It carries the settlements this package reaches for itself,
+// none of which the classification of a store's response describes: a
+// caller's destination refusing the bytes a download delivers (a full disk
+// under an unseal target), a replacement observed part way through a resumed
+// download, an object shorter than the size a ranged read is measured
+// against. Each classifies unknown, and each would only spend the request
+// again to fail the same way.
 var errPermanent = errors.New("permanent failure")
 
 // destWriter marks the destination's own write faults with [errPermanent], so
