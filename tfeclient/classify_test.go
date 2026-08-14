@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"syscall"
 	"testing"
 
 	"github.com/hashicorp/go-tfe"
@@ -52,6 +54,34 @@ func TestClassify(t *testing.T) {
 		"rate limited is transient": {
 			err:  fmt.Errorf("do: %w", tfeclient.ErrRateLimited),
 			want: tfeclient.KindTransient,
+		},
+		"connection reset mid-stream is transient": {
+			err: fmt.Errorf("read state: %w", &net.OpError{
+				Op:  "read",
+				Net: "tcp",
+				Err: syscall.ECONNRESET,
+			}),
+			want: tfeclient.KindTransient,
+		},
+		"connection aborted is transient": {
+			err:  fmt.Errorf("read log: %w", &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNABORTED}),
+			want: tfeclient.KindTransient,
+		},
+		"broken pipe is transient": {
+			err:  fmt.Errorf("write: %w", &net.OpError{Op: "write", Net: "tcp", Err: syscall.EPIPE}),
+			want: tfeclient.KindTransient,
+		},
+		"a body truncated short of its length is transient": {
+			err:  fmt.Errorf("read log: %w", io.ErrUnexpectedEOF),
+			want: tfeclient.KindTransient,
+		},
+		"a read on a closed connection is transient": {
+			err:  fmt.Errorf("read log: %w", net.ErrClosed),
+			want: tfeclient.KindTransient,
+		},
+		"a clean EOF is unknown, not an interrupted stream": {
+			err:  fmt.Errorf("read log: %w", io.EOF),
+			want: tfeclient.KindUnknown,
 		},
 		"generic error is unknown": {
 			err:  errors.New("boom"),

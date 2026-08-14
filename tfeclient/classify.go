@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/hashicorp/go-tfe"
 )
@@ -51,7 +53,8 @@ const (
 	KindUnknown Kind = iota
 
 	// KindTransient is a retryable error: context cancellation or deadline,
-	// a network timeout, or rate limiting ([ErrRateLimited]).
+	// a network timeout, a connection torn down mid-exchange, or rate limiting
+	// ([ErrRateLimited]).
 	KindTransient
 
 	// KindTerminal is a permanent absence, such as a 404 surfaced as
@@ -82,10 +85,10 @@ func (k Kind) String() string {
 // Classify reports the [Kind] of err.
 //
 // It recognizes [tfe.ErrResourceNotFound] as [KindTerminal]; context
-// cancellation, deadlines, network timeouts, and rate limiting
-// ([ErrRateLimited]) as [KindTransient]; and an access denial (an HTTP 403)
-// as [KindForbidden]. A nil error and any error not matched structurally are
-// [KindUnknown].
+// cancellation, deadlines, network timeouts, a connection torn down
+// mid-exchange (see [isInterrupted]), and rate limiting ([ErrRateLimited]) as
+// [KindTransient]; and an access denial (an HTTP 403) as [KindForbidden]. A nil
+// error and any error not matched structurally are [KindUnknown].
 //
 // The go-tfe v1 client discards the HTTP status of a 403 and surfaces only the
 // joined error payload, whose title is "forbidden", so a forbidden error is
@@ -105,7 +108,7 @@ func Classify(err error) Kind {
 		return KindTransient
 	case errors.Is(err, ErrRateLimited):
 		return KindTransient
-	case isTimeout(err):
+	case isTimeout(err), isInterrupted(err):
 		return KindTransient
 	case isForbidden(err):
 		return KindForbidden
@@ -204,6 +207,29 @@ func isTimeout(err error) bool {
 	var netErr net.Error
 
 	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// isInterrupted reports whether err is a connection torn down part-way through
+// an exchange: the peer reset or aborted it, the local end wrote to a closed
+// one, a read landed on a connection already closed beneath it, or the body
+// ended before the length the response declared.
+//
+// None of these report a Timeout of true, so [isTimeout] misses them, yet they
+// are the ordinary shape of a network blip and a fresh attempt commonly
+// succeeds. It matters most to a streamed blob, whose body is read outside the
+// client's own retry layer, leaving only the caller's retry between a
+// mid-stream reset and an object deferred to the next run; classifying these
+// [KindTransient] both earns that retry and records the outcome under the right
+// label.
+//
+// A clean [io.EOF] is deliberately absent: it is the end of a complete body,
+// not an interruption.
+func isInterrupted(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.EPIPE)
 }
 
 // isForbidden reports whether err carries the go-tfe v1 client's rendering of

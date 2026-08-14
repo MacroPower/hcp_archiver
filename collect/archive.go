@@ -94,8 +94,10 @@ func (e *Env) Mutable(ctx context.Context, relPath string, fetch func(context.Co
 // the whole stream with no retry beneath this call. A fetch or mid-stream
 // error that classifies transient is therefore retried here, re-running fetch
 // after a doubling backoff (see [WithBlobRetry]), before the failure is
-// recorded. The write is atomic, so a restarted stream never commits a
-// partial file.
+// recorded. That covers the mid-stream failures a long transfer actually meets
+// (a connection reset, a body truncated short of its declared length, a stall
+// past the idle bound), all of which [tfeclient.Classify] reports transient.
+// The write is atomic, so a restarted stream never commits a partial file.
 //
 // An empty stream carries nothing to archive. Some endpoints answer an absent
 // artifact with 204 No Content (a stack step that only planned, for one), which
