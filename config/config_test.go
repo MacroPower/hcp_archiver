@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -202,6 +203,51 @@ func TestNew_TokenFromEnv(t *testing.T) {
 	}
 }
 
+func TestValidateOrganizationName(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		name string
+		err  error
+	}{
+		"plain name":             {name: "acme"},
+		"dashes and underscores": {name: "acme-corp_2"},
+		"dots inside the name":   {name: "acme.corp"},
+		"leading dot":            {name: ".hidden"},
+		"unicode name":           {name: "acmé"},
+		"empty":                  {name: "", err: config.ErrInvalidOrganization},
+		"current directory":      {name: ".", err: config.ErrInvalidOrganization},
+		"parent directory":       {name: "..", err: config.ErrInvalidOrganization},
+		"traversal prefix":       {name: "../../home/user/.ssh", err: config.ErrInvalidOrganization},
+		"traversal suffix":       {name: "acme/..", err: config.ErrInvalidOrganization},
+		"nested segments":        {name: "acme/sub", err: config.ErrInvalidOrganization},
+		"absolute path":          {name: "/etc/cron.d", err: config.ErrInvalidOrganization},
+		"trailing separator":     {name: "acme/", err: config.ErrInvalidOrganization},
+		"windows separator":      {name: `acme\sub`, err: config.ErrInvalidOrganization},
+		"newline":                {name: "acme\nevil", err: config.ErrInvalidOrganization},
+		"nul byte":               {name: "acme\x00", err: config.ErrInvalidOrganization},
+		"terminal escape":        {name: "\x1b[2Jacme", err: config.ErrInvalidOrganization},
+		"delete character":       {name: "acme\x7f", err: config.ErrInvalidOrganization},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			err := config.ValidateOrganizationName(tc.name)
+
+			if tc.err != nil {
+				require.ErrorIs(t, err, tc.err)
+				assert.Contains(t, err.Error(), strconv.Quote(tc.name))
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestNew_ValidationErrors(t *testing.T) {
 	tests := map[string]struct {
 		opts    []config.Option
@@ -262,6 +308,14 @@ func TestNew_ValidationErrors(t *testing.T) {
 				config.WithRemote(config.RemoteConfig{URL: "s3://b", Concurrency: -1}),
 			},
 			wantErr: config.ErrInvalidRemoteConcurrency,
+		},
+		"traversing organization name": {
+			opts: []config.Option{
+				config.WithToken("tok"),
+				config.WithOutputDir("/tmp/archive"),
+				config.WithOrganizations([]string{"acme", "../../etc"}),
+			},
+			wantErr: config.ErrInvalidOrganization,
 		},
 	}
 

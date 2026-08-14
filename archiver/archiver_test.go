@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/hashicorp/go-tfe"
@@ -231,6 +233,54 @@ func TestResolveOrgs(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestRunOrgRejectsEscapingName(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		org string
+	}{
+		"empty":             {org: ""},
+		"parent directory":  {org: ".."},
+		"traversal prefix":  {org: "../../home/user/.ssh"},
+		"nested segments":   {org: "acme/sub"},
+		"absolute path":     {org: "/etc/cron.d"},
+		"windows separator": {org: `acme\sub`},
+		"terminal escape":   {org: "\x1b[2Jacme"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// The output directory sits inside a sandbox; that both stay empty
+			// is what proves the run rooted nothing on the hostile name, since
+			// the store root, the manifest lock, and the remote marker are all
+			// created before the first collector runs.
+			sandbox := t.TempDir()
+			outputDir := filepath.Join(sandbox, "archive")
+			require.NoError(t, os.Mkdir(outputDir, 0o750))
+
+			a := archiver.New(
+				&config.Config{OutputDir: outputDir},
+				archiver.WithWriter(&bytes.Buffer{}),
+			)
+
+			tally, syncFailed, err := archiver.RunOrg(a, t.Context(), tc.org)
+			require.ErrorIs(t, err, config.ErrInvalidOrganization)
+			assert.Zero(t, tally)
+			assert.Zero(t, syncFailed)
+
+			outside, err := os.ReadDir(sandbox)
+			require.NoError(t, err)
+			assert.Len(t, outside, 1)
+
+			inside, err := os.ReadDir(outputDir)
+			require.NoError(t, err)
+			assert.Empty(t, inside)
 		})
 	}
 }

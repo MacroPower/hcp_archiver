@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -36,6 +37,9 @@ var (
 	ErrMissingToken = errors.New("api token is required (set HCP_TOKEN, TFC_TOKEN, or TFE_TOKEN)")
 	// ErrMissingOutputDir indicates that no output directory was supplied.
 	ErrMissingOutputDir = errors.New("output directory is required")
+	// ErrInvalidOrganization indicates an organization name that is not a single
+	// path segment, and so cannot root an organization's archive.
+	ErrInvalidOrganization = errors.New("organization name must be a single path segment")
 	// ErrInvalidProgressMode indicates an unrecognized progress mode.
 	ErrInvalidProgressMode = errors.New("invalid progress mode")
 	// ErrInvalidProgressInterval indicates a progress interval of zero or less.
@@ -323,13 +327,38 @@ func New(opts ...Option) (*Config, error) {
 	return c, nil
 }
 
+// ValidateOrganizationName reports whether name is usable as the single
+// directory segment an organization's archive is rooted at.
+//
+// The archiver joins the name onto the output directory to root the
+// organization's store, and onto the remote key prefix to root its mirror.
+// Both joins collapse ".." lexically, so a name carrying path separators, dot
+// entries, or control characters would place the whole organization (its
+// store, its manifest lock, and every mirrored object) outside the archive
+// root and outside the configured prefix. Organization names arrive from the
+// server's listing as readily as from an operator, so this is a boundary the
+// archiver enforces on every organization it archives rather than a check on
+// operator input alone. It returns [ErrInvalidOrganization] wrapped with the
+// name.
+func ValidateOrganizationName(name string) error {
+	control := func(r rune) bool { return r < 0x20 || r == 0x7f }
+
+	if name == "" || name == "." || name == ".." ||
+		strings.ContainsAny(name, `/\`) || strings.ContainsFunc(name, control) {
+		return fmt.Errorf("%w: %q", ErrInvalidOrganization, name)
+	}
+
+	return nil
+}
+
 // Validate reports whether the [Config] is internally consistent.
 //
 // It returns [ErrMissingToken], [ErrMissingOutputDir],
-// [ErrInvalidRunHistoryCount], [ErrInvalidRunHistoryAge],
-// [ErrInvalidProgressMode], [ErrInvalidProgressInterval], or, when a remote
-// section is configured, [ErrMissingRemoteURL], [ErrInvalidRemotePartSize],
-// or [ErrInvalidRemoteConcurrency], wrapped with context on the first problem
+// [ErrInvalidOrganization], [ErrInvalidRunHistoryCount],
+// [ErrInvalidRunHistoryAge], [ErrInvalidProgressMode],
+// [ErrInvalidProgressInterval], or, when a remote section is configured,
+// [ErrMissingRemoteURL], [ErrInvalidRemotePartSize], or
+// [ErrInvalidRemoteConcurrency], wrapped with context on the first problem
 // found.
 func (c *Config) Validate() error {
 	if c.Token == "" {
@@ -338,6 +367,16 @@ func (c *Config) Validate() error {
 
 	if c.OutputDir == "" {
 		return ErrMissingOutputDir
+	}
+
+	// Named organizations are rejected here so an operator's typo fails before
+	// the run builds a client; the archiver re-checks every name it actually
+	// archives, since auto-discovery never passes through this list.
+	for _, org := range c.Organizations {
+		err := ValidateOrganizationName(org)
+		if err != nil {
+			return err
+		}
 	}
 
 	if c.RunHistoryCount < 0 {
