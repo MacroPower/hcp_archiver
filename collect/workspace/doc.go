@@ -62,7 +62,10 @@
 // listed, whose task-result and policy-evaluation relations stay bare id refs;
 // and the native Terraform policy evaluations with their set outcomes. Comments
 // come from their own list endpoint because the run's comment relation is not
-// sideloadable through an include.
+// sideloadable through an include, and they are the one run child a terminal
+// status does not freeze: the API accepts a comment on a run in any state, so
+// they are re-listed each time the walk revisits the run and a comment left on
+// a long-finished run is still captured.
 //
 // A run's created-by and each run event's actor are hydrated users, and go-tfe
 // exposes no user listing, so these sub-objects are the only capture of who

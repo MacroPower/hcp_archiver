@@ -13,9 +13,10 @@ import (
 )
 
 // collectRuns archives the workspace's runs newest-first. A run's summary is
-// mutable and refreshes while the run is in flight; its children are immutable
-// and are fetched only once the run reaches a terminal state, so an in-flight
-// run does not record premature absences for logs it has yet to produce. The
+// mutable and refreshes while the run is in flight; its children are fetched
+// only once the run reaches a terminal state, so an in-flight run does not
+// record premature absences for logs it has yet to produce, and all of them but
+// the comments then settle once and are never re-read. The
 // progress callback, when non-nil, is called with 1 after each run is handled,
 // including a settled run the primitives skip, so progress tracks the walk
 // itself rather than only fresh downloads. A configured run-history limit
@@ -87,7 +88,7 @@ func (c *Collector) collectRuns(ctx context.Context, project string, ws *tfe.Wor
 }
 
 // archiveRun archives a run's mutable summary and, once the run is terminal, its
-// immutable children.
+// children.
 func (c *Collector) archiveRun(ctx context.Context, project, ws string, run *tfe.Run) error {
 	err := c.mutable(ctx, c.env.Store().RunFile(project, ws, run.ID, "run.json"), run)
 	if err != nil {

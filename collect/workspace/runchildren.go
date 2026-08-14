@@ -8,10 +8,12 @@ import (
 	"github.com/hashicorp/go-tfe"
 )
 
-// archiveRunChildren archives every immutable child of a terminal run: its
-// configuration version, plan and apply artifacts, cost estimate, comments, run
-// events, policy checks, task stages, native Terraform policy outcomes, and the
-// user that created it.
+// archiveRunChildren archives every child of a terminal run: its configuration
+// version, plan and apply artifacts, cost estimate, comments, run events, policy
+// checks, task stages, native Terraform policy outcomes, and the user that
+// created it. All of them are frozen by the run's terminal status except the
+// comments, which the API lets a person add to a finished run and which are
+// therefore re-listed on every revisit (see [Collector.archiveComments]).
 func (c *Collector) archiveRunChildren(ctx context.Context, project, ws string, run *tfe.Run) error {
 	steps := []func(context.Context, string, string, *tfe.Run) error{
 		c.archiveConfigurationVersion,
@@ -235,10 +237,19 @@ func (c *Collector) archiveCostEstimate(ctx context.Context, project, ws string,
 
 // archiveComments archives the run's comments, which come from their own list
 // endpoint because the run's comment relation is not sideloadable.
+//
+// Comments are the one run child a terminal status does not freeze: the API
+// accepts a comment on a run in any state, and a post-mortem on a finished run
+// is ordinary practice, so an immutable settle-and-skip read would capture
+// whatever existed on the first pass and never look again. They are archived as
+// mutable metadata instead, re-listed whenever the walk revisits the run, which
+// costs one list per visited run per pass and nothing on disk when the payload
+// is unchanged. A changed list supersedes into the object's history sidecar,
+// and once the workspace seals it appends a newer line to the comments roll-up.
 func (c *Collector) archiveComments(ctx context.Context, project, ws string, run *tfe.Run) error {
 	runID := run.ID
 
-	return objectOne(ctx, c, c.env.Store().RunFile(project, ws, run.ID, "comments.json"),
+	return mutableOne(ctx, c, c.env.Store().RunFile(project, ws, run.ID, "comments.json"),
 		func(ctx context.Context, tc *tfe.Client) ([]*tfe.Comment, error) {
 			l, e := tc.Comments.List(ctx, runID)
 			if e != nil {
