@@ -8,9 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"text/template"
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
-	"go.jacobcolvin.com/hcp_archiver/theme"
 	"go.jacobcolvin.com/hcp_archiver/view"
 )
 
@@ -60,16 +60,19 @@ type Summary struct {
 //
 // Create instances with [New].
 type Exporter struct {
-	arc    *view.Archive
-	target string
-	force  bool
-	pages  int
+	arc          *view.Archive
+	tmpl         *template.Template
+	target       string
+	templatesDir string
+	pages        int
+	force        bool
 }
 
 // Option configures an [Exporter].
 //
 // Options of this type:
 //   - [WithForce]
+//   - [WithTemplatesDir]
 type Option func(*Exporter)
 
 // WithForce lets the export replace a non-empty target directory's contents
@@ -77,6 +80,16 @@ type Option func(*Exporter)
 func WithForce() Option {
 	return func(e *Exporter) {
 		e.force = true
+	}
+}
+
+// WithTemplatesDir names a directory of *.md.tmpl files overriding the
+// export's built-in page templates by filename; pages without an override
+// keep their default. An empty dir leaves every default in place. It returns
+// an [Option].
+func WithTemplatesDir(dir string) Option {
+	return func(e *Exporter) {
+		e.templatesDir = dir
 	}
 }
 
@@ -103,7 +116,16 @@ func (e *Exporter) Run(ctx context.Context) (Summary, error) {
 		return Summary{}, ErrNoTarget
 	}
 
-	err := e.prepareTarget()
+	// Templates load before the target is touched, so a broken override never
+	// costs a cleared directory under [WithForce].
+	tmpl, err := loadTemplates(e.templatesDir)
+	if err != nil {
+		return Summary{}, err
+	}
+
+	e.tmpl = tmpl
+
+	err = e.prepareTarget()
 	if err != nil {
 		return Summary{}, err
 	}
@@ -226,17 +248,15 @@ func (e *Exporter) write(rel string, data []byte) error {
 
 // writeArchiveIndex renders the site home: one row per organization.
 func (e *Exporter) writeArchiveIndex(orgs []*view.Org) error {
-	p := &page{}
-	p.h1("Archive")
-	p.para("This site was generated from an hcp_archiver backup. It holds " +
-		theme.CountNoun(len(orgs), "organization", "organizations") + ".")
-
-	rows := make([][]string, 0, len(orgs))
+	pageCtx := ArchivePage{Orgs: make([]ArchiveOrg, 0, len(orgs))}
 	for _, org := range orgs {
-		rows = append(rows, []string{mdLink(org.Name, org.Name, indexFile)})
+		pageCtx.Orgs = append(pageCtx.Orgs, ArchiveOrg{Name: org.Name})
 	}
 
-	p.table([]string{"Organization"}, rows)
+	data, err := e.renderPage("archive.md.tmpl", pageCtx)
+	if err != nil {
+		return err
+	}
 
-	return e.write(indexFile, p.bytes())
+	return e.write(indexFile, data)
 }

@@ -49,6 +49,54 @@ func TestExportCmd_RefusesTargetInsideArchive(t *testing.T) {
 	require.ErrorIs(t, err, main.ErrTargetInArchive)
 }
 
+func TestExportCmd_TemplatesFromConfig(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+	target := filepath.Join(t.TempDir(), "site")
+
+	// The templates directory sits beside the configuration file and is named
+	// relatively, resolving against the file's directory.
+	cfgDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(cfgDir, "export-templates"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(cfgDir, "export-templates", "workspace.md.tmpl"),
+		[]byte("# {{escape .Title}} (custom)"), 0o600))
+
+	cfgPath := filepath.Join(cfgDir, "config.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte("export:\n  templates: export-templates\n"), 0o600))
+
+	_, _, err := runCmd(t, "export", root, "--target", target, "--config", cfgPath)
+	require.NoError(t, err)
+
+	page, err := os.ReadFile(filepath.Join(target, "mini-org", filepath.FromSlash(miniWs), "index.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "# w1 (custom)", string(page))
+}
+
+func TestExportCmd_BadTemplatesPreserveForcedTarget(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+
+	target := t.TempDir()
+	stale := filepath.Join(target, "stale.md")
+	require.NoError(t, os.WriteFile(stale, []byte("previous site"), 0o600))
+
+	cfgDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(cfgDir, "tmpl"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(cfgDir, "tmpl", "workspace.md.tmpl"), []byte("{{escape .Title"), 0o600))
+
+	cfgPath := filepath.Join(cfgDir, "config.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte("export:\n  templates: tmpl\n"), 0o600))
+
+	_, _, err := runCmd(t, "export", root, "--target", target, "--force", "--config", cfgPath)
+	require.ErrorIs(t, err, export.ErrTemplateInvalid)
+
+	assert.FileExists(t, stale, "a template refusal must precede the forced clear")
+}
+
 func TestExportCmd_NonEmptyTargetHintsForce(t *testing.T) {
 	t.Parallel()
 

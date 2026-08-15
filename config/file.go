@@ -40,17 +40,22 @@ var (
 // File is the on-disk YAML configuration describing what to archive and how.
 //
 // It holds the settings that are stable across runs: the API address, the
-// organization, project, and workspace filters, and the opt-in scope toggles.
-// Per-run and secret
+// organization, project, and workspace filters, the opt-in scope toggles, and
+// the export section. Per-run and secret
 // settings (the output directory, the progress mode, the retry-absent toggle,
 // and the API token) are supplied by flags and the environment instead, so a
-// configuration file never carries a machine-specific path or a credential.
+// configuration file never carries a credential; the one path it may name,
+// the export templates directory, resolves relative to the file itself so the
+// two travel together.
 //
 // Every field is optional; an absent field takes the package default. Create
 // instances with [LoadFile], or [DefaultFile] for the defaults alone.
 type File struct {
 	// Address is the HCP Terraform API address. It defaults to [DefaultAddress].
 	Address string `json:"address,omitempty" jsonschema:"title=Address,default=https://app.terraform.io"`
+	// Export configures the export subcommand's rendering; unset keeps the
+	// built-in page templates.
+	Export FileExport `json:"export,omitzero" jsonschema:"title=Export"`
 	// Organizations limits the run to the named organizations. An empty list
 	// archives every organization the token can see.
 	Organizations []string `json:"organizations,omitempty" jsonschema:"title=Organizations"`
@@ -76,6 +81,14 @@ type File struct {
 	// Scope selects the heavy or optional surfaces to archive, each off by
 	// default.
 	Scope FileScope `json:"scope,omitzero" jsonschema:"title=Scope"`
+}
+
+// FileExport configures the export subcommand's rendering.
+type FileExport struct {
+	// Templates is a directory of *.md.tmpl files overriding the export's
+	// built-in page templates by filename; pages without an override keep
+	// their default. A relative path resolves against this file's directory.
+	Templates string `json:"templates,omitempty" jsonschema:"title=Templates"`
 }
 
 // FileRunHistory bounds how much of each workspace's run history is archived.

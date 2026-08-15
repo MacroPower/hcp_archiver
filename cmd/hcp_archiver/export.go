@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -38,6 +39,11 @@ The target directory is created when absent and refused when non-empty;
 --force replaces its contents. Exporting a sealed archive whose roll-ups were
 offloaded fetches that metadata back from the mirror.
 
+Pages render through Go text/template. A configuration file's export.templates
+key names a directory of *.md.tmpl files overriding the built-in page
+templates by filename; pages without an override keep their default, and a
+relative path resolves against the configuration file's directory.
+
 ` + remoteLong + `
 
 A single argument names the archive directory, defaulting to the current
@@ -56,7 +62,15 @@ one.`,
 		ctx, stop := signalContext(cc.Context())
 		defer stop()
 
-		rcfg, err := rf.resolve()
+		// The file loads once and unconditionally (unlike resolve, which
+		// --remote short-circuits): its export section applies even when the
+		// mirror comes from the flag.
+		file, cfgPath, err := rf.loadFile()
+		if err != nil {
+			return err
+		}
+
+		rcfg, err := rf.remoteFromFile(file)
 		if err != nil {
 			return err
 		}
@@ -79,6 +93,15 @@ one.`,
 
 		if force {
 			opts = append(opts, export.WithForce())
+		}
+
+		if file != nil && file.Export.Templates != "" {
+			templatesDir := file.Export.Templates
+			if !filepath.IsAbs(templatesDir) {
+				templatesDir = filepath.Join(filepath.Dir(cfgPath), templatesDir)
+			}
+
+			opts = append(opts, export.WithTemplatesDir(templatesDir))
 		}
 
 		sum, err := export.New(arc, target, opts...).Run(ctx)

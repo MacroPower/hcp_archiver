@@ -128,27 +128,28 @@ func boolCell(r *view.Resource, key string) string {
 // its stored value.
 const sensitiveMarker = "(sensitive)"
 
-// variableRows renders variable-like resources (workspace variables,
-// variable-set variables, policy-set parameters) into table rows, gating the
-// value on the sensitive flag. A sensitive variable's stored value is never
-// read, even though the API blanks it upstream; the export does not rely on
-// that behavior.
-func variableRows(resources []view.Resource) [][]string {
-	rows := make([][]string, 0, len(resources))
+// buildVariables builds variable-like resources (workspace variables,
+// variable-set variables, policy-set parameters) into [Variable] rows, gating
+// the value on the sensitive flag. A sensitive variable's stored value is
+// never read, even though the API blanks it upstream; the export does not
+// rely on that behavior, and the redaction happens here, before any template
+// runs, so no override can reach the value either.
+func buildVariables(resources []view.Resource) []Variable {
+	rows := make([]Variable, 0, len(resources))
 
 	for i := range resources {
 		r := &resources[i]
 
 		value := sensitiveMarker
 		if !r.Bool("sensitive") {
-			value = escapeCell(r.String("value"))
+			value = r.String("value")
 		}
 
-		rows = append(rows, []string{
-			escapeCell(r.String("key")),
-			escapeCell(r.String("category")),
-			boolCell(r, "hcl"),
-			value,
+		rows = append(rows, Variable{
+			Key:      r.String("key"),
+			Category: r.String("category"),
+			HCL:      boolCell(r, "hcl"),
+			Value:    value,
 		})
 	}
 
@@ -163,30 +164,34 @@ const (
 )
 
 // orgSection is one org-scope category rendered as its own page beneath the
-// organization's directory.
+// organization's directory: a template name and the builder of the data it
+// renders.
 type orgSection struct {
-	render func(org *view.Org, ids []string) *page
-	title  string
-	dir    string
-	noun   string
-	nouns  string
+	build func(org *view.Org, ids []string) any
+	tmpl  string
+	title string
+	dir   string
+	noun  string
+	nouns string
 }
 
 var (
-	// The columns [variableRows] renders.
-	variableHeaders = []string{"Key", "Category", "HCL", "Value"}
-
 	// The categories that earn a page: those whose archive directories are
 	// keyed by opaque ids, folded into one readable page each.
 	orgSections = []orgSection{
-		{title: "Teams", dir: "teams", noun: "team", nouns: "teams", render: teamsPage},
+		{
+			title: "Teams", dir: "teams", noun: "team", nouns: "teams",
+			tmpl: "teams.md.tmpl", build: buildTeamsPage,
+		},
 		{
 			title: "Variable sets", dir: "variable-sets",
-			noun: "variable set", nouns: "variable sets", render: variableSetsPage,
+			noun: "variable set", nouns: "variable sets",
+			tmpl: "variable-sets.md.tmpl", build: buildVariableSetsPage,
 		},
 		{
 			title: "Policy sets", dir: "policy-sets",
-			noun: "policy set", nouns: "policy sets", render: policySetsPage,
+			noun: "policy set", nouns: "policy sets",
+			tmpl: "policy-sets.md.tmpl", build: buildPolicySetsPage,
 		},
 	}
 
@@ -271,7 +276,12 @@ func (e *Exporter) renderOrg(ctx context.Context, org *view.Org) error {
 			continue
 		}
 
-		err = e.write(path.Join(org.Name, section.dir, indexFile), section.render(org, sectionIDs[i]).bytes())
+		data, renderErr := e.renderPage(section.tmpl, section.build(org, sectionIDs[i]))
+		if renderErr != nil {
+			return renderErr
+		}
+
+		err = e.write(path.Join(org.Name, section.dir, indexFile), data)
 		if err != nil {
 			return err
 		}
@@ -295,158 +305,159 @@ func (e *Exporter) renderOrg(ctx context.Context, org *view.Org) error {
 // writeOrgIndex renders the organization's index: its allowlisted settings,
 // links into its sections, and the inventory of count-only categories.
 func (e *Exporter) writeOrgIndex(org *view.Org, projectCount int, sectionIDs [][]string) error {
-	p := &page{}
-
 	r := one(decodeTolerant(org.ReadFile("org.json")))
-	p.h1(titleOr(r, org.Name))
 
-	if r != nil {
-		p.kv([][2]string{
-			{labelID, escapeCell(r.ID)},
-			{"Email", escapeCell(r.String("email"))},
-			{labelCreated, fmtTime(r.Time("created-at"))},
-		})
+	pageCtx := OrgPage{
+		Title: titleOr(r, org.Name),
+		Contents: []ContentEntry{
+			{Title: "Projects", Dir: "projects", Noun: "project", Nouns: "projects", Count: projectCount},
+		},
 	}
 
-	lines := []string{"- " + mdLink("Projects", "projects", indexFile) + ": " +
-		theme.CountNoun(projectCount, "project", "projects")}
+	if r != nil {
+		pageCtx.Info = addKV(pageCtx.Info, labelID, r.ID)
+		pageCtx.Info = addKV(pageCtx.Info, "Email", r.String("email"))
+		pageCtx.Info = addKV(pageCtx.Info, labelCreated, fmtTime(r.Time("created-at")))
+	}
 
 	for i, section := range orgSections {
 		if len(sectionIDs[i]) == 0 {
 			continue
 		}
 
-		lines = append(lines, "- "+mdLink(section.title, section.dir, indexFile)+": "+
-			theme.CountNoun(len(sectionIDs[i]), section.noun, section.nouns))
+		pageCtx.Contents = append(pageCtx.Contents, ContentEntry{
+			Title: section.title, Dir: section.dir,
+			Noun: section.noun, Nouns: section.nouns,
+			Count: len(sectionIDs[i]),
+		})
 	}
-
-	p.h2("Contents")
-	p.para(strings.Join(lines, "\n"))
-
-	var rows [][]string
 
 	for _, cat := range orgInventoryDirs {
 		if n := countEntries(org, cat.dir); n > 0 {
-			rows = append(rows, []string{cat.label, strconv.Itoa(n)})
+			pageCtx.Inventory = append(pageCtx.Inventory, InventoryEntry{Label: cat.label, Count: n})
 		}
 	}
 
 	for _, cat := range orgInventoryFiles {
 		if n := len(decodeTolerant(org.ReadFile(cat.file))); n > 0 {
-			rows = append(rows, []string{cat.label, strconv.Itoa(n)})
+			pageCtx.Inventory = append(pageCtx.Inventory, InventoryEntry{Label: cat.label, Count: n})
 		}
 	}
 
-	if len(rows) > 0 {
-		p.h2("Also archived")
-		p.para("Categories the backup holds beyond the pages of this site.")
-		p.table([]string{"Category", "Count"}, rows)
+	data, err := e.renderPage("org.md.tmpl", pageCtx)
+	if err != nil {
+		return err
 	}
 
-	return e.write(path.Join(org.Name, indexFile), p.bytes())
+	return e.write(path.Join(org.Name, indexFile), data)
 }
 
-// teamsPage renders every team as one table row; a team whose team.json is
-// damaged still gets a row carrying only its id.
-func teamsPage(org *view.Org, ids []string) *page {
-	p := &page{}
-	p.h1("Teams")
-
-	rows := make([][]string, 0, len(ids))
+// buildTeamsPage builds every team into one table row; a team whose
+// team.json is damaged still gets a row carrying only its id.
+func buildTeamsPage(org *view.Org, ids []string) any {
+	pageCtx := TeamsPage{Teams: make([]Team, 0, len(ids))}
 
 	for _, id := range ids {
-		row := []string{"", escapeCell(id), "", ""}
+		team := Team{ID: id}
 
 		if r := one(decodeTolerant(org.ReadFile(path.Join("teams", id, "team.json")))); r != nil {
-			row[0] = escapeCell(r.String("name"))
-			row[2] = escapeCell(r.String("visibility"))
+			team.Name = r.String("name")
+			team.Visibility = r.String("visibility")
 
 			if n, ok := r.IntOK("users-count"); ok {
-				row[3] = strconv.FormatInt(n, 10)
+				team.Users = strconv.FormatInt(n, 10)
 			}
 		}
 
-		rows = append(rows, row)
+		pageCtx.Teams = append(pageCtx.Teams, team)
 	}
 
-	p.table([]string{"Name", "ID", "Visibility", "Users"}, rows)
-
-	return p
+	return pageCtx
 }
 
-// idSetsPage renders a category of id-keyed sets as one page: an h2 section
-// per set carrying the allowlisted settings its kv builder names and the
-// set's variables table, values gated by [variableRows]. A set whose metadata
-// leaf is damaged still gets a section keyed by its id.
-func idSetsPage(org *view.Org, ids []string, title, dir, setFile, varsFile string,
-	kv func(r *view.Resource) [][2]string,
-) *page {
-	p := &page{}
-	p.h1(title)
+// setEntry builds one id-keyed set's section: its title, the allowlisted
+// settings its kv builder names, and its variables, values gated by
+// [buildVariables]. A set whose metadata leaf is damaged still gets a section
+// keyed by its id.
+func setEntry(org *view.Org, id, dir, setFile, varsFile string,
+	kv func(r *view.Resource) []KV,
+) (string, []KV, []Variable) {
+	r := one(decodeTolerant(org.ReadFile(path.Join(dir, id, setFile))))
+
+	var info []KV
+
+	if r != nil {
+		info = kv(r)
+	}
+
+	vars := buildVariables(decodeTolerant(org.ReadFile(path.Join(dir, id, varsFile))))
+
+	return titleOr(r, id), info, vars
+}
+
+// buildVariableSetsPage builds every variable set's section through
+// [setEntry].
+func buildVariableSetsPage(org *view.Org, ids []string) any {
+	pageCtx := VariableSetsPage{Sets: make([]VariableSet, 0, len(ids))}
 
 	for _, id := range ids {
-		r := one(decodeTolerant(org.ReadFile(path.Join(dir, id, setFile))))
-		p.h2(titleOr(r, id))
+		title, info, vars := setEntry(org, id, "variable-sets", "variable-set.json", "variables.json",
+			func(r *view.Resource) []KV {
+				info := addKV(nil, labelID, r.ID)
+				info = addKV(info, labelDescription, r.String("description"))
 
-		if r != nil {
-			p.kv(kv(r))
-		}
+				return addKV(info, "Global", boolCell(r, "global"))
+			})
 
-		p.table(variableHeaders, variableRows(decodeTolerant(org.ReadFile(path.Join(dir, id, varsFile)))))
+		pageCtx.Sets = append(pageCtx.Sets, VariableSet{Title: title, Info: info, Variables: vars})
 	}
 
-	return p
+	return pageCtx
 }
 
-// variableSetsPage renders every variable set through [idSetsPage].
-func variableSetsPage(org *view.Org, ids []string) *page {
-	return idSetsPage(org, ids, "Variable sets", "variable-sets", "variable-set.json", "variables.json",
-		func(r *view.Resource) [][2]string {
-			return [][2]string{
-				{labelID, escapeCell(r.ID)},
-				{labelDescription, escapeCell(r.String("description"))},
-				{"Global", boolCell(r, "global")},
-			}
-		})
-}
+// buildPolicySetsPage builds every policy set's section through [setEntry],
+// its parameters carrying the same sensitive gate as variables.
+func buildPolicySetsPage(org *view.Org, ids []string) any {
+	pageCtx := PolicySetsPage{Sets: make([]PolicySet, 0, len(ids))}
 
-// policySetsPage renders every policy set through [idSetsPage], its
-// parameters carrying the same sensitive gate as variables.
-func policySetsPage(org *view.Org, ids []string) *page {
-	return idSetsPage(org, ids, "Policy sets", "policy-sets", "policy-set.json", "parameters.json",
-		func(r *view.Resource) [][2]string {
-			kv := [][2]string{
-				{labelID, escapeCell(r.ID)},
-				{"Kind", escapeCell(r.String("kind"))},
-				{"Global", boolCell(r, "global")},
-			}
+	for _, id := range ids {
+		title, info, params := setEntry(org, id, "policy-sets", "policy-set.json", "parameters.json",
+			func(r *view.Resource) []KV {
+				info := addKV(nil, labelID, r.ID)
+				info = addKV(info, "Kind", r.String("kind"))
+				info = addKV(info, "Global", boolCell(r, "global"))
 
-			if n, ok := r.IntOK("policy-count"); ok {
-				kv = append(kv, [2]string{"Policies", strconv.FormatInt(n, 10)})
-			}
+				if n, ok := r.IntOK("policy-count"); ok {
+					info = addKV(info, "Policies", strconv.FormatInt(n, 10))
+				}
 
-			return kv
-		})
+				return info
+			})
+
+		pageCtx.Sets = append(pageCtx.Sets, PolicySet{Title: title, Info: info, Parameters: params})
+	}
+
+	return pageCtx
 }
 
 // writeProjectsIndex renders the organization's project list.
 func (e *Exporter) writeProjectsIndex(org *view.Org, listings []projectListing) error {
-	p := &page{}
-	p.h1("Projects")
-
-	rows := make([][]string, 0, len(listings))
+	pageCtx := ProjectsPage{Projects: make([]ProjectEntry, 0, len(listings))}
 
 	for _, listing := range listings {
-		rows = append(rows, []string{
-			mdLink(listing.name, listing.name, indexFile),
-			strconv.Itoa(len(listing.workspaces)),
-			strconv.Itoa(len(listing.stacks)),
+		pageCtx.Projects = append(pageCtx.Projects, ProjectEntry{
+			Name:       listing.name,
+			Workspaces: len(listing.workspaces),
+			Stacks:     len(listing.stacks),
 		})
 	}
 
-	p.table([]string{"Project", "Workspaces", "Stacks"}, rows)
+	data, err := e.renderPage("projects.md.tmpl", pageCtx)
+	if err != nil {
+		return err
+	}
 
-	return e.write(path.Join(org.Name, "projects", indexFile), p.bytes())
+	return e.write(path.Join(org.Name, "projects", indexFile), data)
 }
 
 // renderProject writes one project's subtree: its index, its workspace pages,
@@ -481,41 +492,27 @@ func (e *Exporter) renderProject(ctx context.Context, org *view.Org, listing pro
 	return nil
 }
 
-// linkSection writes a heading and a single-column table of links into child
-// pages under dir, writing nothing when names is empty.
-func linkSection(p *page, heading, column, dir string, names []string) {
-	if len(names) == 0 {
-		return
-	}
-
-	p.h2(heading)
-
-	rows := make([][]string, 0, len(names))
-	for _, name := range names {
-		rows = append(rows, []string{mdLink(name, dir, name, indexFile)})
-	}
-
-	p.table([]string{column}, rows)
-}
-
 // writeProjectIndex renders one project's page: its allowlisted settings and
 // its workspace and stack lists.
 func (e *Exporter) writeProjectIndex(org *view.Org, listing projectListing) error {
-	p := &page{}
-
 	r := one(decodeTolerant(org.ReadFile(path.Join("projects", listing.name, "project.json"))))
-	p.h1(titleOr(r, listing.name))
 
-	if r != nil {
-		p.kv([][2]string{
-			{labelID, escapeCell(r.ID)},
-			{labelDescription, escapeCell(r.String("description"))},
-			{labelCreated, fmtTime(r.Time("created-at"))},
-		})
+	pageCtx := ProjectPage{
+		Title:      titleOr(r, listing.name),
+		Workspaces: listing.workspaces,
+		Stacks:     listing.stacks,
 	}
 
-	linkSection(p, "Workspaces", "Workspace", "workspaces", listing.workspaces)
-	linkSection(p, "Stacks", "Stack", "stacks", listing.stacks)
+	if r != nil {
+		pageCtx.Info = addKV(pageCtx.Info, labelID, r.ID)
+		pageCtx.Info = addKV(pageCtx.Info, labelDescription, r.String("description"))
+		pageCtx.Info = addKV(pageCtx.Info, labelCreated, fmtTime(r.Time("created-at")))
+	}
 
-	return e.write(path.Join(org.Name, "projects", listing.name, indexFile), p.bytes())
+	data, err := e.renderPage("project.md.tmpl", pageCtx)
+	if err != nil {
+		return err
+	}
+
+	return e.write(path.Join(org.Name, "projects", listing.name, indexFile), data)
 }

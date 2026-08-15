@@ -15,22 +15,18 @@ import (
 // under the same name.
 const readmeFile = "readme.md"
 
-// cliName is the archiver binary the export's retrieval snippets invoke.
-const cliName = "hcp_archiver"
-
 // renderWorkspace writes one workspace's page beneath its org-prefixed archive
 // path, which the export tree mirrors, and its readme copy beside it when the
 // archive holds one.
 func (e *Exporter) renderWorkspace(ws *view.Workspace, orgName string) error {
 	outDir := path.Join(orgName, ws.Dir())
 
-	p := &page{}
-
 	overview := one(decodeTolerant(ws.Open(ws.File("workspace.json"))))
-	p.h1(titleOr(overview, ws.Name))
+
+	pageCtx := WorkspacePage{Title: titleOr(overview, ws.Name)}
 
 	if overview != nil {
-		p.kv(workspaceOverview(overview))
+		pageCtx.Info = workspaceOverview(overview)
 	}
 
 	hasReadme, err := e.copyReadme(ws, outDir)
@@ -38,48 +34,45 @@ func (e *Exporter) renderWorkspace(ws *view.Workspace, orgName string) error {
 		return err
 	}
 
-	if hasReadme {
-		p.para("See the workspace's " + mdLink("readme", readmeFile) + ".")
-	}
+	pageCtx.HasReadme = hasReadme
+	pageCtx.Variables = buildVariables(decodeTolerant(ws.Open(ws.File("variables.json"))))
 
-	if rows := variableRows(decodeTolerant(ws.Open(ws.File("variables.json")))); len(rows) > 0 {
-		p.h2("Variables")
-		p.table(variableHeaders, rows)
-	}
-
-	err = workspaceRuns(p, ws, orgName)
+	pageCtx.Runs, err = workspaceRuns(ws, orgName)
 	if err != nil {
 		return err
 	}
 
-	err = workspaceStates(p, ws, orgName)
+	pageCtx.States, err = workspaceStates(ws, orgName)
 	if err != nil {
 		return err
 	}
 
-	return e.write(path.Join(outDir, indexFile), p.bytes())
+	data, err := e.renderPage("workspace.md.tmpl", pageCtx)
+	if err != nil {
+		return err
+	}
+
+	return e.write(path.Join(outDir, indexFile), data)
 }
 
 // workspaceOverview picks the allowlisted settings a workspace page shows,
 // mirroring the interactive browser's overview fields.
-func workspaceOverview(r *view.Resource) [][2]string {
-	rows := [][2]string{
-		{labelID, escapeCell(r.ID)},
-		{labelDescription, escapeCell(r.String("description"))},
-		{"Terraform version", escapeCell(r.String("terraform-version"))},
-		{"Execution mode", escapeCell(r.String("execution-mode"))},
-		{"Auto apply", boolCell(r, "auto-apply")},
-	}
+func workspaceOverview(r *view.Resource) []KV {
+	rows := addKV(nil, labelID, r.ID)
+	rows = addKV(rows, labelDescription, r.String("description"))
+	rows = addKV(rows, "Terraform version", r.String("terraform-version"))
+	rows = addKV(rows, "Execution mode", r.String("execution-mode"))
+	rows = addKV(rows, "Auto apply", boolCell(r, "auto-apply"))
 
 	if n, ok := r.IntOK("resource-count"); ok {
-		rows = append(rows, [2]string{"Resource count", strconv.FormatInt(n, 10)})
+		rows = addKV(rows, "Resource count", strconv.FormatInt(n, 10))
 	}
 
-	rows = append(rows, [2]string{labelCreated, fmtTime(r.Time("created-at"))})
+	rows = addKV(rows, labelCreated, fmtTime(r.Time("created-at")))
 
 	if repo, ok := r.Attributes["vcs-repo"].(map[string]any); ok {
 		if id, ok := repo["identifier"].(string); ok {
-			rows = append(rows, [2]string{"VCS repo", escapeCell(id)})
+			rows = addKV(rows, "VCS repo", id)
 		}
 	}
 
@@ -103,33 +96,35 @@ func (e *Exporter) copyReadme(ws *view.Workspace, outDir string) (bool, error) {
 	return true, e.write(path.Join(outDir, readmeFile), data)
 }
 
-// workspaceRuns renders the workspace's run history, newest first. Each row
-// carries the run's metadata and the names of its archived artifacts; the
-// artifacts themselves (plan and apply logs, cost estimates) can embed secret
-// values and are represented by name alone, with a snippet naming the CLI
-// commands that retrieve them.
-func workspaceRuns(p *page, ws *view.Workspace, orgName string) error {
+// workspaceRuns builds the workspace's run history, newest first, nil when it
+// has none. Each row carries the run's metadata and the names of its archived
+// artifacts; the artifacts themselves (plan and apply logs, cost estimates)
+// can embed secret values and are represented by name alone, with the page's
+// snippet naming the CLI commands that retrieve them.
+func workspaceRuns(ws *view.Workspace, orgName string) (*RunsSection, error) {
 	runs, err := ws.Runs()
 	if err != nil {
-		return fmt.Errorf("list runs of %q: %w", ws.Name, err)
+		return nil, fmt.Errorf("list runs of %q: %w", ws.Name, err)
 	}
 
 	if len(runs) == 0 {
-		return nil
+		return nil, nil //nolint:nilnil // No runs means no section, not an error.
 	}
 
-	var example string
-
-	rows := make([][]string, 0, len(runs))
+	section := &RunsSection{
+		Count: len(runs),
+		Dir:   path.Join(orgName, ws.Dir(), "runs"),
+		Rows:  make([]RunRow, 0, len(runs)),
+	}
 
 	for _, run := range runs {
 		artifacts, artErr := ws.RunArtifacts(run.ID)
 		if artErr != nil {
-			return fmt.Errorf("list artifacts of run %q: %w", run.ID, artErr)
+			return nil, fmt.Errorf("list artifacts of run %q: %w", run.ID, artErr)
 		}
 
-		if example == "" && len(artifacts) > 0 {
-			example = path.Join(orgName, artifacts[0])
+		if section.Example == "" && len(artifacts) > 0 {
+			section.Example = path.Join(orgName, artifacts[0])
 		}
 
 		names := make([]string, 0, len(artifacts))
@@ -137,104 +132,63 @@ func workspaceRuns(p *page, ws *view.Workspace, orgName string) error {
 			names = append(names, path.Base(rel))
 		}
 
-		rows = append(rows, []string{
-			escapeCell(run.ID),
-			fmtTime(run.CreatedAt),
-			escapeCell(run.Status),
-			escapeCell(run.Message),
-			escapeCell(run.Source),
-			escapeCell(run.TerraformVersion),
-			strconv.FormatBool(run.IsDestroy),
-			strconv.FormatBool(run.HasChanges),
-			escapeCell(strings.Join(names, ", ")),
+		section.Rows = append(section.Rows, RunRow{
+			ID:               run.ID,
+			Created:          fmtTime(run.CreatedAt),
+			Status:           run.Status,
+			Message:          run.Message,
+			Source:           run.Source,
+			TerraformVersion: run.TerraformVersion,
+			IsDestroy:        run.IsDestroy,
+			HasChanges:       run.HasChanges,
+			Artifacts:        names,
 		})
 	}
 
-	p.h2("Runs")
-	p.para(theme.CountNoun(len(runs), "archived run", "archived runs") +
-		". Artifact contents are withheld; the backup holds them in full:")
-	retrievalSnippet(p, example, path.Join(orgName, ws.Dir(), "runs"))
-	p.table(
-		[]string{
-			labelID,
-			labelCreated,
-			"Status",
-			"Message",
-			"Source",
-			"Terraform",
-			"Destroy",
-			"Changes",
-			"Archived artifacts",
-		},
-		rows,
-	)
-
-	return nil
+	return section, nil
 }
 
-// workspaceStates renders the workspace's state-version history, newest
-// first: metadata and which blob forms the backup holds, never the state
-// itself, whose raw form embeds sensitive values in cleartext. A snippet
-// names the CLI commands that retrieve the blobs.
-func workspaceStates(p *page, ws *view.Workspace, orgName string) error {
+// workspaceStates builds the workspace's state-version history, newest first,
+// nil when it has none: metadata and which blob forms the backup holds, never
+// the state itself, whose raw form embeds sensitive values in cleartext. The
+// page's snippet names the CLI commands that retrieve the blobs.
+func workspaceStates(ws *view.Workspace, orgName string) (*StatesSection, error) {
 	versions, err := ws.StateVersions()
 	if err != nil {
-		return fmt.Errorf("list state versions of %q: %w", ws.Name, err)
+		return nil, fmt.Errorf("list state versions of %q: %w", ws.Name, err)
 	}
 
 	if len(versions) == 0 {
-		return nil
+		return nil, nil //nolint:nilnil // No versions means no section, not an error.
 	}
 
-	var example string
-
-	rows := make([][]string, 0, len(versions))
+	section := &StatesSection{
+		Count: len(versions),
+		Dir:   path.Join(orgName, ws.Dir(), "state-versions"),
+		Rows:  make([]StateRow, 0, len(versions)),
+	}
 
 	for _, sv := range versions {
-		if example == "" {
+		if section.Example == "" {
 			switch {
 			case sv.HasRaw:
-				example = path.Join(orgName, ws.RawStatePath(&sv))
+				section.Example = path.Join(orgName, ws.RawStatePath(&sv))
 			case sv.HasJSON:
-				example = path.Join(orgName, ws.JSONStatePath(&sv))
+				section.Example = path.Join(orgName, ws.JSONStatePath(&sv))
 			}
 		}
 
-		rows = append(rows, []string{
-			escapeCell(sv.ID),
-			fmtTime(sv.CreatedAt),
-			strconv.FormatInt(sv.Serial, 10),
-			escapeCell(sv.Status),
-			theme.HumanBytes(sv.Size),
-			stateForms(sv),
+		section.Rows = append(section.Rows, StateRow{
+			ID:      sv.ID,
+			Created: fmtTime(sv.CreatedAt),
+			Serial:  sv.Serial,
+			Status:  sv.Status,
+			Size:    theme.HumanBytes(sv.Size),
+			Forms:   stateForms(sv),
 		})
 	}
 
-	p.h2("State versions")
-	p.para(theme.CountNoun(len(versions), "archived state version", "archived state versions") +
-		". State contents are withheld; the backup holds them in full:")
-	retrievalSnippet(p, example, path.Join(orgName, ws.Dir(), "state-versions"))
-	p.table([]string{labelID, labelCreated, "Serial", "Status", "Size", "Archived blobs"}, rows)
-
-	return nil
-}
-
-// retrievalSnippet writes the shell commands that retrieve a section's
-// withheld content: a show of one example object when the section holds any,
-// and an unseal of the whole section directory. Archive paths are
-// single-quoted so a name with spaces stays one shell argument; the
-// archive-dir and output-dir placeholders stay for the reader, who alone
-// knows where the archive and the recovered files should live.
-func retrievalSnippet(p *page, example, dir string) {
-	lines := make([]string, 0, 2)
-
-	if example != "" {
-		lines = append(lines, fmt.Sprintf("%s show <archive-dir> '%s'", cliName, example))
-	}
-
-	lines = append(lines, fmt.Sprintf("%s unseal <archive-dir> '%s' --target <output-dir>", cliName, dir))
-
-	p.code("sh", lines...)
+	return section, nil
 }
 
 // stateForms names which state blob forms the backup holds for a version.

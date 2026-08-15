@@ -1,0 +1,6 @@
+# Projects
+{{if .Projects}}
+| Project | Workspaces | Stacks |
+| --- | --- | --- |
+{{range .Projects}}| {{link .Name .Name "index.md"}} | {{.Workspaces}} | {{.Stacks}} |
+{{end}}{{end}}

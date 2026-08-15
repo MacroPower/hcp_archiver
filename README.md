@@ -258,6 +258,28 @@ target). Like the other read commands, the export reads the physical forms
 transparently; exporting a sealed archive whose roll-ups were offloaded
 fetches that metadata back from the mirror.
 
+#### Customizing export pages
+
+Every page renders through a Go `text/template`, and the configuration
+file's `export.templates` key names a directory of overrides:
+
+```yaml
+export:
+  templates: export-templates # relative paths resolve against this file
+```
+
+The directory's `*.md.tmpl` files replace the same-named built-in templates
+-- `archive.md.tmpl`, `org.md.tmpl`, `teams.md.tmpl`, `variable-sets.md.tmpl`,
+`policy-sets.md.tmpl`, `projects.md.tmpl`, `project.md.tmpl`,
+`workspace.md.tmpl`, and `stack.md.tmpl` -- while pages without an override
+keep their default. A file whose name matches no page template is refused
+rather than silently ignored, and a broken override is refused before the
+target directory is touched. The defaults ship embedded in the binary (the
+`export` package's `DefaultTemplates` serves them, or copy them from
+`export/templates/` in this repository) and are the reference for each page's
+data; the data is built with every sensitive value already redacted, so a
+custom template can restyle the pages but cannot reach withheld content.
+
 ### Mirroring the archive to object storage
 
 With a `remote:` block configured, the bucket converges on a **complete copy**

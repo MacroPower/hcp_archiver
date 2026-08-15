@@ -1,0 +1,6 @@
+# Teams
+{{if .Teams}}
+| Name | ID | Visibility | Users |
+| --- | --- | --- | --- |
+{{range .Teams}}| {{escape .Name}} | {{escape .ID}} | {{escape .Visibility}} | {{.Users}} |
+{{end}}{{end}}

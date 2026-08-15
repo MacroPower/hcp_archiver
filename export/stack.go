@@ -13,47 +13,38 @@ import (
 func (e *Exporter) renderStack(org *view.Org, project, name string) error {
 	stackDir := path.Join("projects", project, "stacks", name)
 
-	p := &page{}
-
 	r := one(decodeTolerant(org.ReadFile(path.Join(stackDir, "stack.json"))))
 
-	var kv [][2]string
+	pageCtx := StackPage{Title: titleOr(r, name)}
 
 	if r != nil {
-		kv = [][2]string{
-			{labelID, escapeCell(r.ID)},
-			{labelDescription, escapeCell(r.String("description"))},
-			{labelCreated, fmtTime(r.Time("created-at"))},
-			{"Updated", fmtTime(r.Time("updated-at"))},
-		}
+		pageCtx.Info = addKV(pageCtx.Info, labelID, r.ID)
+		pageCtx.Info = addKV(pageCtx.Info, labelDescription, r.String("description"))
+		pageCtx.Info = addKV(pageCtx.Info, labelCreated, fmtTime(r.Time("created-at")))
+		pageCtx.Info = addKV(pageCtx.Info, "Updated", fmtTime(r.Time("updated-at")))
 	}
 
 	deployments := subdirNames(org, path.Join(stackDir, "deployments"))
 
 	if len(deployments) > 0 {
-		kv = append(kv, [2]string{"Deployments", strconv.Itoa(len(deployments))})
+		pageCtx.Info = addKV(pageCtx.Info, "Deployments", strconv.Itoa(len(deployments)))
 	}
 
-	p.h1(titleOr(r, name))
-	p.kv(kv)
+	for _, dep := range deployments {
+		row := Deployment{Name: dep}
 
-	if len(deployments) > 0 {
-		rows := make([][]string, 0, len(deployments))
-
-		for _, dep := range deployments {
-			row := []string{escapeCell(dep), ""}
-
-			rel := path.Join(stackDir, "deployments", dep, "deployment.json")
-			if dep := one(decodeTolerant(org.ReadFile(rel))); dep != nil {
-				row[1] = fmtTime(dep.Time("created-at"))
-			}
-
-			rows = append(rows, row)
+		rel := path.Join(stackDir, "deployments", dep, "deployment.json")
+		if depRes := one(decodeTolerant(org.ReadFile(rel))); depRes != nil {
+			row.Created = fmtTime(depRes.Time("created-at"))
 		}
 
-		p.h2("Deployments")
-		p.table([]string{"Deployment", labelCreated}, rows)
+		pageCtx.Deployments = append(pageCtx.Deployments, row)
 	}
 
-	return e.write(path.Join(org.Name, stackDir, indexFile), p.bytes())
+	data, err := e.renderPage("stack.md.tmpl", pageCtx)
+	if err != nil {
+		return err
+	}
+
+	return e.write(path.Join(org.Name, stackDir, indexFile), data)
 }

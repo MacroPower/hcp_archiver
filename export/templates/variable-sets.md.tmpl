@@ -1,0 +1,10 @@
+# Variable sets
+{{range .Sets}}
+## {{escape .Title}}
+{{if .Info}}
+{{range .Info}}- **{{.Label}}**: {{escape .Value}}
+{{end}}{{end}}{{if .Variables}}
+| Key | Category | HCL | Value |
+| --- | --- | --- | --- |
+{{range .Variables}}| {{escape .Key}} | {{escape .Category}} | {{.HCL}} | {{escape .Value}} |
+{{end}}{{end}}{{end}}

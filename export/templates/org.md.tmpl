@@ -1,0 +1,16 @@
+# {{escape .Title}}
+{{if .Info}}
+{{range .Info}}- **{{.Label}}**: {{escape .Value}}
+{{end}}{{end}}
+## Contents
+
+{{range .Contents}}- {{link .Title .Dir "index.md"}}: {{countNoun .Count .Noun .Nouns}}
+{{end}}{{if .Inventory}}
+## Also archived
+
+Categories the backup holds beyond the pages of this site.
+
+| Category | Count |
+| --- | --- |
+{{range .Inventory}}| {{.Label}} | {{.Count}} |
+{{end}}{{end}}

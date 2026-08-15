@@ -1,0 +1,38 @@
+# {{escape .Title}}
+{{if .Info}}
+{{range .Info}}- **{{.Label}}**: {{escape .Value}}
+{{end}}{{end}}{{if .HasReadme}}
+See the workspace's {{link "readme" "readme.md"}}.
+{{end}}{{if .Variables}}
+## Variables
+
+| Key | Category | HCL | Value |
+| --- | --- | --- | --- |
+{{range .Variables}}| {{escape .Key}} | {{escape .Category}} | {{.HCL}} | {{escape .Value}} |
+{{end}}{{end}}{{with .Runs}}
+## Runs
+
+{{countNoun .Count "archived run" "archived runs"}}. Artifact contents are withheld; the backup holds them in full:
+
+```sh
+{{if .Example}}hcp_archiver show <archive-dir> '{{.Example}}'
+{{end}}hcp_archiver unseal <archive-dir> '{{.Dir}}' --target <output-dir>
+```
+
+| ID | Created | Status | Message | Source | Terraform | Destroy | Changes | Archived artifacts |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+{{range .Rows}}| {{escape .ID}} | {{.Created}} | {{escape .Status}} | {{escape .Message}} | {{escape .Source}} | {{escape .TerraformVersion}} | {{.IsDestroy}} | {{.HasChanges}} | {{escape (join .Artifacts ", ")}} |
+{{end}}{{end}}{{with .States}}
+## State versions
+
+{{countNoun .Count "archived state version" "archived state versions"}}. State contents are withheld; the backup holds them in full:
+
+```sh
+{{if .Example}}hcp_archiver show <archive-dir> '{{.Example}}'
+{{end}}hcp_archiver unseal <archive-dir> '{{.Dir}}' --target <output-dir>
+```
+
+| ID | Created | Serial | Status | Size | Archived blobs |
+| --- | --- | --- | --- | --- | --- |
+{{range .Rows}}| {{escape .ID}} | {{.Created}} | {{.Serial}} | {{escape .Status}} | {{.Size}} | {{.Forms}} |
+{{end}}{{end}}

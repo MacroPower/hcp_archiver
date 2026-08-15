@@ -1,0 +1,16 @@
+# {{escape .Title}}
+{{if .Info}}
+{{range .Info}}- **{{.Label}}**: {{escape .Value}}
+{{end}}{{end}}{{if .Workspaces}}
+## Workspaces
+
+| Workspace |
+| --- |
+{{range .Workspaces}}| {{link . "workspaces" . "index.md"}} |
+{{end}}{{end}}{{if .Stacks}}
+## Stacks
+
+| Stack |
+| --- |
+{{range .Stacks}}| {{link . "stacks" . "index.md"}} |
+{{end}}{{end}}

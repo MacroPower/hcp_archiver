@@ -1,0 +1,10 @@
+# {{escape .Title}}
+{{if .Info}}
+{{range .Info}}- **{{.Label}}**: {{escape .Value}}
+{{end}}{{end}}{{if .Deployments}}
+## Deployments
+
+| Deployment | Created |
+| --- | --- |
+{{range .Deployments}}| {{escape .Name}} | {{.Created}} |
+{{end}}{{end}}

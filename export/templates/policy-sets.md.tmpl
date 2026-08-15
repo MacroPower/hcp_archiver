@@ -1,0 +1,10 @@
+# Policy sets
+{{range .Sets}}
+## {{escape .Title}}
+{{if .Info}}
+{{range .Info}}- **{{.Label}}**: {{escape .Value}}
+{{end}}{{end}}{{if .Parameters}}
+| Key | Category | HCL | Value |
+| --- | --- | --- | --- |
+{{range .Parameters}}| {{escape .Key}} | {{escape .Category}} | {{.HCL}} | {{escape .Value}} |
+{{end}}{{end}}{{end}}

@@ -97,11 +97,33 @@ func registerRemoteFlags(cmd *cobra.Command) *remoteFlags {
 // opens with: an explicit --remote wins, then the configuration file's remote
 // section (the --config flag or the environment), and nil means no remote was
 // named anywhere, leaving the archive to its local tree and markers.
+//
+// With --remote set the configuration file is never loaded, so a read-only
+// command against an explicit mirror keeps working beside a broken file.
 func (rf *remoteFlags) resolve() (*remote.Config, error) {
 	if rf.url != "" {
 		return &remote.Config{URL: rf.url, Prefix: rf.prefix}, nil
 	}
 
+	file, _, err := rf.loadFile()
+	if err != nil {
+		return nil, err
+	}
+
+	return rf.remoteFromFile(file)
+}
+
+// loadFile loads the configuration file the --config flag or the environment
+// names, answering a nil file when none is named anywhere. The returned path
+// is the one the file was loaded from, the base a relative path inside it
+// resolves against.
+//
+// An environment-named file that does not exist on this host is treated as
+// unnamed: the variable serves the archiver, and a read-only command over a
+// purely local archive must keep working on a machine without the file. An
+// explicit --config, or a file that exists but will not parse, still refuses
+// loudly.
+func (rf *remoteFlags) loadFile() (*config.File, string, error) {
 	cfgPath := rf.configPath
 	fromEnv := false
 
@@ -111,38 +133,37 @@ func (rf *remoteFlags) resolve() (*remote.Config, error) {
 	}
 
 	if cfgPath == "" {
+		return nil, "", nil
+	}
+
+	file, err := config.LoadFile(cfgPath)
+
+	switch {
+	case err != nil && fromEnv && errors.Is(err, fs.ErrNotExist):
+		return nil, "", nil
+	case err != nil:
+		return nil, "", err //nolint:wrapcheck // Source-annotated configuration errors render as-is.
+	}
+
+	return file, cfgPath, nil
+}
+
+// remoteFromFile turns the flag values plus a loaded (possibly nil)
+// configuration file into the remote configuration the archive opens with: an
+// explicit --remote wins, then the file's remote section, and nil means no
+// remote was named anywhere. A --remote-prefix with nothing to apply it to is
+// refused with [ErrPrefixNeedsRemote] in every branch.
+func (rf *remoteFlags) remoteFromFile(file *config.File) (*remote.Config, error) {
+	if rf.url != "" {
+		return &remote.Config{URL: rf.url, Prefix: rf.prefix}, nil
+	}
+
+	if file == nil || file.Remote.IsZero() {
 		if rf.prefix != "" {
 			return nil, ErrPrefixNeedsRemote
 		}
 
 		return nil, nil //nolint:nilnil // No remote named anywhere is the local-only default.
-	}
-
-	file, err := config.LoadFile(cfgPath)
-
-	// An environment-named file that does not exist on this host names no
-	// remote: the variable serves the archiver, and a read-only command over
-	// a purely local archive must keep working on a machine without the file.
-	// An explicit --config, or a file that exists but will not parse, still
-	// refuses loudly.
-	if err != nil && fromEnv && errors.Is(err, fs.ErrNotExist) {
-		if rf.prefix != "" {
-			return nil, ErrPrefixNeedsRemote
-		}
-
-		return nil, nil //nolint:nilnil // Same local-only default as an unset variable.
-	}
-
-	if err != nil {
-		return nil, err //nolint:wrapcheck // Source-annotated configuration errors render as-is.
-	}
-
-	if file.Remote.IsZero() {
-		if rf.prefix != "" {
-			return nil, ErrPrefixNeedsRemote
-		}
-
-		return nil, nil //nolint:nilnil // The file names no remote; same local-only default.
 	}
 
 	rc := file.Remote.RemoteConfig()

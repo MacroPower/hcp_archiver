@@ -1,0 +1,8 @@
+# Archive
+
+This site was generated from an hcp_archiver backup. It holds {{countNoun (len .Orgs) "organization" "organizations"}}.
+{{if .Orgs}}
+| Organization |
+| --- |
+{{range .Orgs}}| {{link .Name .Name "index.md"}} |
+{{end}}{{end}}

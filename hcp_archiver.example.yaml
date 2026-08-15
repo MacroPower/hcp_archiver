@@ -62,3 +62,11 @@ scope:
 #   prefix: hcp-archive
 #   partSize: 67108864
 #   concurrency: 4
+
+# Export subcommand rendering. templates names a directory of *.md.tmpl files
+# overriding the export's built-in page templates by filename (archive, org,
+# teams, variable-sets, policy-sets, projects, project, workspace, stack, each
+# with the .md.tmpl suffix); pages without an override keep their default. A
+# relative path resolves against this file's directory.
+# export:
+#   templates: export-templates
