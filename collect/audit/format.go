@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	tfe "github.com/hashicorp/go-tfe"
+	tfe "github.com/hashicorp/go-tfe/v2"
 )
 
 // pageTimeLayout formats the Since cursor into a lexically-sortable,

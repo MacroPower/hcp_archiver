@@ -1,6 +1,6 @@
 package tfeclient
 
-import tfe "github.com/hashicorp/go-tfe"
+import tfe "github.com/hashicorp/go-tfe/v2"
 
 // The terminality tables decide, once per resource, which API statuses are
 // final: a terminal object freezes in the archive and is never refreshed,

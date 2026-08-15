@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/hashicorp/go-tfe"
+	"github.com/hashicorp/go-tfe/v2"
 )
 
 // collectOrganization archives the organization record itself.

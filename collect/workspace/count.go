@@ -3,7 +3,7 @@ package workspace
 import (
 	"context"
 
-	"github.com/hashicorp/go-tfe"
+	"github.com/hashicorp/go-tfe/v2"
 )
 
 // Counts reports the workspace's run and state-version totals, in that order,

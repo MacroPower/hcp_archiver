@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/hashicorp/go-tfe"
+	"github.com/hashicorp/go-tfe/v2"
 	"golang.org/x/sync/errgroup"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"

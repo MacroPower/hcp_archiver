@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/hashicorp/go-tfe"
+	"github.com/hashicorp/go-tfe/v2"
 )
 
 // collectOAuthClients archives each VCS OAuth client with its tokens and

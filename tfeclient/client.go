@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-cleanhttp"
-	"github.com/hashicorp/go-tfe"
+	"github.com/hashicorp/go-tfe/v2"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 )

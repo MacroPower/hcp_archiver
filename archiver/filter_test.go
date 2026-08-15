@@ -3,7 +3,7 @@ package archiver_test
 import (
 	"testing"
 
-	"github.com/hashicorp/go-tfe"
+	"github.com/hashicorp/go-tfe/v2"
 	"github.com/stretchr/testify/assert"
 
 	"go.jacobcolvin.com/hcp_archiver/archiver"

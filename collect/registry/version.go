@@ -1,7 +1,7 @@
 package registry
 
 import (
-	"github.com/hashicorp/go-tfe"
+	"github.com/hashicorp/go-tfe/v2"
 
 	goversion "github.com/hashicorp/go-version"
 )

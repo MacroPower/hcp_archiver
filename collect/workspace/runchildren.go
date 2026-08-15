@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/hashicorp/go-tfe"
+	"github.com/hashicorp/go-tfe/v2"
 )
 
 // archiveRunChildren archives every child of a terminal run: its configuration

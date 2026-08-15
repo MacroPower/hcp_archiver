@@ -3,7 +3,7 @@ package orgscope
 import (
 	"context"
 
-	"github.com/hashicorp/go-tfe"
+	"github.com/hashicorp/go-tfe/v2"
 )
 
 // PolicyExt exposes the unexported policyExt helper to the external test

@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/hashicorp/go-tfe"
+	"github.com/hashicorp/go-tfe/v2"
 	"github.com/stretchr/testify/assert"
 
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
