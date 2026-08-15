@@ -20,7 +20,12 @@ See the workspace's [readme](readme.md).
 
 ## Runs
 
-2 archived runs. Artifact contents are withheld; the backup holds them in full.
+2 archived runs. Artifact contents are withheld; the backup holds them in full:
+
+```sh
+hcp_archiver show <archive-dir> 'my-org/projects/default/workspaces/app/runs/run-new/plan.log'
+hcp_archiver unseal <archive-dir> 'my-org/projects/default/workspaces/app/runs' --target <output-dir>
+```
 
 | ID | Created | Status | Message | Source | Terraform | Destroy | Changes | Archived artifacts |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -29,7 +34,12 @@ See the workspace's [readme](readme.md).
 
 ## State versions
 
-2 archived state versions. State contents are withheld; the backup holds them in full.
+2 archived state versions. State contents are withheld; the backup holds them in full:
+
+```sh
+hcp_archiver show <archive-dir> 'my-org/projects/default/workspaces/app/state-versions/20240102T030405Z-sv-2.tfstate.json'
+hcp_archiver unseal <archive-dir> 'my-org/projects/default/workspaces/app/state-versions' --target <output-dir>
+```
 
 | ID | Created | Serial | Status | Size | Archived blobs |
 | --- | --- | --- | --- | --- | --- |

@@ -87,6 +87,12 @@ func (p *page) kv(rows [][2]string) {
 	}
 }
 
+// code writes a fenced code block. Lines are copied verbatim: fence content
+// is renderer-composed command text, never escaped archive content.
+func (p *page) code(lang string, lines ...string) {
+	fmt.Fprintf(&p.b, "\n```%s\n%s\n```\n", lang, strings.Join(lines, "\n"))
+}
+
 // table writes a markdown table. Cells must already be escaped (or
 // renderer-composed, like links). A call with no rows writes nothing, so an
 // empty collection leaves no headers-only stub.

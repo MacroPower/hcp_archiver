@@ -15,9 +15,15 @@ import (
 // under the same name.
 const readmeFile = "readme.md"
 
-// renderWorkspace writes one workspace's page beneath outDir, and its readme
-// copy beside it when the archive holds one.
-func (e *Exporter) renderWorkspace(ws *view.Workspace, outDir string) error {
+// cliName is the archiver binary the export's retrieval snippets invoke.
+const cliName = "hcp_archiver"
+
+// renderWorkspace writes one workspace's page beneath its org-prefixed archive
+// path, which the export tree mirrors, and its readme copy beside it when the
+// archive holds one.
+func (e *Exporter) renderWorkspace(ws *view.Workspace, orgName string) error {
+	outDir := path.Join(orgName, ws.Dir())
+
 	p := &page{}
 
 	overview := one(decodeTolerant(ws.Open(ws.File("workspace.json"))))
@@ -41,12 +47,12 @@ func (e *Exporter) renderWorkspace(ws *view.Workspace, outDir string) error {
 		p.table(variableHeaders, rows)
 	}
 
-	err = workspaceRuns(p, ws)
+	err = workspaceRuns(p, ws, orgName)
 	if err != nil {
 		return err
 	}
 
-	err = workspaceStates(p, ws)
+	err = workspaceStates(p, ws, orgName)
 	if err != nil {
 		return err
 	}
@@ -100,8 +106,9 @@ func (e *Exporter) copyReadme(ws *view.Workspace, outDir string) (bool, error) {
 // workspaceRuns renders the workspace's run history, newest first. Each row
 // carries the run's metadata and the names of its archived artifacts; the
 // artifacts themselves (plan and apply logs, cost estimates) can embed secret
-// values and are represented by name alone.
-func workspaceRuns(p *page, ws *view.Workspace) error {
+// values and are represented by name alone, with a snippet naming the CLI
+// commands that retrieve them.
+func workspaceRuns(p *page, ws *view.Workspace, orgName string) error {
 	runs, err := ws.Runs()
 	if err != nil {
 		return fmt.Errorf("list runs of %q: %w", ws.Name, err)
@@ -111,12 +118,18 @@ func workspaceRuns(p *page, ws *view.Workspace) error {
 		return nil
 	}
 
+	var example string
+
 	rows := make([][]string, 0, len(runs))
 
 	for _, run := range runs {
 		artifacts, artErr := ws.RunArtifacts(run.ID)
 		if artErr != nil {
 			return fmt.Errorf("list artifacts of run %q: %w", run.ID, artErr)
+		}
+
+		if example == "" && len(artifacts) > 0 {
+			example = path.Join(orgName, artifacts[0])
 		}
 
 		names := make([]string, 0, len(artifacts))
@@ -139,7 +152,8 @@ func workspaceRuns(p *page, ws *view.Workspace) error {
 
 	p.h2("Runs")
 	p.para(theme.CountNoun(len(runs), "archived run", "archived runs") +
-		". Artifact contents are withheld; the backup holds them in full.")
+		". Artifact contents are withheld; the backup holds them in full:")
+	retrievalSnippet(p, example, path.Join(orgName, ws.Dir(), "runs"))
 	p.table(
 		[]string{
 			labelID,
@@ -160,8 +174,9 @@ func workspaceRuns(p *page, ws *view.Workspace) error {
 
 // workspaceStates renders the workspace's state-version history, newest
 // first: metadata and which blob forms the backup holds, never the state
-// itself, whose raw form embeds sensitive values in cleartext.
-func workspaceStates(p *page, ws *view.Workspace) error {
+// itself, whose raw form embeds sensitive values in cleartext. A snippet
+// names the CLI commands that retrieve the blobs.
+func workspaceStates(p *page, ws *view.Workspace, orgName string) error {
 	versions, err := ws.StateVersions()
 	if err != nil {
 		return fmt.Errorf("list state versions of %q: %w", ws.Name, err)
@@ -171,9 +186,20 @@ func workspaceStates(p *page, ws *view.Workspace) error {
 		return nil
 	}
 
+	var example string
+
 	rows := make([][]string, 0, len(versions))
 
 	for _, sv := range versions {
+		if example == "" {
+			switch {
+			case sv.HasRaw:
+				example = path.Join(orgName, ws.RawStatePath(&sv))
+			case sv.HasJSON:
+				example = path.Join(orgName, ws.JSONStatePath(&sv))
+			}
+		}
+
 		rows = append(rows, []string{
 			escapeCell(sv.ID),
 			fmtTime(sv.CreatedAt),
@@ -186,10 +212,29 @@ func workspaceStates(p *page, ws *view.Workspace) error {
 
 	p.h2("State versions")
 	p.para(theme.CountNoun(len(versions), "archived state version", "archived state versions") +
-		". State contents are withheld; the backup holds them in full.")
+		". State contents are withheld; the backup holds them in full:")
+	retrievalSnippet(p, example, path.Join(orgName, ws.Dir(), "state-versions"))
 	p.table([]string{labelID, labelCreated, "Serial", "Status", "Size", "Archived blobs"}, rows)
 
 	return nil
+}
+
+// retrievalSnippet writes the shell commands that retrieve a section's
+// withheld content: a show of one example object when the section holds any,
+// and an unseal of the whole section directory. Archive paths are
+// single-quoted so a name with spaces stays one shell argument; the
+// archive-dir and output-dir placeholders stay for the reader, who alone
+// knows where the archive and the recovered files should live.
+func retrievalSnippet(p *page, example, dir string) {
+	lines := make([]string, 0, 2)
+
+	if example != "" {
+		lines = append(lines, fmt.Sprintf("%s show <archive-dir> '%s'", cliName, example))
+	}
+
+	lines = append(lines, fmt.Sprintf("%s unseal <archive-dir> '%s' --target <output-dir>", cliName, dir))
+
+	p.code("sh", lines...)
 }
 
 // stateForms names which state blob forms the backup holds for a version.

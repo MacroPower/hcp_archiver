@@ -269,6 +269,44 @@ func TestExportWithholdsSensitiveValues(t *testing.T) {
 	assert.Contains(t, files["my-org/policy-sets/index.md"], "(sensitive)")
 }
 
+// TestExportPointsAtCLI asserts the withheld-content sections carry runnable
+// retrieval snippets, independent of golden churn: a show of one concrete
+// archived object and an unseal of the section directory.
+func TestExportPointsAtCLI(t *testing.T) {
+	t.Parallel()
+
+	target, _ := runExport(t)
+	files := readTree(t, target)
+
+	ws := files["my-org/projects/default/workspaces/app/index.md"]
+	wsDir := "my-org/projects/default/workspaces/app"
+
+	tests := map[string]struct {
+		want string
+	}{
+		"run artifact show": {
+			want: "hcp_archiver show <archive-dir> '" + wsDir + "/runs/run-new/plan.log'",
+		},
+		"runs unseal": {
+			want: "hcp_archiver unseal <archive-dir> '" + wsDir + "/runs' --target <output-dir>",
+		},
+		"state version show": {
+			want: "hcp_archiver show <archive-dir> '" + wsDir + "/state-versions/20240102T030405Z-sv-2.tfstate.json'",
+		},
+		"state versions unseal": {
+			want: "hcp_archiver unseal <archive-dir> '" + wsDir + "/state-versions' --target <output-dir>",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Contains(t, ws, tc.want)
+		})
+	}
+}
+
 func TestExportCopiesReadmeVerbatim(t *testing.T) {
 	t.Parallel()
 

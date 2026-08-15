@@ -465,8 +465,7 @@ func (e *Exporter) renderProject(ctx context.Context, org *view.Org, listing pro
 			return fmt.Errorf("export stopped: %w", ctxErr)
 		}
 
-		err = e.renderWorkspace(org.Workspace(listing.name, name),
-			path.Join(org.Name, "projects", listing.name, "workspaces", name))
+		err = e.renderWorkspace(org.Workspace(listing.name, name), org.Name)
 		if err != nil {
 			return err
 		}
