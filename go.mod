@@ -7,7 +7,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.7
 	charm.land/fang/v2 v2.0.1
 	charm.land/lipgloss/v2 v2.0.4
-	github.com/charmbracelet/x/ansi v0.11.7
+	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/charmbracelet/x/exp/golden v0.0.0-20260602025833-85a30b5e440a
 	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/go-tfe v1.109.0
