@@ -19,7 +19,15 @@ import (
 )
 
 // schemaVersion is the on-disk manifest format version.
-const schemaVersion = 1
+//
+// Versions:
+//   - 1: the initial sharded snapshot + org-level log layout.
+//   - 2: entries may carry a server-side updated-at (see [Entry.UpdatedAt]).
+//
+// A snapshot naming a newer version than this build supports refuses to load;
+// an older snapshot loads, runs the registered migrations over its records
+// (see [WithMigrations]), and is folded back at the current version.
+const schemaVersion = 2
 
 // defaultCompactThreshold is the org-level log size past which a flush folds
 // the log back into the stale shards' snapshots. It bounds a single run's log
@@ -92,6 +100,7 @@ type Ledger struct {
 	runStartedAt     time.Time
 	root             string
 	target           string
+	migrations       []Migration
 	bytes            int64
 	retried          int64
 	compactThreshold int64
@@ -109,9 +118,35 @@ type Ledger struct {
 // The available options are:
 //   - [WithClock]
 //   - [WithLogger]
+//   - [WithMigrations]
 //   - [WithRecordOnlyPrefixes]
 //   - [WithRetryAbsent]
 type Option func(*Ledger)
+
+// Migration repairs one ledger entry recorded by an older schema version.
+//
+// [Load] runs every registered migration (see [WithMigrations]) over every
+// entry of every shard whose loaded snapshot predates the current
+// schemaVersion, after the log replays and before the ledger is handed back.
+// The fromVersion argument is the version of the shard's loaded snapshot; 0
+// means unknown (the shard had no snapshot, only log records, which carry no
+// version and may have been written by any release), so a migration must
+// condition on the entry's own state alone, never on fromVersion pinpointing
+// a release. A migration returns the rewritten entry and whether it changed
+// anything; it runs again on any open that still finds an old snapshot, so it
+// must be idempotent.
+type Migration func(relPath string, fromVersion int, e Entry) (Entry, bool)
+
+// WithMigrations registers migrations [Load] runs over the records of shards
+// whose snapshots predate the current schema version. Collector packages
+// export their migrations for the load call site to pass here, mirroring how
+// [WithRecordOnlyPrefixes] carries package knowledge into the load. It returns
+// an [Option].
+func WithMigrations(migs ...Migration) Option {
+	return func(l *Ledger) {
+		l.migrations = append(l.migrations, migs...)
+	}
+}
 
 // WithClock injects the clock used for every recorded timestamp, defaulting to
 // [time.Now]. A nil function leaves the default in place. It returns an
@@ -281,6 +316,16 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 		return nil, err
 	}
 
+	// Migrations run after the replay, so they see each entry's final loaded
+	// state, and before the tally seeding below, so counts seed from migrated
+	// statuses.
+	migrated, foldOld, err := l.runMigrations()
+	if err != nil {
+		_ = l.Close() //nolint:errcheck // The load error takes precedence.
+
+		return nil, err
+	}
+
 	// Validate and seed the cumulative tally from every shard's entries, so a
 	// resumed run's counts start from the prior run's settled work rather than
 	// from zero. An unrecognized status is rejected rather than seeded under a
@@ -325,7 +370,89 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 		}
 	}
 
+	// Migrated records and old-version snapshots persist before the ledger is
+	// handed back, so the next load finds current-version snapshots and the
+	// migrations do not re-fire. The flush logs the rewritten entries first;
+	// after a crash between the snapshot write and the log removal, the replay
+	// then lands the migrated record last-writer-wins rather than regressing a
+	// fresh snapshot with a stale pre-migration log record. Shards with no
+	// snapshot at all are left to fold naturally (see runMigrations).
+	if migrated {
+		err = l.Flush()
+		if err != nil {
+			_ = l.Close() //nolint:errcheck // The load error takes precedence.
+
+			return nil, fmt.Errorf("persist migrated records: %w", err)
+		}
+	}
+
+	if foldOld {
+		err = l.fold(true)
+		if err != nil {
+			_ = l.Close() //nolint:errcheck // The load error takes precedence.
+
+			return nil, fmt.Errorf("persist migrated snapshots: %w", err)
+		}
+	}
+
 	return l, nil
+}
+
+// runMigrations runs the registered migrations (see [WithMigrations]) over
+// every entry of every physical shard whose loaded snapshot predates the
+// current schema version. The first result reports whether any entry was
+// rewritten; the second whether any shard holds an old-version snapshot that
+// must fold back at the current version. Shards with no snapshot at all only
+// re-run their idempotent migrations on later opens, so a fresh archive's
+// first load writes nothing.
+func (l *Ledger) runMigrations() (bool, bool, error) {
+	var migrated, foldOld bool
+
+	for _, sh := range l.physShards {
+		if sh.loadedVersion >= schemaVersion {
+			continue
+		}
+
+		if sh.loadedVersion >= 1 {
+			sh.stale = true
+			foldOld = true
+		}
+
+		if len(l.migrations) == 0 {
+			continue
+		}
+
+		for relPath, e := range sh.entries {
+			if e == nil {
+				continue // The tally seeding refuses the load with the cause.
+			}
+
+			out, changed := *e, false
+
+			for _, mig := range l.migrations {
+				if next, ok := mig(relPath, sh.loadedVersion, cloneEntry(out)); ok {
+					out, changed = next, true
+				}
+			}
+
+			if !changed {
+				continue
+			}
+
+			if !out.Status.Valid() {
+				return false, false, fmt.Errorf("%w: migration rewrote entry %q to unknown status %q",
+					ErrCorruptManifest, relPath, out.Status)
+			}
+
+			stored := cloneEntry(out)
+			stored.counted = e.counted
+			sh.entries[relPath] = &stored
+			sh.dirtyEntries[relPath] = struct{}{}
+			migrated = true
+		}
+	}
+
+	return migrated, foldOld, nil
 }
 
 // Close releases the ledger's cross-process lock, so another process (or a

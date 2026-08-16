@@ -1,6 +1,7 @@
 package manifest_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -792,6 +793,207 @@ func TestLoad_LegacyShardLogIsRefused(t *testing.T) {
 
 	ledger, err := manifest.Load(root)
 	require.NoError(t, err)
+	require.NoError(t, ledger.Close())
+}
+
+// writeV1Snapshot plants an org-root shard snapshot at schema version 1
+// carrying the given entries JSON, the state a pre-v2 release left behind.
+func writeV1Snapshot(t *testing.T, root, entriesJSON string) string {
+	t.Helper()
+
+	snapshot, _ := rootShardFiles(root)
+	require.NoError(t, os.MkdirAll(filepath.Dir(snapshot), 0o755))
+
+	doc := `{"version":1,"entries":{` + entriesJSON + `}}`
+	require.NoError(t, os.WriteFile(snapshot, []byte(doc), 0o600))
+
+	return snapshot
+}
+
+// snapshotVersion reads the schema version a shard snapshot on disk names.
+func snapshotVersion(t *testing.T, snapshot string) int {
+	t.Helper()
+
+	data, err := os.ReadFile(snapshot)
+	require.NoError(t, err)
+
+	var doc struct {
+		Version int `json:"version"`
+	}
+
+	require.NoError(t, json.Unmarshal(data, &doc))
+
+	return doc.Version
+}
+
+func TestLoad_RefusesNewerSchemaVersion(t *testing.T) {
+	t.Parallel()
+
+	path := t.TempDir()
+	snapshot, _ := rootShardFiles(path)
+	require.NoError(t, os.MkdirAll(filepath.Dir(snapshot), 0o755))
+	require.NoError(t, os.WriteFile(snapshot, []byte(`{"version":99}`), 0o600))
+
+	_, err := manifest.Load(path)
+	require.ErrorIs(t, err, manifest.ErrCorruptManifest)
+	require.ErrorContains(t, err, "newer than supported")
+}
+
+func TestLoad_MigratesOldSnapshotRecords(t *testing.T) {
+	t.Parallel()
+
+	path := t.TempDir()
+	snapshot := writeV1Snapshot(t, path,
+		`"audit-trails/p1.json":{"firstSeen":"2026-07-08T12:00:00Z","status":"absent","attempts":1},`+
+			`"org.json":{"firstSeen":"2026-07-08T12:00:00Z","status":"done","attempts":1}`)
+
+	var calls []string
+
+	repair := func(relPath string, fromVersion int, e manifest.Entry) (manifest.Entry, bool) {
+		calls = append(calls, relPath)
+
+		assert.Equal(t, 1, fromVersion, "the shard's loaded snapshot names v1")
+
+		if e.Status != manifest.StatusAbsent {
+			return e, false
+		}
+
+		e.Status = manifest.StatusErrored
+		e.LastError = "settled absent by a prior release"
+
+		return e, true
+	}
+
+	ledger, err := manifest.Load(path, manifest.WithMigrations(repair))
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, []string{"audit-trails/p1.json", "org.json"}, calls,
+		"every entry of the old shard passes through the migration")
+
+	entry, ok := ledger.Entry("audit-trails/p1.json")
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, entry.Status, "the rewrite lands in the loaded state")
+	assert.True(t, ledger.ShouldFetch("audit-trails/p1.json"), "the repaired slot is fetchable again")
+
+	assert.Equal(t, 2, snapshotVersion(t, snapshot),
+		"the old snapshot folds back at the current version before the ledger is handed back")
+
+	require.NoError(t, ledger.Close())
+
+	// The persisted snapshot is current, so a second open runs no migrations.
+	fired := false
+	counting := func(_ string, _ int, e manifest.Entry) (manifest.Entry, bool) {
+		fired = true
+
+		return e, false
+	}
+
+	reloaded, err := manifest.Load(path, manifest.WithMigrations(counting))
+	require.NoError(t, err)
+
+	assert.False(t, fired, "a current-version snapshot re-fires nothing")
+
+	entry, ok = reloaded.Entry("audit-trails/p1.json")
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, entry.Status, "the rewrite survived the fold")
+
+	require.NoError(t, reloaded.Close())
+}
+
+func TestLoad_FoldsUnchangedOldSnapshotAtCurrentVersion(t *testing.T) {
+	t.Parallel()
+
+	// A v1 shard the migrations leave untouched must still advance to v2 on
+	// disk: snapshots rewrite only when a shard folds, so without the forced
+	// fold the migrations would re-fire on every later open.
+	path := t.TempDir()
+	snapshot := writeV1Snapshot(t, path,
+		`"org.json":{"firstSeen":"2026-07-08T12:00:00Z","status":"done","attempts":1}`)
+
+	noop := func(_ string, _ int, e manifest.Entry) (manifest.Entry, bool) { return e, false }
+
+	ledger, err := manifest.Load(path, manifest.WithMigrations(noop))
+	require.NoError(t, err)
+	require.NoError(t, ledger.Close())
+
+	assert.Equal(t, 2, snapshotVersion(t, snapshot))
+
+	fired := false
+	counting := func(_ string, _ int, e manifest.Entry) (manifest.Entry, bool) {
+		fired = true
+
+		return e, false
+	}
+
+	reloaded, err := manifest.Load(path, manifest.WithMigrations(counting))
+	require.NoError(t, err)
+
+	assert.False(t, fired)
+
+	require.NoError(t, reloaded.Close())
+}
+
+func TestLoad_FreshArchiveRunsNoMigrations(t *testing.T) {
+	t.Parallel()
+
+	path := t.TempDir()
+
+	fired := false
+	counting := func(_ string, _ int, e manifest.Entry) (manifest.Entry, bool) {
+		fired = true
+
+		return e, false
+	}
+
+	ledger, err := manifest.Load(path, manifest.WithMigrations(counting))
+	require.NoError(t, err)
+
+	assert.False(t, fired, "an empty archive holds nothing to migrate")
+
+	snapshot, _ := rootShardFiles(path)
+	_, statErr := os.Stat(snapshot)
+	assert.True(t, os.IsNotExist(statErr),
+		"a fresh archive's first load writes no snapshot just to stamp a version")
+
+	require.NoError(t, ledger.Close())
+}
+
+func TestLoad_LogOnlyStateMigratesWithUnknownVersion(t *testing.T) {
+	t.Parallel()
+
+	// A shard holding only log records carries no schema version: the state may
+	// have been written by any release (a run killed before its first fold), so
+	// the migration sees fromVersion 0 and must condition on the entry alone.
+	path := t.TempDir()
+	line := `{"kind":"entry","path":"audit-trails/p1.json",` +
+		`"entry":{"firstSeen":"2026-07-08T12:00:00Z","status":"absent","attempts":1}}`
+	_, logFile := rootShardFiles(path)
+	require.NoError(t, os.MkdirAll(filepath.Dir(logFile), 0o755))
+	require.NoError(t, os.WriteFile(logFile, []byte(line+"\n"), 0o600))
+
+	var fromVersions []int
+
+	repair := func(_ string, fromVersion int, e manifest.Entry) (manifest.Entry, bool) {
+		fromVersions = append(fromVersions, fromVersion)
+
+		if e.Status != manifest.StatusAbsent {
+			return e, false
+		}
+
+		e.Status = manifest.StatusErrored
+
+		return e, true
+	}
+
+	ledger, err := manifest.Load(path, manifest.WithMigrations(repair))
+	require.NoError(t, err)
+
+	assert.Equal(t, []int{0}, fromVersions)
+
+	entry, ok := ledger.Entry("audit-trails/p1.json")
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusErrored, entry.Status)
+
 	require.NoError(t, ledger.Close())
 }
 

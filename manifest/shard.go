@@ -75,6 +75,7 @@ type shard struct {
 	entries         map[string]*Entry
 	dir             string
 	runCount        int
+	loadedVersion   int
 	runDirty        bool
 	stale           bool
 }
@@ -132,6 +133,10 @@ func (s *shard) loadSnapshot() error {
 				ErrCorruptManifest, doc.Version, schemaVersion)
 		}
 	}
+
+	// A missing snapshot leaves the version 0: unknown, since log records carry
+	// no version of their own (see [Migration]).
+	s.loadedVersion = doc.Version
 
 	s.applyDocument(&doc)
 
