@@ -378,6 +378,30 @@ func TestRunArtifacts(t *testing.T) {
 	}
 }
 
+func TestRunArtifactsHidesMachinery(t *testing.T) {
+	t.Parallel()
+
+	// A crash mid-write leaves an atomic writer's staging temp beside a run's
+	// artifacts, and the collector stamps identity sidecars into archive
+	// directories. The run screen must hide both the way List does, not offer
+	// the half-written staging file as an openable artifact.
+	root := buildArchive(t)
+	org := filepath.Join(root, "my-org")
+	writeFile(t, org, wsDir+"/runs/run-new/.atomicfile-1234.tmp", "half-written")
+	writeFile(t, org, wsDir+"/runs/run-new/.identity.json", `{"id":"run-new"}`)
+
+	orgs, err := view.OpenArchive(root)
+	require.NoError(t, err)
+	require.Len(t, orgs, 1)
+
+	artifacts, err := orgs[0].Workspace("default", "app").RunArtifacts("run-new")
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		wsDir + "/runs/run-new/plan.log",
+		wsDir + "/runs/run-new/config-version.json",
+	}, artifacts)
+}
+
 func TestStateVersions(t *testing.T) {
 	t.Parallel()
 

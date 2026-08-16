@@ -695,7 +695,10 @@ func (o *Org) subdirs(relPath string) ([]string, error) {
 
 // looseNames returns the regular-file names directly under an archive-relative
 // directory, tolerating one that does not exist, merged with the file names the
-// organization's mirror holds there. Callers dedupe and sort.
+// organization's mirror holds there. The archive's own machinery is hidden the
+// way [*Org.List] hides it: a staging leftover or identity sidecar beside a
+// run's artifacts is bookkeeping, not archived content. Callers dedupe and
+// sort.
 func (o *Org) looseNames(relPath string) ([]string, error) {
 	entries, err := o.mergedChildren(relPath)
 	if err != nil {
@@ -705,9 +708,11 @@ func (o *Org) looseNames(relPath string) ([]string, error) {
 	var names []string
 
 	for _, e := range entries {
-		if !e.Dir {
-			names = append(names, e.Name)
+		if e.Dir || isMachinery(path.Join(relPath, e.Name)) {
+			continue
 		}
+
+		names = append(names, e.Name)
 	}
 
 	return names, nil

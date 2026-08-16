@@ -151,6 +151,44 @@ func linkedOrgDir(t *testing.T) (string, string) {
 	return root, target
 }
 
+func TestList_UncleanMirrorKeysAreDropped(t *testing.T) {
+	t.Parallel()
+
+	// A bucket key is arbitrary bytes. One carrying dot segments would surface
+	// a listed entry every read and extract then refuses (counting it errored
+	// on every recovery), and index a ".." child whose joined path escapes the
+	// directory it lists under. Such keys are dropped where the inventory is
+	// ingested, so no consumer sees them.
+	org := openMerged(t,
+		[]string{mergeDir + "/app/workspace.json"},
+		[]string{
+			mergeDir + "/../escape.json",
+			mergeDir + "/./self.json",
+			mergeDir + "/app/ok.json",
+		},
+	)
+
+	entries, err := org.List("")
+	require.NoError(t, err)
+
+	paths := make([]string, 0, len(entries))
+	for _, e := range entries {
+		paths = append(paths, e.Path)
+	}
+
+	assert.Contains(t, paths, mergeDir+"/app/ok.json", "the clean mirror key still lists")
+	assert.NotContains(t, paths, mergeDir+"/../escape.json")
+	assert.NotContains(t, paths, mergeDir+"/./self.json")
+
+	tree, err := org.Entries(mergeDir)
+	require.NoError(t, err)
+
+	for _, te := range tree {
+		assert.NotEqual(t, "..", te.Name, "no phantom parent-directory child")
+		assert.NotEqual(t, ".", te.Name, "no phantom self child")
+	}
+}
+
 func TestOpenArchive_OrgRootStatFaultRefuses(t *testing.T) {
 	t.Parallel()
 

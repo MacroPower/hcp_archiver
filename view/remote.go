@@ -22,6 +22,7 @@ import (
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 	"go.jacobcolvin.com/hcp_archiver/remote"
+	"go.jacobcolvin.com/hcp_archiver/seal"
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
@@ -80,6 +81,12 @@ type orgRemote struct {
 	listing map[string]remote.ObjectInfo
 	byDir   map[string]map[string]remoteChild
 	listErr error
+
+	// The in-flight listing's readiness signal, closed when the build settles
+	// (see [orgRemote.objects]); nil when no listing is running. It keeps the
+	// enumeration itself outside listMu, so the cheap readers never block for
+	// the listing's duration.
+	listBuild chan struct{}
 
 	orgName string
 	cfg     remote.Config
@@ -280,36 +287,68 @@ func (r *orgRemote) downloadVerified(
 // [remoteReadTimeout] over it: a large mirror's listing is many pages, and the
 // client's own stall watchdog already cuts a wedged page without capping a
 // working enumeration.
+//
+// The client build and the enumeration run outside listMu, behind an in-flight
+// latch the same way a bundle build does: a second objects call waits for the
+// first's result, but the cheap readers ([orgRemote.childrenAt],
+// [orgRemote.listingErr], and with them the whole event loop) only ever wait on
+// field access, never on the listing itself.
 func (r *orgRemote) objects() (map[string]remote.ObjectInfo, error) {
 	r.listMu.Lock()
-	defer r.listMu.Unlock()
+
+	for !r.listed && r.listBuild != nil {
+		ready := r.listBuild
+		r.listMu.Unlock()
+
+		<-ready
+
+		r.listMu.Lock()
+	}
 
 	if r.listed {
+		defer r.listMu.Unlock()
+
 		return r.listing, r.listErr
 	}
 
-	r.listed = true
+	ready := make(chan struct{})
+	r.listBuild = ready
+	r.listMu.Unlock()
 
+	listing, byDir, err := r.buildListing()
+
+	r.listMu.Lock()
+
+	r.listing = listing
+	r.byDir = byDir
+	r.listErr = err
+	r.listed = true
+	r.listBuild = nil
+	r.listMu.Unlock()
+
+	close(ready)
+
+	return listing, err
+}
+
+// buildListing builds the org's mirror inventory and its per-directory child
+// index, the body [orgRemote.objects] runs outside listMu.
+func (r *orgRemote) buildListing() (map[string]remote.ObjectInfo, map[string]map[string]remoteChild, error) {
 	client, err := r.clientBuild()
 	if err != nil {
-		r.listErr = err
-
-		return nil, r.listErr
+		return nil, nil, err
 	}
 
 	prefix := r.cfg.Key(r.orgName, "") + "/"
 
 	inventory, err := client.List(r.ctx, prefix)
 	if err != nil {
-		r.listErr = fmt.Errorf("list mirror inventory: %w", err)
-
-		return nil, r.listErr
+		return nil, nil, fmt.Errorf("list mirror inventory: %w", err)
 	}
 
-	r.listing = relativeListing(inventory, prefix)
-	r.byDir = indexListing(r.listing)
+	listing := relativeListing(inventory, prefix)
 
-	return r.listing, nil
+	return listing, indexListing(listing), nil
 }
 
 // relativeListing strips a key prefix from every listed key, dropping keys
@@ -320,6 +359,16 @@ func relativeListing(inventory map[string]remote.ObjectInfo, prefix string) map[
 	for key, info := range inventory {
 		rel := strings.TrimPrefix(key, prefix)
 		if (rel == key && prefix != "") || rel == "" {
+			continue
+		}
+
+		// A bucket key is arbitrary bytes: one carrying an empty, ".", or ".."
+		// segment (or a backslash) names no honest archive path, and admitting
+		// it would surface listing entries every read and extract then refuses,
+		// and per-directory children whose joined path escapes the directory.
+		// Dropping it here keeps every downstream consumer of the inventory
+		// clean by construction.
+		if seal.ValidName(rel) != nil {
 			continue
 		}
 
