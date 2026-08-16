@@ -98,13 +98,10 @@ func registerRemoteFlags(cmd *cobra.Command) *remoteFlags {
 // section (the --config flag or the environment), and nil means no remote was
 // named anywhere, leaving the archive to its local tree and markers.
 //
-// With --remote set the configuration file is never loaded, so a read-only
-// command against an explicit mirror keeps working beside a broken file.
+// The configuration file loads even with --remote set: the file also carries
+// directory defaults, so a named file that will not parse is refused rather
+// than skipped.
 func (rf *remoteFlags) resolve() (*remote.Config, error) {
-	if rf.url != "" {
-		return &remote.Config{URL: rf.url, Prefix: rf.prefix}, nil
-	}
-
 	file, _, err := rf.loadFile()
 	if err != nil {
 		return nil, err
@@ -205,26 +202,33 @@ whichever physical form (loose, roll-up, bundle) holds it.
 ` + remoteLong + `
 
 A single argument names the archive directory; pass "." explicitly to address
-a path in the current directory.`,
+a path in the current directory. With no directory argument the configuration
+file's archiveDir, when set, is read instead of the current directory.`,
 		Args: cobra.MaximumNArgs(2),
 	}
 
 	rf := registerRemoteFlags(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, args []string) error {
-		dir, prefix := archiveArgs(args)
-
 		ctx, stop := signalContext(cc.Context())
 		defer stop()
 
-		rcfg, err := rf.resolve()
+		file, cfgPath, err := rf.loadFile()
 		if err != nil {
 			return err
 		}
 
+		rcfg, err := rf.remoteFromFile(file)
+		if err != nil {
+			return err
+		}
+
+		fallback := defaultArchiveDir(file, cfgPath)
+		dir, prefix := archiveArgs(args, fallback)
+
 		arc, err := openArchive(ctx, dir, rcfg)
 		if err != nil {
-			return hintLoneArg(err, "list", args)
+			return hintLoneArg(err, "list", fallback, args)
 		}
 
 		entries, err := arc.List(prefix)
@@ -259,23 +263,29 @@ form (loose, roll-up, bundle) holds it.
 
 ` + remoteLong + `
 
-A single argument is the archive path, read from the archive in the current
-directory.`,
+A single argument is the archive path, read from the directory the
+configuration file's archiveDir names, or from the current directory when
+none is set.`,
 		Args: cobra.RangeArgs(1, 2),
 	}
 
 	rf := registerRemoteFlags(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, args []string) error {
-		dir, archivePath := showArgs(args)
-
 		ctx, stop := signalContext(cc.Context())
 		defer stop()
 
-		rcfg, err := rf.resolve()
+		file, cfgPath, err := rf.loadFile()
 		if err != nil {
 			return err
 		}
+
+		rcfg, err := rf.remoteFromFile(file)
+		if err != nil {
+			return err
+		}
+
+		dir, archivePath := showArgs(args, defaultArchiveDir(file, cfgPath))
 
 		arc, err := openArchive(ctx, dir, rcfg)
 		if err != nil {
@@ -336,30 +346,42 @@ failures; a fetch can still fail against a mirror that is configured.
 ` + remoteLong + `
 
 A single argument names the archive directory; pass "." explicitly to address
-a path in the current directory. With --dry-run the plan, including how much it
-would fetch from the mirror, is summarized from the listing and nothing is
-written into the target; --target is not required. Sizing the plan can itself
-fetch a workspace's absent sealed indexes (roll-ups and sidecars) from the
-mirror, the one egress a dry run may cost.`,
+a path in the current directory. With no directory argument the configuration
+file's archiveDir, when set, is read instead of the current directory, and the
+file's extractDir stands in for an omitted --target. With --dry-run the plan,
+including how much it would fetch from the mirror, is summarized from the
+listing and nothing is written into the target; --target is not required.
+Sizing the plan can itself fetch a workspace's absent sealed indexes (roll-ups
+and sidecars) from the mirror, the one egress a dry run may cost.`,
 		Args: cobra.MaximumNArgs(2),
 	}
 
 	rf := registerRemoteFlags(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, args []string) error {
-		dir, prefix := archiveArgs(args)
-
 		ctx, stop := signalContext(cc.Context())
 		defer stop()
 
-		rcfg, err := rf.resolve()
+		file, cfgPath, err := rf.loadFile()
 		if err != nil {
 			return err
 		}
 
+		rcfg, err := rf.remoteFromFile(file)
+		if err != nil {
+			return err
+		}
+
+		fallback := defaultArchiveDir(file, cfgPath)
+		dir, prefix := archiveArgs(args, fallback)
+
+		if target == "" && file != nil {
+			target = configDir(cfgPath, file.ExtractDir)
+		}
+
 		arc, err := openArchive(ctx, dir, rcfg)
 		if err != nil {
-			return hintLoneArg(err, "extract", args)
+			return hintLoneArg(err, "extract", fallback, args)
 		}
 
 		if dryRun {
@@ -379,7 +401,8 @@ mirror, the one egress a dry run may cost.`,
 	}
 
 	flags := cmd.Flags()
-	flags.StringVarP(&target, flagTarget, "t", "", "directory to write recovered files into")
+	flags.StringVarP(&target, flagTarget, "t", "",
+		"directory to write recovered files into (defaults to the configuration file's extractDir)")
 	flags.BoolVar(&dryRun, flagDryRun, false, "summarize what would be extracted without writing")
 	flags.BoolVarP(&verbose, flagVerbose, "v", false, "stream one line per recovered file to stderr")
 	flags.BoolVar(&jsonOut, flagJSON, false, "emit the summary as JSON")
@@ -681,26 +704,48 @@ func displayForm(e view.Entry) string {
 	return string(e.Form)
 }
 
+// configDir resolves a directory named by the configuration file against the
+// file's own location; an absolute or empty path is returned as-is.
+func configDir(cfgPath, dir string) string {
+	if dir == "" || filepath.IsAbs(dir) {
+		return dir
+	}
+
+	return filepath.Join(filepath.Dir(cfgPath), dir)
+}
+
+// defaultArchiveDir is the directory a read command falls back to when no
+// positional names one: the configuration file's archiveDir, else the current
+// directory. A nil file (no configuration named anywhere) yields ".".
+func defaultArchiveDir(file *config.File, cfgPath string) string {
+	if file == nil || file.ArchiveDir == "" {
+		return "."
+	}
+
+	return configDir(cfgPath, file.ArchiveDir)
+}
+
 // archiveArgs binds the list/extract positionals to (directory, archive path):
 // required arguments first, so a lone argument names the archive directory
-// and the optional archive path stays empty (the whole archive).
-func archiveArgs(args []string) (string, string) {
+// and the optional archive path stays empty (the whole archive). With no
+// arguments the directory falls back to defaultDir.
+func archiveArgs(args []string, defaultDir string) (string, string) {
 	switch len(args) {
 	case 1:
 		return args[0], ""
 	case 2: //nolint:mnd // Two positionals: dir then path, per the Use line.
 		return args[0], args[1]
 	default:
-		return ".", ""
+		return defaultDir, ""
 	}
 }
 
 // showArgs binds the show positionals to (directory, archive path): the
 // archive path is required, so a lone argument is the path and the directory
-// defaults to the current one.
-func showArgs(args []string) (string, string) {
+// falls back to defaultDir.
+func showArgs(args []string, defaultDir string) (string, string) {
 	if len(args) == 1 {
-		return ".", args[0]
+		return defaultDir, args[0]
 	}
 
 	return args[0], args[1]
@@ -726,19 +771,19 @@ func openArchive(ctx context.Context, dir string, rcfg *remote.Config) (*view.Ar
 
 // hintLoneArg augments a not-an-archive failure when a lone positional was
 // most likely meant as an archive path: the argument named no archive but the
-// current directory holds one.
-func hintLoneArg(err error, cmdName string, args []string) error {
+// fallback directory holds one.
+func hintLoneArg(err error, cmdName, defaultDir string, args []string) error {
 	if !errors.Is(err, view.ErrNotArchive) || len(args) != 1 {
 		return err
 	}
 
-	_, cwdErr := view.OpenArchive(".")
-	if cwdErr != nil {
+	_, dirErr := view.OpenArchive(defaultDir)
+	if dirErr != nil {
 		return err
 	}
 
-	return fmt.Errorf("%w\na lone argument names the archive directory; to address a path here, run: %s %s . %s",
-		err, appName, cmdName, args[0])
+	return fmt.Errorf("%w\na lone argument names the archive directory; to address a path in %s, run: %s %s %s %s",
+		err, defaultDir, appName, cmdName, defaultDir, args[0])
 }
 
 // describeNoOrg augments an unknown-organization failure with the archive's

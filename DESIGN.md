@@ -1137,40 +1137,44 @@ projects/<project>/workspaces/<ws>/
 ## Config surface
 
 Settings split by how much they vary. The token is a secret (environment only),
-the output directory and per-run knobs are flags, and everything that describes
-what and how to archive is a YAML file, validated against a JSON schema
-generated from the Go type and embedded in the binary.
+the per-run knobs are flags, and everything that describes what and how to
+archive is a YAML file, validated against a JSON schema generated from the Go
+type and embedded in the binary. The output directory sits in both camps: the
+file's `archiveDir` supplies the stable default and `--output` overrides it
+per run.
 
 - Environment: `HCP_TOKEN`, then `TFC_TOKEN`, then `TFE_TOKEN` (required, first
   non-empty wins); `HCP_ARCHIVER_CONFIG` for the config file path.
-- Flags: `--config` / `-c` (config path), `--output` / `-o` (archive root;
-  resume/re-run is implied when it already holds an archive),
-  `--progress=auto|human|json|quiet` (default `auto`: human on a TTY, quiet off
-  one) with a progress-interval knob, `--retry-absent` to re-probe
-  `absent` objects on a re-run, and the `--log-*` knobs.
+- Flags: `--config` / `-c` (config path), `--output` / `-o` (archive root,
+  defaulting to the file's `archiveDir`; resume/re-run is implied when it
+  already holds an archive), `--progress=auto|human|json|quiet` (default
+  `auto`: human on a TTY, quiet off one) with a progress-interval knob,
+  `--retry-absent` to re-probe `absent` objects on a re-run, and the
+  `--log-*` knobs.
 - Config file (all keys optional, defaults applied per field): `address`
-  (default `https://app.terraform.io`), `organizations` (all visible orgs if
-  empty), `projects` and `workspaces` (filters within each org; everything if
-  empty, and with both set a workspace must satisfy both), a `runHistory`
-  block bounding each workspace's archived run history
+  (default `https://app.terraform.io`), `archiveDir` and `extractDir`
+  (directory defaults for `--output` / the read commands' positional and for
+  extract/export `--target`; an explicit flag or positional wins, relative
+  paths resolve against the file's directory), `organizations` (all visible
+  orgs if empty), `projects` and `workspaces` (filters within each org;
+  everything if empty, and with both set a workspace must satisfy both), a
+  `runHistory` block bounding each workspace's archived run history
   (`count` / `age`; whichever admits more history wins; unlimited by
   default), `rateLimit` (the ceiling of the client's adaptive rate governor,
   in requests per second; default 30, HCP's documented general limit — the
   governor adapts downward from server feedback on its own, so this is set
-  only for an org whose granted limit sits well below the default and the
-  run should not probe past it), a `scope`
-  block of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
-  `registryDetail`, `auditTrail`), each off by default, and a `remote`
-  block enabling the full remote mirror described in Remote offload and
-  full-archive sync: the bucket converges on a complete copy of the archive
-  — sealed cold bundles and settled config-version tarballs evicted off
-  disk, everything else (the search layer, roll-ups, sidecars, ledger
-  snapshots) synced incrementally with stale keys pruned — with no separate
-  per-motion knob (`url` required, its scheme selecting the backend —
-  `s3://`, `azblob://`, `file://`; optional `prefix`, `partSize`,
-  `concurrency`).
-  Credentials are never in the file; each backend's provider default chain
-  supplies them.
+  only for an org whose granted limit sits well below the default and the run
+  should not probe past it), a `scope` block of toggles for the heavy or
+  optional surfaces (`stacks`, `hyok`, `registryDetail`, `auditTrail`), each
+  off by default, and a `remote` block enabling the full remote mirror
+  described in Remote offload and full-archive sync: the bucket converges on
+  a complete copy of the archive -- sealed cold bundles and settled
+  config-version tarballs evicted off disk, everything else (the search layer,
+  roll-ups, sidecars, ledger snapshots) synced incrementally with stale keys
+  pruned -- with no separate per-motion knob (`url` required, its scheme
+  selecting the backend: `s3://`, `azblob://`, `file://`; optional `prefix`,
+  `partSize`, `concurrency`). Credentials are never in the file; each
+  backend's provider default chain supplies them.
 
 ## Packaging
 

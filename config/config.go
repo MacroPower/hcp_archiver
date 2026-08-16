@@ -36,7 +36,9 @@ var (
 	// environment.
 	ErrMissingToken = errors.New("api token is required (set HCP_TOKEN, TFC_TOKEN, or TFE_TOKEN)")
 	// ErrMissingOutputDir indicates that no output directory was supplied.
-	ErrMissingOutputDir = errors.New("output directory is required")
+	ErrMissingOutputDir = errors.New(
+		"output directory is required (set --output or archiveDir in the configuration file)",
+	)
 	// ErrInvalidOrganization indicates an organization name that is not a single
 	// path segment, and so cannot root an organization's archive.
 	ErrInvalidOrganization = errors.New("organization name must be a single path segment")

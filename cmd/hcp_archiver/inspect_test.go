@@ -203,6 +203,45 @@ func TestListCmd_LoneArgHint(t *testing.T) { //nolint:paralleltest // changes th
 	require.ErrorContains(t, err, "list . mini-org/projects")
 }
 
+func TestListCmd_ArchiveDirFromConfig(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+	cfgPath := writeConfigFile(t, "archiveDir: '"+root+"'\n")
+
+	// With no positional, the configuration file's archiveDir is read.
+	out, _, err := runCmd(t, "list", "--config", cfgPath)
+	require.NoError(t, err)
+	assert.Contains(t, out, "mini-org/org.json")
+}
+
+func TestListCmd_PositionalBeatsConfigArchiveDir(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+
+	// The configuration names a directory holding no archive; the explicit
+	// positional wins, so the listing still succeeds.
+	cfgPath := writeConfigFile(t, "archiveDir: '"+t.TempDir()+"'\n")
+
+	out, _, err := runCmd(t, "list", root, "--config", cfgPath)
+	require.NoError(t, err)
+	assert.Contains(t, out, "mini-org/org.json")
+}
+
+func TestShowCmd_ArchiveDirFromConfig(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+	cfgPath := writeConfigFile(t, "archiveDir: '"+root+"'\n")
+
+	// The lone argument stays the archive path; the directory comes from the
+	// configuration file.
+	out, _, err := runCmd(t, "show", "mini-org/org.json", "--config", cfgPath)
+	require.NoError(t, err)
+	assert.JSONEq(t, miniOrgContent, out)
+}
+
 func TestShowCmd(t *testing.T) {
 	t.Parallel()
 
@@ -583,6 +622,68 @@ func TestExtractCmd_RefusesTargetInsideArchive(t *testing.T) {
 
 	_, _, err = runCmd(t, "extract", root, "--target", sibling)
 	require.NoError(t, err)
+}
+
+func TestExtractCmd_TargetFromConfig(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+	target := filepath.Join(t.TempDir(), "restore")
+	cfgPath := writeConfigFile(t, "extractDir: '"+target+"'\n")
+
+	out, _, err := runCmd(t, "extract", root, "--config", cfgPath)
+	require.NoError(t, err)
+	assert.Contains(t, out, "extracted")
+	assert.Contains(t, out, target)
+
+	got, err := os.ReadFile(filepath.Join(target, "mini-org", "org.json"))
+	require.NoError(t, err)
+	assert.JSONEq(t, miniOrgContent, string(got))
+}
+
+func TestExtractCmd_RelativeTargetFromConfig(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+
+	// A relative extractDir resolves against the configuration file's own
+	// directory, not the working directory.
+	cfgPath := writeConfigFile(t, "extractDir: restore\n")
+
+	_, _, err := runCmd(t, "extract", root, "--config", cfgPath)
+	require.NoError(t, err)
+
+	got, err := os.ReadFile(filepath.Join(filepath.Dir(cfgPath), "restore", "mini-org", "org.json"))
+	require.NoError(t, err)
+	assert.JSONEq(t, miniOrgContent, string(got))
+}
+
+func TestExtractCmd_TargetFlagBeatsConfig(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+	flagTarget := filepath.Join(t.TempDir(), "flag-restore")
+	cfgTarget := filepath.Join(t.TempDir(), "cfg-restore")
+	cfgPath := writeConfigFile(t, "extractDir: '"+cfgTarget+"'\n")
+
+	_, _, err := runCmd(t, "extract", root, "--config", cfgPath, "--target", flagTarget)
+	require.NoError(t, err)
+
+	_, err = os.Stat(filepath.Join(flagTarget, "mini-org", "org.json"))
+	require.NoError(t, err)
+
+	_, err = os.Stat(cfgTarget)
+	require.ErrorIs(t, err, os.ErrNotExist, "the configuration's target is untouched")
+}
+
+func TestExtractCmd_RefusesConfigTargetInsideArchive(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+	cfgPath := writeConfigFile(t, "extractDir: '"+filepath.Join(root, "restore")+"'\n")
+
+	_, _, err := runCmd(t, "extract", root, "--config", cfgPath)
+	require.ErrorIs(t, err, main.ErrTargetInArchive)
 }
 
 func TestExtractCmd_PerFileFailuresExitNonzero(t *testing.T) {

@@ -49,6 +49,22 @@ func TestExportCmd_RefusesTargetInsideArchive(t *testing.T) {
 	require.ErrorIs(t, err, main.ErrTargetInArchive)
 }
 
+func TestExportCmd_TargetFromConfig(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+	target := filepath.Join(t.TempDir(), "site")
+	cfgPath := writeConfigFile(t, "extractDir: '"+target+"'\n")
+
+	out, _, err := runCmd(t, "export", root, "--config", cfgPath)
+	require.NoError(t, err)
+	assert.Contains(t, out, "exported")
+	assert.Contains(t, out, target)
+
+	_, err = os.Stat(filepath.Join(target, "mini-org", "index.md"))
+	require.NoError(t, err)
+}
+
 func TestExportCmd_TemplatesFromConfig(t *testing.T) {
 	t.Parallel()
 

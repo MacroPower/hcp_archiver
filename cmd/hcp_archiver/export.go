@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -46,25 +45,20 @@ relative path resolves against the configuration file's directory.
 
 ` + remoteLong + `
 
-A single argument names the archive directory, defaulting to the current
-one.`,
+A single argument names the archive directory, defaulting to the configuration
+file's archiveDir or, with none set, the current one. The file's extractDir
+stands in for an omitted --target.`,
 		Args: cobra.MaximumNArgs(1),
 	}
 
 	rf := registerRemoteFlags(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, args []string) error {
-		dir := "."
-		if len(args) == 1 {
-			dir = args[0]
-		}
-
 		ctx, stop := signalContext(cc.Context())
 		defer stop()
 
-		// The file loads once and unconditionally (unlike resolve, which
-		// --remote short-circuits): its export section applies even when the
-		// mirror comes from the flag.
+		// The file loads once and unconditionally: its export section and
+		// directory defaults apply even when the mirror comes from the flag.
 		file, cfgPath, err := rf.loadFile()
 		if err != nil {
 			return err
@@ -73,6 +67,15 @@ one.`,
 		rcfg, err := rf.remoteFromFile(file)
 		if err != nil {
 			return err
+		}
+
+		dir := defaultArchiveDir(file, cfgPath)
+		if len(args) == 1 {
+			dir = args[0]
+		}
+
+		if target == "" && file != nil {
+			target = configDir(cfgPath, file.ExtractDir)
 		}
 
 		if target == "" {
@@ -96,12 +99,7 @@ one.`,
 		}
 
 		if file != nil && file.Export.Templates != "" {
-			templatesDir := file.Export.Templates
-			if !filepath.IsAbs(templatesDir) {
-				templatesDir = filepath.Join(filepath.Dir(cfgPath), templatesDir)
-			}
-
-			opts = append(opts, export.WithTemplatesDir(templatesDir))
+			opts = append(opts, export.WithTemplatesDir(configDir(cfgPath, file.Export.Templates)))
 		}
 
 		sum, err := export.New(arc, target, opts...).Run(ctx)
@@ -126,7 +124,8 @@ one.`,
 	}
 
 	flags := cmd.Flags()
-	flags.StringVarP(&target, flagTarget, "t", "", "directory to write the markdown tree into")
+	flags.StringVarP(&target, flagTarget, "t", "",
+		"directory to write the markdown tree into (defaults to the configuration file's extractDir)")
 	flags.BoolVar(&force, flagForce, false, "replace a non-empty target directory's contents")
 
 	return cmd

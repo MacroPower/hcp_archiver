@@ -122,6 +122,22 @@ func TestLoadFile(t *testing.T) {
 				}, file.Remote.RemoteConfig())
 			},
 		},
+		"archive and extract directories decode": {
+			yaml: "archiveDir: ./archive\nextractDir: /mnt/restore\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.Equal(t, "./archive", file.ArchiveDir)
+				assert.Equal(t, "/mnt/restore", file.ExtractDir)
+			},
+		},
+		"directories left unset stay empty": {
+			yaml: "organizations:\n  - acme\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.Empty(t, file.ArchiveDir)
+				assert.Empty(t, file.ExtractDir)
+			},
+		},
 		"remote left unset disables offloading": {
 			yaml: "organizations:\n  - acme\n",
 			want: func(t *testing.T, file *config.File) {
@@ -189,6 +205,12 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 		},
 		"run history age must not be negative": {
 			yaml: "runHistory:\n  age: -24h\n",
+		},
+		"archive directory must be a string": {
+			yaml: "archiveDir:\n  - x\n",
+		},
+		"extract directory must be a string": {
+			yaml: "extractDir:\n  - x\n",
 		},
 		"remote without a bucket": {
 			yaml: "remote:\n  prefix: hcp\n",

@@ -40,22 +40,30 @@ var (
 // File is the on-disk YAML configuration describing what to archive and how.
 //
 // It holds the settings that are stable across runs: the API address, the
-// organization, project, and workspace filters, the opt-in scope toggles, and
-// the export section. Per-run and secret
-// settings (the output directory, the progress mode, the retry-absent toggle,
-// and the API token) are supplied by flags and the environment instead, so a
-// configuration file never carries a credential; the one path it may name,
-// the export templates directory, resolves relative to the file itself so the
-// two travel together.
+// organization, project, and workspace filters, the opt-in scope toggles, the
+// archive and extract directories, and the export section. Per-run and secret
+// settings (the progress mode, the retry-absent toggle, and the API token)
+// are supplied by flags and the environment instead, so a configuration file
+// never carries a credential; any path it names resolves relative to the file
+// itself so the two travel together.
 //
 // Every field is optional; an absent field takes the package default. Create
 // instances with [LoadFile], or [DefaultFile] for the defaults alone.
 type File struct {
 	// Address is the HCP Terraform API address. It defaults to [DefaultAddress].
 	Address string `json:"address,omitempty" jsonschema:"title=Address,default=https://app.terraform.io"`
+	// ArchiveDir is the archive root directory: the default for the root
+	// command's --output flag and for the read commands' [archive-dir]
+	// positional. A relative path resolves against this file's directory. An
+	// explicit flag or positional always wins.
+	ArchiveDir string `json:"archiveDir,omitempty" jsonschema:"title=Archive Directory"`
 	// Export configures the export subcommand's rendering; unset keeps the
 	// built-in page templates.
 	Export FileExport `json:"export,omitzero" jsonschema:"title=Export"`
+	// ExtractDir is the default --target directory for the extract and export
+	// commands. A relative path resolves against this file's directory. An
+	// explicit --target always wins.
+	ExtractDir string `json:"extractDir,omitempty" jsonschema:"title=Extract Directory"`
 	// Organizations limits the run to the named organizations. An empty list
 	// archives every organization the token can see.
 	Organizations []string `json:"organizations,omitempty" jsonschema:"title=Organizations"`

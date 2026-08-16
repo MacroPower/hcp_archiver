@@ -122,10 +122,34 @@ func TestConfigFromArgs(t *testing.T) {
 				assert.Nil(t, cfg.Remote)
 			},
 		},
+		"config archiveDir supplies output": {
+			token:      "secret",
+			args:       []string{},
+			configYAML: "archiveDir: /tmp/from-file\n",
+			want: func(t *testing.T, cfg *config.Config) {
+				t.Helper()
+				assert.Equal(t, "/tmp/from-file", cfg.OutputDir)
+			},
+		},
+		"output flag wins over archiveDir": {
+			token:      "secret",
+			args:       []string{"--output", "/tmp/from-flag"},
+			configYAML: "archiveDir: /tmp/from-file\n",
+			want: func(t *testing.T, cfg *config.Config) {
+				t.Helper()
+				assert.Equal(t, "/tmp/from-flag", cfg.OutputDir)
+			},
+		},
 		"missing output": {
 			token: "secret",
 			args:  []string{},
 			err:   config.ErrMissingOutputDir,
+		},
+		"config without archiveDir still requires output": {
+			token:      "secret",
+			args:       []string{},
+			configYAML: "organizations:\n  - acme\n",
+			err:        config.ErrMissingOutputDir,
 		},
 		"missing token": {
 			args: []string{"--output", "/tmp/a"},
@@ -189,6 +213,23 @@ func TestConfigFromArgs_ConfigFlagBeatsEnv(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	assert.Equal(t, []string{"from-flag"}, cfg.Organizations)
+}
+
+// TestConfigFromArgs_RelativeArchiveDir pins the resolution base for a
+// relative archiveDir: the configuration file's own directory, not the
+// process working directory.
+func TestConfigFromArgs_RelativeArchiveDir(t *testing.T) {
+	t.Setenv(config.EnvToken, "secret")
+	t.Setenv(config.EnvTokenTFC, "")
+	t.Setenv(config.EnvTokenFallback, "")
+	t.Setenv(config.EnvConfigPath, "")
+
+	cfgPath := writeConfigFile(t, "archiveDir: archive\n")
+
+	cfg, err := main.ConfigFromArgs([]string{"--config", cfgPath})
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, filepath.Join(filepath.Dir(cfgPath), "archive"), cfg.OutputDir)
 }
 
 // writeConfigFile writes yaml to a temporary file and returns its path.

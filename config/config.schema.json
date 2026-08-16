@@ -7,10 +7,20 @@
       "description": "Address is the HCP Terraform API address. It defaults to [DefaultAddress].",
       "default": "https://app.terraform.io"
     },
+    "archiveDir": {
+      "type": "string",
+      "title": "Archive Directory",
+      "description": "ArchiveDir is the archive root directory: the default for the root\ncommand's --output flag and for the read commands' [archive-dir]\npositional. A relative path resolves against this file's directory. An\nexplicit flag or positional always wins."
+    },
     "export": {
       "$ref": "#/$defs/FileExport",
       "title": "Export",
       "description": "Export configures the export subcommand's rendering; unset keeps the\nbuilt-in page templates."
+    },
+    "extractDir": {
+      "type": "string",
+      "title": "Extract Directory",
+      "description": "ExtractDir is the default --target directory for the extract and export\ncommands. A relative path resolves against this file's directory. An\nexplicit --target always wins."
     },
     "organizations": {
       "type": [
@@ -165,6 +175,6 @@
     }
   },
   "title": "File",
-  "description": "File is the on-disk YAML configuration describing what to archive and how.\n\nIt holds the settings that are stable across runs: the API address, the\norganization, project, and workspace filters, the opt-in scope toggles, and\nthe export section. Per-run and secret\nsettings (the output directory, the progress mode, the retry-absent toggle,\nand the API token) are supplied by flags and the environment instead, so a\nconfiguration file never carries a credential; the one path it may name,\nthe export templates directory, resolves relative to the file itself so the\ntwo travel together.\n\nEvery field is optional; an absent field takes the package default. Create\ninstances with [LoadFile], or [DefaultFile] for the defaults alone.",
+  "description": "File is the on-disk YAML configuration describing what to archive and how.\n\nIt holds the settings that are stable across runs: the API address, the\norganization, project, and workspace filters, the opt-in scope toggles, the\narchive and extract directories, and the export section. Per-run and secret\nsettings (the progress mode, the retry-absent toggle, and the API token)\nare supplied by flags and the environment instead, so a configuration file\nnever carries a credential; any path it names resolves relative to the file\nitself so the two travel together.\n\nEvery field is optional; an absent field takes the package default. Create\ninstances with [LoadFile], or [DefaultFile] for the defaults alone.",
   "additionalProperties": false
 }

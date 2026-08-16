@@ -73,7 +73,7 @@ func registerArchiveFlags(cmd *cobra.Command) *archiveFlags {
 	fs.StringVarP(&af.configPath, flagConfig, "c", "",
 		fmt.Sprintf("path to the YAML configuration file (defaults to $%s)", config.EnvConfigPath))
 	fs.StringVarP(&af.output, flagOutput, "o", "",
-		"archive root directory (required)")
+		"archive root directory (defaults to the configuration file's archiveDir)")
 	fs.StringVar(&af.progress, flagProgress, config.DefaultProgressMode.String(),
 		"progress output mode (auto|human|json|quiet)")
 	fs.DurationVar(&af.progressInterval, flagProgressInterval, config.DefaultProgressInterval,
@@ -94,9 +94,14 @@ func (af *archiveFlags) config() (*config.Config, error) {
 		return nil, err
 	}
 
-	file, err := af.loadFile()
+	file, cfgPath, err := af.loadFile()
 	if err != nil {
 		return nil, err
+	}
+
+	output := af.output
+	if output == "" {
+		output = configDir(cfgPath, file.ArchiveDir)
 	}
 
 	opts := []config.Option{
@@ -111,7 +116,7 @@ func (af *archiveFlags) config() (*config.Config, error) {
 		config.WithHYOK(file.Scope.HYOK),
 		config.WithRegistryDetail(file.Scope.RegistryDetail),
 		config.WithAuditTrail(file.Scope.AuditTrail),
-		config.WithOutputDir(af.output),
+		config.WithOutputDir(output),
 		config.WithProgressMode(mode),
 		config.WithProgressInterval(af.progressInterval),
 		config.WithRetryAbsent(af.retryAbsent),
@@ -128,18 +133,25 @@ func (af *archiveFlags) config() (*config.Config, error) {
 
 // loadFile resolves the configuration file path from the --config flag, then
 // the environment, and loads it. When neither names a path the built-in
-// defaults are used and no file is read.
-func (af *archiveFlags) loadFile() (*config.File, error) {
+// defaults are used and no file is read. The returned path is the one the
+// file was loaded from (empty when none was), the base a relative path inside
+// it resolves against.
+func (af *archiveFlags) loadFile() (*config.File, string, error) {
 	path := af.configPath
 	if path == "" {
 		path = os.Getenv(config.EnvConfigPath)
 	}
 
 	if path == "" {
-		return config.DefaultFile(), nil
+		return config.DefaultFile(), "", nil
 	}
 
-	return config.LoadFile(path)
+	file, err := config.LoadFile(path)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return file, path, nil
 }
 
 // newRootCmd builds the root [*cobra.Command] for the hcp_archiver CLI. Logging
@@ -211,7 +223,7 @@ func newRootCmd() *cobra.Command {
 // interactive terminal UI mirroring the HCP interface: organizations open into
 // projects, workspaces, runs, and state versions. The directory may be the
 // archive root or a single organization's directory; it defaults to the
-// current directory.
+// configuration file's archiveDir or, with none set, the current directory.
 func newViewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "view [archive-dir]",
@@ -219,7 +231,8 @@ func newViewCmd() *cobra.Command {
 		Long: `Browse an archive in an interactive terminal UI mirroring the HCP interface:
 organizations open into projects, workspaces, runs, and state versions. The
 directory may be the archive root or a single organization's directory; it
-defaults to the current directory.
+defaults to the configuration file's archiveDir or, with none set, the
+current directory.
 
 ` + remoteLong,
 		Args: cobra.MaximumNArgs(1),
@@ -228,17 +241,22 @@ defaults to the current directory.
 	rf := registerRemoteFlags(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, args []string) error {
-		dir := "."
-		if len(args) == 1 {
-			dir = args[0]
-		}
-
 		ctx, stop := signalContext(cc.Context())
 		defer stop()
 
-		rcfg, err := rf.resolve()
+		file, cfgPath, err := rf.loadFile()
 		if err != nil {
 			return err
+		}
+
+		rcfg, err := rf.remoteFromFile(file)
+		if err != nil {
+			return err
+		}
+
+		dir := defaultArchiveDir(file, cfgPath)
+		if len(args) == 1 {
+			dir = args[0]
 		}
 
 		var opts []view.ArchiveOption

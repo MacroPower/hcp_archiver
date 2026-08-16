@@ -2,11 +2,20 @@
 #
 # hcp_archiver configuration. Copy to hcp_archiver.yaml and edit, then point the
 # tool at it with --config (or set HCP_ARCHIVER_CONFIG). Every key is optional
-# and defaults as shown; the output directory and the API token are supplied by
-# --output and the environment, never here.
+# and defaults as shown; the API token is supplied by the environment, never
+# here.
 
 # HCP Terraform API address.
 address: https://app.terraform.io
+
+# Archive root directory: default for --output and for the read commands'
+# [archive-dir] positional. A relative path resolves against this file's
+# directory. An explicit flag or positional wins.
+# archiveDir: ./archive
+
+# Default --target for extract and export; relative paths resolve against
+# this file's directory.
+# extractDir: ./restore
 
 # Ceiling on how fast requests launch, in requests per second. The default of
 # 30 is HCP Terraform's documented limit, and the client adapts downward from

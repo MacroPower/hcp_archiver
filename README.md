@@ -56,6 +56,13 @@ the file or set `HCP_ARCHIVER_CONFIG`; with neither, the built-in defaults apply
 # HCP Terraform API address (the default).
 address: https://app.terraform.io
 
+# Default directories, each optional and unset by default: archiveDir stands
+# in for --output and for the read commands' [archive-dir] positional,
+# extractDir for extract and export --target. An explicit flag or positional
+# wins, and a relative path resolves against this file's directory.
+# archiveDir: ./archive
+# extractDir: ./restore
+
 # Ceiling on how fast requests launch, in requests per second. The default of
 # 30 is HCP Terraform's documented limit. Lower it for an organization whose
 # granted limit sits well below that; the client still adapts downward from
@@ -114,8 +121,9 @@ root.
 
 ### Archiving an organization
 
-The only required flag is the output directory. Point `--output` (`-o`) at the
-archive root and `--config` at the file:
+The archive root is the one setting a run cannot do without: point `--output`
+(`-o`) at it, or let the configuration file's `archiveDir` supply it. Point
+`--config` at the file:
 
 ```bash
 hcp_archiver --config hcp_archiver.yaml --output ./archive
@@ -182,8 +190,10 @@ the archive root or a single organization's directory. Positional arguments
 bind left to right: with two arguments the first is the archive directory and
 the second the archive path; a single argument to `list` and `extract` names
 the archive directory (pass `.` explicitly to address a path in the current
-directory), while a single argument to `show` is the archive path, read from
-the current directory.
+directory), while a single argument to `show` is the archive path. With no
+directory argument the configuration file's `archiveDir`, when set, is read
+instead of the current directory, and `extract` falls back to the file's
+`extractDir` when `--target` is omitted.
 
 ```bash
 hcp_archiver list ./archive                       # every object, every org
@@ -254,7 +264,8 @@ world-readable, curated for sharing, unlike the owner-only archive.
 
 The target is created when absent and refused when non-empty; `--force`
 replaces its contents (refusing when the archive itself sits beneath the
-target). Like the other read commands, the export reads the physical forms
+target). `--target` may be omitted when the configuration file's `extractDir`
+names it. Like the other read commands, the export reads the physical forms
 transparently; exporting a sealed archive whose roll-ups were offloaded
 fetches that metadata back from the mirror.
 
@@ -456,28 +467,31 @@ Settings are grouped by how much they vary; see
   non-empty wins) is the archiving identity's API token, and
   `HCP_ARCHIVER_CONFIG` is the default configuration file path.
 - **Flags**: `--config` / `-c` points at the YAML configuration file;
-  `--output` / `-o` is the archive root (required; resume and incremental
-  re-run are implied when it already holds an archive); `--progress` selects the
-  progress format (`auto|human|json|quiet`, default `auto`: human on a TTY,
-  quiet off one) with a `--progress-interval` knob; and `--retry-absent`
-  re-probes objects previously recorded as absent.
+  `--output` / `-o` is the archive root (defaulting to the file's `archiveDir`;
+  resume and incremental re-run are implied when it already holds an archive);
+  `--progress` selects the progress format (`auto|human|json|quiet`, default
+  `auto`: human on a TTY, quiet off one) with a `--progress-interval` knob; and
+  `--retry-absent` re-probes objects previously recorded as absent.
 - **Configuration file** (every key optional, defaulted per field): `address`
-  (the API endpoint, default `https://app.terraform.io`), `rateLimit` (the
-  request-launch ceiling in requests per second, default 30, HCP Terraform's
-  documented limit; lower it for an organization granted less), `organizations` (a
-  list; empty or omitted archives every organization the token can see in turn),
-  `projects` and `workspaces` (lists filtering what is archived within each
-  organization; empty or omitted archives everything, and with both set a
-  workspace must satisfy both),
-  a `runHistory` block bounding each workspace's archived run history
-  (`count` keeps the newest N runs, `age` keeps runs created within a
-  Go-duration window; with both set,
-  whichever admits more history wins; unlimited by default), a `scope`
-  block of toggles for the heavy or optional surfaces (`stacks`, `hyok`,
-  `registryDetail`, `auditTrail`), each off by default, and a `remote` block
-  ([Mirroring the archive](#mirroring-the-archive-to-object-storage))
-  naming the object store the archive is mirrored to (`url` required to
-  enable; optional `prefix`, `partSize`, `concurrency`).
+  (the API endpoint, default `https://app.terraform.io`), `archiveDir` and
+  `extractDir` (directory defaults for `--output` / the read commands'
+  `[archive-dir]` positional and for extract/export `--target`; an explicit
+  flag or positional wins, and a relative path resolves against the file's
+  directory), `rateLimit` (the request-launch ceiling in requests per second,
+  default 30, HCP Terraform's documented limit; lower it for an organization
+  granted less), `organizations` (a list; empty or omitted archives every
+  organization the token can see in turn), `projects` and `workspaces` (lists
+  filtering what is archived within each organization; empty or omitted
+  archives everything, and with both set a workspace must satisfy both), a
+  `runHistory` block bounding each workspace's archived run history (`count`
+  keeps the newest N runs, `age` keeps runs created within a Go-duration
+  window; with both set, whichever admits more history wins; unlimited by
+  default), a `scope` block of toggles for the heavy or optional surfaces
+  (`stacks`, `hyok`, `registryDetail`, `auditTrail`), each off by default,
+  and a `remote` block naming the object store the archive is mirrored to
+  ([Mirroring the archive](#mirroring-the-archive-to-object-storage));
+  `url` is required to enable it, with optional `prefix`, `partSize`, and
+  `concurrency`.
 
 ## Output layout
 
