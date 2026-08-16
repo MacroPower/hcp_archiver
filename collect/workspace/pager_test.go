@@ -174,6 +174,31 @@ func TestStablePagerServesEveryElementOnce(t *testing.T) {
 	}
 }
 
+func TestStablePagerServesEveryElementAcrossRepeatedDeletionWaves(t *testing.T) {
+	t.Parallel()
+
+	// Two separate deletion waves during one walk. The second re-list must rewind
+	// by the losses of both waves, since the served count still includes the
+	// elements the first wave deleted: rewinding by only the latest loss starts
+	// the scan past a7 and a8 and the walk ends without them.
+	all := []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10"}
+
+	firstWave := deleteBefore(2, "a1", "a2")
+	secondWave := deleteBefore(5, "a3", "a4")
+
+	live := &listing{
+		ids:  slices.Clone(all),
+		size: 2,
+		edit: func(fetch int, current []string) []string {
+			return secondWave(fetch, firstWave(fetch, current))
+		},
+	}
+
+	got := drain(t, workspace.NewStablePager(func(id string) string { return id }, live.page))
+
+	assert.Equal(t, all, got, "every element that outlived the walk is served exactly once")
+}
+
 func TestStablePagerStopsOnAListingThatKeepsShrinking(t *testing.T) {
 	t.Parallel()
 

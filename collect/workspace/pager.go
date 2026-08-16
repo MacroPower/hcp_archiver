@@ -77,6 +77,7 @@ type stablePager[T any] struct {
 	served map[string]struct{}
 	next   int
 	total  int
+	shed   int
 	span   int
 	sized  bool
 }
@@ -132,7 +133,8 @@ func (p *stablePager[T]) page(ctx context.Context, page int) ([]T, bool, error) 
 			}
 
 			scanned = 0
-			p.next = p.resyncPage(lost)
+			p.shed += lost
+			p.next = p.resyncPage()
 
 			continue
 		}
@@ -166,6 +168,7 @@ func (p *stablePager[T]) reset() {
 	p.served = make(map[string]struct{})
 	p.next = 1
 	p.total = 0
+	p.shed = 0
 	p.span = 0
 	p.sized = false
 }
@@ -233,15 +236,19 @@ func (p *stablePager[T]) measure(pg *tfe.Pagination, items []T, hasNext bool) {
 }
 
 // resyncPage reports the page a re-list restarts its scan from. Elements shift
-// up by at most the number the listing lost, so the first element the walk has
-// not served sits no earlier than that many positions before the boundary it had
-// reached. A listing whose page size is still unknown is scanned from the head.
-func (p *stablePager[T]) resyncPage(lost int) int {
+// up by at most the number the listing has lost across the whole walk, since
+// the served record still counts elements deleted after they were served, so
+// the first element the walk has not served sits no earlier than the served
+// count less every loss to date. Rewinding by only the latest loss would leave
+// earlier losses uncorrected and start the scan past unserved elements they
+// shifted up. A listing whose page size is still unknown is scanned from the
+// head.
+func (p *stablePager[T]) resyncPage() int {
 	if !p.sized {
 		return 1
 	}
 
-	back := max(len(p.served)-lost, 0)
+	back := max(len(p.served)-p.shed, 0)
 
 	return back/p.span + 1
 }
