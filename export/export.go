@@ -7,10 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"text/template"
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
+	"go.jacobcolvin.com/hcp_archiver/pathkit"
 	"go.jacobcolvin.com/hcp_archiver/view"
 )
 
@@ -210,24 +210,12 @@ func (e *Exporter) checkTargetDisjoint() error {
 	}
 
 	for _, org := range e.arc.Orgs() {
-		if contained(absTarget, org.Root()) || contained(org.Root(), absTarget) {
+		if pathkit.Overlaps(absTarget, org.Root()) {
 			return fmt.Errorf("%w: %s and %s", ErrTargetOverlapsArchive, e.target, org.Root())
 		}
 	}
 
 	return nil
-}
-
-// contained reports whether the absolute path child sits at or beneath the
-// absolute path parent. The comparison is segment-wise; unrelatable paths (a
-// different volume) are outside by definition.
-func contained(parent, child string) bool {
-	rel, err := filepath.Rel(parent, child)
-	if err != nil {
-		return false
-	}
-
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // write stores one generated file at a target-relative forward-slash path,
