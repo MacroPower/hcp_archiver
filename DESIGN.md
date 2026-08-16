@@ -514,6 +514,28 @@ Notes:
     `jsonapi:"primary"` field, which the plain-`json:` audit-trail and pagination
     types lack, so those stay on the `encoding/json` (snake-case) path.
 
+## Path conventions
+
+Paths cross package boundaries as plain strings in three shapes, and a
+signature names its parameters after the shape it expects:
+
+- **absPath**: an absolute-physical path in the host's separators (a store or
+  organization root, an extract target).
+- **relPath**: an archive-relative forward-slash path rooted at one
+  organization's directory, the shape the store's builders produce, the ledger
+  keys on, and `seal.ValidName` validates when untrusted.
+- **archivePath**: an org-prefixed `<org>/<relPath>` path, the shape the
+  archive browser's cross-organization surfaces accept and an extract
+  reproduces under its target.
+
+Two packages own the checks over these shapes. The `pathkit` package holds the
+lexical ones (containment, overlap, prefix scoping, root confinement), defined
+once so every guard agrees on what "inside" means; the guards built on them
+are deliberately symlink-blind, a tradeoff each documents. The `fsid` package
+owns physical identity (two spellings of one on-disk location), the
+symlink-aware resolution the walkers and the ledger's shard keying use; raw
+`filepath.EvalSymlinks` and `filepath.WalkDir` are lint-banned outside it.
+
 ## Storage at scale
 
 An org with thousands of workspaces, each with hundreds of runs and dozens of
