@@ -221,3 +221,20 @@ func TestMarshalSliceOfModels(t *testing.T) {
 	assert.Contains(t, out, "two")
 	require.True(t, json.Valid(got))
 }
+
+func TestMarshalPointerToSliceOfModels(t *testing.T) {
+	t.Parallel()
+
+	// The jsonapi encoder rejects a pointer to a slice (its pointer case
+	// requires a struct behind it), so this shape must take the encoding/json
+	// path instead of surfacing an unexpected-type error.
+	vars := []*tfe.Variable{
+		{ID: "var-1", Key: "a", Value: "one"},
+	}
+
+	got, err := serialize.Marshal(&vars)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(got), `"one"`)
+	require.True(t, json.Valid(got))
+}

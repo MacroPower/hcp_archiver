@@ -107,22 +107,26 @@ func marshalJSONAPI(v any) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// isJSONAPIModel reports whether v (following pointers, and into a slice
-// element) is a struct type carrying a jsonapi primary field.
+// isJSONAPIModel reports whether v is a shape the jsonapi encoder accepts (a
+// struct behind a pointer chain, or a slice of them) whose struct type carries
+// a jsonapi primary field.
 func isJSONAPIModel(v any) bool {
 	t := reflect.TypeOf(v)
 	if t == nil {
 		return false
 	}
 
-	t = deref(t)
-
-	// The jsonapi encoder marshals a struct pointer or a slice of them, never a
-	// Go array, so only a slice element is followed here; an array falls through
-	// to the struct check below and, failing it, to the encoding/json path.
+	// The jsonapi encoder marshals a struct pointer or a slice of them, never
+	// a Go array or a pointer to a slice, so only a top-level slice's element
+	// is followed here. Every other shape (an array, a pointer chain ending in
+	// anything but a struct, a pointer to a slice among them) falls through to
+	// the struct check below and, failing it, to the encoding/json path the
+	// encoder would have refused with an unexpected-type error.
 	if t.Kind() == reflect.Slice {
-		t = deref(t.Elem())
+		t = t.Elem()
 	}
+
+	t = deref(t)
 
 	if t.Kind() != reflect.Struct {
 		return false
