@@ -234,6 +234,90 @@ func TestEnvObject(t *testing.T) {
 	}
 }
 
+func TestEnvArchiveUpdatedAtStamp(t *testing.T) {
+	t.Parallel()
+
+	updated := time.Date(2026, time.June, 1, 9, 30, 0, 0, time.UTC)
+
+	t.Run("object with the option stamps the entry", func(t *testing.T) {
+		t.Parallel()
+
+		const relPath = "policies/pol-1.json"
+
+		env, _, ledger := newEnv(t)
+
+		err := env.Object(t.Context(), relPath, func(_ context.Context) (any, error) {
+			return cannedProject(), nil
+		}, collect.WithUpdatedAt(updated))
+		require.NoError(t, err)
+
+		entry, ok := ledger.Entry(relPath)
+		require.True(t, ok)
+		assert.Equal(t, updated, entry.UpdatedAt)
+	})
+
+	t.Run("object without the option leaves no stamp", func(t *testing.T) {
+		t.Parallel()
+
+		const relPath = "policies/pol-1.json"
+
+		env, _, ledger := newEnv(t)
+
+		err := env.Object(t.Context(), relPath, func(_ context.Context) (any, error) {
+			return cannedProject(), nil
+		})
+		require.NoError(t, err)
+
+		entry, ok := ledger.Entry(relPath)
+		require.True(t, ok)
+		assert.True(t, entry.UpdatedAt.IsZero())
+	})
+
+	t.Run("mutable refresh without the option clears a prior stamp", func(t *testing.T) {
+		t.Parallel()
+
+		const relPath = "policies/pol-1.json"
+
+		env, _, ledger := newEnv(t)
+
+		err := env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+			return cannedProject(), nil
+		}, collect.WithUpdatedAt(updated))
+		require.NoError(t, err)
+
+		entry, ok := ledger.Entry(relPath)
+		require.True(t, ok)
+		require.Equal(t, updated, entry.UpdatedAt)
+
+		err = env.Mutable(t.Context(), relPath, func(_ context.Context) (any, error) {
+			return cannedProject(), nil
+		})
+		require.NoError(t, err)
+
+		entry, ok = ledger.Entry(relPath)
+		require.True(t, ok)
+		assert.True(t, entry.UpdatedAt.IsZero(),
+			"a refresh that reports no server reading must not keep the stale stamp")
+	})
+
+	t.Run("bytes with the option stamps the entry", func(t *testing.T) {
+		t.Parallel()
+
+		const relPath = "policies/pol-1.sentinel"
+
+		env, _, ledger := newEnv(t)
+
+		err := env.Bytes(t.Context(), relPath, func(_ context.Context) ([]byte, error) {
+			return []byte("main = rule { true }"), nil
+		}, collect.WithUpdatedAt(updated))
+		require.NoError(t, err)
+
+		entry, ok := ledger.Entry(relPath)
+		require.True(t, ok)
+		assert.Equal(t, updated, entry.UpdatedAt)
+	})
+}
+
 func TestEnvObjectPropagatesCancellation(t *testing.T) {
 	t.Parallel()
 

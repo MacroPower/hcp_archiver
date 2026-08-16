@@ -15,6 +15,38 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/tfeclient"
 )
 
+// archiveConfig carries the per-object settings of one archive call.
+type archiveConfig struct {
+	updatedAt time.Time
+}
+
+// ArchiveOption configures a single archive of one object, accepted by
+// [Env.Object], [Env.Mutable], [Env.Blob], and [Env.Bytes].
+//
+// The available options are:
+//   - [WithUpdatedAt]
+type ArchiveOption func(*archiveConfig)
+
+// WithUpdatedAt records the server-side updated-at the listing reported for
+// the object, carried onto its ledger entry when the archive records done
+// (see [manifest.Entry.UpdatedAt]). It returns an [ArchiveOption].
+func WithUpdatedAt(t time.Time) ArchiveOption {
+	return func(cfg *archiveConfig) {
+		cfg.updatedAt = t
+	}
+}
+
+// resolveArchiveConfig folds opts into one [archiveConfig].
+func resolveArchiveConfig(opts []ArchiveOption) archiveConfig {
+	var cfg archiveConfig
+
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	return cfg
+}
+
 // retention says what a JSON archive write does with the content it replaces.
 type retention int
 
@@ -42,12 +74,17 @@ const (
 // a 410 among them, records the object as errored so a re-run retries it.
 // Only a cancellation of ctx propagates; every other outcome is recorded and
 // returns nil so one bad object never aborts the run.
-func (e *Env) Object(ctx context.Context, relPath string, fetch func(context.Context) (any, error)) error {
+func (e *Env) Object(
+	ctx context.Context,
+	relPath string,
+	fetch func(context.Context) (any, error),
+	opts ...ArchiveOption,
+) error {
 	if !e.ledger.ShouldFetch(relPath) {
 		return nil
 	}
 
-	return e.archiveJSON(ctx, relPath, fetch, retainCurrent)
+	return e.archiveJSON(ctx, relPath, fetch, retainCurrent, resolveArchiveConfig(opts))
 }
 
 // Mutable archives a single mutable metadata object at relPath.
@@ -77,8 +114,13 @@ func (e *Env) Object(ctx context.Context, relPath string, fetch func(context.Con
 // roll-up line on the next seal. The ledger, not file existence, is the
 // record, consistent with [Env.Object], so a hand-deleted, unchanged mutable
 // file also stays deleted. A changed payload always writes.
-func (e *Env) Mutable(ctx context.Context, relPath string, fetch func(context.Context) (any, error)) error {
-	return e.archiveJSON(ctx, relPath, fetch, retainHistory)
+func (e *Env) Mutable(
+	ctx context.Context,
+	relPath string,
+	fetch func(context.Context) (any, error),
+	opts ...ArchiveOption,
+) error {
+	return e.archiveJSON(ctx, relPath, fetch, retainHistory, resolveArchiveConfig(opts))
 }
 
 // Blob archives a single immutable blob at relPath, streaming it from fetch's
@@ -105,11 +147,17 @@ func (e *Env) Mutable(ctx context.Context, relPath string, fetch func(context.Co
 // a zero-byte file recorded done that a re-run never retries. Such a result is
 // recorded as not applicable, a settled gap, and no file is written, matching
 // [Env.Bytes].
-func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Context) (io.Reader, error)) error {
+func (e *Env) Blob(
+	ctx context.Context,
+	relPath string,
+	fetch func(context.Context) (io.Reader, error),
+	opts ...ArchiveOption,
+) error {
 	if !e.ledger.ShouldFetch(relPath) {
 		return nil
 	}
 
+	cfg := resolveArchiveConfig(opts)
 	confirmed := func(ctx context.Context) (io.Reader, error) {
 		return fetchConfirmed(ctx, e, fetch)
 	}
@@ -117,7 +165,7 @@ func (e *Env) Blob(ctx context.Context, relPath string, fetch func(context.Conte
 	var cause error
 
 	for attempt := 0; ; attempt++ {
-		settled, err := e.streamBlob(ctx, relPath, confirmed)
+		settled, err := e.streamBlob(ctx, relPath, confirmed, cfg)
 		if settled {
 			return err
 		}
@@ -155,6 +203,7 @@ func (e *Env) streamBlob(
 	ctx context.Context,
 	relPath string,
 	fetch func(context.Context) (io.Reader, error),
+	cfg archiveConfig,
 ) (bool, error) {
 	r, err := fetch(ctx)
 	if err != nil {
@@ -207,7 +256,7 @@ func (e *Env) streamBlob(
 		return true, e.failWrite(ctx, relPath, err)
 	}
 
-	e.recordDone(ctx, relPath, res)
+	e.recordDone(ctx, relPath, res, cfg)
 
 	return true, nil
 }
@@ -280,7 +329,12 @@ func (r *recordingReader) Read(p []byte) (int, error) {
 // run that produced none, for one), which the client hands back as empty bytes
 // with no error; writing it would leave a zero-byte, unparseable file. Such a
 // result is recorded as not applicable, a settled gap, and no file is written.
-func (e *Env) Bytes(ctx context.Context, relPath string, fetch func(context.Context) ([]byte, error)) error {
+func (e *Env) Bytes(
+	ctx context.Context,
+	relPath string,
+	fetch func(context.Context) ([]byte, error),
+	opts ...ArchiveOption,
+) error {
 	if !e.ledger.ShouldFetch(relPath) {
 		return nil
 	}
@@ -301,7 +355,7 @@ func (e *Env) Bytes(ctx context.Context, relPath string, fetch func(context.Cont
 		return e.failWrite(ctx, relPath, err)
 	}
 
-	e.recordDone(ctx, relPath, res)
+	e.recordDone(ctx, relPath, res, resolveArchiveConfig(opts))
 
 	return nil
 }
@@ -356,6 +410,7 @@ func (e *Env) archiveJSON(
 	relPath string,
 	fetch func(context.Context) (any, error),
 	keep retention,
+	cfg archiveConfig,
 ) error {
 	v, err := fetchConfirmed(ctx, e, fetch)
 	if err != nil {
@@ -397,7 +452,7 @@ func (e *Env) archiveJSON(
 		return e.failWrite(ctx, relPath, err)
 	}
 
-	e.recordDone(ctx, relPath, res)
+	e.recordDone(ctx, relPath, res, cfg)
 
 	return nil
 }
@@ -483,12 +538,13 @@ func (e *Env) sealedElsewhere(relPath string, data []byte) bool {
 
 // recordDone records a successful write and counts its bytes when the commit
 // actually changed the on-disk content, then mirrors an org-scope change to
-// the remote store as written (see [Env.eagerSync]).
-func (e *Env) recordDone(ctx context.Context, relPath string, res store.WriteResult) {
+// the remote store as written (see [Env.eagerSync]). The config's server-side
+// updated-at, when set, stamps the ledger entry.
+func (e *Env) recordDone(ctx context.Context, relPath string, res store.WriteResult, cfg archiveConfig) {
 	e.ledger.RecordDone(relPath, manifest.Signature{
 		Hash: res.SHA256,
 		Size: res.Size,
-	})
+	}, manifest.WithUpdatedAt(cfg.updatedAt))
 
 	if res.Changed {
 		e.ledger.AddBytes(res.Size)
