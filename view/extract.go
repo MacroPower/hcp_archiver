@@ -18,22 +18,24 @@ var (
 	// directory.
 	ErrNoTarget = errors.New("extract target directory is required")
 
-	// ErrTargetOverlapsArchive indicates an extract target that contains,
-	// equals, or sits inside an organization's archive root, or whose "<org>"
-	// directory would land back inside it: extracting there would write the
-	// recovery into the archive itself.
+	// ErrTargetOverlapsArchive indicates an extract target at or inside an
+	// organization's archive root, or whose "<org>" directory beneath it
+	// would overlap that root: extracting there would write the recovery into
+	// the archive itself.
 	ErrTargetOverlapsArchive = errors.New("extract target overlaps the archive")
 )
 
 // checkExtractTarget refuses a target whose writes could land inside any of
 // the organizations' archive roots. An extract reproduces "<org>/<path>"
-// under the target, so both the target itself and each organization's
-// directory beneath it must stay clear of that organization's root; a target
-// that is an ancestor of the archive fails on the join (a
-// single-organization archive extracted into its parent). Every scope is
-// validated before the first write, so a multi-organization refusal writes
-// nothing. Symlinks are not resolved: a symlinked target can dodge the check,
-// accepted rather than pulling physical identity resolution into the guard.
+// under the target, so a target at or inside an organization's root is
+// refused outright, and a target elsewhere is refused when the organization's
+// directory beneath it overlaps that organization's root: an ancestor of the archive
+// fails on the join (a single-organization archive extracted into its
+// parent), while an ancestor whose join lands beside the archive passes,
+// matching the CLI guard's shape. Every scope is validated before the first
+// write, so a multi-organization refusal writes nothing. Symlinks are not
+// resolved: a symlinked target can dodge the check, accepted rather than
+// pulling physical identity resolution into the guard.
 func checkExtractTarget(orgs []*Org, target string) error {
 	absTarget, err := filepath.Abs(target)
 	if err != nil {
@@ -41,7 +43,7 @@ func checkExtractTarget(orgs []*Org, target string) error {
 	}
 
 	for _, org := range orgs {
-		if pathkit.Overlaps(absTarget, org.Root()) ||
+		if pathkit.Contains(org.Root(), absTarget) ||
 			pathkit.Overlaps(filepath.Join(absTarget, org.Name), org.Root()) {
 			return fmt.Errorf("%w: %s reaches %s", ErrTargetOverlapsArchive, target, org.Root())
 		}

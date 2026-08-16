@@ -780,10 +780,11 @@ func (o *Org) mergedChildren(relDir string) ([]TreeEntry, error) {
 	for _, e := range local {
 		rel := path.Join(relDir, e.Name())
 
-		// An eviction stub diverts before the machinery filter, the way the
-		// recursive walk diverts it, and folds onto its target below; a stub
-		// [*Org.readRemoteStub] refuses drops, the listing then short by the
-		// object exactly as it would be with no stub at all.
+		// An eviction stub diverts before the machinery filter, the way
+		// stubEntries diverts it in the recursive listing, and folds onto its
+		// target below; a stub that [*Org.readRemoteStub] refuses is dropped,
+		// leaving the listing short by the object, exactly as if no stub
+		// existed.
 		if _, isStub := store.RemoteStubTarget(rel); isStub && !e.IsDir() {
 			if target, size, ok := o.evictedObject(rel); ok {
 				leaf := path.Base(target)

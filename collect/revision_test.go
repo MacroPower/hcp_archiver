@@ -61,7 +61,7 @@ func TestEnvRevisionPath(t *testing.T) {
 			seed: func(l *manifest.Ledger) {
 				l.RecordDone(plain, sig, manifest.WithUpdatedAt(captured))
 			},
-			updatedAt: replaced,
+			updatedAt: fetched.Add(time.Hour),
 			want:      stamped,
 		},
 		"revision updated before the local fetch stamp still earns its name": {

@@ -150,6 +150,17 @@ func TestCheckExtractTarget(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("an ancestor whose org join lands beside the archive passes", func(t *testing.T) {
+		t.Parallel()
+
+		// The organization sits one level down ("arch/my-org"), so extracting
+		// into the grandparent writes "my-org" beside "arch", not into it,
+		// matching the CLI guard's shape.
+		nested := &Org{Name: "my-org", root: filepath.Join(root, "arch", "my-org")}
+
+		require.NoError(t, checkExtractTarget([]*Org{nested}, root))
+	})
 }
 
 func TestExtractPromptRefusesTargetInsideArchive(t *testing.T) {

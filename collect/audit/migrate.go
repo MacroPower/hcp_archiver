@@ -21,7 +21,7 @@ func isPageName(leaf string) bool {
 }
 
 // LedgerMigration returns the [manifest.Migration] repairing audit-trail page
-// slots a pre-v0.4 release settled absent by routing a terminal list result
+// slots a pre-v0.4 release settled absent by routing a terminal list error
 // through [collect.Env.Object]. Pass it to [manifest.Load] via
 // [manifest.WithMigrations].
 //

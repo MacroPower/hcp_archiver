@@ -80,8 +80,9 @@ func TestOverlaps(t *testing.T) {
 		},
 		"ancestor reach-back overlaps": {
 			// The extract reach-back case: a target that is an ancestor of the
-			// archive writes "<org>/<path>" straight back into it when the
-			// organization's directory joins onto the archive dir.
+			// archive writes "<org>/<path>" straight back into it. Here a is
+			// what joining the organization name "mini-org" under the target
+			// "/data" produces, landing exactly on the archive directory b.
 			a: "/data/mini-org", b: "/data/mini-org", want: true,
 		},
 		"siblings do not overlap": {
