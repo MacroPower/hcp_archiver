@@ -38,6 +38,7 @@ type auditFixture struct {
 	collector *audit.Collector
 	store     *store.Store
 	ledger    *manifest.Ledger
+	client    *tfeclient.Client
 }
 
 // newAuditFixture serves pages keyed by page number (page 1 serves requests
@@ -104,6 +105,32 @@ func newAuditFixture(t *testing.T, pages map[int]trailPage) auditFixture {
 		collector: audit.New(env, "acme"),
 		store:     st,
 		ledger:    ledger,
+		client:    client,
+	}
+}
+
+// reloadWithMigration closes the fixture's ledger and re-opens it with the
+// audit repair registered, the way the archiver's load call site does,
+// returning a fixture whose collector runs over the migrated state.
+func (f auditFixture) reloadWithMigration(t *testing.T) auditFixture {
+	t.Helper()
+
+	require.NoError(t, f.ledger.Flush())
+	require.NoError(t, f.ledger.Close())
+
+	ledger, err := manifest.Load(f.store.Root(),
+		manifest.WithMigrations(audit.LedgerMigration(f.store)))
+	require.NoError(t, err)
+
+	ledger.StartRun()
+
+	env := collect.NewEnv(f.client, f.store, ledger)
+
+	return auditFixture{
+		collector: audit.New(env, "acme"),
+		store:     f.store,
+		ledger:    ledger,
+		client:    f.client,
 	}
 }
 
@@ -237,11 +264,19 @@ func TestCollectTrailsRepairsPageSettledAbsentByAPriorRelease(t *testing.T) {
 	})
 
 	// A pre-v0.4 release routed a terminal list error through Object, which
-	// settled the fileless page slot absent. Seed that legacy record directly:
-	// left alone, the settled slot short-circuits the write and the read-back
-	// of the never-created file halts the walk on every run.
+	// settled the fileless page slot absent. Seed that legacy record, then
+	// reopen the ledger the way the archiver does, with the audit repair
+	// registered: the migration unsettles the slot at open, so the walk writes
+	// it fresh instead of wedging on the read-back of a never-created file.
 	relPath := f.store.AuditTrailFile(audit.PageName(time.Time{}, 1))
 	f.ledger.RecordAbsent(relPath, errors.New("list audit trails: resource not found"))
+
+	f = f.reloadWithMigration(t)
+
+	entry, ok := f.ledger.Entry(relPath)
+	require.True(t, ok)
+	require.Equal(t, manifest.StatusErrored, entry.Status,
+		"the migration unsettles the legacy record at open")
 
 	require.NoError(t, f.collector.CollectTrails(t.Context()))
 
@@ -251,9 +286,62 @@ func TestCollectTrailsRepairsPageSettledAbsentByAPriorRelease(t *testing.T) {
 		"the walk completes and advances the cursor instead of wedging")
 	assert.Zero(t, f.ledger.Tally().SurfacesDropped)
 
-	entry, ok := f.ledger.Entry(relPath)
+	entry, ok = f.ledger.Entry(relPath)
 	require.True(t, ok)
 	assert.Equal(t, manifest.StatusDone, entry.Status, "the repaired slot settles done")
+}
+
+func TestLedgerMigration(t *testing.T) {
+	t.Parallel()
+
+	st := store.New(t.TempDir())
+	mig := audit.LedgerMigration(st)
+
+	absent := manifest.Entry{Status: manifest.StatusAbsent}
+
+	tests := map[string]struct {
+		relPath     string
+		entry       manifest.Entry
+		wantChanged bool
+	}{
+		"absent page slot is unsettled": {
+			relPath:     st.AuditTrailFile(audit.PageName(time.Time{}, 1)),
+			entry:       absent,
+			wantChanged: true,
+		},
+		"absent audit config is untouched": {
+			// The audit configuration is a mutable object that can legitimately
+			// settle absent (an unentitled organization answers 404); churning
+			// it to errored would fight the next run's re-record.
+			relPath: st.AuditTrailFile("config.json"),
+			entry:   absent,
+		},
+		"done page slot is untouched": {
+			relPath: st.AuditTrailFile(audit.PageName(time.Time{}, 1)),
+			entry:   manifest.Entry{Status: manifest.StatusDone},
+		},
+		"absent entry outside the audit dir is untouched": {
+			relPath: "org.json",
+			entry:   absent,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			out, changed := mig(tc.relPath, 1, tc.entry)
+			assert.Equal(t, tc.wantChanged, changed)
+
+			if tc.wantChanged {
+				assert.Equal(t, manifest.StatusErrored, out.Status)
+				assert.False(t, out.Transient)
+				assert.NotEmpty(t, out.LastError)
+			} else {
+				assert.Equal(t, tc.entry.Status, out.Status)
+			}
+		})
+	}
 }
 
 func TestCollectTrailsPassesAnAbsentSlotWithNothingToRewrite(t *testing.T) {

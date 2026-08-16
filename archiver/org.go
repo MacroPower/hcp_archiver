@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/go-tfe"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/collect/audit"
 	"go.jacobcolvin.com/hcp_archiver/config"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
 	"go.jacobcolvin.com/hcp_archiver/progress"
@@ -107,6 +108,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 		manifest.WithLogger(a.logger),
 		manifest.WithRetryAbsent(a.cfg.RetryAbsent),
 		manifest.WithRecordOnlyPrefixes(collect.RecordOnlyLedgerPrefixes()...),
+		manifest.WithMigrations(audit.LedgerMigration(st)),
 	)
 	if err != nil {
 		return manifest.Tally{}, 0, fmt.Errorf("load manifest: %w", err)

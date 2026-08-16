@@ -3,7 +3,6 @@ package audit
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -151,17 +150,6 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 		}
 
 		relPath := st.AuditTrailFile(pageName(since, page))
-
-		// A page slot recorded absent is a prior release's terminal list error
-		// settled wrongly (see archiveTrailPage): no file was ever written for it,
-		// so left settled it would short-circuit the write and wedge the walk on
-		// the read-back below, on every run. When the re-list carries events for
-		// the slot, unsettle it so this walk writes the page fresh; a clean
-		// re-list with nothing to write leaves the record standing, and
-		// persistedEvents reads it as contributing nothing.
-		if len(fresh) > 0 && c.pageSettledAbsent(relPath) {
-			c.env.Unsettle(relPath, errors.New("audit trail page settled absent by a prior release"))
-		}
 
 		// Whether Object will persist fresh or short-circuit on an already-settled
 		// page is fixed by the ledger before the call decides it.
@@ -346,6 +334,12 @@ func (c *Collector) pageShortCircuited(relPath string) bool {
 // archiveTrailPage). No file was ever written for such a slot, so it must never
 // be read back; under retry-absent the slot is not settled and the ordinary
 // path re-fetches it.
+//
+// [LedgerMigration] is this check's required companion: registered at
+// [manifest.Load] it unsettles such slots before any walk sees them, so the
+// walk writes them fresh. On a ledger opened without it this branch only
+// passes the slot over, silently, run after run; it is a defensive backstop,
+// not the repair.
 func (c *Collector) pageSettledAbsent(relPath string) bool {
 	entry, ok := c.env.Entry(relPath)
 
