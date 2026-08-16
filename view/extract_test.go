@@ -395,6 +395,57 @@ func TestExtract_OverwriteIsIdempotent(t *testing.T) {
 	assert.Equal(t, "plan output line\n", readTarget(t, target, wsDir+"/runs/run-new/plan.log"))
 }
 
+func TestExtract_RefusesTargetOverlappingArchive(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+	orgRoot := filepath.Join(root, "my-org")
+
+	orgs, err := view.OpenArchive(root)
+	require.NoError(t, err)
+
+	arc := view.NewArchive(orgs)
+
+	for name, target := range map[string]string{
+		"the organization root":         orgRoot,
+		"a directory inside it":         filepath.Join(orgRoot, "projects"),
+		"an ancestor reaching the root": root,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			sum, extractErr := arc.Extract(t.Context(), target, "my-org", nil)
+			require.ErrorIs(t, extractErr, view.ErrTargetOverlapsArchive)
+			assert.Zero(t, sum.Files, "a refused extract writes nothing")
+		})
+	}
+}
+
+func TestExtract_MultiOrgRefusalWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	// Two organizations; the target overlaps only the second. Every scope is
+	// validated before the first write, so the first organization must not
+	// have extracted by the time the refusal lands.
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "org-a"), "org.json",
+		`{"data":{"id":"org-a","type":"organizations","attributes":{"name":"org-a"}}}`)
+	writeFile(t, filepath.Join(root, "org-b"), "org.json",
+		`{"data":{"id":"org-b","type":"organizations","attributes":{"name":"org-b"}}}`)
+
+	orgs, err := view.OpenArchive(root)
+	require.NoError(t, err)
+
+	target := filepath.Join(root, "org-b")
+
+	sum, err := view.NewArchive(orgs).Extract(t.Context(), target, "", nil)
+	require.ErrorIs(t, err, view.ErrTargetOverlapsArchive)
+	assert.Zero(t, sum.Files)
+
+	_, statErr := os.Stat(filepath.Join(target, "org-a"))
+	assert.True(t, os.IsNotExist(statErr), "no earlier organization extracted before the refusal")
+}
+
 func TestExtract_PathTraversalRejected(t *testing.T) {
 	t.Parallel()
 

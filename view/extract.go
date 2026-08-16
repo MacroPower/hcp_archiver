@@ -9,12 +9,46 @@ import (
 	"path/filepath"
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
+	"go.jacobcolvin.com/hcp_archiver/pathkit"
 	"go.jacobcolvin.com/hcp_archiver/seal"
 )
 
-// ErrNoTarget indicates an extract was confirmed with an empty target
-// directory.
-var ErrNoTarget = errors.New("extract target directory is required")
+var (
+	// ErrNoTarget indicates an extract was confirmed with an empty target
+	// directory.
+	ErrNoTarget = errors.New("extract target directory is required")
+
+	// ErrTargetOverlapsArchive indicates an extract target that contains,
+	// equals, or sits inside an organization's archive root, or whose "<org>"
+	// directory would land back inside it: extracting there would write the
+	// recovery into the archive itself.
+	ErrTargetOverlapsArchive = errors.New("extract target overlaps the archive")
+)
+
+// checkExtractTarget refuses a target whose writes could land inside any of
+// the organizations' archive roots. An extract reproduces "<org>/<path>"
+// under the target, so both the target itself and each organization's
+// directory beneath it must stay clear of that organization's root; a target
+// that is an ancestor of the archive fails on the join (a
+// single-organization archive extracted into its parent). Every scope is
+// validated before the first write, so a multi-organization refusal writes
+// nothing. Symlinks are not resolved: a symlinked target can dodge the check,
+// accepted rather than pulling physical identity resolution into the guard.
+func checkExtractTarget(orgs []*Org, target string) error {
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return fmt.Errorf("resolve %q: %w", target, err)
+	}
+
+	for _, org := range orgs {
+		if pathkit.Overlaps(absTarget, org.Root()) ||
+			pathkit.Overlaps(filepath.Join(absTarget, org.Name), org.Root()) {
+			return fmt.Errorf("%w: %s reaches %s", ErrTargetOverlapsArchive, target, org.Root())
+		}
+	}
+
+	return nil
+}
 
 // extractJob is one file of an extract: the archive-relative path to reproduce
 // under the target and the writer that streams its bytes through

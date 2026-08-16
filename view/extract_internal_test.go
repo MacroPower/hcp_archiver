@@ -108,6 +108,83 @@ func TestListScreenExtractKeyInertWithoutExtractRows(t *testing.T) {
 	assert.Equal(t, 0, s.list.Paginator.Page, "u keeps its stock prev-page binding")
 }
 
+func TestCheckExtractTarget(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	orgRoot := filepath.Join(root, "my-org")
+	org := &Org{Name: "my-org", root: orgRoot}
+
+	tests := map[string]struct {
+		target string
+		refuse bool
+	}{
+		"the organization root refuses": {
+			target: orgRoot, refuse: true,
+		},
+		"a directory inside the organization refuses": {
+			target: filepath.Join(orgRoot, "projects"), refuse: true,
+		},
+		"an ancestor whose org join reaches the archive refuses": {
+			// The extract writes "<org>/<path>" under the target, so the
+			// archive root itself joins straight back onto the organization.
+			target: root, refuse: true,
+		},
+		"a sibling target passes": {
+			target: filepath.Join(root, "out"), refuse: false,
+		},
+		"a name-prefix sibling passes": {
+			target: orgRoot + "-extract", refuse: false,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			err := checkExtractTarget([]*Org{org}, tc.target)
+			if tc.refuse {
+				require.ErrorIs(t, err, ErrTargetOverlapsArchive)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestExtractPromptRefusesTargetInsideArchive(t *testing.T) {
+	t.Parallel()
+
+	// The guard runs synchronously at the prompt's confirm, before any plan
+	// or extract goroutine, so the refusal surfaces as the prompt's error and
+	// nothing starts.
+	root := t.TempDir()
+	org := &Org{Name: "my-org", root: filepath.Join(root, "my-org")}
+
+	planned := false
+	build := extractPrompt(org, "workspace app", func() ([]extractJob, error) {
+		planned = true
+
+		return nil, nil
+	})
+
+	s, err := build()
+	require.NoError(t, err)
+
+	prompt, ok := s.(*extractPromptScreen)
+	require.True(t, ok)
+
+	prompt.input.SetValue(filepath.Join(root, "my-org"))
+
+	cmd := pressOn(prompt, tea.Key{Code: tea.KeyEnter})
+	require.NotNil(t, cmd)
+
+	msg, ok := execPush(t, cmd).(statusMsg)
+	require.True(t, ok, "the refusal settles as a status error, not a pushed screen")
+	require.ErrorIs(t, msg.err, ErrTargetOverlapsArchive)
+	assert.False(t, planned, "the guard runs before the plan")
+}
+
 func TestExtractPromptScreen(t *testing.T) {
 	t.Parallel()
 

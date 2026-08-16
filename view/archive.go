@@ -1012,6 +1012,19 @@ func (a *Archive) Extract(
 		return ExtractSummary{}, err
 	}
 
+	// Every scope's root is validated before the first job is built, so a
+	// refusal for a later organization cannot land after earlier ones already
+	// extracted into the target.
+	orgs := make([]*Org, 0, len(scopes))
+	for _, sc := range scopes {
+		orgs = append(orgs, sc.org)
+	}
+
+	err = checkExtractTarget(orgs, target)
+	if err != nil {
+		return ExtractSummary{}, err
+	}
+
 	var total ExtractSummary
 
 	for _, sc := range scopes {

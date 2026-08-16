@@ -225,6 +225,15 @@ func extractPrompt(org *Org, label string, plan func() ([]extractJob, error)) fu
 	return func() (screen, error) {
 		return newExtractPromptScreen(label, org.remote != nil, defaultTarget(),
 			func(target string) (screen, error) {
+				// The refusal runs synchronously at the confirm, before the
+				// extract goroutine exists, so a target inside the archive
+				// surfaces as the prompt's error rather than a run that
+				// writes into the archive.
+				err := checkExtractTarget([]*Org{org}, target)
+				if err != nil {
+					return nil, err
+				}
+
 				jobs, err := plan()
 				if err != nil {
 					return nil, err
