@@ -222,3 +222,30 @@ func TestWalkFilesDeclinesALinkToAnAncestorOfTheRoot(t *testing.T) {
 		filepath.Join(root, "up", "archive"): root,
 	}, aliases)
 }
+
+//nolint:paralleltest // t.Chdir is incompatible with t.Parallel, and the case needs a working-directory-relative root.
+func TestWalkFilesRelativeRootWithAbsoluteLinkTarget(t *testing.T) {
+	// A relative walk root meets a symlink whose resolution is absolute
+	// (filepath.EvalSymlinks answers absolute whenever any link component
+	// is). The ownership comparisons must still match, or the same physical
+	// subtree walks and reports twice with no alias recorded.
+	base := t.TempDir()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "demo", "tree", "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(base, "demo", "tree", "sub", "inner.txt"), []byte("x"), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join(base, "demo", "tree", "sub"), filepath.Join(base, "demo", "backlink")))
+
+	t.Chdir(base)
+
+	var got []string
+
+	aliases, err := fsid.WalkFiles(t.Context(), "demo", func(logical string) error {
+		got = append(got, filepath.ToSlash(logical))
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	assert.Len(t, got, 1, "one physical file reports exactly once: %v", got)
+	assert.Len(t, aliases, 1, "the declined second spelling surfaces as an alias: %v", aliases)
+}

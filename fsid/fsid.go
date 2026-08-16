@@ -15,14 +15,23 @@ import (
 // rename symlink and its target, say) map to one string, fit for use as a
 // map key.
 //
-// The path need not exist. Resolution walks up to the deepest existing
-// ancestor, resolves that, and rejoins the missing remainder, so a directory
-// about to be created beneath a symlinked parent aliases its physical
-// location before anything exists at the path. A resolution fault other than
-// absence falls back to the cleaned path: the result is an identity, not an
-// I/O handle, and a degraded identity only weakens alias detection to the
-// plain path equality the caller started with.
+// The path need not exist. Resolution starts from the absolute form, so a
+// relative and an absolute spelling of one location share one identity and
+// the result compares reliably against other resolved paths, which
+// [filepath.EvalSymlinks] answers absolute whenever any link component is.
+// It then walks up to the deepest existing ancestor, resolves that, and
+// rejoins the missing remainder, so a directory about to be created beneath
+// a symlinked parent aliases its physical location before anything exists at
+// the path. A resolution fault other than absence falls back to the cleaned
+// path: the result is an identity, not an I/O handle, and a degraded
+// identity only weakens alias detection to the plain path equality the
+// caller started with.
 func Canonical(path string) string {
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = abs
+	}
+
 	path = filepath.Clean(path)
 	probe := path
 
@@ -79,8 +88,11 @@ func WalkFiles(ctx context.Context, root string, fn func(logical string) error) 
 
 	// The root resolves up front, so a walk rooted at a symlink (a relocated
 	// subtree walked directly) traverses its physical tree while reporting
-	// under the requested logical root.
-	err := w.walk(ctx, Canonical(root), root)
+	// under the requested logical root. The physical side is canonical and
+	// with it absolute, so the ownership comparisons hold against resolved
+	// link targets (absolute whenever any link component is) even when the
+	// caller's root is relative; the logical names keep the root as given.
+	err := w.walk(ctx, Canonical(root), filepath.Clean(root))
 
 	return w.aliases, err
 }
