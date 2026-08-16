@@ -101,18 +101,18 @@ type pushMsg struct {
 // initializer is the optional screen hook for startup work: a screen that
 // implements it has its init command run by the root model as it is pushed.
 // Screens have no Bubble Tea Init of their own, so this is how an async
-// screen ([*unsealProgressScreen]) starts its work and its first listen.
+// screen ([*extractProgressScreen]) starts its work and its first listen.
 type initializer interface {
 	init() tea.Cmd
 }
 
 // closer is the optional screen hook for teardown: a screen owning something
-// that outlives its own update loop (an unseal run's goroutine and the context
+// that outlives its own update loop (an extract run's goroutine and the context
 // bounding it) implements it, and the root model closes the screen as it
 // leaves the stack. Screens never see the quit that ends the program, so this
 // is the only place such a run can be stopped.
 //
-// See [*unsealProgressScreen] for an implementation.
+// See [*extractProgressScreen] for an implementation.
 type closer interface {
 	close()
 }
@@ -342,7 +342,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
-		// Another spinner's tick (an unseal run's) belongs to the screen below.
+		// Another spinner's tick (an extract run's) belongs to the screen below.
 
 	case tea.KeyPressMsg:
 		m.status = ""
@@ -453,7 +453,7 @@ func (m *model) abandonLoads() {
 
 // teardown closes every stacked screen and returns the command that ends the
 // program. A quit taken at the root model -- a ctrl+c, or a screen signaling
-// [quitMsg] -- never reaches the screens themselves, so without this an unseal
+// [quitMsg] -- never reaches the screens themselves, so without this an extract
 // still running under the top screen would keep its goroutine blocked on a
 // channel whose receiver left with the program.
 func (m *model) teardown() tea.Cmd {

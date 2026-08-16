@@ -17,35 +17,40 @@ func DecompressMemberBoundedForTest(method uint16, compressed []byte, limit int6
 	return decompressMemberBounded(method, compressed, limit)
 }
 
-// UnsealJob aliases the unexported job type so the external test package can
+// ExtractJob aliases the unexported job type so the external test package can
 // carry plans between the plan and run shims.
-type UnsealJob = unsealJob
+type ExtractJob = extractJob
 
-// UnsealEvent aliases the unexported event type; its fields are exported, so
+// ExtractEvent aliases the unexported event type; its fields are exported, so
 // tests assert on them directly.
-type UnsealEvent = unsealEvent
+type ExtractEvent = extractEvent
 
-// PlanWorkspaceUnsealForTest exposes [Org.planWorkspaceUnseal] to tests.
-func PlanWorkspaceUnsealForTest(o *Org, ws *Workspace) ([]UnsealJob, error) {
-	return o.planWorkspaceUnseal(ws)
+// PlanWorkspaceExtractForTest exposes [Org.planWorkspaceExtract] to tests.
+func PlanWorkspaceExtractForTest(o *Org, ws *Workspace) ([]ExtractJob, error) {
+	return o.planWorkspaceExtract(ws)
 }
 
-// PlanProjectUnsealForTest exposes [Org.planProjectUnseal] to tests.
-func PlanProjectUnsealForTest(o *Org, project string) ([]UnsealJob, error) {
-	return o.planProjectUnseal(project)
+// PlanProjectExtractForTest exposes [Org.planProjectExtract] to tests.
+func PlanProjectExtractForTest(o *Org, project string) ([]ExtractJob, error) {
+	return o.planProjectExtract(project)
 }
 
-// RunUnsealForTest drives [runUnseal] synchronously, returning the per-file
+// RunExtractForTest drives [runExtract] synchronously, returning the per-file
 // events and the terminal summary (zero when the run was canceled before it
 // finished).
-func RunUnsealForTest(ctx context.Context, org *Org, target string, jobs []UnsealJob) ([]UnsealEvent, UnsealSummary) {
-	events := make(chan unsealEvent)
+func RunExtractForTest(
+	ctx context.Context,
+	org *Org,
+	target string,
+	jobs []ExtractJob,
+) ([]ExtractEvent, ExtractSummary) {
+	events := make(chan extractEvent)
 
-	go runUnseal(ctx, org, target, jobs, events)
+	go runExtract(ctx, org, target, jobs, events)
 
 	var (
-		perFile []UnsealEvent
-		summary UnsealSummary
+		perFile []ExtractEvent
+		summary ExtractSummary
 	)
 
 	for ev := range events {
@@ -61,10 +66,10 @@ func RunUnsealForTest(ctx context.Context, org *Org, target string, jobs []Unsea
 	return perFile, summary
 }
 
-// WriteUnsealedForTest exposes [writeUnsealed] to tests, streaming data as the
+// WriteExtractedForTest exposes [writeExtracted] to tests, streaming data as the
 // object's bytes.
-func WriteUnsealedForTest(ctx context.Context, target, org, rel string, data []byte) error {
-	_, err := writeUnsealed(ctx, target, org, rel, func(_ context.Context, _ string, w io.Writer) (int64, error) {
+func WriteExtractedForTest(ctx context.Context, target, org, rel string, data []byte) error {
+	_, err := writeExtracted(ctx, target, org, rel, func(_ context.Context, _ string, w io.Writer) (int64, error) {
 		n, err := w.Write(data)
 
 		return int64(n), err //nolint:wrapcheck // A test shim over one write.

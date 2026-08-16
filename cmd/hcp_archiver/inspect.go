@@ -33,11 +33,11 @@ const (
 )
 
 var (
-	// ErrUnsealIncomplete indicates an unseal run finished but some objects
+	// ErrExtractIncomplete indicates an extract run finished but some objects
 	// could not be read or written.
-	ErrUnsealIncomplete = errors.New("some objects could not be unsealed")
+	ErrExtractIncomplete = errors.New("some objects could not be extracted")
 
-	// ErrTargetInArchive indicates an unseal or export target sits inside the
+	// ErrTargetInArchive indicates an extract or export target sits inside the
 	// archive directory being read, where the written files would land in the
 	// archive itself.
 	ErrTargetInArchive = errors.New("target must be outside the archive directory")
@@ -49,7 +49,7 @@ var (
 
 // inspectLong is the addressing contract the three read commands share.
 const inspectLong = `Objects are addressed by org-prefixed archive paths ("<org>/<path>"), the
-same layout an unseal reproduces beneath its target, whether the archive
+same layout an extract reproduces beneath its target, whether the archive
 directory is the archive root or a single organization's directory.
 
 Positional arguments bind left to right: with two arguments the first is the
@@ -307,9 +307,9 @@ directory.`,
 	return cmd
 }
 
-// newUnsealCmd returns a command that extracts archived objects into a plain
+// newExtractCmd returns a command that extracts archived objects into a plain
 // directory tree, expanding sealed forms back into loose files.
-func newUnsealCmd() *cobra.Command {
+func newExtractCmd() *cobra.Command {
 	var (
 		target  string
 		dryRun  bool
@@ -318,7 +318,7 @@ func newUnsealCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "unseal [archive-dir] [path]",
+		Use:   "extract [archive-dir] [path]",
 		Short: "Extract archived objects into a plain directory tree",
 		Long: `Extract every archived object at or beneath an archive path into a target
 directory, expanding roll-ups and bundles back into loose files. The target
@@ -359,11 +359,11 @@ mirror, the one egress a dry run may cost.`,
 
 		arc, err := openArchive(ctx, dir, rcfg)
 		if err != nil {
-			return hintLoneArg(err, "unseal", args)
+			return hintLoneArg(err, "extract", args)
 		}
 
 		if dryRun {
-			return unsealDryRun(cc.OutOrStdout(), cc.ErrOrStderr(), arc, prefix, target, jsonOut)
+			return extractDryRun(cc.OutOrStdout(), cc.ErrOrStderr(), arc, prefix, target, jsonOut)
 		}
 
 		if target == "" {
@@ -375,23 +375,23 @@ mirror, the one egress a dry run may cost.`,
 			return err
 		}
 
-		return runUnsealCmd(ctx, cc, arc, prefix, target, verbose, jsonOut)
+		return runExtractCmd(ctx, cc, arc, prefix, target, verbose, jsonOut)
 	}
 
 	flags := cmd.Flags()
 	flags.StringVarP(&target, flagTarget, "t", "", "directory to write recovered files into")
-	flags.BoolVar(&dryRun, flagDryRun, false, "summarize what would be unsealed without writing")
+	flags.BoolVar(&dryRun, flagDryRun, false, "summarize what would be extracted without writing")
 	flags.BoolVarP(&verbose, flagVerbose, "v", false, "stream one line per recovered file to stderr")
 	flags.BoolVar(&jsonOut, flagJSON, false, "emit the summary as JSON")
 
 	return cmd
 }
 
-// runUnsealCmd drives one unseal run and reports its summary. Per-file
+// runExtractCmd drives one extract run and reports its summary. Per-file
 // failures always stream to stderr; verbose adds a line per recovered file.
 // An interrupt reports the partial totals to stderr and exits cleanly,
 // matching the archive command's signal semantics.
-func runUnsealCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
+func runExtractCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
 	prefix, target string, verbose, jsonOut bool,
 ) error {
 	errW := cc.ErrOrStderr()
@@ -405,13 +405,13 @@ func runUnsealCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
 		}
 	}
 
-	sum, err := arc.Unseal(ctx, target, prefix, progress)
+	sum, err := arc.Extract(ctx, target, prefix, progress)
 
 	warnDegraded(errW, arc)
 
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			eprintf(errW, "unseal interrupted: %s (%s) written into %s\n",
+			eprintf(errW, "extract interrupted: %s (%s) written into %s\n",
 				theme.CountNoun(sum.Files, "object", "objects"), theme.HumanBytes(sum.Bytes), target)
 
 			return nil
@@ -420,19 +420,19 @@ func runUnsealCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
 		return describeNoOrg(err, arc)
 	}
 
-	err = writeUnsealSummary(cc.OutOrStdout(), unsealOutcome{summary: sum, target: target}, jsonOut)
+	err = writeExtractSummary(cc.OutOrStdout(), extractOutcome{summary: sum, target: target}, jsonOut)
 	if err != nil {
 		return err
 	}
 
 	if sum.Errored > 0 {
-		return fmt.Errorf("%w: %d of %d objects", ErrUnsealIncomplete, sum.Errored, sum.Errored+sum.Files)
+		return fmt.Errorf("%w: %d of %d objects", ErrExtractIncomplete, sum.Errored, sum.Errored+sum.Files)
 	}
 
 	return nil
 }
 
-// unsealDryRun summarizes an unseal from the listing without writing: the
+// extractDryRun summarizes an extract from the listing without writing: the
 // listing carries the same entries in the same order as the plan the real run
 // executes, so the totals predict it.
 //
@@ -454,7 +454,7 @@ func runUnsealCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
 // run. The one egress a dry run may cost is the listing's own machinery: a
 // workspace whose sealed indexes (roll-ups, sidecars) are not on disk has them
 // fetched from the mirror so the plan covers its sealed objects at all.
-func unsealDryRun(out, errW io.Writer, arc *view.Archive, prefix, target string, jsonOut bool) error {
+func extractDryRun(out, errW io.Writer, arc *view.Archive, prefix, target string, jsonOut bool) error {
 	entries, err := arc.List(prefix)
 	if err != nil {
 		return describeNoOrg(err, arc)
@@ -467,13 +467,13 @@ func unsealDryRun(out, errW io.Writer, arc *view.Archive, prefix, target string,
 		mirrored[org.Name] = org.HasRemote()
 	}
 
-	outcome := unsealOutcome{target: target, dryRun: true}
+	outcome := extractOutcome{target: target, dryRun: true}
 
 	for _, e := range entries {
 		if e.Offloaded && !mirrored[e.Org] {
 			outcome.summary.Errored++
 
-			eprintf(errW, "%s: cannot be unsealed; its bytes are in the remote store "+
+			eprintf(errW, "%s: cannot be extracted; its bytes are in the remote store "+
 				"and the organization records no mirror to fetch them from\n", e.ArchivePath())
 
 			continue
@@ -488,20 +488,20 @@ func unsealDryRun(out, errW io.Writer, arc *view.Archive, prefix, target string,
 		outcome.summary.Bytes += e.Size
 	}
 
-	err = writeUnsealSummary(out, outcome, jsonOut)
+	err = writeExtractSummary(out, outcome, jsonOut)
 	if err != nil {
 		return err
 	}
 
 	if outcome.summary.Errored > 0 {
 		return fmt.Errorf("%w: %d of %d objects",
-			ErrUnsealIncomplete, outcome.summary.Errored, outcome.summary.Errored+outcome.summary.Files)
+			ErrExtractIncomplete, outcome.summary.Errored, outcome.summary.Errored+outcome.summary.Files)
 	}
 
 	return nil
 }
 
-// unsealVolume counts the objects an unseal plans to pull down from the
+// extractVolume counts the objects an extract plans to pull down from the
 // mirror, an estimate of the egress a run costs.
 //
 // The byte figure is each object's archived length, which is exact for a
@@ -510,26 +510,26 @@ func unsealDryRun(out, errW io.Writer, arc *view.Archive, prefix, target string,
 // crosses the wire. Only the bundle's central directory knows that span, and
 // reading it is a network round trip per bundle, which sizing the plan
 // deliberately skips.
-type unsealVolume struct {
+type extractVolume struct {
 	bytes int64
 	files int
 }
 
-// unsealOutcome is one unseal's reported result: a finished run's totals, or a
+// extractOutcome is one extract's reported result: a finished run's totals, or a
 // dry run's prediction of them.
 //
 // The remote volume is a dry run's alone. A finished run has already spent
 // whatever egress it spent, so reporting it there would only add a field that
 // is always zero to every summary the real command writes.
-type unsealOutcome struct {
+type extractOutcome struct {
 	target  string
-	summary view.UnsealSummary
-	remote  unsealVolume
+	summary view.ExtractSummary
+	remote  extractVolume
 	dryRun  bool
 }
 
-// unsealReport is the wire shape of an unseal summary under --json.
-type unsealReport struct {
+// extractReport is the wire shape of an extract summary under --json.
+type extractReport struct {
 	Target      string `json:"target"`
 	Files       int    `json:"files"`
 	Bytes       int64  `json:"bytes"`
@@ -539,11 +539,11 @@ type unsealReport struct {
 	DryRun      bool   `json:"dryRun"`
 }
 
-// writeUnsealSummary reports one run's totals to out, as one human line or one
+// writeExtractSummary reports one run's totals to out, as one human line or one
 // JSON object.
-func writeUnsealSummary(out io.Writer, oc unsealOutcome, jsonOut bool) error {
+func writeExtractSummary(out io.Writer, oc extractOutcome, jsonOut bool) error {
 	if jsonOut {
-		err := json.NewEncoder(out).Encode(unsealReport{
+		err := json.NewEncoder(out).Encode(extractReport{
 			Target:      oc.target,
 			Files:       oc.summary.Files,
 			Bytes:       oc.summary.Bytes,
@@ -562,9 +562,9 @@ func writeUnsealSummary(out io.Writer, oc unsealOutcome, jsonOut bool) error {
 	var b strings.Builder
 
 	if oc.dryRun {
-		b.WriteString("would unseal ")
+		b.WriteString("would extract ")
 	} else {
-		b.WriteString("unsealed ")
+		b.WriteString("extracted ")
 	}
 
 	fmt.Fprintf(&b, "%s (%s)",
@@ -681,7 +681,7 @@ func displayForm(e view.Entry) string {
 	return string(e.Form)
 }
 
-// archiveArgs binds the list/unseal positionals to (directory, archive path):
+// archiveArgs binds the list/extract positionals to (directory, archive path):
 // required arguments first, so a lone argument names the archive directory
 // and the optional archive path stays empty (the whole archive).
 func archiveArgs(args []string) (string, string) {

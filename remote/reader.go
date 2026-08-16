@@ -231,7 +231,7 @@ func (v objectVersion) String() string {
 // leave on it. It carries the settlements this package reaches for itself,
 // none of which the classification of a store's response describes: a
 // caller's destination refusing the bytes a download delivers (a full disk
-// under an unseal target), a replacement observed part way through a resumed
+// under an extract target), a replacement observed part way through a resumed
 // download, an object shorter than the size a ranged read is measured
 // against. Each classifies unknown, and each would only spend the request
 // again to fail the same way.

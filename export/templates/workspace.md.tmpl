@@ -16,7 +16,7 @@ See the workspace's {{link "readme" "readme.md"}}.
 
 ```sh
 {{if .Example}}hcp_archiver show <archive-dir> '{{.Example}}'
-{{end}}hcp_archiver unseal <archive-dir> '{{.Dir}}' --target <output-dir>
+{{end}}hcp_archiver extract <archive-dir> '{{.Dir}}' --target <output-dir>
 ```
 
 | ID | Created | Status | Message | Source | Terraform | Destroy | Changes | Archived artifacts |
@@ -29,7 +29,7 @@ See the workspace's {{link "readme" "readme.md"}}.
 
 ```sh
 {{if .Example}}hcp_archiver show <archive-dir> '{{.Example}}'
-{{end}}hcp_archiver unseal <archive-dir> '{{.Dir}}' --target <output-dir>
+{{end}}hcp_archiver extract <archive-dir> '{{.Dir}}' --target <output-dir>
 ```
 
 | ID | Created | Serial | Status | Size | Archived blobs |

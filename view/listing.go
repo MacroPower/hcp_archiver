@@ -60,13 +60,13 @@ type Entry struct {
 	// downloaded whole, and a warm object the mirror holds but the local tree
 	// does not yet is fetched and persisted locally by the read itself. None
 	// is reachable in an organization that records no mirror (see
-	// [*Org.HasRemote]), where an unseal counts the object as one it could
+	// [*Org.HasRemote]), where an extract counts the object as one it could
 	// not recover.
 	Offloaded bool
 }
 
 // ArchivePath returns [path.Join](e.Org, e.Path), the form [*Archive.Read]
-// accepts and an unseal reproduces beneath its target.
+// accepts and an extract reproduces beneath its target.
 func (e Entry) ArchivePath() string {
 	return path.Join(e.Org, e.Path)
 }
@@ -678,7 +678,7 @@ func (o *Org) rootStub(relDir string) []string {
 // workspace's sealed-form directory ([store.InSealedForm]), a
 // [manifest.LedgerDirName] bookkeeping directory, the org-root remote marker,
 // a directory's [store.IdentityFileName] sidecar, or an atomic writer's
-// staging leftover. Listings hide machinery and unseals skip it; [*Org.Read]
+// staging leftover. Listings hide machinery and extracts skip it; [*Org.Read]
 // deliberately does not filter on it.
 //
 // The sealed-form match is positional: only the bundles/ and rollups/

@@ -264,15 +264,15 @@ func TestShowCmd_RequiresAPath(t *testing.T) {
 	require.Error(t, err, "show without a path is a usage error")
 }
 
-func TestUnsealCmd(t *testing.T) {
+func TestExtractCmd(t *testing.T) {
 	t.Parallel()
 
 	root := buildMiniArchive(t)
 	target := t.TempDir()
 
-	out, _, err := runCmd(t, "unseal", root, "--target", target)
+	out, _, err := runCmd(t, "extract", root, "--target", target)
 	require.NoError(t, err)
-	assert.Contains(t, out, "unsealed")
+	assert.Contains(t, out, "extracted")
 	assert.Contains(t, out, target)
 
 	// Every physical form lands as a plain file with exact bytes.
@@ -289,7 +289,7 @@ func TestUnsealCmd(t *testing.T) {
 	assert.JSONEq(t, miniOrgContent, string(got))
 }
 
-func TestUnsealCmd_DryRunMatchesList(t *testing.T) {
+func TestExtractCmd_DryRunMatchesList(t *testing.T) {
 	t.Parallel()
 
 	root := buildMiniArchive(t)
@@ -312,7 +312,7 @@ func TestUnsealCmd_DryRunMatchesList(t *testing.T) {
 		wantBytes += rec.Size
 	}
 
-	out, _, err := runCmd(t, "unseal", root, "--dry-run", "--json")
+	out, _, err := runCmd(t, "extract", root, "--dry-run", "--json")
 	require.NoError(t, err)
 
 	var report struct {
@@ -369,7 +369,7 @@ func mirrorMiniTarball(t *testing.T, root, content string) string {
 	return "mini-org/" + rel
 }
 
-func TestUnsealCmd_FetchesEvictedTarballFromMirror(t *testing.T) {
+func TestExtractCmd_FetchesEvictedTarballFromMirror(t *testing.T) {
 	t.Parallel()
 
 	const content = "mirrored tarball bytes"
@@ -380,34 +380,34 @@ func TestUnsealCmd_FetchesEvictedTarballFromMirror(t *testing.T) {
 	// The dry run predicts a complete recovery, and says what the run will
 	// pull down to get there: with no opt-out flag, this is where an operator
 	// sees the egress before paying it.
-	out, _, err := runCmd(t, "unseal", root, "--dry-run", "--json")
+	out, _, err := runCmd(t, "extract", root, "--dry-run", "--json")
 	require.NoError(t, err, "an evicted object with a mirror behind it is recoverable")
 
-	type unsealReport struct {
+	type extractReport struct {
 		Files       int   `json:"files"`
 		Errored     int   `json:"errored"`
 		RemoteFiles int   `json:"remoteFiles"`
 		RemoteBytes int64 `json:"remoteBytes"`
 	}
 
-	var predicted unsealReport
+	var predicted extractReport
 
 	require.NoError(t, json.Unmarshal([]byte(out), &predicted))
 	assert.Zero(t, predicted.Errored)
 	assert.Equal(t, 1, predicted.RemoteFiles)
 	assert.EqualValues(t, len(content), predicted.RemoteBytes)
 
-	text, _, err := runCmd(t, "unseal", root, "--dry-run")
+	text, _, err := runCmd(t, "extract", root, "--dry-run")
 	require.NoError(t, err)
 	assert.Contains(t, text, "to fetch from the remote store")
 
 	// And the run delivers it: the bytes come back from the bucket, byte-exact.
 	target := t.TempDir()
 
-	summary, _, err := runCmd(t, "unseal", root, "--target", target, "--json")
+	summary, _, err := runCmd(t, "extract", root, "--target", target, "--json")
 	require.NoError(t, err)
 
-	var ran unsealReport
+	var ran extractReport
 
 	require.NoError(t, json.Unmarshal([]byte(summary), &ran))
 	assert.Zero(t, ran.Errored)
@@ -442,7 +442,7 @@ func TestListCmd_EvictedObjectsReadRemote(t *testing.T) {
 	assert.NotContains(t, out, ".remote.json", "its stub is not")
 }
 
-func TestUnsealCmd_DryRunCountsRemoteOnlyObjects(t *testing.T) {
+func TestExtractCmd_DryRunCountsRemoteOnlyObjects(t *testing.T) {
 	t.Parallel()
 
 	// The dry run predicts the run it plans. It cannot foresee every failure,
@@ -456,8 +456,8 @@ func TestUnsealCmd_DryRunCountsRemoteOnlyObjects(t *testing.T) {
 
 	wantEntries := len(strings.Split(strings.TrimSpace(listOut), "\n"))
 
-	out, _, err := runCmd(t, "unseal", root, "--dry-run", "--json")
-	require.ErrorIs(t, err, main.ErrUnsealIncomplete)
+	out, _, err := runCmd(t, "extract", root, "--dry-run", "--json")
+	require.ErrorIs(t, err, main.ErrExtractIncomplete)
 
 	var report struct {
 		Files   int  `json:"files"`
@@ -474,21 +474,21 @@ func TestUnsealCmd_DryRunCountsRemoteOnlyObjects(t *testing.T) {
 	// The real run reaches the same verdict, by trying.
 	target := t.TempDir()
 
-	summary, _, err := runCmd(t, "unseal", root, "--target", target, "--json")
-	require.ErrorIs(t, err, main.ErrUnsealIncomplete)
+	summary, _, err := runCmd(t, "extract", root, "--target", target, "--json")
+	require.ErrorIs(t, err, main.ErrExtractIncomplete)
 
 	require.NoError(t, json.Unmarshal([]byte(summary), &report))
 	assert.Equal(t, 1, report.Errored)
 
 	// The text summary says what a dry run can honestly say: nothing has been
 	// attempted, so nothing has errored yet.
-	text, _, err := runCmd(t, "unseal", root, "--dry-run")
-	require.ErrorIs(t, err, main.ErrUnsealIncomplete)
+	text, _, err := runCmd(t, "extract", root, "--dry-run")
+	require.ErrorIs(t, err, main.ErrExtractIncomplete)
 	assert.Contains(t, text, "1 not recoverable")
 	assert.NotContains(t, text, "errored")
 }
 
-func TestUnsealCmd_DryRunCountsOffloadedBundleMembers(t *testing.T) {
+func TestExtractCmd_DryRunCountsOffloadedBundleMembers(t *testing.T) {
 	t.Parallel()
 
 	// An evicted bundle in an organization recording no mirror loses its
@@ -500,8 +500,8 @@ func TestUnsealCmd_DryRunCountsOffloadedBundleMembers(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(root, "mini-org",
 		filepath.FromSlash(miniWs), "bundles", "logs.gen0001.zip")))
 
-	out, errOut, err := runCmd(t, "unseal", root, "--dry-run", "--json")
-	require.ErrorIs(t, err, main.ErrUnsealIncomplete)
+	out, errOut, err := runCmd(t, "extract", root, "--dry-run", "--json")
+	require.ErrorIs(t, err, main.ErrExtractIncomplete)
 
 	var predicted struct {
 		Errored     int `json:"errored"`
@@ -516,8 +516,8 @@ func TestUnsealCmd_DryRunCountsOffloadedBundleMembers(t *testing.T) {
 	// The real run reaches the same verdict, by trying.
 	target := t.TempDir()
 
-	summary, _, err := runCmd(t, "unseal", root, "--target", target, "--json")
-	require.ErrorIs(t, err, main.ErrUnsealIncomplete)
+	summary, _, err := runCmd(t, "extract", root, "--target", target, "--json")
+	require.ErrorIs(t, err, main.ErrExtractIncomplete)
 
 	var ran struct {
 		Errored int `json:"errored"`
@@ -527,23 +527,23 @@ func TestUnsealCmd_DryRunCountsOffloadedBundleMembers(t *testing.T) {
 	assert.Equal(t, 1, ran.Errored)
 }
 
-func TestUnsealCmd_DryRunText(t *testing.T) {
+func TestExtractCmd_DryRunText(t *testing.T) {
 	t.Parallel()
 
 	root := buildMiniArchive(t)
 
-	out, _, err := runCmd(t, "unseal", root, "--dry-run")
+	out, _, err := runCmd(t, "extract", root, "--dry-run")
 	require.NoError(t, err)
-	assert.Contains(t, out, "would unseal")
+	assert.Contains(t, out, "would extract")
 }
 
-func TestUnsealCmd_JSONSummary(t *testing.T) {
+func TestExtractCmd_JSONSummary(t *testing.T) {
 	t.Parallel()
 
 	root := buildMiniArchive(t)
 	target := t.TempDir()
 
-	out, _, err := runCmd(t, "unseal", root, "--target", target, "--json")
+	out, _, err := runCmd(t, "extract", root, "--target", target, "--json")
 	require.NoError(t, err)
 
 	var report struct {
@@ -560,32 +560,32 @@ func TestUnsealCmd_JSONSummary(t *testing.T) {
 	assert.False(t, report.DryRun)
 }
 
-func TestUnsealCmd_RequiresTarget(t *testing.T) {
+func TestExtractCmd_RequiresTarget(t *testing.T) {
 	t.Parallel()
 
 	root := buildMiniArchive(t)
 
-	_, _, err := runCmd(t, "unseal", root)
+	_, _, err := runCmd(t, "extract", root)
 	require.ErrorIs(t, err, view.ErrNoTarget)
 }
 
-func TestUnsealCmd_RefusesTargetInsideArchive(t *testing.T) {
+func TestExtractCmd_RefusesTargetInsideArchive(t *testing.T) {
 	t.Parallel()
 
 	root := buildMiniArchive(t)
 
-	_, _, err := runCmd(t, "unseal", root, "--target", filepath.Join(root, "restore"))
+	_, _, err := runCmd(t, "extract", root, "--target", filepath.Join(root, "restore"))
 	require.ErrorIs(t, err, main.ErrTargetInArchive)
 
 	// A sibling sharing the directory-name prefix is outside.
 	sibling := root + "-restore"
 	t.Cleanup(func() { _ = os.RemoveAll(sibling) })
 
-	_, _, err = runCmd(t, "unseal", root, "--target", sibling)
+	_, _, err = runCmd(t, "extract", root, "--target", sibling)
 	require.NoError(t, err)
 }
 
-func TestUnsealCmd_PerFileFailuresExitNonzero(t *testing.T) {
+func TestExtractCmd_PerFileFailuresExitNonzero(t *testing.T) {
 	t.Parallel()
 
 	// An evicted-looking bundle (zip gone, sidecar kept, no remote) makes its
@@ -597,9 +597,9 @@ func TestUnsealCmd_PerFileFailuresExitNonzero(t *testing.T) {
 
 	target := t.TempDir()
 
-	out, stderr, err := runCmd(t, "unseal", root, "--target", target)
-	require.ErrorIs(t, err, main.ErrUnsealIncomplete)
-	assert.Contains(t, out, "unsealed")
+	out, stderr, err := runCmd(t, "extract", root, "--target", target)
+	require.ErrorIs(t, err, main.ErrExtractIncomplete)
+	assert.Contains(t, out, "extracted")
 	assert.Contains(t, out, "1 errored")
 	assert.Contains(t, stderr, miniPlanPath, "the failed file is reported on stderr")
 
@@ -609,13 +609,13 @@ func TestUnsealCmd_PerFileFailuresExitNonzero(t *testing.T) {
 	assert.JSONEq(t, miniCVContent, string(got))
 }
 
-func TestUnsealCmd_Verbose(t *testing.T) {
+func TestExtractCmd_Verbose(t *testing.T) {
 	t.Parallel()
 
 	root := buildMiniArchive(t)
 	target := t.TempDir()
 
-	_, stderr, err := runCmd(t, "unseal", root, "--target", target, "-v")
+	_, stderr, err := runCmd(t, "extract", root, "--target", target, "-v")
 	require.NoError(t, err)
 	assert.Contains(t, stderr, miniPlanPath, "verbose streams one line per file to stderr")
 }

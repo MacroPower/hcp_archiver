@@ -565,7 +565,7 @@ func TestRead_EvictedTarballStaysRemoteOnly(t *testing.T) {
 		"read-through never re-materializes an evicted surface")
 }
 
-func TestUnseal_FetchesTarballWithoutLocalStub(t *testing.T) {
+func TestExtract_FetchesTarballWithoutLocalStub(t *testing.T) {
 	t.Parallel()
 
 	fake := buildMirroredArchive(t)
@@ -580,7 +580,7 @@ func TestUnseal_FetchesTarballWithoutLocalStub(t *testing.T) {
 	orgs, dir := openBootstrap(t, fake)
 	target := t.TempDir()
 
-	sum2, err := view.NewArchive(orgs).Unseal(t.Context(), target, "my-org/"+rel, nil)
+	sum2, err := view.NewArchive(orgs).Extract(t.Context(), target, "my-org/"+rel, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, sum2.Files)
 	assert.Zero(t, sum2.Errored)

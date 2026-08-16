@@ -3,7 +3,7 @@
 // history, run history, the configuration that produced each run, and the
 // surrounding org-level metadata as plain files. Read-only subcommands browse
 // an existing archive (view) and list, print, or extract its objects (list,
-// show, unseal). It does not restore anything back into HCP Terraform.
+// show, extract). It does not restore anything back into HCP Terraform.
 //
 // It is a thin entrypoint. It builds the command-line interface, binds flags
 // and environment variables into a configuration, constructs the archiver, runs

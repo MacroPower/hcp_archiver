@@ -175,7 +175,7 @@ func TestArchiveRead(t *testing.T) {
 	}
 }
 
-func TestArchiveUnsealScopes(t *testing.T) {
+func TestArchiveExtractScopes(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
@@ -200,7 +200,7 @@ func TestArchiveUnsealScopes(t *testing.T) {
 			require.NoError(t, err)
 			require.NotEmpty(t, entries)
 
-			sum, err := arc.Unseal(t.Context(), target, tt.prefix, nil)
+			sum, err := arc.Extract(t.Context(), target, tt.prefix, nil)
 			require.NoError(t, err)
 			assert.Zero(t, sum.Errored)
 
@@ -228,31 +228,31 @@ func TestArchiveUnsealScopes(t *testing.T) {
 				got, fileErr := os.ReadFile(filepath.Join(target, filepath.FromSlash(e.ArchivePath())))
 				require.NoError(t, fileErr)
 
-				assert.Equal(t, want, got, "unsealed bytes for %s", e.ArchivePath())
+				assert.Equal(t, want, got, "extracted bytes for %s", e.ArchivePath())
 			}
 		})
 	}
 }
 
-func TestArchiveUnseal_EmptyTarget(t *testing.T) {
+func TestArchiveExtract_EmptyTarget(t *testing.T) {
 	t.Parallel()
 
 	arc := openArchiveTree(t, buildArchive(t))
 
-	_, err := arc.Unseal(t.Context(), "", "", nil)
+	_, err := arc.Extract(t.Context(), "", "", nil)
 	require.ErrorIs(t, err, view.ErrNoTarget)
 }
 
-func TestArchiveUnseal_UnknownOrg(t *testing.T) {
+func TestArchiveExtract_UnknownOrg(t *testing.T) {
 	t.Parallel()
 
 	arc := openArchiveTree(t, buildArchive(t))
 
-	_, err := arc.Unseal(t.Context(), t.TempDir(), "nope", nil)
+	_, err := arc.Extract(t.Context(), t.TempDir(), "nope", nil)
 	require.ErrorIs(t, err, view.ErrNoOrg)
 }
 
-func TestArchiveUnseal_CanceledContext(t *testing.T) {
+func TestArchiveExtract_CanceledContext(t *testing.T) {
 	t.Parallel()
 
 	arc := openArchiveTree(t, buildArchive(t))
@@ -260,12 +260,12 @@ func TestArchiveUnseal_CanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	sum, err := arc.Unseal(ctx, t.TempDir(), "", nil)
+	sum, err := arc.Extract(ctx, t.TempDir(), "", nil)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Zero(t, sum.Files, "a pre-canceled run writes nothing")
 }
 
-func TestArchiveUnseal_ProgressCallback(t *testing.T) {
+func TestArchiveExtract_ProgressCallback(t *testing.T) {
 	t.Parallel()
 
 	arc := openArchiveTree(t, buildMultiOrgArchive(t))
@@ -273,7 +273,7 @@ func TestArchiveUnseal_ProgressCallback(t *testing.T) {
 
 	var paths []string
 
-	sum, err := arc.Unseal(t.Context(), target, "", func(relPath string, bytes int64, err error) {
+	sum, err := arc.Extract(t.Context(), target, "", func(relPath string, bytes int64, err error) {
 		require.NoError(t, err)
 		assert.Positive(t, bytes)
 
@@ -290,7 +290,7 @@ func TestArchiveUnseal_ProgressCallback(t *testing.T) {
 	}
 }
 
-func TestArchiveUnseal_RemoteEviction(t *testing.T) {
+func TestArchiveExtract_RemoteEviction(t *testing.T) {
 	t.Parallel()
 
 	root, fake := buildRemoteArchive(t)
@@ -306,7 +306,7 @@ func TestArchiveUnseal_RemoteEviction(t *testing.T) {
 	arc := view.NewArchive(orgs)
 	target := t.TempDir()
 
-	sum, err := arc.Unseal(t.Context(), target, "my-org/"+wsDir, nil)
+	sum, err := arc.Extract(t.Context(), target, "my-org/"+wsDir, nil)
 	require.NoError(t, err)
 	assert.Zero(t, sum.Errored)
 

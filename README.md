@@ -161,26 +161,26 @@ shape.
 
 Evicted configuration tarballs stay visible too: eviction leaves a small stub
 in each tarball's place, so `list` still reports the object at its true size,
-shown as `remote`. `unseal` fetches one back from the mirror like any other
+shown as `remote`. `extract` fetches one back from the mirror like any other
 evicted object, verifying the bytes against the size and digest the eviction
 proved. Only `show` and the browser's viewer stop at such an object, since both
 hold what they read whole in memory and a tarball has no bound; they name its
 mirrored key (`<prefix>/<org>/config-versions/<id>.tar.gz`) to fetch with any
 client for the backing store.
 
-### Listing and unsealing files
+### Listing and extracting files
 
 Three plain, scriptable commands cover the same read surface without an
 interactive session: `list` enumerates archived objects, `show` prints one
-object's exact bytes to stdout, and `unseal` extracts any scope back into a
+object's exact bytes to stdout, and `extract` expands any scope back into a
 plain directory tree. All three read the physical forms transparently, so a
 freshly collected tree and a fully sealed one answer identically.
 
 Objects are addressed by org-prefixed archive paths (`<org>/<path>`), the same
-layout an unseal reproduces beneath its target, whether the command points at
+layout an extract reproduces beneath its target, whether the command points at
 the archive root or a single organization's directory. Positional arguments
 bind left to right: with two arguments the first is the archive directory and
-the second the archive path; a single argument to `list` and `unseal` names
+the second the archive path; a single argument to `list` and `extract` names
 the archive directory (pass `.` explicitly to address a path in the current
 directory), while a single argument to `show` is the archive path, read from
 the current directory.
@@ -189,7 +189,7 @@ the current directory.
 hcp_archiver list ./archive                       # every object, every org
 hcp_archiver list ./archive my-org/projects       # any path prefix
 hcp_archiver show ./archive my-org/org.json       # exact bytes to stdout
-hcp_archiver unseal ./archive my-org --target ./restore
+hcp_archiver extract ./archive my-org --target ./restore
 ```
 
 `list` prints one line per object (size, physical form, path), with sealed
@@ -207,7 +207,7 @@ browser's evicted-read path):
 
 `--json` switches `list` to NDJSON (one object per line, with `path`, `org`,
 `form`, and `size` on every line, plus `container`, `modified`, and
-`offloaded` where they apply) and `unseal` to a JSON summary. `unseal
+`offloaded` where they apply) and `extract` to a JSON summary. `extract
 --dry-run` reports what a run would write without writing, planning from the
 same listing over the same prefix, so it predicts the run it describes: every
 listed object is accounted for, either as one that would be written or as one
@@ -225,7 +225,7 @@ egress a dry run may spend is materializing a bootstrapped workspace's absent
 sealed indexes, so its plan can cover sealed objects at all). Both the text
 summary and the `errored` field of `--json` carry the count.
 
-`unseal -v` streams one line per recovered file to stderr, and per-file
+`extract -v` streams one line per recovered file to stderr, and per-file
 failures always land there. A run in which every object recovers exits 0; if
 any object fails, the failures are counted and reported and the command exits
 with status 1, and a dry run whose plan already holds one exits the same way.
@@ -366,7 +366,7 @@ choices are worth making deliberately:
 ### Reading an archive back from its mirror
 
 Every read command works even when the local files are partly or completely
-absent, as long as the mirror holds them. `view`, `list`, `show`, and `unseal`
+absent, as long as the mirror holds them. `view`, `list`, `show`, and `extract`
 all accept the mirror's location three ways: `--remote <bucket-url>` (with
 `--remote-prefix` for the key prefix), `-c/--config` naming a configuration
 file whose `remote:` block records it, or `$HCP_ARCHIVER_CONFIG` pointing at
@@ -387,7 +387,7 @@ archive path, so everything read once is local from then on. Listings union
 the mirror's inventory into the local tree (`list` shows not-yet-fetched
 objects as `remote`), and the two evicted surfaces keep their usual behavior:
 bundle members are read with ranged requests without ever pulling the zip
-down, and configuration tarballs stay remote-only for reads while `unseal`
+down, and configuration tarballs stay remote-only for reads while `extract`
 streams them to its target.
 
 The bootstrapped tree is a browse cache, not a canonical archive: its marker

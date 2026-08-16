@@ -16,7 +16,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// writeBytesJob builds an [unsealJob] write function serving fixed content, the
+// writeBytesJob builds an [extractJob] write function serving fixed content, the
 // shape the screen tests need without an archive behind it.
 func writeBytesJob(content string) func(context.Context, string, io.Writer) (int64, error) {
 	return func(_ context.Context, _ string, w io.Writer) (int64, error) {
@@ -43,51 +43,51 @@ func pressOn(s screen, k tea.Key) tea.Cmd {
 	return s.update(tea.KeyPressMsg(k))
 }
 
-func TestListScreenUnsealKeyPushesPrompt(t *testing.T) {
+func TestListScreenExtractKeyPushesPrompt(t *testing.T) {
 	t.Parallel()
 
-	// The hint (and the freed u binding) comes from the rows via
-	// newListScreen; there is no opt-in flag for a caller to forget.
-	prompt := stubScreen{name: "unseal"}
+	// The hint comes from the rows via newListScreen; there is no opt-in
+	// flag for a caller to forget.
+	prompt := stubScreen{name: "extract"}
 	s := newListScreen("test", []item{{
-		title:  "app",
-		desc:   "unsealable row",
-		unseal: func() (screen, error) { return prompt, nil },
+		title:   "app",
+		desc:    "extractable row",
+		extract: func() (screen, error) { return prompt, nil },
 	}})
 	s.setSize(80, 24)
 
-	cmd := pressOn(s, tea.Key{Code: 'u', Text: "u"})
+	cmd := pressOn(s, tea.Key{Code: 'e', Text: "e"})
 	require.NotNil(t, cmd)
 
 	msg, ok := execPush(t, cmd).(pushMsg)
-	require.True(t, ok, "u on an unsealable row descends into the prompt")
+	require.True(t, ok, "e on an extractable row descends into the prompt")
 	assert.Equal(t, prompt, msg.s)
 }
 
-func TestListScreenUnsealKeyIsTypableWhileFiltering(t *testing.T) {
+func TestListScreenExtractKeyIsTypableWhileFiltering(t *testing.T) {
 	t.Parallel()
 
 	s := newListScreen("test", []item{{
-		title:  "app",
-		desc:   "unsealable row",
-		unseal: func() (screen, error) { return stubScreen{}, nil },
+		title:   "app",
+		desc:    "extractable row",
+		extract: func() (screen, error) { return stubScreen{}, nil },
 	}})
 	s.setSize(80, 24)
 
 	pressOn(s, tea.Key{Code: '/', Text: "/"})
 	require.Equal(t, list.Filtering, s.list.FilterState())
 
-	pressOn(s, tea.Key{Code: 'u', Text: "u"})
+	pressOn(s, tea.Key{Code: 'e', Text: "e"})
 
 	assert.Equal(t, list.Filtering, s.list.FilterState(), "the key stays with the filter prompt")
-	assert.Equal(t, "u", s.list.FilterInput.Value(), "u types into the filter, not the unseal action")
+	assert.Equal(t, "e", s.list.FilterInput.Value(), "e types into the filter, not the extract action")
 }
 
-func TestListScreenUnsealKeyStillPagesWithoutUnsealRows(t *testing.T) {
+func TestListScreenExtractKeyInertWithoutExtractRows(t *testing.T) {
 	t.Parallel()
 
-	// A screen without unsealable rows keeps the stock keymap, where u pages
-	// back; the intercept must not swallow it there.
+	// A screen without extractable rows binds nothing to e; the intercept
+	// must not push a prompt there, and the stock paging keys stay whole.
 	rows := make([]item, 30)
 	for i := range rows {
 		rows[i] = item{title: "row", desc: "plain"}
@@ -99,17 +99,22 @@ func TestListScreenUnsealKeyStillPagesWithoutUnsealRows(t *testing.T) {
 	pressOn(s, tea.Key{Code: tea.KeyRight})
 	require.Positive(t, s.list.Paginator.Page, "the fixture spans multiple pages")
 
+	page := s.list.Paginator.Page
+	cmd := pressOn(s, tea.Key{Code: 'e', Text: "e"})
+	assert.Nil(t, cmd, "e pushes nothing on screens without extract rows")
+	assert.Equal(t, page, s.list.Paginator.Page, "e does not page")
+
 	pressOn(s, tea.Key{Code: 'u', Text: "u"})
-	assert.Equal(t, 0, s.list.Paginator.Page, "u pages back on screens without unseal rows")
+	assert.Equal(t, 0, s.list.Paginator.Page, "u keeps its stock prev-page binding")
 }
 
-func TestUnsealPromptScreen(t *testing.T) {
+func TestExtractPromptScreen(t *testing.T) {
 	t.Parallel()
 
 	progress := stubScreen{name: "progress"}
 
-	newPrompt := func(started *string) *unsealPromptScreen {
-		return newUnsealPromptScreen("workspace app", false, "/tmp/default",
+	newPrompt := func(started *string) *extractPromptScreen {
+		return newExtractPromptScreen("workspace app", false, "/tmp/default",
 			func(target string) (screen, error) {
 				if started != nil {
 					*started = target
@@ -164,24 +169,24 @@ func TestUnsealPromptScreen(t *testing.T) {
 	t.Run("remote note renders only for remote archives", func(t *testing.T) {
 		t.Parallel()
 
-		local := newUnsealPromptScreen("workspace app", false, "d", nil)
+		local := newExtractPromptScreen("workspace app", false, "d", nil)
 		assert.NotContains(t, local.view(), "remote store")
 
-		remote := newUnsealPromptScreen("workspace app", true, "d", nil)
+		remote := newExtractPromptScreen("workspace app", true, "d", nil)
 		assert.Contains(t, remote.view(), "downloaded from the remote store")
 	})
 }
 
-func TestUnsealProgressScreenFoldsEvents(t *testing.T) {
+func TestExtractProgressScreenFoldsEvents(t *testing.T) {
 	t.Parallel()
 
 	org := &Org{Name: "my-org"}
-	s := newUnsealProgressScreen(org, t.TempDir(), nil, "workspace app")
+	s := newExtractProgressScreen(org, t.TempDir(), nil, "workspace app")
 
-	cmd := s.update(unsealEvent{Path: "a.json", Bytes: 5})
+	cmd := s.update(extractEvent{Path: "a.json", Bytes: 5})
 	require.NotNil(t, cmd, "a per-file event re-arms the listener")
 
-	cmd = s.update(unsealEvent{Path: "b.json", Err: assert.AnError})
+	cmd = s.update(extractEvent{Path: "b.json", Err: assert.AnError})
 	require.NotNil(t, cmd)
 
 	assert.Equal(t, 1, s.done)
@@ -193,15 +198,15 @@ func TestUnsealProgressScreenFoldsEvents(t *testing.T) {
 	assert.Contains(t, view, "errored 1")
 	assert.Contains(t, view, "b.json", "the failed file lists")
 
-	cmd = s.update(unsealEvent{Summary: &UnsealSummary{Files: 1, Errored: 1, Bytes: 5}})
+	cmd = s.update(extractEvent{Summary: &ExtractSummary{Files: 1, Errored: 1, Bytes: 5}})
 	assert.Nil(t, cmd, "the terminal event ends the listening chain")
 
 	view = s.view()
-	assert.Contains(t, view, "unsealed workspace app")
+	assert.Contains(t, view, "extracted workspace app")
 	assert.Contains(t, view, "1 file errored")
 }
 
-func TestUnsealProgressScreenInitRunsToSummary(t *testing.T) {
+func TestExtractProgressScreenInitRunsToSummary(t *testing.T) {
 	t.Parallel()
 
 	// Drive the real init: the goroutine, the spinner tick, and the listen
@@ -211,8 +216,8 @@ func TestUnsealProgressScreenInitRunsToSummary(t *testing.T) {
 	org := &Org{Name: "my-org"}
 	target := t.TempDir()
 
-	jobs := []unsealJob{{rel: "a.json", write: writeBytesJob("data")}}
-	s := newUnsealProgressScreen(org, target, jobs, "workspace app")
+	jobs := []extractJob{{rel: "a.json", write: writeBytesJob("data")}}
+	s := newExtractProgressScreen(org, target, jobs, "workspace app")
 
 	pending := []tea.Cmd{s.init()}
 	sawTick := false
@@ -244,16 +249,16 @@ func TestUnsealProgressScreenInitRunsToSummary(t *testing.T) {
 
 	assert.Equal(t, 1, s.done)
 	assert.Equal(t, 0, s.errored)
-	assert.Equal(t, &UnsealSummary{Files: 1, Bytes: 4}, s.summary)
+	assert.Equal(t, &ExtractSummary{Files: 1, Bytes: 4}, s.summary)
 	assert.True(t, sawTick, "init's batch carries the spinner tick")
 	assert.FileExists(t, filepath.Join(target, "my-org", "a.json"))
 }
 
-func TestUnsealProgressScreenEscCancelsMidRun(t *testing.T) {
+func TestExtractProgressScreenEscCancelsMidRun(t *testing.T) {
 	t.Parallel()
 
 	org := &Org{Name: "my-org"}
-	s := newUnsealProgressScreen(org, t.TempDir(), nil, "workspace app")
+	s := newExtractProgressScreen(org, t.TempDir(), nil, "workspace app")
 	m := newTestModel(stubScreen{name: "root"}, s)
 
 	cmd := pressOn(s, tea.Key{Code: tea.KeyEscape})
@@ -268,13 +273,13 @@ func TestUnsealProgressScreenEscCancelsMidRun(t *testing.T) {
 	require.Error(t, s.ctx.Err(), "leaving the screen cancels the run context")
 }
 
-func TestUnsealProgressScreenQuitKeyRoutesThroughTheModel(t *testing.T) {
+func TestExtractProgressScreenQuitKeyRoutesThroughTheModel(t *testing.T) {
 	t.Parallel()
 
 	// The q key must not end the program from the screen itself: the runtime
 	// would swallow the quit and the run's context would never be canceled.
 	org := &Org{Name: "my-org"}
-	s := newUnsealProgressScreen(org, t.TempDir(), nil, "workspace app")
+	s := newExtractProgressScreen(org, t.TempDir(), nil, "workspace app")
 	m := newTestModel(stubScreen{name: "root"}, s)
 
 	cmd := pressOn(s, tea.Key{Code: 'q', Text: "q"})
@@ -289,20 +294,20 @@ func TestUnsealProgressScreenQuitKeyRoutesThroughTheModel(t *testing.T) {
 	require.Error(t, s.ctx.Err(), "the teardown cancels the run context")
 }
 
-func TestModelQuitStopsAnActiveUnseal(t *testing.T) {
+func TestModelQuitStopsAnActiveExtract(t *testing.T) {
 	t.Parallel()
 
 	// The interrupt lands mid-run with nothing draining the events channel,
 	// exactly as it does once the program stops reading: without the model's
-	// teardown, runUnseal blocks on its next send forever and the remaining
-	// files are silently never unsealed.
+	// teardown, runExtract blocks on its next send forever and the remaining
+	// files are silently never extracted.
 	org := &Org{Name: "my-org"}
-	jobs := []unsealJob{
+	jobs := []extractJob{
 		{rel: "a.json", write: writeBytesJob("a")},
 		{rel: "b.json", write: writeBytesJob("b")},
 	}
 
-	s := newUnsealProgressScreen(org, t.TempDir(), jobs, "workspace app")
+	s := newExtractProgressScreen(org, t.TempDir(), jobs, "workspace app")
 	m := newTestModel(stubScreen{name: "root"}, s)
 
 	s.init()
@@ -324,19 +329,19 @@ func TestModelQuitStopsAnActiveUnseal(t *testing.T) {
 			}
 
 		case <-deadline:
-			t.Fatal("the unseal goroutine outlived the quit that stopped its run")
+			t.Fatal("the extract goroutine outlived the quit that stopped its run")
 		}
 	}
 }
 
-func TestModelAbandonedUnsealScreenIsCanceled(t *testing.T) {
+func TestModelAbandonedExtractScreenIsCanceled(t *testing.T) {
 	t.Parallel()
 
 	// The screen's context is a child of the browse context from construction,
 	// before init ever runs, so a build the user walked away from leaks it into
 	// the browse context's lifetime unless the drop closes the screen.
 	org := &Org{Name: "my-org"}
-	built := newUnsealProgressScreen(org, t.TempDir(), nil, "workspace app")
+	built := newExtractProgressScreen(org, t.TempDir(), nil, "workspace app")
 	m := newTestModel(stubScreen{name: "root"})
 
 	_, cmd := m.Update(announce(t, m, push(func() (screen, error) { return built, nil })))
@@ -349,19 +354,19 @@ func TestModelAbandonedUnsealScreenIsCanceled(t *testing.T) {
 	assert.Error(t, built.ctx.Err(), "the dropped screen's run context is canceled")
 }
 
-func TestRunUnsealCanceledWithoutReceiverDoesNotStrand(t *testing.T) {
+func TestRunExtractCanceledWithoutReceiverDoesNotStrand(t *testing.T) {
 	t.Parallel()
 
 	org := &Org{Name: "my-org"}
 	ctx, cancel := context.WithCancel(t.Context())
-	events := make(chan unsealEvent)
+	events := make(chan extractEvent)
 
-	jobs := []unsealJob{
+	jobs := []extractJob{
 		{rel: "a.json", write: writeBytesJob("a")},
 		{rel: "b.json", write: writeBytesJob("b")},
 	}
 
-	go runUnseal(ctx, org, t.TempDir(), jobs, events)
+	go runExtract(ctx, org, t.TempDir(), jobs, events)
 
 	// Cancel while nothing drains the channel: the ctx-guarded sends must
 	// unblock the goroutine so it closes events rather than leaking.
@@ -377,7 +382,7 @@ func TestRunUnsealCanceledWithoutReceiverDoesNotStrand(t *testing.T) {
 			}
 
 		case <-deadline:
-			t.Fatal("runUnseal never closed its channel after cancellation")
+			t.Fatal("runExtract never closed its channel after cancellation")
 		}
 	}
 }
@@ -394,14 +399,14 @@ func TestModelPushRunsInitializer(t *testing.T) {
 	assert.True(t, ok)
 }
 
-func TestUnsealProgressScreenViewTruncatesCurrentPath(t *testing.T) {
+func TestExtractProgressScreenViewTruncatesCurrentPath(t *testing.T) {
 	t.Parallel()
 
 	org := &Org{Name: "my-org"}
-	s := newUnsealProgressScreen(org, t.TempDir(), nil, "workspace app")
+	s := newExtractProgressScreen(org, t.TempDir(), nil, "workspace app")
 
 	long := strings.Repeat("x", 200)
-	s.update(unsealEvent{Path: long, Bytes: 1})
+	s.update(extractEvent{Path: long, Bytes: 1})
 
 	assert.NotContains(t, s.view(), long, "the current path is clamped to a list-friendly width")
 }

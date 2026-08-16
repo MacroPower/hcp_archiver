@@ -31,7 +31,7 @@ func TestNewRootCmd(t *testing.T) {
 		registered[sub.Name()] = true
 	}
 
-	for _, name := range []string{"version", "view", "list", "show", "unseal"} {
+	for _, name := range []string{"version", "view", "list", "show", "extract"} {
 		assert.True(t, registered[name], "%s subcommand is registered", name)
 	}
 }

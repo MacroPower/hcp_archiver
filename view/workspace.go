@@ -395,7 +395,7 @@ func indexRollupFile(file string, idx map[string]sealedRef) error {
 			// "path") is corrupt in the same way and is skipped with it: indexing
 			// one would key a sealed object at the empty path, which sits under
 			// every prefix, so each whole-organization listing would carry an entry
-			// naming nothing and each unseal would report it as a file it could not
+			// naming nothing and each extract would report it as a file it could not
 			// write, on every run.
 			err = json.Unmarshal(line, &rec)
 			if err != nil || rec.Path == "" {
@@ -470,7 +470,7 @@ func indexSidecarFile(file, relBundles string, idx map[string]sealedRef) error {
 			//
 			// A record naming no member or no bundle is skipped alongside it: an
 			// empty name would key a member at the empty path, which every listing
-			// and unseal then carries, and an empty bundle would point a member at
+			// and extract then carries, and an empty bundle would point a member at
 			// the bundles directory itself rather than at a zip.
 			err = json.Unmarshal(line, &rec)
 			if err == nil && rec.Name != "" && rec.Bundle != "" {

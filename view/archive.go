@@ -43,7 +43,7 @@ var (
 	// It is what a whole-object read ([*Org.Read]) answers for an evicted
 	// configuration tarball, naming the mirrored key to fetch, because that
 	// shape holds the bytes in memory and such a tarball has no bound. An
-	// unseal streams instead and fetches the object back, so it meets this
+	// extract streams instead and fetches the object back, so it meets this
 	// error only where no fetch is possible, in an organization recording no
 	// mirror or over a stub too damaged to trust.
 	ErrRemoteOnly = errors.New("archived object is remote-only")
@@ -66,13 +66,13 @@ type Org struct {
 	remote *orgRemote
 
 	// The browse context the archive was opened under. Long-running work
-	// started from the browser (an unseal) derives its cancelable child from
+	// started from the browser (an extract) derives its cancelable child from
 	// it, so an external cancellation (SIGINT) stops that work even on a
 	// local-only archive, where no orgRemote carries the context.
 	ctx context.Context //nolint:containedctx // Screens start work from tea.Cmds, which take none.
 
 	// Workspace handles memoized by project/name, so repeated lookups (a
-	// per-file unseal read) reuse one handle and its lazily built sealed
+	// per-file extract read) reuse one handle and its lazily built sealed
 	// index instead of rebuilding it per call.
 	workspaces map[string]*Workspace
 
@@ -568,7 +568,7 @@ func (o *Org) Root() string {
 // It answers what is configured, not what answers: the mirror may be
 // unreachable, the credentials absent, the object gone from the bucket. That
 // is the useful boundary for a caller predicting a run, since an evicted object
-// in an organization with no marker is one an unseal is certain to lose, while
+// in an organization with no marker is one an extract is certain to lose, while
 // everything else is only as reachable as the network.
 func (o *Org) HasRemote() bool {
 	return o.remote != nil
@@ -828,7 +828,7 @@ func (o *Org) mergedChildren(relDir string) ([]TreeEntry, error) {
 // Archive is a read handle on every organization under one archive directory.
 //
 // It addresses objects by "<org>/<archive-relative>" paths, the layout an
-// unseal reproduces beneath its target, so a listed path names the same file
+// extract reproduces beneath its target, so a listed path names the same file
 // before and after recovery. The addressing is invariant whether the archive
 // was opened on its root or on a single organization's directory.
 //
@@ -934,9 +934,9 @@ func (a *Archive) Read(archivePath string) ([]byte, error) {
 	return scopes[0].org.Read(scopes[0].prefix)
 }
 
-// Unseal extracts every archived object at or beneath an org-prefixed archive
+// Extract extracts every archived object at or beneath an org-prefixed archive
 // path into target, reproducing the "<org>/<archive-relative>" layout. An
-// empty prefix unseals the whole archive; an empty target returns
+// empty prefix extracts the whole archive; an empty target returns
 // [ErrNoTarget].
 //
 // Each finished file is handed to progress (which may be nil) with its
@@ -945,25 +945,29 @@ func (a *Archive) Read(archivePath string) ([]byte, error) {
 // the partial totals alongside the context's error.
 //
 //nolint:contextcheck // Index materialization fetches run under the stored browse context (see orgRemote).
-func (a *Archive) Unseal(ctx context.Context, target, prefix string, progress UnsealProgress) (UnsealSummary, error) {
+func (a *Archive) Extract(
+	ctx context.Context,
+	target, prefix string,
+	progress ExtractProgress,
+) (ExtractSummary, error) {
 	if target == "" {
-		return UnsealSummary{}, ErrNoTarget
+		return ExtractSummary{}, ErrNoTarget
 	}
 
 	scopes, err := a.scope(prefix)
 	if err != nil {
-		return UnsealSummary{}, err
+		return ExtractSummary{}, err
 	}
 
-	var total UnsealSummary
+	var total ExtractSummary
 
 	for _, sc := range scopes {
-		jobs, planErr := sc.org.planUnseal(sc.prefix)
+		jobs, planErr := sc.org.planExtract(sc.prefix)
 		if planErr != nil {
 			return total, planErr
 		}
 
-		emit := func(ev unsealEvent) bool {
+		emit := func(ev extractEvent) bool {
 			if progress != nil {
 				progress(path.Join(sc.org.Name, ev.Path), ev.Bytes, ev.Err)
 			}
@@ -971,11 +975,11 @@ func (a *Archive) Unseal(ctx context.Context, target, prefix string, progress Un
 			return true
 		}
 
-		sum, finished := unsealJobs(ctx, sc.org.Name, target, jobs, emit)
+		sum, finished := extractJobs(ctx, sc.org.Name, target, jobs, emit)
 		total.add(sum)
 
 		if !finished {
-			return total, fmt.Errorf("unseal stopped: %w", ctx.Err())
+			return total, fmt.Errorf("extract stopped: %w", ctx.Err())
 		}
 	}
 

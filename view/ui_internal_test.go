@@ -554,7 +554,7 @@ func TestModelRoutesSpinnerTicksByID(t *testing.T) {
 	assert.NotNil(t, cmd, "a consumed tick re-arms the chain")
 	assert.Empty(t, rs.msgs)
 
-	// Another spinner's tick (an unseal run's) belongs to that screen.
+	// Another spinner's tick (an extract run's) belongs to that screen.
 	m.Update(spinner.TickMsg{ID: m.spin.ID() + 1})
 	assert.Len(t, rs.msgs, 1, "a foreign tick is forwarded to the active screen")
 }

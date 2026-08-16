@@ -201,7 +201,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newViewCmd())
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newShowCmd())
-	cmd.AddCommand(newUnsealCmd())
+	cmd.AddCommand(newExtractCmd())
 	cmd.AddCommand(newExportCmd())
 
 	return cmd

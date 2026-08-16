@@ -12,11 +12,11 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/seal"
 )
 
-// ErrNoTarget indicates an unseal was confirmed with an empty target
+// ErrNoTarget indicates an extract was confirmed with an empty target
 // directory.
-var ErrNoTarget = errors.New("unseal target directory is required")
+var ErrNoTarget = errors.New("extract target directory is required")
 
-// unsealJob is one file of an unseal: the archive-relative path to reproduce
+// extractJob is one file of an extract: the archive-relative path to reproduce
 // under the target and the writer that streams its bytes through
 // [*Org.writeObject], whichever physical form holds them and wherever they
 // live.
@@ -31,13 +31,13 @@ var ErrNoTarget = errors.New("unseal target directory is required")
 // a plan is a list of paths beside one shared function value instead of one
 // closure per object. A whole-organization plan holds every job at once, and a
 // per-object closure would pin whatever the loop that built it had in scope.
-type unsealJob struct {
+type extractJob struct {
 	write func(ctx context.Context, rel string, w io.Writer) (int64, error)
 	rel   string
 }
 
-// UnsealSummary totals one finished unseal run.
-type UnsealSummary struct {
+// ExtractSummary totals one finished extract run.
+type ExtractSummary struct {
 	// Bytes is the total content size written.
 	Bytes int64
 	// Files is the number of files written.
@@ -46,32 +46,32 @@ type UnsealSummary struct {
 	Errored int
 }
 
-// add folds another run's totals into s, so a multi-organization unseal
+// add folds another run's totals into s, so a multi-organization extract
 // accumulates one summary.
-func (s *UnsealSummary) add(other UnsealSummary) {
+func (s *ExtractSummary) add(other ExtractSummary) {
 	s.Bytes += other.Bytes
 	s.Files += other.Files
 	s.Errored += other.Errored
 }
 
-// UnsealProgress observes one file of an unseal run: the org-prefixed archive
+// ExtractProgress observes one file of an extract run: the org-prefixed archive
 // path just processed, its written byte count, and its error. A per-file
-// failure does not stop the run; it is counted in [UnsealSummary].Errored.
-type UnsealProgress func(archivePath string, bytes int64, err error)
+// failure does not stop the run; it is counted in [ExtractSummary].Errored.
+type ExtractProgress func(archivePath string, bytes int64, err error)
 
-// unsealEvent is the tea.Msg [runUnseal] emits: one per file (Err non-nil on
+// extractEvent is the tea.Msg [runExtract] emits: one per file (Err non-nil on
 // a per-file failure), then a terminal event carrying Summary.
-type unsealEvent struct {
+type extractEvent struct {
 	Err     error
-	Summary *UnsealSummary
+	Summary *ExtractSummary
 	Path    string
 	Bytes   int64
 }
 
-// planUnseal enumerates the archived objects at or beneath an archive-relative
-// prefix as unseal jobs, in listing order. The jobs carry exactly [*Org.List]'s
+// planExtract enumerates the archived objects at or beneath an archive-relative
+// prefix as extract jobs, in listing order. The jobs carry exactly [*Org.List]'s
 // entries, with the same dedup, the same machinery filter, and the same order,
-// so a listing is a faithful dry run of the unseal it plans.
+// so a listing is a faithful dry run of the extract it plans.
 //
 // That faithfulness is about what the run attempts, not about what it
 // recovers: a listed object can still fail its read, and one kind fails
@@ -79,35 +79,35 @@ type unsealEvent struct {
 // organization that records where its mirror is (see [*Org.HasRemote]) and lost
 // in one that does not, so a caller summarizing the plan can count the second
 // kind against it up front.
-func (o *Org) planUnseal(prefix string) ([]unsealJob, error) {
+func (o *Org) planExtract(prefix string) ([]extractJob, error) {
 	entries, err := o.List(prefix)
 	if err != nil {
 		return nil, err
 	}
 
-	jobs := make([]unsealJob, 0, len(entries))
+	jobs := make([]extractJob, 0, len(entries))
 	write := o.writeObject
 
 	for _, e := range entries {
-		jobs = append(jobs, unsealJob{rel: e.Path, write: write})
+		jobs = append(jobs, extractJob{rel: e.Path, write: write})
 	}
 
 	return jobs, nil
 }
 
-// planWorkspaceUnseal enumerates one workspace's archived objects as unseal
+// planWorkspaceExtract enumerates one workspace's archived objects as extract
 // jobs.
-func (o *Org) planWorkspaceUnseal(ws *Workspace) ([]unsealJob, error) {
-	return o.planUnseal(ws.Dir())
+func (o *Org) planWorkspaceExtract(ws *Workspace) ([]extractJob, error) {
+	return o.planExtract(ws.Dir())
 }
 
-// planProjectUnseal enumerates a whole project's archived objects as unseal
+// planProjectExtract enumerates a whole project's archived objects as extract
 // jobs.
-func (o *Org) planProjectUnseal(project string) ([]unsealJob, error) {
-	return o.planUnseal(path.Join(projectsDir, project))
+func (o *Org) planProjectExtract(project string) ([]extractJob, error) {
+	return o.planExtract(path.Join(projectsDir, project))
 }
 
-// unsealJobs writes jobs into target under org sequentially, handing each
+// extractJobs writes jobs into target under org sequentially, handing each
 // outcome to emit, and returns the totals plus whether the run finished.
 //
 // A per-file problem increments Errored and the run continues: an unreadable
@@ -125,20 +125,20 @@ func (o *Org) planProjectUnseal(project string) ([]unsealJob, error) {
 // report a failed object where the operator stopped the run. A failed write
 // under an ended context therefore ends the run unfinished, which is what the
 // callers turn into an interrupted-run message rather than a failure.
-func unsealJobs(
+func extractJobs(
 	ctx context.Context,
 	org, target string,
-	jobs []unsealJob,
-	emit func(unsealEvent) bool,
-) (UnsealSummary, bool) {
-	var sum UnsealSummary
+	jobs []extractJob,
+	emit func(extractEvent) bool,
+) (ExtractSummary, bool) {
+	var sum ExtractSummary
 
 	for _, job := range jobs {
 		if ctx.Err() != nil {
 			return sum, false
 		}
 
-		n, err := writeUnsealed(ctx, target, org, job.rel, job.write)
+		n, err := writeExtracted(ctx, target, org, job.rel, job.write)
 		if err != nil {
 			if ctx.Err() != nil {
 				return sum, false
@@ -146,7 +146,7 @@ func unsealJobs(
 
 			sum.Errored++
 
-			if !emit(unsealEvent{Path: job.rel, Err: err}) {
+			if !emit(extractEvent{Path: job.rel, Err: err}) {
 				return sum, false
 			}
 
@@ -156,7 +156,7 @@ func unsealJobs(
 		sum.Files++
 		sum.Bytes += n
 
-		if !emit(unsealEvent{Path: job.rel, Bytes: n}) {
+		if !emit(extractEvent{Path: job.rel, Bytes: n}) {
 			return sum, false
 		}
 	}
@@ -164,14 +164,14 @@ func unsealJobs(
 	return sum, true
 }
 
-// runUnseal extracts jobs into target sequentially, emitting one event per
+// runExtract extracts jobs into target sequentially, emitting one event per
 // file and then a terminal event carrying the summary before closing events.
 // Every send is guarded on ctx so a receiver that stopped draining can never
-// strand this goroutine; see [unsealJobs] for the loop's semantics.
-func runUnseal(ctx context.Context, org *Org, target string, jobs []unsealJob, events chan<- unsealEvent) {
+// strand this goroutine; see [extractJobs] for the loop's semantics.
+func runExtract(ctx context.Context, org *Org, target string, jobs []extractJob, events chan<- extractEvent) {
 	defer close(events)
 
-	send := func(ev unsealEvent) bool {
+	send := func(ev extractEvent) bool {
 		select {
 		case events <- ev:
 			return true
@@ -180,13 +180,13 @@ func runUnseal(ctx context.Context, org *Org, target string, jobs []unsealJob, e
 		}
 	}
 
-	sum, finished := unsealJobs(ctx, org.Name, target, jobs, send)
+	sum, finished := extractJobs(ctx, org.Name, target, jobs, send)
 	if finished {
-		send(unsealEvent{Summary: &sum})
+		send(extractEvent{Summary: &sum})
 	}
 }
 
-// writeUnsealed streams one object at its archive-relative path under
+// writeExtracted streams one object at its archive-relative path under
 // target/<org>, overwriting an existing file so a re-run refreshes the tree,
 // and returns how many bytes write produced.
 //
@@ -207,7 +207,7 @@ func runUnseal(ctx context.Context, org *Org, target string, jobs []unsealJob, e
 // A failure of write is returned as it stands, so the reason an object could
 // not be resolved reads plainly; only a failure of the write path itself is
 // wrapped with the path it was writing.
-func writeUnsealed(
+func writeExtracted(
 	ctx context.Context,
 	target, org, rel string,
 	write func(ctx context.Context, rel string, w io.Writer) (int64, error),

@@ -173,7 +173,7 @@ func TestOrgList_MachineryNeverAppears(t *testing.T) {
 	// sidecars, roll-ups, a ledger shard, a staging leftover, identity
 	// sidecars, plus an org-root remote marker and an eviction stub this test
 	// adds.
-	root := buildUnsealArchive(t)
+	root := buildExtractArchive(t)
 	writeFile(t, filepath.Join(root, "my-org"), ".remote.json", viewMarker)
 	evictTarball(t, root, "cv-9")
 
@@ -202,7 +202,7 @@ func TestOrgList_WorkspaceNamedLikeMachinery(t *testing.T) {
 	// "bundles" and "rollups" are legal workspace and project display names.
 	// The machinery filter matches those directories positionally, so a
 	// workspace (or project) carrying one of the names keeps its content
-	// listed and unsealable rather than silently vanishing.
+	// listed and extractable rather than silently vanishing.
 	root := buildArchive(t)
 	org := filepath.Join(root, "my-org")
 
@@ -288,7 +288,7 @@ func TestOrgList_OffloadedBundleMemberWithoutMirror(t *testing.T) {
 
 	// A bundle whose zip is gone with no marker beside it: its members still
 	// list, from the sidecar index eviction left behind, and nothing can fetch
-	// them. An unseal counts them as unrecoverable on exactly this pairing,
+	// them. An extract counts them as unrecoverable on exactly this pairing,
 	// which is why the two facts have to be readable together.
 	root := buildArchive(t)
 	require.NoError(t, os.Remove(

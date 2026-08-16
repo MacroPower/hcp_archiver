@@ -93,7 +93,7 @@ var (
 
 // ValidName checks that name is a clean archive-relative path safe to
 // reproduce under a destination directory. Writers gate member names through
-// it before packing; an unsealer gates untrusted sidecar and roll-up names
+// it before packing; an extractor gates untrusted sidecar and roll-up names
 // through it before joining them under a target. Names are slash-separated
 // archive paths: an empty name, a leading slash (absolute), a backslash
 // anywhere (a Windows separator a '/'-only split would step over), or any

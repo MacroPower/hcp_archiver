@@ -98,7 +98,7 @@ func TestWorkspaceIndexSkipsRollupLineNamingNoPath(t *testing.T) {
 
 	// A roll-up record that parses but carries no path used to index a sealed
 	// object at the empty path, which sits under every prefix: the whole-org
-	// listing grew an entry naming nothing and every unseal reported it as a
+	// listing grew an entry naming nothing and every extract reported it as a
 	// file it could not write.
 	tests := map[string]struct {
 		line string
@@ -135,9 +135,9 @@ func TestWorkspaceIndexSkipsRollupLineNamingNoPath(t *testing.T) {
 
 			target := t.TempDir()
 
-			sum, err := view.NewArchive([]*view.Org{org}).Unseal(t.Context(), target, "my-org", nil)
+			sum, err := view.NewArchive([]*view.Org{org}).Extract(t.Context(), target, "my-org", nil)
 			require.NoError(t, err)
-			assert.Zero(t, sum.Errored, "an unseal has no phantom file to fail on")
+			assert.Zero(t, sum.Errored, "an extract has no phantom file to fail on")
 		})
 	}
 }
@@ -186,9 +186,9 @@ func TestWorkspaceIndexSkipsSidecarLineNamingNoMember(t *testing.T) {
 
 			target := t.TempDir()
 
-			sum, err := view.NewArchive([]*view.Org{org}).Unseal(t.Context(), target, "my-org", nil)
+			sum, err := view.NewArchive([]*view.Org{org}).Extract(t.Context(), target, "my-org", nil)
 			require.NoError(t, err)
-			assert.Zero(t, sum.Errored, "an unseal has no phantom member to fail on")
+			assert.Zero(t, sum.Errored, "an extract has no phantom member to fail on")
 		})
 	}
 }

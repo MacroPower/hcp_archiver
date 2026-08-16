@@ -219,7 +219,7 @@ func TestDownloadObjectReplacedMidTransfer(t *testing.T) {
 }
 
 // errWriter is a destination that refuses every byte, the shape a full disk
-// under an unseal target takes.
+// under an extract target takes.
 type errWriter struct {
 	err error
 }

@@ -671,7 +671,7 @@ of the archive, in two modes with different semantics:
   disk: sealed bundles as each workspace seals, and org-wide
   `config-versions/<id>.tar.gz` tarballs at the close sweep, once the ledger
   proves them. Peak local disk is then bounded to the search layer plus
-  in-flight unsealed work plus the run's still-unevicted tarballs (tarballs
+  in-flight not-yet-sealed work plus the run's still-unevicted tarballs (tarballs
   have no mid-run eviction driver, so they accumulate until the sweep), which
   is what lets a 5k+ workspace org's archive run on a machine that could
   never hold the whole thing at once. Each eviction leaves something local
@@ -679,7 +679,7 @@ of the archive, in two modes with different semantics:
   can go get it: a bundle already leaves its sidecar index, from which a member
   is fetched with ranged reads of the remote zip, and a tarball is given a
   small `<id>.tar.gz.remote.json` stub recording the size and digest the
-  eviction proved: the size the listing reports, and the handle an unseal
+  eviction proved: the size the listing reports, and the handle an extract
   downloads and verifies the object by.
 - **Sync** (incremental upload, local kept) mirrors everything else — loose
   files, roll-ups, sidecar indexes, ledger snapshots. Local disk stays the
@@ -839,7 +839,7 @@ a crash between the two leaves a stub beside a live tarball, which the next
 sweep re-evicts and rewrites, while a delete-first crash would leave a path
 nothing ever walks again. The stub records the size and digest the eviction
 proved, which is what the read side needs to list an object whose bytes are
-gone and to fetch it back: an unseal reads the stub for the object's length,
+gone and to fetch it back: an extract reads the stub for the object's length,
 downloads the mirrored key, and checks what arrives against both recorded
 values before the file lands. The stub closes, for the readers, the asymmetry
 `RecordOnlyLedgerPrefixes` records for the ledger: a sealed bundle leaves its

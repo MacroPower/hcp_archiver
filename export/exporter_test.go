@@ -271,7 +271,7 @@ func TestExportWithholdsSensitiveValues(t *testing.T) {
 
 // TestExportPointsAtCLI asserts the withheld-content sections carry runnable
 // retrieval snippets, independent of golden churn: a show of one concrete
-// archived object and an unseal of the section directory.
+// archived object and an extract of the section directory.
 func TestExportPointsAtCLI(t *testing.T) {
 	t.Parallel()
 
@@ -287,14 +287,14 @@ func TestExportPointsAtCLI(t *testing.T) {
 		"run artifact show": {
 			want: "hcp_archiver show <archive-dir> '" + wsDir + "/runs/run-new/plan.log'",
 		},
-		"runs unseal": {
-			want: "hcp_archiver unseal <archive-dir> '" + wsDir + "/runs' --target <output-dir>",
+		"runs extract": {
+			want: "hcp_archiver extract <archive-dir> '" + wsDir + "/runs' --target <output-dir>",
 		},
 		"state version show": {
 			want: "hcp_archiver show <archive-dir> '" + wsDir + "/state-versions/20240102T030405Z-sv-2.tfstate.json'",
 		},
-		"state versions unseal": {
-			want: "hcp_archiver unseal <archive-dir> '" + wsDir + "/state-versions' --target <output-dir>",
+		"state versions extract": {
+			want: "hcp_archiver extract <archive-dir> '" + wsDir + "/state-versions' --target <output-dir>",
 		},
 	}
 

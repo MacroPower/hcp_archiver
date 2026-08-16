@@ -39,7 +39,7 @@ func (o *Org) writeObject(ctx context.Context, relPath string, w io.Writer) (int
 	n, err := copyLoose(o.AbsPath(rel), rel, w)
 	if errors.Is(err, fs.ErrNotExist) {
 		// A warm object the mirror holds is pulled down to its archive path
-		// first, so the unseal both recovers it and leaves it referenceable
+		// first, so the extract both recovers it and leaves it referenceable
 		// locally; the evicted surfaces stream to the target alone.
 		if n, handled, copyErr := o.copyThrough(rel, w); handled {
 			return n, copyErr
@@ -134,9 +134,9 @@ func (o *Org) headStub(rel string) (store.RemoteStub, bool) {
 // The context is accepted for the signature's sake and is deliberately unused,
 // because a member of an evicted bundle is fetched through the organization's
 // cached [io.ReaderAt], which carries the browse context rather than this
-// call's. That is what makes the unseal progress screen's cancel stop the loop
+// call's. That is what makes the extract progress screen's cancel stop the loop
 // between files without aborting an in-flight ranged GET, the behavior
-// [unsealProgressScreen.update] documents.
+// [extractProgressScreen.update] documents.
 //
 //nolint:contextcheck // See above; every remote read derives from the stored browse context.
 func (w *Workspace) writeObject(_ context.Context, rel string, dst io.Writer) (int64, error) {

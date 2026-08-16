@@ -508,7 +508,7 @@ func (r *orgRemote) fetchLocal(root, relPath string) error {
 // fetchEligible reports whether a locally absent archive-relative path may be
 // materialized from the mirror. The evicted surfaces are excluded so
 // read-through never undoes an eviction: a configuration-version tarball
-// (served by [ErrRemoteOnly] and the unseal's fetch instead) and a bundle zip
+// (served by [ErrRemoteOnly] and the extract's fetch instead) and a bundle zip
 // (served by ranged member reads). Everything else in the warm layer,
 // including roll-ups, sidecars, and identity files, is eligible; eviction
 // stubs pass the guard harmlessly but are never mirrored, so a fetch of one
@@ -905,7 +905,7 @@ func (o *Org) readThrough(rel string, miss error) ([]byte, error) {
 	}
 }
 
-// copyThrough is [*Org.readThrough]'s streaming shape for the unseal path: on
+// copyThrough is [*Org.readThrough]'s streaming shape for the extract path: on
 // a fetch it streams the landed file into w and reports handled; a false
 // leaves the caller to describe its own miss.
 func (o *Org) copyThrough(rel string, w io.Writer) (int64, bool, error) {

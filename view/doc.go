@@ -16,13 +16,13 @@
 //
 // Only an object the eviction moved to the mirror touches the network, and only
 // when something reads it. A member of an evicted bundle is fetched with ranged
-// reads of the remote zip, which the browser and an unseal both do; an evicted
+// reads of the remote zip, which the browser and an extract both do; an evicted
 // configuration-version tarball is the whole object, so it is downloaded whole,
-// which only an unseal does. Listing, searching, and reading everything else
+// which only an extract does. Listing, searching, and reading everything else
 // stay offline.
 //
 // [Browse] starts the browser; [OpenArchive] exposes the read layer on its
 // own, and [Archive] layers org-prefixed addressing over it for logical
-// listing, single-object reads, and unsealing any scope back into loose
+// listing, single-object reads, and extracting any scope back into loose
 // files.
 package view
