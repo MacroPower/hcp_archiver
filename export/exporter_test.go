@@ -243,6 +243,28 @@ func TestCountEntriesFoldsEvictionStubs(t *testing.T) {
 		"the stub folds onto the object it stands in for")
 }
 
+func TestCountEntriesExcludesMachinery(t *testing.T) {
+	t.Parallel()
+
+	// The count delegates to the merged tree, which hides the archive's own
+	// bookkeeping: an identity sidecar or a staging leftover beside the
+	// counted objects is not archived content.
+	root := t.TempDir()
+	org := filepath.Join(root, "my-org")
+
+	writeFile(t, org, "org.json",
+		`{"data":{"id":"org-1","type":"organizations","attributes":{"name":"my-org"}}}`)
+	writeFile(t, org, "users/user-1.json", `{}`)
+	writeFile(t, org, "users/.identity.json", `{"id":"org-1"}`)
+	writeFile(t, org, "users/.atomicfile-99.tmp", "half-written")
+
+	orgs, err := view.OpenArchive(root)
+	require.NoError(t, err)
+	require.Len(t, orgs, 1)
+
+	assert.Equal(t, 1, export.CountEntries(orgs[0], "users"))
+}
+
 func TestExportTree(t *testing.T) {
 	t.Parallel()
 

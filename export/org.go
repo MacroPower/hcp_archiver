@@ -5,11 +5,8 @@ import (
 	"fmt"
 	"path"
 	"strconv"
-	"strings"
 	"time"
 
-	"go.jacobcolvin.com/hcp_archiver/atomicfile"
-	"go.jacobcolvin.com/hcp_archiver/store"
 	"go.jacobcolvin.com/hcp_archiver/theme"
 	"go.jacobcolvin.com/hcp_archiver/view"
 )
@@ -74,35 +71,16 @@ func subdirNames(org *view.Org, rel string) []string {
 }
 
 // countEntries counts the archived objects under an org-relative directory,
-// answering zero when it is absent. The archive's own bookkeeping is
-// excluded: dotfiles (identity sidecars, ledgers), staging temp files, and
-// eviction stubs, each stub folded onto the object it stands in for so an
-// evicted object never counts beside the mirror's record of it.
+// answering zero when it is absent. [*view.Org.Entries] already hides the
+// archive's bookkeeping and folds each eviction stub onto the object it
+// stands in for, so every child counts once.
 func countEntries(org *view.Org, rel string) int {
 	entries, err := org.Entries(rel)
 	if err != nil {
 		return 0
 	}
 
-	seen := make(map[string]struct{}, len(entries))
-
-	for _, e := range entries {
-		name := e.Name
-		if strings.HasPrefix(name, ".") || atomicfile.IsTemp(name) {
-			continue
-		}
-
-		// Stub recognition needs the org-relative path: it admits only stubs
-		// under the surface eviction writes them for, so a bare leaf name would
-		// never match and the stub would count beside the mirror's record.
-		if target, ok := store.RemoteStubTarget(path.Join(rel, name)); ok {
-			name = path.Base(target)
-		}
-
-		seen[name] = struct{}{}
-	}
-
-	return len(seen)
+	return len(entries)
 }
 
 // fmtTime renders a timestamp in the archive's shared layout, empty when
