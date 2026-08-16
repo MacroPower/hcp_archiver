@@ -17,6 +17,7 @@ import (
 
 	"go.jacobcolvin.com/hcp_archiver/archiver"
 	"go.jacobcolvin.com/hcp_archiver/config"
+	"go.jacobcolvin.com/hcp_archiver/pathkit"
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/theme"
 	"go.jacobcolvin.com/hcp_archiver/view"
@@ -827,33 +828,18 @@ func checkTargetOutside(archiveDir, target string, orgs []string) error {
 		return fmt.Errorf("resolve %q: %w", target, err)
 	}
 
-	rel, err := filepath.Rel(absArchive, absTarget)
-	if err != nil {
-		// No relative path between the two (a different volume): the target
-		// cannot be inside the archive.
-		return nil //nolint:nilerr // Unrelatable paths are definitionally outside.
-	}
-
-	if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if pathkit.Contains(absArchive, absTarget) {
 		return fmt.Errorf("%w: %s is inside %s", ErrTargetInArchive, target, archiveDir)
 	}
 
 	for _, org := range orgs {
-		if pathsOverlap(filepath.Join(absTarget, org), absArchive) {
+		if pathkit.Overlaps(filepath.Join(absTarget, org), absArchive) {
 			return fmt.Errorf("%w: writing organization %q under %s reaches %s",
 				ErrTargetInArchive, org, target, archiveDir)
 		}
 	}
 
 	return nil
-}
-
-// pathsOverlap reports whether two absolute paths name the same directory or
-// one sits inside the other, so a write under either could land in both.
-func pathsOverlap(a, b string) bool {
-	sep := string(filepath.Separator)
-
-	return a == b || strings.HasPrefix(a, b+sep) || strings.HasPrefix(b, a+sep)
 }
 
 // orgNames returns the archive's organization names in listing order.
