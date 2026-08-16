@@ -232,11 +232,16 @@ file's archiveDir, when set, is read instead of the current directory.`,
 		}
 
 		entries, err := arc.List(prefix)
+
+		// Whatever the listing answered, a degraded mirror is context the
+		// reader needs: an unknown organization may exist only in the mirror
+		// the session could not list, and a clean listing still covered local
+		// content alone.
+		warnDegraded(cc.ErrOrStderr(), arc)
+
 		if err != nil {
 			return describeNoOrg(err, arc)
 		}
-
-		warnDegraded(cc.ErrOrStderr(), arc)
 
 		if jsonOut {
 			return writeEntriesJSON(cc.OutOrStdout(), entries)
@@ -392,7 +397,7 @@ and sidecars) from the mirror, the one egress a dry run may cost.`,
 			return view.ErrNoTarget
 		}
 
-		err = checkTargetOutside(dir, target)
+		err = checkTargetOutside(dir, target, orgNames(arc))
 		if err != nil {
 			return err
 		}
@@ -479,11 +484,15 @@ func runExtractCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
 // fetched from the mirror so the plan covers its sealed objects at all.
 func extractDryRun(out, errW io.Writer, arc *view.Archive, prefix, target string, jsonOut bool) error {
 	entries, err := arc.List(prefix)
+
+	// The warning precedes the error check for the same reason show's does: a
+	// listing miss may be explained by the degraded mirror, and going quiet
+	// about it would report a local-only plan as the whole archive.
+	warnDegraded(errW, arc)
+
 	if err != nil {
 		return describeNoOrg(err, arc)
 	}
-
-	warnDegraded(errW, arc)
 
 	mirrored := make(map[string]bool, len(arc.Orgs()))
 	for _, org := range arc.Orgs() {
@@ -793,20 +802,21 @@ func describeNoOrg(err error, arc *view.Archive) error {
 		return err
 	}
 
-	names := make([]string, 0, len(arc.Orgs()))
-	for _, org := range arc.Orgs() {
-		names = append(names, org.Name)
-	}
-
-	return fmt.Errorf("%w (known organizations: %s)", err, strings.Join(names, ", "))
+	return fmt.Errorf("%w (known organizations: %s)", err, strings.Join(orgNames(arc), ", "))
 }
 
-// checkTargetOutside refuses a target inside the archive directory. The
-// comparison is segment-wise over absolute paths, so a sibling like
-// "archive-backup" beside "archive" is not flagged. Symlinks are not
-// resolved: a symlinked target can dodge the check, which is accepted rather
-// than pulling physical identity resolution into a CLI guard.
-func checkTargetOutside(archiveDir, target string) error {
+// checkTargetOutside refuses a target whose writes could land inside the
+// archive directory. The target itself must sit outside the archive
+// (segment-wise over absolute paths, so a sibling like "archive-backup"
+// beside "archive" is not flagged), and each organization's destination
+// under the target must not overlap the archive either: recovery reproduces
+// "<org>/<path>" under the target, so a target that is an ancestor of the
+// archive writes straight back into it when an organization's directory
+// joins onto the archive dir (a single-organization archive extracted into
+// its parent). Symlinks are not resolved: a symlinked target can dodge the
+// check, which is accepted rather than pulling physical identity resolution
+// into a CLI guard.
+func checkTargetOutside(archiveDir, target string, orgs []string) error {
 	absArchive, err := filepath.Abs(archiveDir)
 	if err != nil {
 		return fmt.Errorf("resolve %q: %w", archiveDir, err)
@@ -828,7 +838,32 @@ func checkTargetOutside(archiveDir, target string) error {
 		return fmt.Errorf("%w: %s is inside %s", ErrTargetInArchive, target, archiveDir)
 	}
 
+	for _, org := range orgs {
+		if pathsOverlap(filepath.Join(absTarget, org), absArchive) {
+			return fmt.Errorf("%w: writing organization %q under %s reaches %s",
+				ErrTargetInArchive, org, target, archiveDir)
+		}
+	}
+
 	return nil
+}
+
+// pathsOverlap reports whether two absolute paths name the same directory or
+// one sits inside the other, so a write under either could land in both.
+func pathsOverlap(a, b string) bool {
+	sep := string(filepath.Separator)
+
+	return a == b || strings.HasPrefix(a, b+sep) || strings.HasPrefix(b, a+sep)
+}
+
+// orgNames returns the archive's organization names in listing order.
+func orgNames(arc *view.Archive) []string {
+	names := make([]string, 0, len(arc.Orgs()))
+	for _, org := range arc.Orgs() {
+		names = append(names, org.Name)
+	}
+
+	return names
 }
 
 // eprintf writes best-effort progress to w; a stderr write fault mid-run has

@@ -82,12 +82,15 @@ stands in for an omitted --target.`,
 			return export.ErrNoTarget
 		}
 
-		err = checkTargetOutside(dir, target)
+		arc, err := openArchive(ctx, dir, rcfg)
 		if err != nil {
 			return err
 		}
 
-		arc, err := openArchive(ctx, dir, rcfg)
+		// The guard needs the organization names the open discovered, since an
+		// organization's directory under the target can reach back into the
+		// archive even when the target itself sits outside it.
+		err = checkTargetOutside(dir, target, orgNames(arc))
 		if err != nil {
 			return err
 		}

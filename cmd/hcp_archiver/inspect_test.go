@@ -624,6 +624,19 @@ func TestExtractCmd_RefusesTargetInsideArchive(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestExtractCmd_RefusesAncestorTargetReachingArchive(t *testing.T) {
+	t.Parallel()
+
+	// A single-organization archive directory opened directly names its
+	// organization after the directory, so extracting into the parent would
+	// write "<org>/<path>" straight back into the archive tree itself.
+	root := buildMiniArchive(t)
+	orgDir := filepath.Join(root, "mini-org")
+
+	_, _, err := runCmd(t, "extract", orgDir, "--target", root)
+	require.ErrorIs(t, err, main.ErrTargetInArchive)
+}
+
 func TestExtractCmd_TargetFromConfig(t *testing.T) {
 	t.Parallel()
 
