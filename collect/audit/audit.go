@@ -10,7 +10,6 @@ import (
 	tfe "github.com/hashicorp/go-tfe"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
-	"go.jacobcolvin.com/hcp_archiver/manifest"
 )
 
 // configFile is the leaf name of the organization audit-configuration file
@@ -153,7 +152,8 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 
 		// Whether Object will persist fresh or short-circuit on an already-settled
 		// page is fixed by the ledger before the call decides it.
-		settled := c.pageShortCircuited(relPath)
+		slot := c.env.PageSlot(relPath)
+		settled := slot != collect.PageSlotMustWrite
 
 		// Write the page unless it lists cleanly but carries only already-archived
 		// events (an empty page among them). Skipping such a page avoids duplicating
@@ -178,7 +178,7 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 		// shifted later page re-lists, so they must join the archived set, and they
 		// are persisted, so they are a valid source for the watermark.
 		if settled || len(fresh) > 0 {
-			persisted, halt := c.persistedEvents(key, relPath, fresh, settled)
+			persisted, halt := c.persistedEvents(key, relPath, fresh, slot)
 			if halt {
 				return nil
 			}
@@ -287,21 +287,25 @@ func (c *Collector) archiveTrailPage(
 // short-circuited write never persisted, dropping it. A short-circuited Done
 // page is search-layer JSON that is never evicted, so a read-back failure is
 // not expected; if it happens, the page contributes nothing to the watermark
-// and the walk halts, so a transient read error cannot advance the cursor. A
-// slot still settled absent (a prior release's list error the caller found
-// nothing fresh to rewrite with) never had a file, so it contributes nothing
-// and the walk carries on past it.
+// and the walk halts, so a transient read error cannot advance the cursor.
+//
+// A slot settled absent never had a file, so it contributes nothing and the
+// walk carries on past it. [LedgerMigration] is that branch's required
+// companion: registered at [manifest.Load] it unsettles such slots before any
+// walk sees them, so the walk writes them fresh. On a ledger opened without it
+// the branch only passes the slot over, silently, run after run; it is a
+// defensive backstop, not the repair.
 func (c *Collector) persistedEvents(
 	key, relPath string,
 	fresh []*tfe.AuditTrail,
-	settled bool,
+	slot collect.PageSlotState,
 ) ([]*tfe.AuditTrail, bool) {
-	if !settled {
+	switch slot {
+	case collect.PageSlotMustWrite:
 		return fresh, false
-	}
-
-	if c.pageSettledAbsent(relPath) {
+	case collect.PageSlotSettledAbsent:
 		return nil, false
+	case collect.PageSlotShortCircuited:
 	}
 
 	stored, err := c.readPersistedPage(relPath)
@@ -312,38 +316,6 @@ func (c *Collector) persistedEvents(
 	}
 
 	return stored, false
-}
-
-// pageShortCircuited reports whether [collect.Env.Object] will skip its write
-// for the audit-trail page at relPath: it has a ledger entry that is settled and
-// not up for a re-fetch, so the call leaves the stored file untouched. This is
-// broader than StatusDone: an Absent page (a prior terminal list error) is
-// settled too, and Object short-circuits it identically. That makes it exactly
-// the condition under which the page's contribution must be read back from the
-// stored file rather than taken from the re-listed events the write never
-// persisted.
-func (c *Collector) pageShortCircuited(relPath string) bool {
-	_, ok := c.env.Entry(relPath)
-
-	return ok && !c.env.ShouldFetch(relPath)
-}
-
-// pageSettledAbsent reports whether the audit-trail page at relPath sits in the
-// ledger as a settled absence, the record a pre-v0.4 release left behind when a
-// terminal list error was routed through [collect.Env.Object] (see
-// archiveTrailPage). No file was ever written for such a slot, so it must never
-// be read back; under retry-absent the slot is not settled and the ordinary
-// path re-fetches it.
-//
-// [LedgerMigration] is this check's required companion: registered at
-// [manifest.Load] it unsettles such slots before any walk sees them, so the
-// walk writes them fresh. On a ledger opened without it this branch only
-// passes the slot over, silently, run after run; it is a defensive backstop,
-// not the repair.
-func (c *Collector) pageSettledAbsent(relPath string) bool {
-	entry, ok := c.env.Entry(relPath)
-
-	return ok && entry.Status == manifest.StatusAbsent && !c.env.ShouldFetch(relPath)
 }
 
 // readPersistedPage decodes the stored audit-trail page at relPath into its
