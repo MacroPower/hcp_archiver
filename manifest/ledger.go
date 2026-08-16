@@ -804,16 +804,38 @@ func (l *Ledger) Now() time.Time {
 	return l.now()
 }
 
+// RecordOption configures a single record call.
+//
+// The available options are:
+//   - [WithUpdatedAt]
+type RecordOption func(*Entry)
+
+// WithUpdatedAt stamps the server-side updated-at the object reported onto
+// its entry (see [Entry.UpdatedAt]). A zero time leaves the entry unstamped.
+// It returns a [RecordOption].
+func WithUpdatedAt(t time.Time) RecordOption {
+	return func(e *Entry) {
+		e.UpdatedAt = t
+	}
+}
+
 // RecordDone records a successful fetch of relPath with its content signature.
-func (l *Ledger) RecordDone(relPath string, sig Signature) {
+// A record without [WithUpdatedAt] clears any server-side updated-at a prior
+// record stamped, so the entry never carries a stamp staler than its content.
+func (l *Ledger) RecordDone(relPath string, sig Signature, opts ...RecordOption) {
 	stored := sig
 
 	l.record(relPath, StatusDone, func(now time.Time, e *Entry) {
 		e.FetchedAt = now
+		e.UpdatedAt = time.Time{}
 		e.Signature = &stored
 		e.LastError = ""
 		e.LastErrorAt = time.Time{}
 		e.Transient = false
+
+		for _, opt := range opts {
+			opt(e)
+		}
 	})
 }
 

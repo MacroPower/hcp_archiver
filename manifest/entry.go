@@ -12,6 +12,11 @@ type Entry struct {
 	// FetchedAt is when the object was last fetched or probed; it is zero for an
 	// object that has only ever errored.
 	FetchedAt time.Time `json:"fetchedAt,omitzero"`
+	// UpdatedAt is the server-side updated-at the object reported when it was
+	// last recorded done (see [WithUpdatedAt]); it is zero when the recorder
+	// had none. Unlike [Entry.FetchedAt] it reads the server's clock, so it
+	// compares against other server timestamps without cross-clock skew.
+	UpdatedAt time.Time `json:"updatedAt,omitzero"`
 	// LastErrorAt is when the last failure was recorded.
 	LastErrorAt time.Time `json:"lastErrorAt,omitzero"`
 	// Signature is the content fingerprint recorded on a successful fetch.

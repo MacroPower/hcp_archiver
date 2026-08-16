@@ -212,6 +212,66 @@ func TestLedger_RoundTrip(t *testing.T) {
 	assert.Equal(t, int64(1024), last.BytesDownloaded)
 }
 
+func TestLedger_UpdatedAtRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 8, 12, 0, 0, 0, time.UTC)
+	updated := time.Date(2026, time.June, 1, 9, 30, 0, 0, time.UTC)
+	path := t.TempDir()
+
+	ledger, err := manifest.Load(path, manifest.WithClock(fixedClock(now)))
+	require.NoError(t, err)
+
+	ledger.StartRun()
+
+	sig := manifest.SignatureOf([]byte("policy source"))
+	ledger.RecordDone("policies/pol-1.sentinel", sig, manifest.WithUpdatedAt(updated))
+	ledger.RecordDone("policies/pol-2.sentinel", sig)
+
+	entry, ok := ledger.Entry("policies/pol-1.sentinel")
+	require.True(t, ok)
+	assert.Equal(t, updated, entry.UpdatedAt, "the server stamp lands on the entry")
+
+	plain, ok := ledger.Entry("policies/pol-2.sentinel")
+	require.True(t, ok)
+	assert.True(t, plain.UpdatedAt.IsZero(), "a record without the option carries no stamp")
+
+	// The stamp survives the log alone: flush without finishing the run, so the
+	// reload replays the WAL rather than reading a folded snapshot.
+	require.NoError(t, ledger.Flush())
+	require.NoError(t, ledger.Close())
+
+	replayed, err := manifest.Load(path, manifest.WithClock(fixedClock(now)))
+	require.NoError(t, err)
+
+	entry, ok = replayed.Entry("policies/pol-1.sentinel")
+	require.True(t, ok)
+	assert.Equal(t, updated, entry.UpdatedAt, "the stamp survives WAL replay")
+
+	// A re-record without the option clears the stale stamp: the entry never
+	// claims a server reading newer content did not report.
+	replayed.StartRun()
+	replayed.RecordDone("policies/pol-1.sentinel", sig)
+
+	entry, ok = replayed.Entry("policies/pol-1.sentinel")
+	require.True(t, ok)
+	assert.True(t, entry.UpdatedAt.IsZero(), "a re-record without the option clears the stamp")
+
+	// Re-stamp and finish the run, so the state folds into snapshots and the
+	// next load reads the stamp from a snapshot rather than the log.
+	replayed.RecordDone("policies/pol-1.sentinel", sig, manifest.WithUpdatedAt(updated))
+	replayed.FinishRun()
+	require.NoError(t, replayed.Flush())
+	require.NoError(t, replayed.Close())
+
+	folded, err := manifest.Load(path, manifest.WithClock(fixedClock(now)))
+	require.NoError(t, err)
+
+	entry, ok = folded.Entry("policies/pol-1.sentinel")
+	require.True(t, ok)
+	assert.Equal(t, updated, entry.UpdatedAt, "the stamp survives compaction into a snapshot")
+}
+
 func TestLedger_ShouldFetch(t *testing.T) {
 	t.Parallel()
 
