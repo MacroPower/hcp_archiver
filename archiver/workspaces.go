@@ -69,7 +69,7 @@ func (a *Archiver) collectProjects(
 		// surface leaves the archive incomplete, so record it (with an empty
 		// name map so workspaces still resolve to their default project) rather
 		// than let the run report success over the missing projects.
-		env.MarkSurfaceDropped(phaseProjects, err)
+		env.MarkSurfaceDropped(err, phaseProjects)
 
 		a.logger.LogAttrs(ctx, slog.LevelError, "project_list_error",
 			slog.String("org", orgName),
@@ -182,7 +182,7 @@ func (a *Archiver) collectWorkspaces(
 		// re-run retries the workspaces. The dropped surface leaves the archive
 		// incomplete, so record it rather than let the run report success over
 		// an organization whose entire workspace surface was silently missed.
-		env.MarkSurfaceDropped(phaseWorkspaces, err)
+		env.MarkSurfaceDropped(err, phaseWorkspaces)
 
 		a.logger.LogAttrs(ctx, slog.LevelError, "workspace_list_error",
 			slog.String("org", orgName),
@@ -269,7 +269,7 @@ func (a *Archiver) collectWorkspaces(
 				// re-run re-walks the workspace and picks up what it missed.
 				// The abandoned walk is a dropped surface: the listings it never
 				// finished record no entries, so nothing else marks the gap.
-				env.MarkSurfaceDropped(project+"/"+ws.Name, err)
+				env.MarkSurfaceDropped(err, project, ws.Name)
 
 				a.logger.LogAttrs(gctx, slog.LevelError, "workspace_archive_error",
 					slog.String("org", orgName),

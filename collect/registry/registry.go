@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
 )
@@ -85,19 +86,23 @@ func (c *Collector) Collect(ctx context.Context) error {
 // enumeration failure is logged and swallowed so an unreachable or disabled
 // registry family does not abort the archive (a re-run retries, having recorded
 // nothing settled). The drop is recorded through [collect.Env.MarkSurfaceDropped]
-// so the run still reports incomplete over the missing family, and logged so an
-// operator sees which family was omitted, matching the org-scoped and stacks
-// collectors.
-func (c *Collector) listFailed(ctx context.Context, family string, cause error) error {
+// under "registry" plus the family segments, so a caller dropping one of many
+// sibling surfaces (one provider's version listing) passes the distinguishing
+// identity as segments and the record's key stays unique by construction. It is
+// also logged so an operator sees which family was omitted, matching the
+// org-scoped and stacks collectors.
+func (c *Collector) listFailed(ctx context.Context, cause error, family ...string) error {
+	name := strings.Join(family, "/")
+
 	ctxErr := ctx.Err()
 	if ctxErr != nil {
-		return fmt.Errorf("list registry %s: %w", family, ctxErr)
+		return fmt.Errorf("list registry %s: %w", name, ctxErr)
 	}
 
-	c.env.MarkSurfaceDropped("registry/"+family, cause)
+	c.env.MarkSurfaceDropped(cause, "registry", family...)
 
 	slog.WarnContext(ctx, msgListSkipped,
-		slog.String("family", family),
+		slog.String("family", name),
 		slog.String("org", c.org),
 		slog.Any("error", cause),
 	)

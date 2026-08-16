@@ -203,8 +203,9 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 		// watermark it would never revisit. The unreached pages are a dropped
 		// surface: nothing records them, so the run must not report complete.
 		if p.NextPage <= page {
-			c.env.MarkSurfaceDropped(key,
-				fmt.Errorf("audit trail pagination stalled: page %d reports next page %d", page, p.NextPage))
+			c.env.MarkSurfaceDropped(
+				fmt.Errorf("audit trail pagination stalled: page %d reports next page %d", page, p.NextPage),
+				key)
 
 			return nil
 		}
@@ -250,7 +251,7 @@ func (c *Collector) archiveTrailPage(
 
 		// The walk cannot paginate past an unreadable page, so halt without
 		// advancing the watermark; the next run retries from the same cursor.
-		c.env.MarkSurfaceDropped(c.env.Store().AuditTrailDir(), listErr)
+		c.env.MarkSurfaceDropped(listErr, c.env.Store().AuditTrailDir())
 
 		return true, nil
 	}
@@ -267,8 +268,9 @@ func (c *Collector) archiveTrailPage(
 	// the next run retries the page from the same cursor instead of stepping past
 	// its events under a name it would never revisit.
 	if entry, ok := c.env.Entry(relPath); ok && !entry.Status.Settled() {
-		c.env.MarkSurfaceDropped(c.env.Store().AuditTrailDir(),
-			fmt.Errorf("audit trail page %q did not settle: %s", relPath, entry.LastError))
+		c.env.MarkSurfaceDropped(
+			fmt.Errorf("audit trail page %q did not settle: %s", relPath, entry.LastError),
+			c.env.Store().AuditTrailDir())
 
 		return true, nil
 	}
@@ -310,7 +312,7 @@ func (c *Collector) persistedEvents(
 
 	stored, err := c.readPersistedPage(relPath)
 	if err != nil {
-		c.env.MarkSurfaceDropped(key, err)
+		c.env.MarkSurfaceDropped(err, key)
 
 		return nil, true
 	}

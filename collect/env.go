@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -369,8 +370,9 @@ func (e *Env) FailObligation(ob *manifest.Obligation, cause error) {
 	ob.Fail(cause, tfeclient.IsTransient(cause))
 }
 
-// MarkSurfaceDropped records that the enumeration of surface failed this run
-// for a non-cancellation reason, marking the run incomplete.
+// MarkSurfaceDropped records that the enumeration of the surface the joined
+// segments name failed this run for a non-cancellation reason, marking the
+// run incomplete.
 //
 // Every collector that tolerates a listing failure (logging it and moving on
 // so one unreachable surface does not abort the rest of the organization)
@@ -378,8 +380,20 @@ func (e *Env) FailObligation(ob *manifest.Obligation, cause error) {
 // per-object failure is already visible as an errored ledger entry, but a
 // listing that never completed records no entries for the objects it never
 // named, so this is the only channel that keeps a dropped surface out of a
-// clean exit. See [manifest.Ledger.MarkSurfaceDropped].
-func (e *Env) MarkSurfaceDropped(surface string, cause error) {
+// clean exit.
+//
+// The segments join with "/" into the record's key. The record is
+// last-writer-wins per key, so a caller dropping several sibling surfaces (one
+// provider's version listing among many) passes the identity that
+// distinguishes them as segments, and the key's uniqueness is structural
+// rather than remembered at each call site. See
+// [manifest.Ledger.MarkSurfaceDropped].
+func (e *Env) MarkSurfaceDropped(cause error, seg string, segs ...string) {
+	surface := seg
+	if len(segs) > 0 {
+		surface += "/" + strings.Join(segs, "/")
+	}
+
 	e.ledger.MarkSurfaceDropped(surface, cause)
 }
 

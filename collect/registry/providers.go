@@ -31,7 +31,7 @@ func (c *Collector) collectProviders(ctx context.Context) error {
 		},
 	)
 	if err != nil {
-		return c.listFailed(ctx, "providers", err)
+		return c.listFailed(ctx, err, "providers")
 	}
 
 	// The providers archive concurrently, each under its own registry-name/
@@ -102,9 +102,8 @@ func (c *Collector) archiveProviderDetail(ctx context.Context, prov *tfe.Registr
 		// versions concurrently, and the dropped-surface record is last-writer-wins
 		// per key, so a shared key would keep only one provider's cause and hide
 		// that the others were skipped too.
-		family := fmt.Sprintf("provider-versions/%s/%s/%s", prov.RegistryName, prov.Namespace, prov.Name)
-
-		return c.listFailed(ctx, family, err)
+		return c.listFailed(ctx, err,
+			"provider-versions", string(prov.RegistryName), prov.Namespace, prov.Name)
 	}
 
 	// Each version is a metadata write plus one platform list at its own paths,

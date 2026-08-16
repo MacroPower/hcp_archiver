@@ -30,7 +30,7 @@ func (c *Collector) collectModules(ctx context.Context) error {
 		},
 	)
 	if err != nil {
-		return c.listFailed(ctx, "modules", err)
+		return c.listFailed(ctx, err, "modules")
 	}
 
 	// The modules archive concurrently, each under its own registry-name/

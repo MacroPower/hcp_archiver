@@ -197,9 +197,10 @@ func (c *Collector) collectStack(ctx context.Context, stack *tfe.Stack) error {
 		// dropped. Recording the surface makes the run report incomplete rather
 		// than closing clean over it.
 		if !resolved.named {
-			c.env.MarkSurfaceDropped(c.env.Store().StackDir(project, stack.Name),
+			c.env.MarkSurfaceDropped(
 				fmt.Errorf("stack %q: project %s name unresolved, so the project filter cannot judge it",
-					stack.Name, project))
+					stack.Name, project),
+				c.env.Store().StackDir(project, stack.Name))
 			c.log.WarnContext(
 				ctx, "stack project name unresolved; excluded by the project filter",
 				slog.String("stack", stack.Name),
@@ -359,7 +360,7 @@ func (c *Collector) tolerate(ctx context.Context, surface string, err error) err
 		return err
 	}
 
-	c.env.MarkSurfaceDropped(surface, err)
+	c.env.MarkSurfaceDropped(err, surface)
 
 	c.log.WarnContext(
 		ctx, "skipping stacks object after failure",

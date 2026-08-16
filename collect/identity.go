@@ -75,7 +75,7 @@ func (e *Env) ClaimDir(dir, id string) (string, error) {
 
 	renamedFrom, err := e.claimDirLocked(dir, id)
 	if err != nil {
-		e.ledger.MarkSurfaceDropped(dir, err)
+		e.MarkSurfaceDropped(err, dir)
 	}
 
 	return renamedFrom, err

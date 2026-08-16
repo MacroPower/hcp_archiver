@@ -31,7 +31,7 @@ func (c *Collector) collectGPGKeys(ctx context.Context) error {
 		},
 	)
 	if err != nil {
-		return c.listFailed(ctx, "gpg-keys", err)
+		return c.listFailed(ctx, err, "gpg-keys")
 	}
 
 	for _, key := range keys {

@@ -143,7 +143,7 @@ func paginate[T any](
 			return nil, false, fmt.Errorf("list %s: %w", collection, ctx.Err())
 		}
 
-		c.env.MarkSurfaceDropped(name+"/"+collection, err)
+		c.env.MarkSurfaceDropped(err, name, collection)
 
 		slog.WarnContext(ctx, msgListSkipped,
 			slog.String("collection", collection),
