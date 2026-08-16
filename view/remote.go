@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
+	"go.jacobcolvin.com/hcp_archiver/pathkit"
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/seal"
 	"go.jacobcolvin.com/hcp_archiver/store"
@@ -895,7 +896,7 @@ func (o *Org) remoteKeysUnder(prefix string) map[string]remote.ObjectInfo {
 	out := make(map[string]remote.ObjectInfo)
 
 	for rel, info := range inventory {
-		if underPrefix(rel, prefix) {
+		if pathkit.UnderPrefix(rel, prefix) {
 			out[rel] = info
 		}
 	}

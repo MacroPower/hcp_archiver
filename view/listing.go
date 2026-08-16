@@ -15,6 +15,7 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 	"go.jacobcolvin.com/hcp_archiver/fsid"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/pathkit"
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/seal"
 	"go.jacobcolvin.com/hcp_archiver/store"
@@ -382,7 +383,7 @@ func (o *Org) looseEntries(prefix string) ([]Entry, map[string]struct{}, error) 
 func (o *Org) stubEntries(entries []Entry, seen map[string]struct{}, stubs []string, prefix string) []Entry {
 	for _, rel := range stubs {
 		target, size, ok := o.evictedObject(rel)
-		if !ok || !underPrefix(target, prefix) {
+		if !ok || !pathkit.UnderPrefix(target, prefix) {
 			continue
 		}
 

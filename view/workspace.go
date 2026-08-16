@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 
+	"go.jacobcolvin.com/hcp_archiver/pathkit"
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
@@ -246,18 +247,12 @@ func (w *Workspace) sealedUnder(prefix string) ([]sealedEntry, error) {
 	var entries []sealedEntry
 
 	for rel, ref := range idx {
-		if underPrefix(rel, prefix) {
+		if pathkit.UnderPrefix(rel, prefix) {
 			entries = append(entries, sealedEntry{rel: rel, ref: ref})
 		}
 	}
 
 	return entries, nil
-}
-
-// underPrefix reports whether a slash-separated path sits at or beneath a
-// prefix, matching whole segments so "runs/run-1" never matches "runs/run-10".
-func underPrefix(p, prefix string) bool {
-	return prefix == "" || p == prefix || strings.HasPrefix(p, prefix+"/")
 }
 
 // index returns the workspace's sealed-object index, building it on first use

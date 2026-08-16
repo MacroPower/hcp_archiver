@@ -25,6 +25,7 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 	"go.jacobcolvin.com/hcp_archiver/fsid"
 	"go.jacobcolvin.com/hcp_archiver/manifest"
+	"go.jacobcolvin.com/hcp_archiver/pathkit"
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/seal"
 	"go.jacobcolvin.com/hcp_archiver/store"
@@ -1185,7 +1186,10 @@ func (s *treeSweep) reshaped(relPath string) bool {
 	}
 
 	for alias := range s.aliases {
-		if strings.HasPrefix(relPath, alias+"/") {
+		// Strictly beneath: the alias directory itself is not reshaped by its
+		// own record, and an empty alias (which UnderPrefix reads as
+		// everything) must not match.
+		if alias != "" && relPath != alias && pathkit.UnderPrefix(relPath, alias) {
 			return true
 		}
 	}
