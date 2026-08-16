@@ -184,21 +184,11 @@ func fillRun(run *Run, r *Resource) {
 func (w *Workspace) RunArtifacts(runID string) ([]string, error) {
 	runDir := path.Join(w.dir, "runs", runID)
 
-	names, err := w.org.looseNames(runDir)
+	names, err := w.mergedLeafNames(runDir)
 	if err != nil {
 		return nil, fmt.Errorf("list run artifacts: %w", err)
 	}
 
-	sealed, err := w.sealedNames(runDir)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, relPath := range sealed {
-		names = append(names, path.Base(relPath))
-	}
-
-	names = dedupe(names)
 	names = slices.DeleteFunc(names, func(name string) bool {
 		return name == "run.json"
 	})
@@ -249,23 +239,14 @@ func (w *Workspace) StateVersions() ([]StateVersion, error) {
 func (w *Workspace) StateVersionNames() ([]string, error) {
 	svDir := path.Join(w.dir, "state-versions")
 
-	names, err := w.org.looseNames(svDir)
+	names, err := w.mergedLeafNames(svDir)
 	if err != nil {
 		return nil, fmt.Errorf("list state versions: %w", err)
 	}
 
-	sealed, err := w.sealedNames(svDir)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, relPath := range sealed {
-		names = append(names, path.Base(relPath))
-	}
-
 	var stems []string
 
-	for _, name := range dedupe(names) {
+	for _, name := range names {
 		if !strings.HasSuffix(name, metaSuffix) {
 			continue
 		}
@@ -349,4 +330,27 @@ func dedupe(names []string) []string {
 	slices.Sort(names)
 
 	return slices.Compact(names)
+}
+
+// mergedLeafNames returns the deduplicated leaf names directly under a
+// workspace-scoped directory across both physical forms: the loose files
+// [*Org.looseNames] answers (the clean merged tree, machinery hidden) and the
+// base name of every sealed key there. Callers project and order the names
+// for their own presentation.
+func (w *Workspace) mergedLeafNames(relDir string) ([]string, error) {
+	names, err := w.org.looseNames(relDir)
+	if err != nil {
+		return nil, err
+	}
+
+	sealed, err := w.sealedNames(relDir)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, relPath := range sealed {
+		names = append(names, path.Base(relPath))
+	}
+
+	return dedupe(names), nil
 }
