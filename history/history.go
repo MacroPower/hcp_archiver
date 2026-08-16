@@ -101,9 +101,17 @@ func WithLogger(logger *slog.Logger) Option {
 // retried after a crash between the append and the object's rename does not
 // duplicate the record, and a reappearance whose old bytes [Bury] already
 // flushed is not flushed again. It reports whether a record was appended.
+//
+// Empty content appends nothing: it carries no version worth keeping, and its
+// record would marshal with neither a content nor a deleted field, a line
+// readers could classify as neither a version nor a tombstone.
 func Supersede(path string, content []byte, fetchedAt time.Time, opts ...Option) (bool, error) {
 	if !utf8.Valid(content) {
 		return false, ErrContentNotUTF8
+	}
+
+	if len(content) == 0 {
+		return false, nil
 	}
 
 	cfg := resolveConfig(opts...)
@@ -134,7 +142,9 @@ func Supersede(path string, content []byte, fetchedAt time.Time, opts ...Option)
 // tombstone: the object came back, and the returning content closes the
 // deletion so the timeline stays ordered and a later disappearance records a
 // fresh tombstone. It never creates a sidecar and is a no-op on any other
-// state, reporting whether a record was appended.
+// state, reporting whether a record was appended. Empty content appends
+// nothing and leaves the tombstone standing, for the reason [Supersede]
+// documents; the deletion closes once content worth keeping returns.
 func Restore(path string, content []byte, fetchedAt time.Time, opts ...Option) (bool, error) {
 	newest, ok, err := Newest(path, opts...)
 	if err != nil || !ok {
@@ -147,6 +157,10 @@ func Restore(path string, content []byte, fetchedAt time.Time, opts ...Option) (
 
 	if !utf8.Valid(content) {
 		return false, ErrContentNotUTF8
+	}
+
+	if len(content) == 0 {
+		return false, nil
 	}
 
 	err = appendRecord(path, &Record{

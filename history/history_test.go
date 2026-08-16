@@ -248,6 +248,40 @@ func TestRestore(t *testing.T) {
 		assert.Len(t, readRecords(t, path), 1)
 	})
 
+	t.Run("empty supersede appends nothing and creates no sidecar", func(t *testing.T) {
+		t.Parallel()
+
+		path := sidecar(t)
+
+		appended, err := history.Supersede(path, []byte{}, at)
+		require.NoError(t, err)
+		assert.False(t, appended)
+
+		_, statErr := os.Stat(path)
+		assert.True(t, os.IsNotExist(statErr))
+	})
+
+	t.Run("empty content leaves the tombstone standing", func(t *testing.T) {
+		t.Parallel()
+
+		// An empty record would marshal with neither a content nor a deleted
+		// field, a line readers can classify as neither a version nor a
+		// tombstone; the deletion closes only once content worth keeping
+		// returns.
+		path := sidecar(t)
+
+		_, err := history.Bury(path, content, at, at.Add(time.Hour))
+		require.NoError(t, err)
+
+		appended, err := history.Restore(path, []byte{}, at.Add(2*time.Hour))
+		require.NoError(t, err)
+		assert.False(t, appended)
+
+		recs := readRecords(t, path)
+		require.Len(t, recs, 2)
+		assert.True(t, recs[1].Deleted, "the tombstone stays the newest record")
+	})
+
 	t.Run("newest tombstone appends the returning content", func(t *testing.T) {
 		t.Parallel()
 
