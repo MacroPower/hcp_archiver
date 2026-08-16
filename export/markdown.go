@@ -33,6 +33,14 @@ func escapeCell(s string) string {
 	return cellEscaper.Replace(s)
 }
 
+// shellQuote renders s as one single-quoted POSIX shell word, closing the
+// quote around each embedded single quote, so an archive-derived path pastes
+// into a retrieval snippet as exactly one argument no matter what characters
+// the organization or workspace name carries.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // mdLink renders a markdown link whose text is escaped and whose target path
 // segments are URL-escaped, so a display name cannot break out of the link
 // and a path segment with reserved characters still resolves.

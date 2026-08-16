@@ -73,10 +73,11 @@ func templateNames() []string {
 // templateFuncs returns the helper functions every page template can call.
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
-		"escape":    escapeCell,
-		"link":      mdLink,
-		"countNoun": theme.CountNoun,
-		"join":      strings.Join,
+		"escape":     escapeCell,
+		"link":       mdLink,
+		"countNoun":  theme.CountNoun,
+		"join":       strings.Join,
+		"shellQuote": shellQuote,
 	}
 }
 

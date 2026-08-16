@@ -65,3 +65,33 @@ func TestEscapeCell(t *testing.T) {
 		})
 	}
 }
+
+func TestShellQuote(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		in   string
+		want string
+	}{
+		"plain path stays one quoted word": {
+			in:   "acme/projects/default",
+			want: "'acme/projects/default'",
+		},
+		"embedded single quote closes and reopens the word": {
+			in:   "o'brien/projects",
+			want: `'o'\''brien/projects'`,
+		},
+		"spaces and glob characters stay literal": {
+			in:   "my org/state *.json",
+			want: "'my org/state *.json'",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, export.ShellQuote(tc.in))
+		})
+	}
+}

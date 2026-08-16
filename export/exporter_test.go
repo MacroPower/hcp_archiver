@@ -221,6 +221,28 @@ func readTree(t *testing.T, target string) map[string]string {
 	return files
 }
 
+func TestCountEntriesFoldsEvictionStubs(t *testing.T) {
+	t.Parallel()
+
+	// An evicted configuration version surfaces twice in a merged listing: the
+	// local eviction stub and the mirror's record of the tarball itself. The
+	// inventory must fold the stub onto its target and count one object.
+	root := t.TempDir()
+	org := filepath.Join(root, "my-org")
+
+	writeFile(t, org, "org.json",
+		`{"data":{"id":"org-1","type":"organizations","attributes":{"name":"my-org"}}}`)
+	writeFile(t, org, "config-versions/cv-1.tar.gz", "tarball bytes")
+	writeFile(t, org, "config-versions/cv-1.tar.gz.remote.json", `{"key":"k","version":1}`)
+
+	orgs, err := view.OpenArchive(root)
+	require.NoError(t, err)
+	require.Len(t, orgs, 1)
+
+	assert.Equal(t, 1, export.CountEntries(orgs[0], "config-versions"),
+		"the stub folds onto the object it stands in for")
+}
+
 func TestExportTree(t *testing.T) {
 	t.Parallel()
 

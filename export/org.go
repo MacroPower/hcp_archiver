@@ -92,8 +92,11 @@ func countEntries(org *view.Org, rel string) int {
 			continue
 		}
 
-		if target, ok := store.RemoteStubTarget(name); ok {
-			name = target
+		// Stub recognition needs the org-relative path: it admits only stubs
+		// under the surface eviction writes them for, so a bare leaf name would
+		// never match and the stub would count beside the mirror's record.
+		if target, ok := store.RemoteStubTarget(path.Join(rel, name)); ok {
+			name = path.Base(target)
 		}
 
 		seen[name] = struct{}{}
