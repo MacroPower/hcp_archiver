@@ -2,7 +2,9 @@ package orgscope
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/hashicorp/go-tfe"
@@ -171,20 +173,24 @@ func (c *Collector) collectPolicies(ctx context.Context) error {
 }
 
 // archivePolicy archives one policy's metadata and its raw source.
+//
+// The source revision's name resolves against the updated-at the previous
+// run's metadata recorded, so it is picked before this run's refresh replaces
+// the metadata (see [Collector.policySourcePath]).
 func (c *Collector) archivePolicy(ctx context.Context, policy *tfe.Policy) error {
+	srcPath := c.policySourcePath(policy)
+
 	err := c.mutableValue(ctx, c.env.Store().Policy(policy.ID, "json"), policy)
 	if err != nil {
 		return err
 	}
 
-	return c.collectPolicySource(ctx, policy)
+	return c.collectPolicySource(ctx, policy, srcPath)
 }
 
 // collectPolicySource archives the raw source of the policy's current revision
-// as immutable bytes, under the name [Collector.policySourcePath] picks.
-func (c *Collector) collectPolicySource(ctx context.Context, policy *tfe.Policy) error {
-	relPath := c.policySourcePath(policy)
-
+// as immutable bytes at relPath, the name [Collector.policySourcePath] picks.
+func (c *Collector) collectPolicySource(ctx context.Context, policy *tfe.Policy, relPath string) error {
 	err := c.env.Bytes(ctx, relPath, func(ctx context.Context) ([]byte, error) {
 		var src []byte
 
@@ -225,29 +231,84 @@ func (c *Collector) collectPolicySource(ctx context.Context, policy *tfe.Policy)
 // as <id>.<updated-at>.<ext>. The stamps sort lexically, so the last name is the
 // current source and no revision is overwritten by the one that replaced it.
 //
-// The comparison is against the plain file's fetch time throughout rather than
-// the newest revision's, so a revision already archived resolves to the same
-// name on every later run and the ledger settles its one fetch. A policy whose
-// plain name has not settled keeps it, whether nothing is archived there yet or
-// a failed capture is still awaiting its retry, so the retry lands on the entry
-// the ledger is waiting for rather than stranding it unsettled under a new name.
-// An unset updated-at is never newer than a recorded fetch, so it too keeps the
-// plain name. Two uploads inside one second share a stamp, so the archive keeps
-// whichever revision it reached first; the second is captured only once a later
-// upload moves the stamp again.
+// The baseline a listed updated-at is compared against is the updated-at the
+// previously archived policy metadata recorded, read before this run's refresh
+// replaces it (see archivePolicy). Both readings come from the server's clock,
+// so an upload landing between a run's download and its ledger stamp, or an
+// archiver clock running ahead of the server, cannot make a new revision look
+// already captured. An archive missing that metadata falls back to comparing
+// against the plain file's local fetch time, the closest reading it has left.
+// Either baseline is stable across runs for an unchanged policy, so a revision
+// already archived resolves to the same name on every later run and the ledger
+// settles its one fetch.
+//
+// A policy whose plain name has not settled keeps it, whether nothing is
+// archived there yet or a failed capture is still awaiting its retry, so the
+// retry lands on the entry the ledger is waiting for rather than stranding it
+// unsettled under a new name. A stamped name a failed capture left unsettled is
+// kept the same way, since by then the refreshed metadata already carries the
+// revision's own updated-at and the baseline alone would fold the retry back
+// into the settled plain name. An unset updated-at is never newer than any
+// baseline, so it too keeps the plain name. Two uploads inside one second share
+// a stamp, so the archive keeps whichever revision it reached first; the second
+// is captured only once a later upload moves the stamp again.
 func (c *Collector) policySourcePath(policy *tfe.Policy) string {
 	st := c.env.Store()
 	ext := policyExt(policy.Kind)
 	relPath := st.Policy(policy.ID, ext)
 
 	entry, ok := c.env.Entry(relPath)
-	if !ok || c.env.ShouldFetch(relPath) || !policy.UpdatedAt.After(entry.FetchedAt) {
+	if !ok || c.env.ShouldFetch(relPath) || policy.UpdatedAt.IsZero() {
 		return relPath
 	}
 
 	// The revision stamp composes into the extension rather than into the id, so
 	// the store stays the one place a policy id is sanitized into a path segment.
-	return st.Policy(policy.ID, policyRevision(policy.UpdatedAt)+"."+ext)
+	stamped := st.Policy(policy.ID, policyRevision(policy.UpdatedAt)+"."+ext)
+
+	if _, ok := c.env.Entry(stamped); ok && c.env.ShouldFetch(stamped) {
+		return stamped
+	}
+
+	baseline, ok := c.archivedPolicyUpdatedAt(policy.ID)
+	if !ok {
+		baseline = entry.FetchedAt
+	}
+
+	if !policy.UpdatedAt.After(baseline) {
+		return relPath
+	}
+
+	return stamped
+}
+
+// archivedPolicyUpdatedAt reads the updated-at recorded in the archived
+// metadata of the policy with the given id, and whether one is available: it
+// is absent when the metadata was never archived, cannot be read, or carries
+// no updated-at.
+func (c *Collector) archivedPolicyUpdatedAt(id string) (time.Time, bool) {
+	st := c.env.Store()
+
+	//nolint:gosec // The path is composed by the store from its archive root.
+	data, err := os.ReadFile(st.AbsPath(st.Policy(id, "json")))
+	if err != nil {
+		return time.Time{}, false
+	}
+
+	var doc struct {
+		Data struct {
+			Attributes struct {
+				UpdatedAt time.Time `json:"updated-at"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+
+	err = json.Unmarshal(data, &doc)
+	if err != nil || doc.Data.Attributes.UpdatedAt.IsZero() {
+		return time.Time{}, false
+	}
+
+	return doc.Data.Attributes.UpdatedAt, true
 }
 
 // policyRevisionLayout formats a policy's updated-at into the stamp naming one

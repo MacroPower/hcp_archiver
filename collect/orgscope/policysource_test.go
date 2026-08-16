@@ -178,6 +178,104 @@ func TestCollectPolicySource(t *testing.T) {
 	}
 }
 
+// writeArchivedPolicyMetadata plants the archived policy.json a previous run's
+// metadata refresh would have left, carrying the updated-at the revision naming
+// reads as its baseline.
+func writeArchivedPolicyMetadata(t *testing.T, f orgFixture, id string, updatedAt time.Time) {
+	t.Helper()
+
+	doc := `{"data":{"id":"` + id + `","type":"policies","attributes":{"updated-at":"` +
+		updatedAt.UTC().Format(time.RFC3339) + `"}}}`
+
+	path := f.store.AbsPath("policies/" + id + ".json")
+	require.NoError(t, os.WriteFile(path, []byte(doc), 0o600))
+}
+
+func TestCollectPolicySourceArchivesRevisionUpdatedBeforeLocalFetchStamp(t *testing.T) {
+	t.Parallel()
+
+	// The upload lands after the download but before the ledger stamps the fetch
+	// (or the archiver clock runs ahead of the server), so the new revision's
+	// updated-at sorts before the recorded fetch time. Against the local stamp
+	// the revision looks already captured and is silently lost; against the
+	// archived metadata's own updated-at it is newer and earns a stamped name.
+	src := &policySource{content: beforeUpload}
+	f := newPolicyFixture(t, src)
+
+	captured := fetchedAt.Add(-time.Hour)
+
+	require.NoError(t, f.collector.CollectPolicySource(t.Context(),
+		&tfe.Policy{ID: "pol-1", Kind: tfe.Sentinel, UpdatedAt: captured}))
+
+	writeArchivedPolicyMetadata(t, f, "pol-1", captured)
+
+	src.replace(afterUpload)
+
+	// Newer than the captured revision, older than the local fetch stamp.
+	replaced := &tfe.Policy{ID: "pol-1", Kind: tfe.Sentinel, UpdatedAt: fetchedAt.Add(-30 * time.Minute)}
+
+	require.NoError(t, f.collector.CollectPolicySource(t.Context(), replaced))
+	require.NoError(t, f.collector.CollectPolicySource(t.Context(), replaced))
+
+	for relPath, want := range map[string]string{
+		"policies/pol-1.sentinel":                  beforeUpload,
+		"policies/pol-1.20260814T094500Z.sentinel": afterUpload,
+	} {
+		content, err := os.ReadFile(f.store.AbsPath(relPath))
+		require.NoError(t, err, "%s should be written", relPath)
+		assert.Equal(t, want, string(content))
+
+		entry, ok := f.ledger.Entry(relPath)
+		require.True(t, ok, "%s should have a ledger entry", relPath)
+		assert.Equal(t, manifest.StatusDone, entry.Status)
+	}
+
+	assert.Equal(t, 2, src.downloads(), "the replaced revision is downloaded exactly once")
+}
+
+func TestCollectPolicySourceRetriesFailedStampedCapture(t *testing.T) {
+	t.Parallel()
+
+	// A stamped capture that failed leaves its name unsettled while the metadata
+	// refresh of the same run already recorded the revision's updated-at. The
+	// baseline alone would fold the next run back onto the settled plain name and
+	// strand the failure; the unsettled stamped entry must keep its name so the
+	// retry lands on it.
+	src := &policySource{content: beforeUpload}
+	f := newPolicyFixture(t, src)
+
+	captured := fetchedAt.Add(-time.Hour)
+
+	require.NoError(t, f.collector.CollectPolicySource(t.Context(),
+		&tfe.Policy{ID: "pol-1", Kind: tfe.Sentinel, UpdatedAt: captured}))
+
+	writeArchivedPolicyMetadata(t, f, "pol-1", captured)
+
+	src.replace(afterUpload)
+
+	src.status = http.StatusInternalServerError
+
+	replacedAt := fetchedAt.Add(-30 * time.Minute)
+	replaced := &tfe.Policy{ID: "pol-1", Kind: tfe.Sentinel, UpdatedAt: replacedAt}
+
+	require.NoError(t, f.collector.CollectPolicySource(t.Context(), replaced))
+
+	stamped := "policies/pol-1.20260814T094500Z.sentinel"
+	entry, ok := f.ledger.Entry(stamped)
+	require.True(t, ok)
+	require.Equal(t, manifest.StatusErrored, entry.Status)
+
+	// The failing run's metadata refresh already moved the baseline to the
+	// revision's own updated-at.
+	writeArchivedPolicyMetadata(t, f, "pol-1", replacedAt)
+
+	require.NoError(t, f.collector.CollectPolicySource(t.Context(), replaced))
+
+	entry, ok = f.ledger.Entry(stamped)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusDone, entry.Status, "the retry lands on the stamped entry")
+}
+
 func TestCollectPolicySourceRetriesFailedCapture(t *testing.T) {
 	t.Parallel()
 

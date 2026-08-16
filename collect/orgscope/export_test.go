@@ -16,9 +16,10 @@ func (c *Collector) ArchiveHYOKConfiguration(ctx context.Context, config *tfe.HY
 	return c.archiveHYOKConfiguration(ctx, config)
 }
 
-// CollectPolicySource exposes collectPolicySource to the external test package.
+// CollectPolicySource exposes collectPolicySource to the external test package,
+// resolving the revision name first, the way archivePolicy does.
 func (c *Collector) CollectPolicySource(ctx context.Context, policy *tfe.Policy) error {
-	return c.collectPolicySource(ctx, policy)
+	return c.collectPolicySource(ctx, policy, c.policySourcePath(policy))
 }
 
 // ArchivePolicySetVersions exposes archivePolicySetVersions to the external test
