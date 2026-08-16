@@ -366,8 +366,13 @@ func (c *Client) Copy(ctx context.Context, srcKey, dstKey string) error {
 	}
 
 	if c.serverCopyCap > 0 && attrs.Size < c.serverCopyCap {
+		// A server-side copy exposes no progress to touch, so the whole request
+		// is unobservable the way a write body past the SDK's buffers is. The
+		// window scales with the source size like the streaming branch's, since
+		// a near-cap copy on a slow backend can legitimately outlast the base
+		// window, and a flat window would cut it identically on every retry.
 		err = c.withRetry(ctx, func() error {
-			return c.runAttempt(ctx, c.stallTimeout, func(ctx context.Context, _ func()) error {
+			return c.runAttempt(ctx, c.writeWindow(attrs.Size), func(ctx context.Context, _ func()) error {
 				return c.bucket.Copy(ctx, dstKey, srcKey, nil) //nolint:wrapcheck // Wrapped below.
 			})
 		})
