@@ -1151,8 +1151,8 @@ func TestWalkInterruptedRewalkUnsettles(t *testing.T) {
 	// entry, but the older new element is never listed and leaves no ledger
 	// record. Were the stale settled flag to survive, the next run's early
 	// stop would halt at the page-1 element and strand the unlisted one
-	// forever — a silent permanent gap the seal and the remote mirror would
-	// then enshrine as complete history.
+	// forever: a silent permanent gap the seal and the remote mirror would then
+	// enshrine as complete history.
 	r4 := walkItem{relPath: "runs/r4/run.json", createdAt: base.Add(4 * time.Hour), terminal: true}
 	r3 := walkItem{relPath: "runs/r3/run.json", createdAt: base.Add(3 * time.Hour), terminal: true}
 	r2 := walkItem{relPath: "runs/r2/run.json", createdAt: base.Add(2 * time.Hour), terminal: true}
@@ -1229,7 +1229,7 @@ func TestWalkEarlyStopResettlesAfterDelta(t *testing.T) {
 
 	// A settled collection with one new terminal element: the walk withdraws
 	// settlement to archive it, stops at the frozen boundary below, and must
-	// re-earn the flag — otherwise every delta would force the next run to
+	// re-earn the flag; otherwise every delta would force the next run to
 	// re-page the whole collection, forfeiting the incremental optimization.
 	r3 := walkItem{relPath: "runs/r3/run.json", createdAt: base.Add(3 * time.Hour), terminal: true}
 	r2 := walkItem{relPath: "runs/r2/run.json", createdAt: base.Add(2 * time.Hour), terminal: true}
@@ -1774,8 +1774,8 @@ func TestWalkSyntheticCursorFlagsShareTheEntriesShard(t *testing.T) {
 
 	base := time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC)
 
-	// The crash fence's durability order — the unsettle record ahead of the
-	// entries it guards, settlement and completion behind them — holds only
+	// The crash fence's durability order (the unsettle record ahead of the
+	// entries it guards, settlement and completion behind them) holds only
 	// within one shard's log append. A synthetic cursor key routes to the
 	// org-root shard while the entries live in the stack shard, so flags keyed
 	// on the cursor would flush in a separate append from the entries, in no
@@ -1848,7 +1848,7 @@ func TestWalkSyntheticCursorFlagsShareTheEntriesShard(t *testing.T) {
 	assert.Equal(t, 2, archived[cfg2.relPath], "the boundary gets its refresh, so the flags were read back")
 	assert.Equal(t, 1, archived[cfg1.relPath], "the early stop halts above settled history")
 
-	// After a flush every collection record — flags and high-water mark alike —
+	// After a flush every collection record (flags and high-water mark alike)
 	// carries the stack shard's tag, routing it back to the shard that owns the
 	// entries it describes.
 	require.NoError(t, ledger.Flush())

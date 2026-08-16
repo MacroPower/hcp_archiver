@@ -373,7 +373,7 @@ func (c *Collector) tolerate(ctx context.Context, surface string, err error) err
 
 // listingLeaf names the obligation marker recording a child enumeration's
 // outcome, placed inside the directory the enumeration fills. The marker is a
-// ledger entry only — no file is ever written at the path — and cannot collide
+// ledger entry only (no file is ever written at the path) and cannot collide
 // with a real archived object, whose directories key on API-prefixed ids.
 const listingLeaf = "listing"
 
@@ -412,13 +412,13 @@ func (c *Collector) tolerateEnumeration(
 // settles the marker only when the nested collection itself settled. A nested
 // walk that saw a still-running element (or was interrupted) withholds its
 // own settlement, but that flag is invisible to the enclosing walk's entry
-// gate — a run recorded done while in flight leaves nothing unsettled for
-// [manifest.Collection.HasUnsettled] to find — so without the marker a
-// terminal configuration could freeze over a deployment run still executing
-// beneath it, permanently stranding the run's final state and steps. The
-// pending marker carries the nested walk's openness into an entry both
-// enclosing gates scan, and clears once a later pass finds the nested
-// collection settled.
+// gate: a run recorded done while in flight leaves nothing unsettled for
+// [manifest.Collection.HasUnsettled] to find. Without the marker a terminal
+// configuration could freeze over a deployment run still executing beneath
+// it, permanently stranding the run's final state and steps. The pending
+// marker carries the nested walk's openness into an entry both enclosing
+// gates scan, and clears once a later pass finds the nested collection
+// settled.
 func (c *Collector) tolerateWalk(
 	ctx context.Context,
 	ob *manifest.Obligation,

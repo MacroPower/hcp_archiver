@@ -4,7 +4,7 @@ set: [errexit, nounset, pipefail]
 shopt: [globstar]
 
 # The .taskfiles/ segmentation is intentional, even where a namespace holds
-# only thin Dagger wrappers -- do not flatten it into this file.
+# only thin Dagger wrappers; do not flatten it into this file.
 includes:
   dagger: ./.taskfiles/dagger/Taskfile.yaml
   dev: ./.taskfiles/dev/Taskfile.yaml
@@ -42,7 +42,7 @@ tasks:
   # check is the fast local gate: lint and test invoke their tools straight off
   # the devbox PATH, so it needs no Dagger engine. check:ci adds the gates whose
   # tools (Trivy, zizmor, renovate-config-validator, goreleaser) are not on the
-  # devbox PATH and so run through Dagger. check:all is the union -- the full set
+  # devbox PATH and so run through Dagger. check:all is the union: the full set
   # CI runs, mirrored by the validate.yaml matrix.
   check:
     desc: Runs the local checks using devbox

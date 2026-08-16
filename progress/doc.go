@@ -29,12 +29,12 @@
 // scroll in scrollback above the panel instead of corrupting it. Delivery is
 // at-least-once: a line leaves the sink only once the panel confirms it
 // printed, and everything unconfirmed when the panel stops flushes to the
-// sink's fallback writer — a killed panel may repeat a line on stderr, but no
-// shutdown path loses one. Off a terminal (a pipe,
-// a redirect, or a test buffer) the same signal falls back to a logfmt line.
-// The machine mode ([config.ProgressModeJSON]) is one JSON object per line for
-// wrapping in CI or a watcher. The mode defaults to the panel on an interactive
-// terminal and to quiet otherwise.
+// sink's fallback writer; a killed panel may repeat a line on stderr, but no
+// shutdown path loses one. Off a terminal (a pipe, a redirect, or a test
+// buffer) the same signal falls back to a logfmt line. The machine mode
+// ([config.ProgressModeJSON]) is one JSON object per line for wrapping in CI
+// or a watcher. The mode defaults to the panel on an interactive terminal and
+// to quiet otherwise.
 //
 // The panel's bar tracks unit progress, a per-phase weighted count the archiver
 // sets and advances, distinct from the object tally. During the workspaces phase

@@ -157,11 +157,11 @@ or has been sealed into an NDJSON roll-up or a zip bundle.
 
 For an archive the archiver wrote and mirrored to object storage (see
 [Mirroring the archive](#mirroring-the-archive-to-object-storage)),
-browsing and grep stay fully offline — the search layer, including every
-sidecar index, is local — and only opening a sealed member whose bundle was
-evicted reaches the remote store, fetching just that member with ranged reads
-rather than the whole bundle. (A tree bootstrapped _from_ a mirror is the one
-exception: it fetches what it lacks on demand, per
+browsing and grep stay fully offline, because the search layer, including
+every sidecar index, is local. Only opening a sealed member whose bundle was
+evicted reaches the remote store, and it fetches just that member with ranged
+reads rather than the whole bundle. (A tree bootstrapped _from_ a mirror is
+the one exception: it fetches what it lacks on demand, per
 [Reading an archive back from its mirror](#reading-an-archive-back-from-its-mirror).)
 That read path needs object-store credentials from the backend provider's
 default chain; a read-only identity scoped to the archive prefix is the right
@@ -257,8 +257,8 @@ Pages carry metadata only: organization, team, variable-set, policy-set,
 project, workspace, and stack settings, variable tables (a sensitive
 variable shows its key with a `(sensitive)` marker, its stored value never
 read), and run and state-version history. Content that can embed secret
-values -- state blobs, plan and apply logs, cost estimates -- is represented
-by presence alone: names, sizes, and timestamps, never bytes. A workspace's
+values (state blobs, plan and apply logs, cost estimates) is represented by
+presence alone: names, sizes, and timestamps, never bytes. A workspace's
 archived readme is copied beside its page verbatim. The tree is written
 world-readable, curated for sharing, unlike the owner-only archive.
 
@@ -280,9 +280,9 @@ export:
 ```
 
 The directory's `*.md.tmpl` files replace the same-named built-in templates
--- `archive.md.tmpl`, `org.md.tmpl`, `teams.md.tmpl`, `variable-sets.md.tmpl`,
+(`archive.md.tmpl`, `org.md.tmpl`, `teams.md.tmpl`, `variable-sets.md.tmpl`,
 `policy-sets.md.tmpl`, `projects.md.tmpl`, `project.md.tmpl`,
-`workspace.md.tmpl`, and `stack.md.tmpl` -- while pages without an override
+`workspace.md.tmpl`, and `stack.md.tmpl`), while pages without an override
 keep their default. A file whose name matches no page template is refused
 rather than silently ignored, and a broken override is refused before the
 target directory is touched. The defaults ship embedded in the binary (the
@@ -299,8 +299,8 @@ verified, then removed locally): each workspace's sealed `logs.gen*.zip` and
 `state.gen*.zip` at the moment it seals, and each org-wide
 `config-versions/<id>.tar.gz` once the ledger has proven its bytes. Peak
 local disk then stays bounded to the grep-able search layer plus in-flight
-work. Everything else is **synced** at each org run's close — loose JSON,
-roll-ups, sidecar indexes, ledger snapshots — with the local copy kept: local
+work. Everything else is **synced** at each org run's close (loose JSON,
+roll-ups, sidecar indexes, ledger snapshots), with the local copy kept: local
 disk stays the canonical, searchable archive, and the bucket is the long-term
 and disaster-recovery copy. Restoring is one download of the org prefix.
 
@@ -309,8 +309,8 @@ The sync is incremental: one bucket listing per run inventories the mirror
 by size and the full-object MD5 digest the tool records with each synced
 write (fetched per file when a backend's listings omit it; on a store that
 recorded no digest at all the comparison degrades to size alone). The mirror
-also **prunes**: a remote copy of a file that no longer exists locally — a
-loose `run.json` later coalesced into a roll-up, or a subtree you deleted —
+also **prunes**: a remote copy of a file that no longer exists locally (a
+loose `run.json` later coalesced into a roll-up, or a subtree you deleted)
 is removed on the next run, so the bucket tracks the archive rather than
 accumulating stale copies. Evicted bundles and tarballs are exempt; they are
 remote-only by design. Eviction verification is layered: a bundle is

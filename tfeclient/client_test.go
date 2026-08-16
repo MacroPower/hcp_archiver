@@ -1395,7 +1395,7 @@ func TestRateLimit429StormEndToEnd(t *testing.T) {
 	// stampede the reopened window together, and its reset-header parse exits
 	// the process on a malformed value. The transport now owns 429s, so the
 	// whole go-tfe call must come back after exactly the bounded attempts with
-	// an error wrapping ErrRateLimited -- go-tfe adds no attempts of its own.
+	// an error wrapping ErrRateLimited; go-tfe adds no attempts of its own.
 	var hits atomic.Int64
 
 	mux := http.NewServeMux()
@@ -1498,7 +1498,7 @@ func TestServerErrorStallIsBoundedEndToEnd(t *testing.T) {
 
 	// The regression this pins: with go-tfe's own RetryServerErrors enabled, a
 	// persistently failing endpoint was retried 30 times under a linearly
-	// growing backoff -- over six minutes per request, none of it configurable.
+	// growing backoff: over six minutes per request, none of it configurable.
 	// The bounded transport retry replaces it, so the whole go-tfe call must
 	// come back in seconds after exactly the configured attempts.
 	var hits atomic.Int64

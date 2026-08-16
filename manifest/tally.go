@@ -35,7 +35,7 @@ type Tally struct {
 	SurfacesDropped int `json:"surfacesDropped,omitempty"`
 	// RecordsDiscarded counts the log records the load discarded because their
 	// shard's subtree no longer existed on disk: an honored delete-to-re-archive,
-	// or unexpected local loss — the ledger cannot tell which, so the count is
+	// or unexpected local loss. The ledger cannot tell which, so the count is
 	// surfaced in the summary rather than buried in a load-time log line. The
 	// discarded objects re-fetch, so a non-zero count is safe, but an operator
 	// who deleted nothing should read it as evidence of loss.

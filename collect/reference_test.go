@@ -18,10 +18,10 @@ func TestReferenceCarriesAForeignAbsenceToARetryAbsentRun(t *testing.T) {
 	t.Parallel()
 
 	// A run's config-version tarball expired and settled StatusAbsent in the
-	// config-versions shard -- a shard the runs walk never scans. The
-	// reference gate must leave an absence mark in the run's own shard, or a
-	// retry-absent run early-stops over the settled runs collection and the
-	// flag can never reach the one entry it exists to re-probe.
+	// config-versions shard, a shard the runs walk never scans. The reference
+	// gate must leave an absence mark in the run's own shard, or a retry-absent
+	// run early-stops over the settled runs collection and the flag can never
+	// reach the one entry it exists to re-probe.
 	root := t.TempDir()
 
 	const (

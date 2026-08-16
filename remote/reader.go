@@ -11,8 +11,8 @@ import (
 // ReadAt reads len(p) bytes of the object at key starting at off, in a single
 // ranged read. The size argument is the object's total length, as reported by
 // [Client.Head]; reads at or past it answer [io.EOF] without a request. A
-// transient failure — a request that never opened, or a body that died
-// mid-fill — reopens the range and refills p from off under the client's
+// transient failure (a request that never opened, or a body that died
+// mid-fill) reopens the range and refills p from off under the client's
 // bounded retries, so one blip does not surface as a failed screen or a
 // failed sweep.
 //
@@ -23,9 +23,9 @@ import (
 // length settles it, so a body cut short of an object that is long enough
 // still reads as the transient fault it is.
 //
-// It honors the [io.ReaderAt] contract — a non-nil error whenever it fills
+// It honors the [io.ReaderAt] contract (a non-nil error whenever it fills
 // less than all of p, with [io.EOF] marking a read clipped by the object's
-// end — so a caller can adapt it to [io.ReaderAt] with a context of its
+// end), so a caller can adapt it to [io.ReaderAt] with a context of its
 // choosing per call. The shape suits [archive/zip.NewReader], which parses a
 // bundle's central directory from a handful of reads near the end of the
 // object; callers extracting a member should read its compressed span in one

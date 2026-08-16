@@ -18,7 +18,7 @@
 // to the terminal's actual profile, so rendering stays deterministic. The
 // shared styles cover the roles every surface uses; packages compose their
 // own surface-specific styles (borders, padding, faintness) by deriving from
-// them — lipgloss styles are values, so a derivation never mutates the shared
+// them; lipgloss styles are values, so a derivation never mutates the shared
 // definition.
 //
 // The glyph vocabulary carries status at a glance (per-status counts on the

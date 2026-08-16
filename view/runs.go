@@ -42,8 +42,8 @@ const metaSuffix = ".meta.json"
 
 var (
 	// RunArtifacts lists a run's artifact leaves in the order an operator reads
-	// them -- execution output first, then the structured plan, then the
-	// surrounding metadata -- each paired with the description its list row
+	// them (execution output first, then the structured plan, then the
+	// surrounding metadata), each paired with the description its list row
 	// shows. Both runArtifactRank and artifactDesc derive from this one table,
 	// so an artifact's ordering and its label cannot drift apart. A leaf absent
 	// here (a per-check policy log, a future leaf) sorts after these
@@ -91,8 +91,8 @@ var (
 
 // Runs returns the workspace's archived runs, newest first.
 //
-// Run ids are enumerated across both physical forms — loose run directories
-// and sealed keys — and each run.json is read through [Workspace.Open], so an
+// Run ids are enumerated across both physical forms (loose run directories
+// and sealed keys), and each run.json is read through [Workspace.Open], so an
 // in-flight run's loose summary and a terminal run's roll-up line list
 // together. A run whose run.json is missing or malformed still lists by id,
 // with its parsed fields zero, so one damaged file or roll-up line does not

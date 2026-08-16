@@ -10,10 +10,10 @@ import (
 // status glyphs on the counts row so the footer's rows read as one grid. They
 // are panel-specific (no other surface prints these readouts), so they live
 // here rather than in the shared [theme] vocabulary. The arrows draw from two
-// families the terminal renders as one set: the dashed arrows (⇠⇡⇢⇣) carry
-// byte movement, and the paired arrows with their bar (⇉⇇⇥) carry request
-// flow — requests streaming out, the server pushing back with 429s, and a
-// cooldown stopping the flow at a bar.
+// families the terminal renders as one set. The dashed arrows (⇠⇡⇢⇣) carry
+// byte movement; the paired arrows with their bar (⇉⇇⇥) carry request flow:
+// requests streaming out, the server pushing back with 429s, and a cooldown
+// stopping the flow at a bar.
 const (
 	glyphBytes    = "⇣"
 	glyphRate     = "⇢"

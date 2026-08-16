@@ -18,8 +18,8 @@ func TestWriteWindowScalesWithBodySize(t *testing.T) {
 	}{
 		// A small body adds nothing measurable: the base window rules.
 		"tiny body keeps the base window": {size: 32, want: 2 * time.Minute},
-		// A 16 MiB body — S3's single-shot threshold, whose whole transfer
-		// happens inside the writer's commit with no observable progress —
+		// A 16 MiB body (S3's single-shot threshold, whose whole transfer
+		// happens inside the writer's commit with no observable progress)
 		// widens the window enough to cross a 32 KiB/s link.
 		"single-shot body widens by size": {size: 16 << 20, want: 2*time.Minute + 512*time.Second},
 		// The sync path's largest in-memory body.

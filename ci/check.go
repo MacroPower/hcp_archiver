@@ -121,7 +121,7 @@ func (m *Ci) LintRenovate(ctx context.Context) error {
 //
 // For a fast goreleaser config-only check, see [Ci.LintReleaser].
 func (m *Ci) ReleaseDryRun(ctx context.Context) error {
-	// Snapshot build -- exercises goreleaser cross-compilation for all
+	// Snapshot build: exercises goreleaser cross-compilation for all
 	// platforms, releaserBase tool setup (cosign, syft), and
 	// archive/checksum generation.
 	dist, err := m.Build(ctx)
@@ -131,7 +131,7 @@ func (m *Ci) ReleaseDryRun(ctx context.Context) error {
 
 	g, ctx := errgroup.WithContext(ctx)
 
-	// Platform verification -- asserts each binary is for the intended
+	// Platform verification: asserts each binary is for the intended
 	// architecture, catching cross-compilation mismatches early.
 	for _, t := range platformDistDirs {
 		g.Go(func() error {
@@ -143,7 +143,7 @@ func (m *Ci) ReleaseDryRun(ctx context.Context) error {
 		})
 	}
 
-	// Container image build -- exercises runtime base image construction,
+	// Container image build: exercises runtime base image construction,
 	// binary packaging, and OCI metadata for all platforms.
 	g.Go(func() error {
 		containers, err := m.BuildImages(ctx, "dry-run", dist)

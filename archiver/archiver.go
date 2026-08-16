@@ -162,9 +162,9 @@ func New(cfg *config.Config, opts ...Option) *Archiver {
 
 // Run archives every resolved organization in turn.
 //
-// It validates the configuration, builds the one shared client — proving a
+// It validates the configuration, builds the one shared client (proving a
 // configured remote store manageable with a probe round-trip before any
-// archive work — resolves the organizations (the single named one, or every
+// archive work), resolves the organizations (the single named one, or every
 // visible organization), and archives each sequentially. The orgs run under a
 // cancelable child of ctx whose cancel the reporter's terminal UI holds, so an
 // in-UI ctrl+c aborts the whole run exactly as an external SIGINT does. A
@@ -229,9 +229,10 @@ func (a *Archiver) Run(ctx context.Context) error {
 		}
 
 		// An untrusted backend digest attribute (an SSE-KMS bucket's ETag is
-		// hex but no content MD5) downgrades nothing about correctness — the
-		// client serves the metadata digests this tool records instead — but
-		// size-matched files now pay one Head each, so the run notes it once.
+		// hex but no content MD5) downgrades nothing about correctness, since
+		// the client serves the metadata digests this tool records instead,
+		// but size-matched files now pay one Head each, so the run notes it
+		// once.
 		if report.AttrDigestsUntrusted {
 			a.logger.LogAttrs(ctx, slog.LevelWarn, "remote_attr_digests_untrusted",
 				slog.String("detail", "the store's digest attribute does not match written bytes"+
@@ -292,7 +293,7 @@ func (a *Archiver) Run(ctx context.Context) error {
 
 		// The mirror check sits beside orgIncomplete rather than inside it:
 		// the tally describes what the collectors captured, while syncFailed
-		// describes whether the close sweep got all of it mirrored — a
+		// describes whether the close sweep got all of it mirrored. That is a
 		// different failure with the same consequence for a scheduled run.
 		if orgIncomplete(tally) || syncFailed > 0 {
 			a.logger.LogAttrs(runCtx, slog.LevelError, "org_archive_incomplete",

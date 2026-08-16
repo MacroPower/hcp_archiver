@@ -78,8 +78,8 @@ func recordShardKey(rec *walRecord) string {
 // walRecordClass ranks a record for the durability order one appended batch
 // must satisfy (see [shard.drainDirty]): collection unsettlements lead, then
 // unsettled-status entries, then settled-status entries, then the skip
-// signals — settled gate entries alongside the collection-level watermark,
-// completion, and settlement records — then the run metadata. Merging several
+// signals (settled gate entries alongside the collection-level watermark,
+// completion, and settlement records), then the run metadata. Merging several
 // shards' drains into one batch stable-sorts by this class, so the guard rule
 // holds across the whole batch, not merely within one shard's slice of it.
 //

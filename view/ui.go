@@ -374,8 +374,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View renders the breadcrumb, the status line, and the active screen in the
 // alternate screen buffer.
 //
-// The breadcrumb and status are each clamped to one physical row -- the
-// breadcrumb to m.width, the status to m.width and one line -- so the chrome
+// The breadcrumb and status are each clamped to one physical row (the
+// breadcrumb to m.width, the status to m.width and one line), so the chrome
 // occupies exactly [chromeLines] rows: a deep trail or a multi-line error
 // string would otherwise wrap past its row and push the content's bottom off
 // the terminal, whose height is sized as height minus [chromeLines]. MaxWidth
@@ -452,8 +452,8 @@ func (m *model) abandonLoads() {
 }
 
 // teardown closes every stacked screen and returns the command that ends the
-// program. A quit taken at the root model -- a ctrl+c, or a screen signaling
-// [quitMsg] -- never reaches the screens themselves, so without this an extract
+// program. A quit taken at the root model (a ctrl+c, or a screen signaling
+// [quitMsg]) never reaches the screens themselves, so without this an extract
 // still running under the top screen would keep its goroutine blocked on a
 // channel whose receiver left with the program.
 func (m *model) teardown() tea.Cmd {

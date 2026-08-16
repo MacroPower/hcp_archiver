@@ -35,9 +35,9 @@ var ErrLedgerLocked = errors.New("ledger is locked by another process")
 func acquireLock(dir string) (*os.File, error) {
 	// The org-root ledger directory is created durably: acquireLock runs before
 	// any shard I/O, so every later write into the directory takes the
-	// exists-fast-path and never flushes its dentry — a plain MkdirAll here
-	// would leave the whole org-root shard (and the ledger's log) hanging off a
-	// dentry no fsync ever covers.
+	// exists-fast-path and never flushes its dentry; a plain MkdirAll here would
+	// leave the whole org-root shard (and the ledger's log) hanging off a dentry
+	// no fsync ever covers.
 	err := atomicfile.MkdirAll(dir, 0o700)
 	if err != nil {
 		return nil, fmt.Errorf("create ledger dir %q: %w", dir, err)

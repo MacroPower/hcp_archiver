@@ -38,10 +38,10 @@ func pageName(since time.Time, page int) string {
 // under its Since cursor, the second half of the freshness test [eventsAfter]
 // applies.
 //
-// The cursor alone cannot express it: the watermark is a single instant, while a
-// resumed walk carries per-page state -- the settled pages' stored events, which
-// are strictly newer than the cursor and so pass the timestamp test even though
-// they are already archived.
+// The cursor alone cannot express it: the watermark is a single instant, while
+// a resumed walk carries per-page state. That state is the settled pages'
+// stored events, which are strictly newer than the cursor and so pass the
+// timestamp test even though they are already archived.
 type archivedIDs map[string]struct{}
 
 // record folds the events persisted for one page into the set. Events without an

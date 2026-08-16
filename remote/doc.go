@@ -24,14 +24,14 @@
 //
 // The mirror is the archive's long-term record, so every operation retries
 // a transient store failure under a bounded doubling backoff ([WithRetry],
-// on by default) — the same in-run persistence the API transport gives
-// fetches — while errors the store pins on the request (an absent key, a
-// permission denial, a failed precondition) surface immediately. A
-// transport-level failure (a DNS blip, a dial fault) is never trusted as a
-// request fault, whatever code the driver stamped on it, so it can neither
-// settle a delete nor answer an absence; and each attempt runs under a
-// stall watchdog ([WithStallTimeout]) that cancels it after a window with
-// no progress, so one wedged connection costs a window, not a hung worker.
+// on by default), the same in-run persistence the API transport gives
+// fetches. Errors the store pins on the request (an absent key, a permission
+// denial, a failed precondition) surface immediately. A transport-level
+// failure (a DNS blip, a dial fault) is never trusted as a request fault,
+// whatever code the driver stamped on it, so it can neither settle a delete
+// nor answer an absence; and each attempt runs under a stall watchdog
+// ([WithStallTimeout]) that cancels it after a window with no progress, so
+// one wedged connection costs a window, not a hung worker.
 //
 // The backend is selected by [Config.URL]'s scheme, resolved through
 // [gocloud.dev/blob]: s3:// (AWS S3, or a compatible store such as MinIO,

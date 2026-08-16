@@ -115,9 +115,10 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 	env := collect.NewEnv(a.client, st, ledger, envOpts...)
 
 	// The marker is written before any collector runs, so even an archive
-	// interrupted mid-run records where its evicted bundles live — but after
-	// manifest.Load acquired the cross-process flock, since it mutates the
-	// org root like any other write and must not race a run in progress.
+	// interrupted mid-run records where its evicted bundles live. The write
+	// waits for manifest.Load to acquire the cross-process flock, since it
+	// mutates the org root like any other write and must not race a run in
+	// progress.
 	if a.remote != nil {
 		markerErr := a.writeRemoteMarker(ctx, env, st)
 		if markerErr != nil {
@@ -208,7 +209,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 			cancelFlush()
 			flushWG.Wait()
 
-			// The finalize phase spans the whole close — the final flush, the
+			// The finalize phase spans the whole close: the final flush, the
 			// failure logging, and the sweep. It starts indeterminate; the sweep
 			// flips it to a determinate bar once it has classified the tree and
 			// knows how many files it will settle.

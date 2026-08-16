@@ -74,9 +74,9 @@ func (e *Env) Object(ctx context.Context, relPath string, fetch func(context.Con
 // not re-materialized when the loose file is absent: that is the fingerprint
 // of an object sealed elsewhere (a terminal run.json coalesced into a
 // roll-up), and rewriting it would resurrect the loose copy and duplicate the
-// roll-up line on the next seal. The ledger, not file existence, is the record
-// — consistent with [Env.Object] — so a hand-deleted, unchanged mutable file
-// also stays deleted. A changed payload always writes.
+// roll-up line on the next seal. The ledger, not file existence, is the
+// record, consistent with [Env.Object], so a hand-deleted, unchanged mutable
+// file also stays deleted. A changed payload always writes.
 func (e *Env) Mutable(ctx context.Context, relPath string, fetch func(context.Context) (any, error)) error {
 	return e.archiveJSON(ctx, relPath, fetch, retainHistory)
 }
@@ -337,8 +337,8 @@ func fetchConfirmed[T any](ctx context.Context, e *Env, fetch func(context.Conte
 // Confirmed runs fetch with the terminal-confirmation semantics of the archive
 // primitives: an error that classifies terminal (a 404) is re-probed once after
 // the absent-confirm delay (see [WithAbsentConfirm]) before it is believed. It
-// suits a shared read performed outside the primitives — one whose value splits
-// into several derived files — so the cause later recorded through
+// suits a shared read performed outside the primitives, one whose value splits
+// into several derived files, so the cause later recorded through
 // [Env.RecordFailure] has already survived the in-run re-probe that guards a
 // settled absence.
 //
@@ -446,7 +446,7 @@ func (e *Env) buryHistory(ctx context.Context, relPath string) {
 
 // sealedElsewhere reports whether the freshly marshaled payload at relPath is
 // already recorded done with exactly this content while the loose file is
-// absent — the fingerprint of an object whose bytes were sealed into another
+// absent: the fingerprint of an object whose bytes were sealed into another
 // form (a terminal run.json coalesced into a roll-up, verified before its
 // loose source was removed). Writing it again would resurrect the loose file
 // and make the next seal append a duplicate roll-up line, so [Env.archiveJSON]
@@ -455,8 +455,8 @@ func (e *Env) buryHistory(ctx context.Context, relPath string) {
 //
 // The comparison requires a recorded hash and never falls back to size alone
 // ([manifest.Signature.Equal] would), because a size-only match could bless a
-// different payload. A stat error on the loose file fails open — the object is
-// treated as present and the write proceeds — so only a clean "absent" report
+// different payload. A stat error on the loose file fails open (the object is
+// treated as present and the write proceeds), so only a clean "absent" report
 // gates the skip.
 //
 // The skip fires only when the fresh payload is byte-identical to the
@@ -502,7 +502,7 @@ func (e *Env) recordDone(ctx context.Context, relPath string, res store.WriteRes
 // value splits into several derived files. It self-gates like [Env.Object], so
 // a settled path is left untouched (never regressed done->absent or
 // done->errored), and classifies cause the same way: a terminal cause records
-// the object absent — settled and sticky — so the caller must have run the
+// the object absent, settled and sticky, so the caller must have run the
 // read through [Confirmed] and let it re-probe the 404 in-run first; a denial
 // records the object forbidden; anything else records it errored so a re-run
 // retries. Only a cancellation of ctx propagates. No history tombstone is

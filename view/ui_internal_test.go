@@ -475,7 +475,7 @@ func TestModelQuitClosesEveryStackedScreen(t *testing.T) {
 	t.Parallel()
 
 	// A ctrl+c is handled by the root model and never reaches the screens, so
-	// the whole stack -- not just the top -- is torn down here or nowhere.
+	// the whole stack (not just the top) is torn down here or nowhere.
 	root := &closeStub{stubScreen: stubScreen{name: "root"}}
 	top := &closeStub{stubScreen: stubScreen{name: "child"}}
 	m := newTestModel(root, top)

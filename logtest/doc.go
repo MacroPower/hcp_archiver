@@ -1,7 +1,7 @@
 // Package logtest asserts over structured log events in tests.
 //
-// The archive's safety valves — a replay discarding records for a deleted
-// subtree, a torn log truncated at its tear, a refused prune — deliberately
+// The archive's safety valves (a replay discarding records for a deleted
+// subtree, a torn log truncated at its tear, a refused prune) deliberately
 // trade completeness for safety and announce themselves as log events. A test
 // exercising the machinery around a valve usually needs to prove the valve
 // did NOT fire: a silently activated valve can absorb exactly the state the

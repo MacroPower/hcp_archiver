@@ -88,12 +88,12 @@ type Client struct {
 	stallTimeout  time.Duration
 	serverCopyCap int64
 
-	// The attrsUntrusted flag records that the backend's own digest attribute is not a
-	// content MD5 (an SSE-KMS-encrypted S3 bucket's ETag is hex but hashes
-	// nothing readable), as proven by [Client.Preflight]'s probe. Once set,
-	// [Client.Head] and [Client.List] serve only the metadata digests this
-	// tool's writes record, so a bogus backend digest can neither refuse an
-	// eviction confirm nor force perpetual re-uploads.
+	// The attrsUntrusted flag records that the backend's own digest attribute
+	// is not a content MD5 (an SSE-KMS-encrypted S3 bucket's ETag is hex but
+	// hashes nothing readable), as proven by [Client.Preflight]'s probe. Once
+	// set, [Client.Head] and [Client.List] serve only the metadata digests
+	// this tool's writes record, so a bogus backend digest can neither refuse
+	// an eviction confirm nor force perpetual re-uploads.
 	attrsUntrusted atomic.Bool
 }
 
@@ -168,8 +168,8 @@ func WithServerCopyCap(size int64) Option {
 // New creates a new [Client] over cfg.
 //
 // Unless [WithBucket] supplies one, the bucket is opened from cfg's URL,
-// whose scheme selects the backend; credentials never come from cfg — each
-// backend authenticates through its provider's default chain. It returns
+// whose scheme selects the backend; credentials never come from cfg, since
+// each backend authenticates through its provider's default chain. It returns
 // [ErrMissingURL] when cfg names no URL.
 func New(ctx context.Context, cfg Config, opts ...Option) (*Client, error) {
 	c := &Client{
@@ -212,8 +212,8 @@ func (c *Client) Close() error {
 }
 
 // Digests carries the full-object content digests an upload records with its
-// object. The MD5 doubles as the write's integrity check — the commit fails
-// unless the streamed bytes hash to it — and both digests land in the
+// object. The MD5 doubles as the write's integrity check (the commit fails
+// unless the streamed bytes hash to it), and both digests land in the
 // object's metadata so a later probe can compare stored content against
 // local bytes without a byte of egress. Either field may be empty; only what
 // is present is checked and recorded.
@@ -270,24 +270,25 @@ type ObjectInfo struct {
 	// MD5 is the recorded full-object MD5 digest as raw bytes, comparable
 	// against a locally computed sum: the metadata digest this tool's writes
 	// record when present (computed from the exact bytes streamed and checked
-	// against them at commit), else the backend's own attribute — unless the
+	// against them at commit), else the backend's own attribute. Where the
 	// preflight probe proved that attribute is not a content MD5 (an SSE-KMS
-	// bucket's ETag, say), in which case only metadata digests are served. It
-	// is nil when nothing comparable exists. Listings carry no metadata, so a
-	// nil from [Client.List] may yet resolve through [Client.Head].
+	// bucket's ETag, say), only metadata digests are served. It is nil when
+	// nothing comparable exists. Listings carry no metadata, so a nil from
+	// [Client.List] may yet resolve through [Client.Head].
 	MD5 []byte
 	// Size is the object's length in bytes.
 	Size int64
 }
 
 // objectInfo maps one object's stored attributes onto [ObjectInfo]. The
-// digest ladder prefers the metadata digest this tool's writes record — it
-// was computed from the exact bytes handed to the store and verified against
-// the streamed body at commit — over the backend's own attribute, which can
-// be an ETag that is no content MD5 at all (an SSE-KMS-encrypted S3 object's
-// is hex but hashes nothing readable). The attribute is used only as the
-// fallback for objects recorded without metadata (an older build's write, a
-// foreign object), and not even then once preflight has proven it untrue.
+// digest ladder prefers the metadata digest this tool's writes record over
+// the backend's own attribute: the metadata digest was computed from the
+// exact bytes handed to the store and verified against the streamed body at
+// commit, while the attribute can be an ETag that is no content MD5 at all
+// (an SSE-KMS-encrypted S3 object's is hex but hashes nothing readable). The
+// attribute is used only as the fallback for objects recorded without
+// metadata (an older build's write, a foreign object), and not even then once
+// preflight has proven it untrue.
 func (c *Client) objectInfo(attrs *blob.Attributes) ObjectInfo {
 	info := ObjectInfo{
 		SHA256: attrs.Metadata[metadataKeySHA256],
@@ -347,8 +348,8 @@ func (c *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
 }
 
 // Copy duplicates the object at srcKey to dstKey. A source below the
-// server-copy cap copies server-side — the bytes never leave the backend and
-// the recorded digest metadata rides along — while a source at or past it
+// server-copy cap copies server-side: the bytes never leave the backend and
+// the recorded digest metadata rides along. A source at or past the cap
 // streams through the client instead (see [DefaultServerCopyCap]), since the
 // backend's single-request copy would reject it identically forever. The
 // sweep's rename healing uses it to converge an only-copy stored under a
@@ -389,7 +390,7 @@ func (c *Client) Copy(ctx context.Context, srcKey, dstKey string) error {
 // client, for sources the backend's single-request copy cannot carry. It
 // costs egress, unlike the server-side path, but an oversized heal runs it
 // once and converges permanently. The source's recorded digest metadata
-// rides to the destination, and its MD5 — when recorded — is re-verified
+// rides to the destination, and its MD5, when recorded, is re-verified
 // against the streamed bytes at commit.
 func (c *Client) streamCopy(ctx context.Context, srcKey, dstKey string, attrs *blob.Attributes) error {
 	opts := &blob.WriterOptions{
@@ -425,8 +426,8 @@ func (c *Client) streamCopy(ctx context.Context, srcKey, dstKey string, attrs *b
 // against the streamed bytes at commit, and both digests are recorded as
 // object metadata for later egress-free comparison (see [Digests]).
 //
-// The size argument does not bound the upload — the bytes streamed are
-// whatever body yields — it only grows the part size when needed so a very
+// The size argument does not bound the upload (the bytes streamed are
+// whatever body yields); it only grows the part size when needed, so a very
 // large body still fits the backend's part-count ceiling.
 func (c *Client) Upload(ctx context.Context, key string, body io.ReadSeeker, size int64, digests Digests) error {
 	opts := &blob.WriterOptions{
@@ -458,10 +459,10 @@ func (c *Client) Upload(ctx context.Context, key string, body io.ReadSeeker, siz
 // digests ride with the write: the MD5 is checked against the streamed bytes
 // at commit, and both digests are recorded as object metadata so later
 // [Client.Head] and [Client.List] calls can compare the stored content
-// against local bytes even where the backend records no digest of its own —
-// a body large enough to part (16 MiB on S3) leaves no backend attribute, so
+// against local bytes even where the backend records no digest of its own. A
+// body large enough to part (16 MiB on S3) leaves no backend attribute, so
 // without the metadata a same-size content change would be invisible to the
-// sync gate forever. The whole body rides in memory — the shape of the small
+// sync gate forever. The whole body rides in memory, the shape of the small
 // search-layer files Put serves; bulk bytes stream through [Client.Upload].
 func (c *Client) Put(ctx context.Context, key string, data []byte) error {
 	digests := DigestsOf(data)
@@ -610,10 +611,10 @@ const maxDeleteErrs = 8
 // Delete removes the objects at keys and returns how many keys it durably
 // settled. Deletes are idempotent: a key that does not exist settles as
 // removed and counts. A key whose delete fails past its retries is skipped
-// while the fan-out settles the rest — one bad key must not strand every
-// other stale key for another run — and the failures come back as one
-// joined error beside the truthful count. A context cancellation stops the
-// fan-out early, leaving the rest to the next run.
+// while the fan-out settles the rest (one bad key must not strand every other
+// stale key for another run), and the failures come back as one joined error
+// beside the truthful count. A context cancellation stops the fan-out early,
+// leaving the rest to the next run.
 func (c *Client) Delete(ctx context.Context, keys []string) (int, error) {
 	var (
 		deleted atomic.Int64
@@ -688,9 +689,9 @@ func (c *Client) Delete(ctx context.Context, keys []string) (int, error) {
 // defaultPartSize is the smallest default part size among the parted-upload
 // backends and S3's multipart minimum (5 MiB); it floors both a configured
 // part size and the grow-to-fit logic, because S3-compatible stores reject a
-// multipart upload whose non-final parts are smaller with EntityTooSmall —
-// only after the whole body has streamed, a failure that is a pure function
-// of size and configuration and so would repeat on every retry and every run.
+// multipart upload whose non-final parts are smaller with EntityTooSmall, and
+// only after the whole body has streamed. That rejection is a pure function
+// of size and configuration, so it would repeat on every retry and every run.
 const defaultPartSize = 5 << 20
 
 // partSizeFor returns the part size for a body of size bytes: the configured
@@ -725,8 +726,8 @@ func partSizeFor(size, configured int64) int {
 // isNotFound reports whether err is a store response proving no object at
 // the key. A transport-level failure never qualifies, whatever code the
 // driver stamped on it (azblob classifies DNS failures as NotFound): absence
-// is a destructive fact — a delete settles, an eviction probe re-uploads, a
-// viewer reports a missing bundle — and only the store can attest it.
+// is a destructive fact (a delete settles, an eviction probe re-uploads, a
+// viewer reports a missing bundle), and only the store can attest it.
 func isNotFound(err error) bool {
 	return gcerrors.Code(err) == gcerrors.NotFound && !isTransportError(err)
 }

@@ -142,17 +142,17 @@ func WithHistoryLimit(count int, oldest time.Time) WalkOption {
 // collection unsettled before archiving its first not-already-frozen element,
 // and records it settled again only on the paths that finished the walk's work
 // (the true end of the listing, or an early stop whose new prefix archived
-// clean). An interrupted re-walk of a settled collection — a failed page
-// fetch, a cancellation, a kill — therefore leaves the flag false, and the
-// next run pages past the interrupted walk's new entries instead of
-// early-stopping above elements it never listed; those elements leave no
-// ledger record at all, so the flag is the only guard. The ledger drains the
+// clean). An interrupted re-walk of a settled collection (a failed page fetch,
+// a cancellation, a kill) therefore leaves the flag false, and the next run
+// pages past the interrupted walk's new entries instead of early-stopping
+// above elements it never listed; those elements leave no ledger record at
+// all, so the flag is the only guard. The ledger drains the
 // false record ahead of the entries it guards in the flushed batch (see
 // [manifest.Collection.SetSettled]), so no crash point persists the entries
 // without it.
 //
-// The col handle carries every piece of the collection's ledger state —
-// completion, settlement, the errored-child gate, and the high-water mark —
+// The col handle carries every piece of the collection's ledger state
+// (completion, settlement, the errored-child gate, and the high-water mark)
 // keyed on the collection's archive prefix, so the flags live in the shard
 // that owns the entries by construction (see [manifest.Collection] and
 // [Env.Collection]). A collection listed through a synthetic cursor (a
@@ -281,8 +281,8 @@ func Walk[T any](
 		}
 
 		// A page about to record its first not-already-frozen element unsettles
-		// the collection first, so an abort at any later point — a failed page
-		// fetch, a cancellation, a kill mid-flush — leaves the flag false and
+		// the collection first, so an abort at any later point (a failed page
+		// fetch, a cancellation, a kill mid-flush) leaves the flag false and
 		// the next run pages past the new entries instead of early-stopping
 		// above elements this walk never listed. The stale flag is the only
 		// guard against that gap: an unlisted element leaves no ledger record

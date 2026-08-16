@@ -4,7 +4,7 @@
 // subtree to another volume and leave a link in its place, or leave a rename
 // link beside a renamed directory. The filesystem therefore maps many paths
 // to one physical directory, and every subsystem that walks or indexes the
-// tree must agree on when two paths are the same place — a subsystem that
+// tree must agree on when two paths are the same place; a subsystem that
 // re-derives that mapping locally will miss a case another already handles.
 //
 // This package is the single owner of that mapping. [Canonical] resolves any

@@ -9,8 +9,8 @@ import tfe "github.com/hashicorp/go-tfe"
 // The polarity is shared by every table and must never flip: only a status
 // positively known to be final maps to true, and a status missing from its
 // table reads as non-terminal, the safe direction. A live object mistaken for
-// terminal freezes premature absences for children it has yet to produce —
-// silent and irreversible — while a final object mistaken for live only costs
+// terminal freezes premature absences for children it has yet to produce
+// (silent and irreversible), while a final object mistaken for live only costs
 // re-fetches until the table is updated. An element's terminal status also
 // says nothing about its subtree: a completed stack configuration's
 // deployment runs keep executing, which the stacks collector carries through

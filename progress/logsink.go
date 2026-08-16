@@ -11,9 +11,9 @@ import (
 // draining (a wedged terminal awaiting the reporter's shutdown escalation)
 // cannot grow it without limit. The cap is far above any drain-interval burst
 // a healthy run produces, so in practice only a wedged panel ever reaches it.
-// When the queue is full the oldest lines give way — scrollback semantics,
-// the newest lines matter most — and the next batch opens with a marker
-// counting what was lost.
+// When the queue is full the oldest lines give way (scrollback semantics: the
+// newest lines matter most) and the next batch opens with a marker counting
+// what was lost.
 const maxQueuedLogLines = 10000
 
 // LogSink queues log lines for the terminal UI while it owns the screen, so

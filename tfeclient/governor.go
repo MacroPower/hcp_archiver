@@ -213,11 +213,11 @@ func (g *Governor) On429(resetHeader string) {
 }
 
 // OnSuccess records one response that was not rate limited. Any such response
-// consumed server window capacity without pushback -- a 403 or a 500 is as
-// much evidence of rate headroom as a 200 -- so after a clean stretch
-// (outside any cooldown, and [GovernorRaiseInterval] past both the last raise
-// and the last decrease) the rate creeps up one request per second toward the
-// ceiling. Recovery is event-driven by design: an idle run needs no rate.
+// consumed server window capacity without pushback (a 403 or a 500 is as much
+// evidence of rate headroom as a 200), so after a clean stretch (outside any
+// cooldown, and [GovernorRaiseInterval] past both the last raise and the last
+// decrease) the rate creeps up one request per second toward the ceiling.
+// Recovery is event-driven by design: an idle run needs no rate.
 func (g *Governor) OnSuccess() {
 	g.mu.Lock()
 	defer g.mu.Unlock()

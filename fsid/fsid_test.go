@@ -103,7 +103,7 @@ func TestWalkFilesNamesArePhysicalRegardlessOfVisitOrder(t *testing.T) {
 	// A rename alias that sorts lexically BEFORE its target must not claim
 	// the subtree's files: every other name in the system (ledger entries,
 	// remote keys) derives from the physical layout, so a walk that reported
-	// the link's name would disagree with all of them — the keep set would
+	// the link's name would disagree with all of them: the keep set would
 	// miss every real key and the prune would delete the live mirror.
 	tmp := t.TempDir()
 

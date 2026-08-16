@@ -183,8 +183,8 @@ func WithInterrupt(fn func()) Option {
 }
 
 // WithWireBytes sets the shared counter of response-body bytes as they are
-// delivered to the reader -- after any transport decompression, so not raw
-// compressed bytes on the wire -- which the terminal UI's throughput window
+// delivered to the reader (after any transport decompression, so not raw
+// compressed bytes on the wire), which the terminal UI's throughput window
 // samples so the rate reads live while a large transfer is still in flight
 // rather than only when whole objects commit. The displayed byte total stays
 // the tally's committed archive bytes; only the rate's source changes. A nil
@@ -748,7 +748,7 @@ const quitGrace = 2 * time.Second
 // receive, say on a terminal that stopped draining writes) blocks
 // [tea.Program.Send] on the unbuffered message channel, blocks
 // [tea.Program.Kill] on the renderer handshake, and keeps [tea.Program.Run]
-// from returning at all -- exactly the state the escalation exists to escape.
+// from returning at all: exactly the state the escalation exists to escape.
 // The kill's bare [tea.ErrProgramKilled] is mapped to a clean nil; one
 // carrying a recovered panic surfaces (see [tuiError]). It activates
 // the log sink for the program's lifetime so log lines queue for the panel to
@@ -898,11 +898,11 @@ func (t *guardedTerminal) Write(p []byte) (int, error) {
 }
 
 // feedGuard is the revocable [logFeed] the reporter hands its panel's model.
-// Revoking turns the model's peeks and commits into no-ops: a program the
+// Revoking turns the model's peeks and commits into no-ops. A program the
 // shutdown escalation abandoned still holds its feed and may tick again if
 // its terminal recovers, and without the guard it would keep consuming the
-// shared sink alongside the next organization's panel — two renderers
-// stealing each other's lines, the interleaving the sink exists to prevent.
+// shared sink alongside the next organization's panel: two renderers stealing
+// each other's lines, the interleaving the sink exists to prevent.
 type feedGuard struct {
 	sink    LogSink
 	revoked atomic.Bool
@@ -926,7 +926,7 @@ func (g *feedGuard) Commit(cursor uint64) {
 
 // tuiError maps the panel program's result to [Reporter.Run]'s contract: the
 // shutdown escalation's kill reads as a clean nil, anything else wraps. A
-// recovered panic is checked first — Bubble Tea wraps it in the same
+// recovered panic is checked first because Bubble Tea wraps it in the same
 // [tea.ErrProgramKilled] the deliberate kill returns bare, and a crashed
 // panel must surface to the caller's log, not vanish behind the kill's nil.
 func tuiError(err error) error {
@@ -1188,8 +1188,8 @@ func (r *Reporter) writeJSON(snap snapshot, summary bool) error {
 	// A live figure, kept off the summary line to match logfmt: once the run
 	// has ended the momentary rate is meaningless. A pointer, not a bare
 	// float, so a rate that reads zero mid-cooldown is still emitted rather
-	// than dropped by omitempty -- that is the moment throttling is most
-	// worth reporting.
+	// than dropped by omitempty. That is the moment throttling is most worth
+	// reporting.
 	if !summary && snap.hasRate {
 		rps := snap.rps
 		line.RequestsPerSecond = &rps

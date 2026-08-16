@@ -89,9 +89,9 @@ func TestPreflightUntrustedAttributeDigest(t *testing.T) {
 	client, fake := newClient(t, remote.Config{Prefix: "hcp"})
 
 	// Replace the probe's backend digest attribute with one that hashes
-	// nothing readable while its recorded metadata stays intact — the shape
-	// of an SSE-KMS-encrypted S3 bucket, whose ETags are hex but not content
-	// MD5s. The run proceeds; the client just stops serving attribute digests.
+	// nothing readable while its recorded metadata stays intact (the shape of
+	// an SSE-KMS-encrypted S3 bucket, whose ETags are hex but not content
+	// MD5s). The run proceeds; the client just stops serving attribute digests.
 	fake.HeadHook = func(context.Context) {
 		obj, ok := fake.Object("hcp/.preflight")
 		if ok {

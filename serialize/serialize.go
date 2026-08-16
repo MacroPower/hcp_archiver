@@ -32,7 +32,7 @@ func Marshal(v any) ([]byte, error) {
 	}
 
 	// Encode with HTML escaping off so &, <, and > in a stored value survive byte
-	// for byte rather than turning into \u escapes -- the byte-faithful contract
+	// for byte rather than turning into \u escapes: the byte-faithful contract
 	// this package documents. The default json.MarshalIndent escapes them; a
 	// json.Encoder with SetEscapeHTML(false) does not. Encode appends a trailing
 	// newline that MarshalIndent omits, so trim it to keep the output byte-stable.

@@ -15,15 +15,15 @@ runs locally, and it owns hcp_archiver's release pipeline.
 - `test-coverage` runs the coverage target the same way and returns the coverage
   profile file.
 - `lint-renovate` (+check) validates the Renovate configuration with
-  renovate-config-validator at a pinned version in a Node container — the one
-  gate that runs through neither devbox nor a shared toolchain, so Renovate can
-  bump its own validator.
+  renovate-config-validator at a pinned version in a Node container. It is the
+  one gate that runs through neither devbox nor a shared toolchain, so Renovate
+  can bump its own validator.
 
 ### Lint actions & Security (compose sibling toolchains)
 
 These gates compose a sibling toolchain directly rather than running through
-devbox, because their tools are not on the devbox PATH — the same pattern the
-release functions use for `goreleaser`.
+devbox, because their tools are not on the devbox PATH; the release functions
+use the same pattern for `goreleaser`.
 
 - `lint-actions` (+check) lints the GitHub Actions workflows by composing the
   `zizmor` toolchain. It pins `.github/zizmor.yaml` as the config path.
@@ -38,7 +38,7 @@ release functions use for `goreleaser`.
 ### Release pipeline (composes the goreleaser toolchain; see `build.go` + `publish.go`)
 
 The release pipeline builds the binaries with GoReleaser, then constructs and
-publishes the multi-arch runtime images natively via Dagger — GoReleaser's
+publishes the multi-arch runtime images natively via Dagger; GoReleaser's
 Docker support is skipped to avoid Docker-in-Docker. It composes the
 `goreleaser` toolchain directly, which carries the folded-in cosign signing and
 syft SBOM tooling (`with-cosign`/`with-syft`/`sign-keyless`).

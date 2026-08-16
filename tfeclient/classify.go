@@ -122,8 +122,8 @@ func Classify(err error) Kind {
 // the SDK's own convenience methods (StackStates.Description,
 // StackDeploymentSteps.Artifacts) that call DoRaw directly rather than through
 // [Client.openRaw], and so never receive the typed error [statusError] yields.
-// It applies the same mapping that path gets -- 404 terminal, 403 forbidden --
-// so a missing artifact settles absent and a scope-denied one forbidden rather
+// It applies the same mapping that path gets (404 terminal, 403 forbidden), so
+// a missing artifact settles absent and a scope-denied one forbidden rather
 // than as a generic error that never settles. Any other status, or a message
 // that is not the DoRaw form, is [KindUnknown].
 func classifyRawHTTP(err error) Kind {

@@ -58,13 +58,12 @@
 // stale shards' snapshots once it outgrows a threshold or a run finishes. A
 // load discovers every shard beneath the root, reads the snapshots, and
 // replays the log on top, routing records by their shard key; a torn log
-// suffix — a fragment past the final newline commit marker, or a batch whose
-// blocks a power loss persisted out of order — is truncated at the last intact
+// suffix (a fragment past the final newline commit marker, or a batch whose
+// blocks a power loss persisted out of order) is truncated at the last intact
 // record, so a hard kill loses at most the last unflushed batch, never the
-// ledger itself. The ledger also
-// guards the single mutex-protected tally that both the run summary and the
-// live progress reporter read, so the reported counts and the ledger's own
-// tally can never drift apart (the on-disk copy trails only by the last
-// unflushed batch). Deferred objects are recorded as not-applicable so they are
-// never mistaken for gaps.
+// ledger itself. The ledger also guards the single mutex-protected tally that
+// both the run summary and the live progress reporter read, so the reported
+// counts and the ledger's own tally can never drift apart (the on-disk copy
+// trails only by the last unflushed batch). Deferred objects are recorded as
+// not-applicable so they are never mistaken for gaps.
 package manifest

@@ -197,7 +197,7 @@ func (m *Ci) Release(
 		With(optSecretVariable("ACTIONS_ID_TOKEN_REQUEST_TOKEN", oidcRequestToken))
 
 	// Run GoReleaser for binaries, archives, and signing (when OIDC creds
-	// are provided). Docker is always skipped -- images are published natively
+	// are provided). Docker is always skipped: images are published natively
 	// via Dagger below.
 	dist := ctr.
 		WithExec([]string{"goreleaser", "release", "--clean", "--skip=" + skipFlags}).

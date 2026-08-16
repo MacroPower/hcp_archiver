@@ -30,8 +30,8 @@
 // them, so every child enumeration beneath one (a configuration's deployment
 // groups, a group's runs walk, a terminal run's steps) runs under a persisted
 // obligation marker ([manifest.Obligation]): opened before the enumeration,
-// failed on a drop, settled on success — and, for the nested runs walk, only
-// once the nested collection itself settled, so a deployment run still
+// failed on a drop, settled on success. For the nested runs walk it settles
+// only once the nested collection itself settled, so a deployment run still
 // executing under a terminal configuration holds the configurations walk open
 // until its final state and steps land. An open or failed marker keeps the
 // enclosing walks re-paging across runs; a marker is a ledger entry only,

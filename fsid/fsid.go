@@ -11,8 +11,8 @@ import (
 )
 
 // Canonical resolves path to the identity of the physical location it
-// denotes: two paths that reach one on-disk directory — a relocation or
-// rename symlink and its target, say — map to one string, fit for use as a
+// denotes: two paths that reach one on-disk directory (a relocation or
+// rename symlink and its target, say) map to one string, fit for use as a
 // map key.
 //
 // The path need not exist. Resolution walks up to the deepest existing
@@ -54,13 +54,13 @@ func Canonical(path string) string {
 //
 // The naming rule: a file physically inside a walked tree always reports
 // under its physical name. A symlinked directory whose target the traversal
-// already owns — a rename alias beside its target, a link cycle — is not
+// already owns (a rename alias beside its target, a link cycle) is not
 // followed; it is returned as an alias instead, so a caller reconciling
 // names minted before a rename can rewrite between them. Every other name in
 // the system (ledger entries, remote keys) derives from the physical layout,
 // so the walk must not let a link's name shadow it, which would depend on
 // lexical visit order. A symlinked directory whose target lies outside every
-// walked tree — an operator relocation — is followed, its files reported at
+// walked tree (an operator relocation) is followed, its files reported at
 // their logical location under the link, and its target joins the owned
 // trees.
 //

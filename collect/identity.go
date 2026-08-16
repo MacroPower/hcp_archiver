@@ -254,13 +254,12 @@ func (e *Env) writeIdentity(relPath string, ident *Identity) error {
 // serving later claims from the cache. The scan is best-effort about its
 // children: a child with no identity or an unreadable one is skipped, since its
 // own claim fails closed when it is visited. A child carrying a RenamedTo
-// breadcrumb is also skipped -- it is a kept-for-history orphan, and letting it
+// breadcrumb is also skipped: it is a kept-for-history orphan, and letting it
 // into the map could shadow the directory that actually holds the object's
-// latest history. A directory that does not yet
-// exist caches an empty map. A real read fault on the parent itself is neither
-// cached nor masked as an empty map -- it returns an error, so the caller fails
-// its claim closed rather than proceeding as if the parent had no siblings and
-// missing a rename.
+// latest history. A directory that does not yet exist caches an empty map. A
+// real read fault on the parent itself is neither cached nor masked as an
+// empty map; it returns an error, so the caller fails its claim closed rather
+// than proceeding as if the parent had no siblings and missing a rename.
 func (e *Env) ownersUnderLocked(parent string) (map[string]string, error) {
 	if owners, ok := e.idOwners[parent]; ok {
 		return owners, nil

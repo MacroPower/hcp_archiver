@@ -10,7 +10,7 @@ import (
 
 // Build runs GoReleaser in snapshot mode, producing binaries for all
 // platforms. Returns the dist/ directory. Docker, signing, and SBOM stages
-// are skipped here -- images are built natively via Dagger in [Ci.BuildImages]
+// are skipped here: images are built natively via Dagger in [Ci.BuildImages],
 // and signing requires OIDC credentials only available during a real release.
 func (m *Ci) Build(ctx context.Context) (*dagger.Directory, error) {
 	ctr, err := m.releaserBase(ctx)
@@ -150,11 +150,11 @@ func withOCILabels(ctr *dagger.Container) *dagger.Container {
 // releaserBase builds the full release toolset: the shared GoReleaser base
 // (the Go build base plus the goreleaser binary, from the [Goreleaser]
 // toolchain) extended with cosign, syft, project source, and a bootstrapped
-// git repo -- everything goreleaser release needs for signing and SBOMs.
+// git repo (everything goreleaser release needs for signing and SBOMs).
 // cosign and syft are folded into the goreleaser toolchain, so its
 // WithCosign/WithSyft install those binaries for GoReleaser's sign and sbom
 // steps. Config-only validation goes through the [Goreleaser] toolchain
-// directly -- see [Ci.LintReleaser].
+// directly; see [Ci.LintReleaser].
 func (m *Ci) releaserBase(_ context.Context) (*dagger.Container, error) {
 	// WithCosign/WithSyft take and return a container, so they are applied as
 	// statements rather than chained.

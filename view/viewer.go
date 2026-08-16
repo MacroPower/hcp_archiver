@@ -9,8 +9,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// scrollKey handles the navigation keys the viewer screens share -- back, quit,
-// and jump to top or bottom -- returning the command and whether it consumed the
+// scrollKey handles the navigation keys the viewer screens share (back, quit,
+// and jump to top or bottom), returning the command and whether it consumed the
 // key. The top and bottom callbacks scroll the caller's own viewport, whose
 // GotoTop/GotoBottom signatures differ between the plain and highlighting
 // viewports and whose Update returns its concrete type, so only the key handling
@@ -42,8 +42,8 @@ func scrollKey(msg tea.Msg, top, bottom func()) (tea.Cmd, bool) {
 }
 
 // viewerFooter renders the footer line the viewer screens share: the scroll
-// position, then the key hints — the keys scrollKey handles, with any
-// viewer-specific hints spliced in before the back and quit keys — so the
+// position, then the key hints (the keys scrollKey handles, with any
+// viewer-specific hints spliced in before the back and quit keys), so the
 // viewers cannot drift in hint wording or order. It lives beside scrollKey
 // because the two describe the same keys.
 func viewerFooter(scrollPercent float64, extra ...string) string {

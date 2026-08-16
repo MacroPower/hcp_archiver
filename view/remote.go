@@ -27,8 +27,8 @@ import (
 
 // remoteReadTimeout bounds each individual ranged GET against the remote
 // store, so a stalled request surfaces as a status-line error instead of a
-// hung screen. Every read — a central-directory probe or a whole member's
-// compressed span — is one request under its own timeout.
+// hung screen. Every read (a central-directory probe or a whole member's
+// compressed span) is one request under its own timeout.
 const remoteReadTimeout = 5 * time.Minute
 
 // maxMemberSize caps a single decompressed bundle member the viewer loads whole
@@ -605,7 +605,7 @@ func (r *orgRemote) buildBundle(relBundle string) (*zip.Reader, io.ReaderAt, int
 // session behind a [sync.Once], so it needs no external lock and never
 // re-probes the credential chain per read: a failure (a bad marker, no
 // credentials) is remembered and returned on every subsequent read. The
-// client deliberately lives for the browse session with no close path — the
+// client deliberately lives for the browse session with no close path: the
 // viewer exits with the process, which releases the backend connection.
 //
 // The stored browse context is the intended parent for the build: callers
@@ -643,7 +643,7 @@ func (r *orgRemote) clientBuild() (*remote.Client, error) {
 // and decompresses it locally.
 //
 // Streaming through the bundle's [io.ReaderAt] instead (f.Open) would issue
-// one small ranged GET per flate read — thousands for a large log — so the
+// one small ranged GET per flate read (thousands for a large log), so the
 // span is fetched whole. The member's CRC-32 is verified after
 // decompression, matching the integrity check zip's own reader performs.
 func extractMember(b *remoteBundle, f *zip.File, relPath string) ([]byte, error) {

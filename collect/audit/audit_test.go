@@ -583,7 +583,7 @@ func TestCollectTrailsResumeSkipsAWhollyShiftedPage(t *testing.T) {
 	// Three events arriving between runs shift the listing by a whole page, so the
 	// settled page 2 re-lists page 1's stored events and has nothing fresh left
 	// after the filter. Its own stored events must still join the archived set, or
-	// the unsettled page 3 -- which now lists exactly them -- would write a
+	// the unsettled page 3, which now lists exactly them, would write a
 	// duplicate of the page 2 file.
 	f := shiftFixture(t, events[3:])
 

@@ -207,7 +207,7 @@ func TestCollectProvidersRefreshesAnInFlightVersion(t *testing.T) {
 
 	f := newProviderFixture(t)
 
-	// Run 1: the version is still publishing -- its signature is not yet
+	// Run 1: the version is still publishing; its signature is not yet
 	// uploaded and no platform has landed.
 	f.setState(false, nil)
 	require.NoError(t, f.collector.CollectProviders(t.Context()))
@@ -216,7 +216,7 @@ func TestCollectProvidersRefreshesAnInFlightVersion(t *testing.T) {
 		"the in-flight version is captured unsigned on the first run")
 	require.Zero(t, f.platformCount(t))
 
-	// Run 2: publication completed -- the signature flipped and a platform was
+	// Run 2: publication completed; the signature flipped and a platform was
 	// added after the version first listed. Mutable re-reads both; Object would
 	// freeze the run-1 snapshot forever.
 	f.setState(true, []*tfe.RegistryProviderPlatform{{

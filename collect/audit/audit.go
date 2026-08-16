@@ -155,12 +155,12 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 		settled := c.pageShortCircuited(relPath)
 
 		// Write the page unless it lists cleanly but carries only already-archived
-		// events -- an empty page among them. Skipping such a page avoids
-		// duplicating events under a fresh name and settling an empty page under
-		// the unchanged cursor (a later run's events would then be skipped as
-		// already done and lost). The trail's page order is unspecified, so an
-		// empty page never ends the walk: only the pagination reporting no next
-		// page does, and a non-empty later page may still follow an empty one.
+		// events (an empty page among them). Skipping such a page avoids duplicating
+		// events under a fresh name and settling an empty page under the unchanged
+		// cursor (a later run's events would then be skipped as already done and
+		// lost). The trail's page order is unspecified, so an empty page never ends
+		// the walk: only the pagination reporting no next page does, and a non-empty
+		// later page may still follow an empty one.
 		if listErr != nil || len(fresh) > 0 {
 			halt, err := c.archiveTrailPage(ctx, relPath, fresh, listErr)
 			if err != nil {
@@ -275,8 +275,8 @@ func (c *Collector) archiveTrailPage(
 	return false, nil
 }
 
-// persistedEvents returns the events actually archived for a page -- the source
-// both the watermark and the walk's archived-id set draw from -- and whether a
+// persistedEvents returns the events actually archived for a page (the source
+// both the watermark and the walk's archived-id set draw from) and whether a
 // read-back failure forces the walk to halt.
 //
 // A page Object short-circuited this run kept its stored events (the re-listed
@@ -310,9 +310,9 @@ func (c *Collector) persistedEvents(
 // pageShortCircuited reports whether [collect.Env.Object] will skip its write
 // for the audit-trail page at relPath: it has a ledger entry that is settled and
 // not up for a re-fetch, so the call leaves the stored file untouched. This is
-// broader than StatusDone -- an Absent page (a prior terminal list error) is
-// settled too, and Object short-circuits it identically -- so it is exactly the
-// condition under which the page's contribution must be read back from the
+// broader than StatusDone: an Absent page (a prior terminal list error) is
+// settled too, and Object short-circuits it identically. That makes it exactly
+// the condition under which the page's contribution must be read back from the
 // stored file rather than taken from the re-listed events the write never
 // persisted.
 func (c *Collector) pageShortCircuited(relPath string) bool {

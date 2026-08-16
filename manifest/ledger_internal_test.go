@@ -129,8 +129,8 @@ func TestFlushAppendsOneClassOrderedBatch(t *testing.T) {
 	t.Parallel()
 
 	// A flush spanning several shards lands as one batch in the single
-	// org-level log — one fsync domain, so a crash tears a prefix of the whole
-	// batch rather than between shards — and the batch is class-ordered: every
+	// org-level log (one fsync domain, so a crash tears a prefix of the whole
+	// batch rather than between shards), and the batch is class-ordered: every
 	// entry precedes every collection settlement, so a tarball proof in one
 	// shard is always durable before the settlement that could freeze its
 	// referencing run in another.

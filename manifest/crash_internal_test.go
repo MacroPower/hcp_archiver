@@ -314,8 +314,8 @@ func TestCrashPrefix_ReferencedProofPrecedesItsFreeze(t *testing.T) {
 
 // TestCrashPrefix_GateClearNeverOutlivesTheHealedEntry pins the settled-gate
 // rank: a healing run records the healed foreign entry and the gate clear in
-// one batch, and the clear must never be durable without the healed entry —
-// the skip conditions gate on the cleared reference, so a durable clear over a
+// one batch, and the clear must never be durable without the healed entry: the
+// skip conditions gate on the cleared reference, so a durable clear over a
 // still-errored entry would disable the retry the gate exists to force,
 // permanently.
 func TestCrashPrefix_GateClearNeverOutlivesTheHealedEntry(t *testing.T) {

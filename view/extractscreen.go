@@ -232,7 +232,7 @@ func (s *extractProgressScreen) update(msg tea.Msg) tea.Cmd {
 // ctx-guarded sends unblock, so the goroutine finishes rather than waiting on
 // a channel nothing drains any more. An in-flight remote ranged GET runs under
 // the browse context (the orgRemote's), not this screen's child, so it
-// finishes or times out on its own -- only the loop stops promptly.
+// finishes or times out on its own; only the loop stops promptly.
 //
 // The screen is closed by the root model whenever it leaves the stack, which
 // covers the paths the screen cannot see: a ctrl+c handled above it, and a

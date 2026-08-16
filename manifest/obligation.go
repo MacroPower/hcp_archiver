@@ -3,8 +3,8 @@ package manifest
 // Obligation is a persisted marker for work a collection depends on but whose
 // outcome no object entry carries: a child enumeration beneath a walk-frozen
 // element, or a nested walk whose own settlement is a flag the enclosing
-// walk's entry gate cannot see. The marker is a ledger entry only — no file
-// ever exists at its key — and its key sits under the collections that must
+// walk's entry gate cannot see. The marker is a ledger entry only (no file
+// ever exists at its key), and its key sits under the collections that must
 // stay open, so [Collection.HasUnsettled] finds it.
 //
 // The shape is acquire-then-settle: [Obligation.Open] persists the intent
@@ -12,7 +12,7 @@ package manifest
 // next run re-walks down to it, and a forgotten settle costs over-fetching
 // rather than a silent permanent gap. [Obligation.Settle] closes the marker
 // once the work truly finished; [Obligation.Fail] records the failure so a
-// later pass retries it, regressing a previously settled marker freely — the
+// later pass retries it, regressing a previously settled marker freely; the
 // marker reflects the newest outcome, never the first. Create instances with
 // [Ledger.Obligation].
 type Obligation struct {

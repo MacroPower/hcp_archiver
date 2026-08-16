@@ -20,7 +20,7 @@ import (
 var ErrRemoteRelocated = errors.New("configured remote does not match the archive's recorded mirror")
 
 // RemoteConfig maps the validated configuration surface onto the remote
-// client's transport configuration — the one place the two shapes meet, so
+// client's transport configuration: the one place the two shapes meet, so
 // the config package never imports a storage SDK. The inspect commands share
 // it to open an archive against the configuration file's remote.
 func RemoteConfig(rc *config.RemoteConfig) remote.Config {
@@ -38,8 +38,8 @@ func RemoteConfig(rc *config.RemoteConfig) remote.Config {
 // down; the next run sweeps instead). A non-nil prog receives the sweep's
 // file-settling progress.
 //
-// A per-file failure never aborts the sweep or the organization — local disk
-// stays canonical and the next run re-sweeps — but the returned tally's
+// A per-file failure never aborts the sweep or the organization, since local
+// disk stays canonical and the next run re-sweeps, but the returned tally's
 // Failed count marks the run incomplete (see [Archiver.Run]): the mirror is
 // the archive's long-term record, and a scheduled run must not report
 // success while it is knowingly behind.
@@ -87,10 +87,10 @@ func (a *Archiver) syncOrg(
 // defers to the sweep; only the local side can fail the run.
 //
 // It runs after [manifest.Load] acquired the organization's cross-process
-// flock — the marker is a mutation of the archive root like any other, and
-// writing it outside the single-writer exclusion would let a losing
-// concurrent process re-point a marker another run then faithfully mirrors —
-// and it refuses a re-pointed remote outright (see checkExistingMarker).
+// flock, since the marker is a mutation of the archive root like any other,
+// and writing it outside the single-writer exclusion would let a losing
+// concurrent process re-point a marker another run then faithfully mirrors.
+// It also refuses a re-pointed remote outright (see checkExistingMarker).
 func (a *Archiver) writeRemoteMarker(ctx context.Context, env *collect.Env, st *store.Store) error {
 	cfg := RemoteConfig(a.cfg.Remote)
 	marker := cfg.Marker()
@@ -159,7 +159,7 @@ func (a *Archiver) persistMarker(ctx context.Context, env *collect.Env, st *stor
 // would present the new bucket as a complete mirror it can never become and
 // leave `view` unable to reach any evicted bundle. The operator's way out is
 // stated in the error: copy the old prefix to the new location, then update
-// or delete the marker as consent — the sweep's evicted-surface verification
+// or delete the marker as consent. The sweep's evicted-surface verification
 // still proves the new location actually holds every only-copy before the
 // run can exit clean.
 //
@@ -176,7 +176,7 @@ func checkExistingMarker(root string, marker remote.Marker) (remote.Marker, bool
 	if existing.Conflicts(marker) {
 		return remote.Marker{}, false, fmt.Errorf(
 			"%w: the archive records its mirror at %q prefix %q, but the configuration names %q prefix %q; "+
-				"evicted bundles live only at the recorded location — copy the old prefix to the new "+
+				"evicted bundles live only at the recorded location; copy the old prefix to the new "+
 				"location, then update or delete %s to consent (the close sweep verifies every evicted "+
 				"surface either way)",
 			ErrRemoteRelocated, existing.URL, existing.Prefix, marker.URL, marker.Prefix, remote.MarkerName)

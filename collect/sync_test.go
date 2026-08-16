@@ -83,8 +83,8 @@ func (f syncFixture) write(t *testing.T, relPath string, data []byte) {
 }
 
 // writeDone commits a loose file, records it done, and flushes, the state of
-// a settled artifact whose record a healthy run has already made durable —
-// eviction gates on that durability, so the fixture models it.
+// a settled artifact whose record a healthy run has already made durable.
+// Eviction gates on that durability, so the fixture models it.
 func (f syncFixture) writeDone(t *testing.T, relPath string, data []byte) {
 	t.Helper()
 
@@ -95,9 +95,9 @@ func (f syncFixture) writeDone(t *testing.T, relPath string, data []byte) {
 
 // resume marks the fixture's run as resumed: at least one ledger entry
 // existed when the run opened, the state of every re-run against a real
-// archive. The prune step acts only in that state — a run that opened an
-// empty ledger against a non-empty mirror is a fresh or wrong root and
-// refuses to prune — so prune tests model it explicitly.
+// archive. The prune step acts only in that state (a run that opened an empty
+// ledger against a non-empty mirror is a fresh or wrong root and refuses to
+// prune), so prune tests model it explicitly.
 func (f syncFixture) resume() {
 	f.ledger.RecordSkipped(".fixture-prior-entry")
 	f.ledger.StartRun()
@@ -337,8 +337,8 @@ func TestSyncArchiveNoRemoteLeavesHookUntouched(t *testing.T) {
 
 // TestSyncArchiveMirrorsEveryMeaningfulFile is the mirror's completeness
 // contract: after a settled tree's sweep, the remote holds every file with
-// meaning outside this tool — one representative per store path builder, the
-// evicted cold surfaces, the remote marker, the ledger snapshots — and nothing
+// meaning outside this tool (one representative per store path builder, the
+// evicted cold surfaces, the remote marker, the ledger snapshots) and nothing
 // tool-internal (staging temps, the flock target, the replay logs).
 //
 // The seeds pass through the store's real path builders, and a reflection
@@ -861,8 +861,8 @@ func TestSyncArchiveVerifiesEvictedSurfacesRemain(t *testing.T) {
 		"a store that still holds every evicted surface passes verification")
 
 	// The store loses both only-copies (a re-pointed bucket, a mis-scoped
-	// lifecycle rule, a manual delete). No local walk can see the hole — the
-	// zip and tarball have no local files — so the sweep must derive the
+	// lifecycle rule, a manual delete). No local walk can see the hole, since
+	// the zip and tarball have no local files, so the sweep must derive the
 	// obligation from the sidecar and the ledger and fail the run.
 	require.NoError(t, f.fake.Delete(t.Context(), f.key(tarball)))
 	require.NoError(t, f.fake.Delete(t.Context(), f.key(zip)))
@@ -890,8 +890,8 @@ func TestSyncArchiveUnverifiableObligationCountsFailure(t *testing.T) {
 	// A partial restore leaves a regular file where the config-versions
 	// directory was: the local-presence probe now faults (ENOTDIR) instead of
 	// answering yes or no, so the only-copy verification cannot run. The
-	// fault must count — a run that exits clean here reports a complete
-	// mirror over a check that never executed.
+	// fault must count: a run that exits clean here reports a complete mirror
+	// over a check that never executed.
 	require.NoError(t, os.RemoveAll(f.store.AbsPath("config-versions")))
 	f.write(t, "config-versions", []byte("not a directory"))
 
@@ -937,7 +937,8 @@ func TestSyncArchiveEvictReadsBackDigestlessCopy(t *testing.T) {
 	// The store accepts the upload but does not persist its recorded digests
 	// (a metadata-dropping S3-compatible endpoint). With nothing egress-free
 	// to compare, the confirm must escalate to reading the remote bytes back
-	// and hashing them — never release the archive's only copy on size alone.
+	// and hashing them; the archive's only copy is never released on size
+	// alone.
 	f.fake.HeadHook = func(context.Context) {
 		obj, ok := f.fake.Object(f.key(tarball))
 		if ok {
@@ -1250,7 +1251,7 @@ func TestSyncArchivePruneSurvivesLocalMetadataLoss(t *testing.T) {
 
 	f := newSyncFixture(t)
 
-	// The evicted surfaces' local proof is gone — the sidecar lost with a
+	// The evicted surfaces' local proof is gone: the sidecar lost with a
 	// deleted subtree, the ledger wiped to reset state. The remote copies are
 	// the archive's only bytes, so the eviction shape alone must exempt them.
 	f.fake.SetObject(f.key(zip), remotetest.Object{Data: []byte("zip bytes")})
@@ -1271,7 +1272,7 @@ func TestSyncArchiveFreshLedgerRefusesPrune(t *testing.T) {
 
 	f := newSyncFixture(t)
 
-	// The run opened an empty ledger — a fresh or wrong --output — while the
+	// The run opened an empty ledger (a fresh or wrong --output) while the
 	// mirror already holds history. Pruning would delete the mirror's only
 	// record of it, so the sweep must refuse, and refuse loudly: the run
 	// exits incomplete so a scheduled run cannot silently diverge the mirror.
@@ -1346,7 +1347,7 @@ func TestSyncArchivePruneRefusesMassLossUnderASurvivingLedger(t *testing.T) {
 
 	// A partial restore brought the ledger back but not the data files it
 	// describes. Every mirrored key is now ledger-known and locally absent,
-	// which the ledger alone cannot tell from a re-shape -- but nothing local
+	// which the ledger alone cannot tell from a re-shape, but nothing local
 	// says a seal ever moved them: the workspace holds no bundle and no
 	// roll-up. The mirror is the only copy of the search layer at this point,
 	// so the sweep must refuse rather than delete it and let the run report a
@@ -1410,8 +1411,8 @@ func TestSyncArchivePrunesUnderARenameAlias(t *testing.T) {
 	// An operator moved a workspace subtree and left a rename symlink behind:
 	// the walk declines the alias and reports every file under the owner's
 	// name, so the mirror's alias-named keys are stale in bulk. The walk's own
-	// alias pairs explain them -- the bytes are local, spelled differently --
-	// so the disproportion guard must not read the rename as loss.
+	// alias pairs explain them (the bytes are local, spelled differently), so
+	// the disproportion guard must not read the rename as loss.
 	f.writeDone(t, "projects/prod/workspaces/api/workspace.json", []byte(`{"ws":"api"}`))
 
 	wsDir := filepath.Join(f.store.Root(), "projects", "prod", "workspaces")
@@ -1439,7 +1440,7 @@ func TestSyncArchivePruneExemptsBundleSidecars(t *testing.T) {
 
 	// The workspace subtree was lost locally, taking the sidecar with it. The
 	// mirrored sidecar is now the only index proving the remote-only zip's
-	// members, so the prune must leave it — the zip it proves is exempt by
+	// members, so the prune must leave it: the zip it proves is exempt by
 	// shape, and a proof without its subject is worthless the other way too.
 	f.fake.SetObject(f.key(sidecar), remotetest.Object{Data: []byte(`{"name":"x"}`)})
 	f.write(t, "org.json", []byte(`{"org":"acme"}`))
@@ -1456,8 +1457,8 @@ func TestSyncArchivePrunesKeysTheMirrorMustNotHold(t *testing.T) {
 
 	// A mirror seeded out of band (an aws s3 sync of a local archive) holds
 	// keys this tool never uploads. The local file of the same name is not
-	// their backing -- it is the ledger's own log or flock target, a staging
-	// temp, an eviction stub -- so the presence fence must not protect them.
+	// their backing: it is the ledger's own log or flock target, a staging
+	// temp, an eviction stub. The presence fence must not protect them.
 	// The replay log is why this matters: restoring a mirror that kept one
 	// would replay stale ledger state over the newer snapshot beside it.
 	tests := map[string]struct {
@@ -1620,8 +1621,8 @@ func TestSyncArchiveWalksSiblingAliasedSubtreeOnce(t *testing.T) {
 
 	// A rename symlink an operator left beside its target: the same physical
 	// workspace reachable under two sibling names. The sweep must walk the
-	// subtree once — walked under both names, its files would sync, evict,
-	// and count twice, here a duplicate upload of the same content under the
+	// subtree once: walked under both names, its files would sync, evict, and
+	// count twice, here a duplicate upload of the same content under the
 	// alias's remote key.
 	wsDir := filepath.Join(f.store.Root(), "projects", "prod", "workspaces")
 	require.NoError(t, os.Symlink(
@@ -1657,8 +1658,8 @@ func TestSyncArchiveAliasSortingFirstDoesNotShadowTheRealName(t *testing.T) {
 	// still report the subtree under the physical name the ledger and remote
 	// keys use: a walk that let the alias claim it would fill the keep set
 	// with alias keys only, and the prune would delete the live mirror of
-	// every real-name key while the sweep re-uploaded it all under the alias
-	// -- a cycle that repeats every run.
+	// every real-name key while the sweep re-uploaded it all under the alias,
+	// a cycle that repeats every run.
 	wsDir := filepath.Join(f.store.Root(), "projects", "prod", "workspaces")
 	require.NoError(t, os.Symlink(
 		filepath.Join(wsDir, "api"),
@@ -1686,10 +1687,10 @@ func TestSyncArchiveHealsAnEvictedZipOntoItsCurrentKey(t *testing.T) {
 	// An eviction that ran before a workspace rename: the sidecar walks under
 	// the physical name today, but the zip's only copy sits at the key the
 	// old name minted. The rename alias the walk declines must bridge the
-	// lookup, and the credit must then converge the mirror -- a server-side
-	// copy onto the current key, the historical key released behind the
-	// confirmed copy -- so the archive stops depending on the rename link
-	// surviving on disk.
+	// lookup, and the credit must then converge the mirror (a server-side copy
+	// onto the current key, the historical key released behind the confirmed
+	// copy), so the archive stops depending on the rename link surviving on
+	// disk.
 	const (
 		sidecar = "projects/prod/workspaces/api/bundles/logs.gen0001.zip.sidecar.ndjson"
 		curZip  = "projects/prod/workspaces/api/bundles/logs.gen0001.zip"
@@ -1734,8 +1735,8 @@ func TestSyncArchiveKeepsTheHistoricalCopyWhenTheHealFails(t *testing.T) {
 	f.resume()
 
 	// A failed heal must not disturb custody: the credit already succeeded,
-	// the historical copy stays the only copy, and the run stays clean -- the
-	// next sweep retries the heal.
+	// the historical copy stays the only copy, and the run stays clean while
+	// the next sweep retries the heal.
 	const (
 		sidecar = "projects/prod/workspaces/api/bundles/logs.gen0001.zip.sidecar.ndjson"
 		oldZip  = "projects/prod/workspaces/zeta-old/bundles/logs.gen0001.zip"
@@ -2311,7 +2312,7 @@ func TestEagerSyncBoundsConcurrentUploads(t *testing.T) {
 
 // TestRemoteTallySpansMotions drives all four remote motions through one
 // environment and asserts the run-wide tally accumulates across them while
-// each pass's own [collect.SyncStats] stays scoped to that pass — including
+// each pass's own [collect.SyncStats] stays scoped to that pass, including
 // where the two split: eviction bytes ride the run tally but never a pass's
 // UploadedBytes.
 func TestRemoteTallySpansMotions(t *testing.T) {
@@ -2494,8 +2495,8 @@ func TestSyncArchiveDoesNotEvictATarballWhoseRecordIsNotDurable(t *testing.T) {
 
 	// The done record exists only in memory, the state after a failed final
 	// flush: the record is the tarball's only local proof once the file is
-	// gone, so the eviction must wait. The skip is not a counted failure --
-	// the failed flush already marks the run incomplete.
+	// gone, so the eviction must wait. The skip is not a counted failure,
+	// because the failed flush already marks the run incomplete.
 	data := []byte("tarball")
 	f.write(t, tarball, data)
 	f.ledger.RecordDone(tarball, manifest.SignatureOf(data))
@@ -2524,8 +2525,8 @@ func TestSyncArchiveHealsAcrossStackedRenames(t *testing.T) {
 	f := newSyncFixture(t)
 	f.resume()
 
-	// Two stacked renames -- a project rename above a workspace rename --
-	// minted the historical key under BOTH old names, which no single alias
+	// Two stacked renames (a project rename above a workspace rename) minted
+	// the historical key under BOTH old names, which no single alias
 	// substitution spells. The rewrites must compose, or the intact only-copy
 	// reads as a permanent hole.
 	const (

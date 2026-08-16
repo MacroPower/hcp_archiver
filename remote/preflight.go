@@ -27,8 +27,8 @@ const preflightRangeOffset = 4
 // beyond pass/fail.
 type PreflightReport struct {
 	// AttrDigestsUntrusted reports that the store's own digest attribute did
-	// not match the probe's written bytes — the shape of an SSE-KMS-encrypted
-	// S3 bucket, whose ETags are hex but are not content MD5s — so the client
+	// not match the probe's written bytes (the shape of an SSE-KMS-encrypted
+	// S3 bucket, whose ETags are hex but are not content MD5s), so the client
 	// will serve only the metadata digests this tool's writes record for the
 	// rest of the run. Digest comparisons stay content-aware; size-matched
 	// files just pay one Head where a listing's attribute would have served.
@@ -36,12 +36,12 @@ type PreflightReport struct {
 }
 
 // Preflight proves the client can manage objects in the configured store by
-// round-tripping a probe under the prefix — write it through the eviction
-// path with recorded digests, read its attributes back, find it in a
-// listing, fetch a ranged span of it, delete it — the same motions an
-// archive run's mirror and a later `view` of an evicted bundle perform, so a
-// misconfigured bucket URL or credential set surfaces before any archive
-// work begins rather than hours into it.
+// round-tripping a probe under the prefix: it writes the probe through the
+// eviction path with recorded digests, reads its attributes back, finds it in
+// a listing, fetches a ranged span of it, and deletes it. Those are the same
+// motions an archive run's mirror and a later `view` of an evicted bundle
+// perform, so a misconfigured bucket URL or credential set surfaces before
+// any archive work begins rather than hours into it.
 //
 // The attributes read is also the digest check, in two parts. The recorded
 // metadata digests must read back exactly: they are the currency of the
@@ -52,7 +52,7 @@ type PreflightReport struct {
 // scored: one that mismatches the written bytes (an SSE-KMS bucket's ETag)
 // marks the attribute untrusted in the returned [PreflightReport] and the
 // client serves metadata digests alone from then on, while a store that
-// records no attribute at all passes unremarked — the metadata carries the
+// records no attribute at all passes unremarked. The metadata carries the
 // comparisons either way.
 //
 // The probe key is fixed, so a probe stranded by an interrupted run is

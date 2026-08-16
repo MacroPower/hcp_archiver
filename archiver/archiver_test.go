@@ -510,8 +510,8 @@ func TestWriteRemoteMarkerRefusesRepointedRemote(t *testing.T) {
 	a, env, _ := newSyncOrgFixture(t, buf)
 	st := env.Store()
 
-	// The archive already records its mirror elsewhere: the configured
-	// remote must not silently take over — evicted bundles live only at the
+	// The archive already records its mirror elsewhere, so the configured
+	// remote must not silently take over: evicted bundles live only at the
 	// recorded location, and the marker is the sole pointer to them.
 	_, err := st.WriteBytes(remote.MarkerName,
 		[]byte(`{"url":"s3://old-bucket","prefix":"old","version":1}`+"\n"))

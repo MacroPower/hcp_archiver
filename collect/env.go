@@ -138,11 +138,11 @@ func WithTarget(target string) Option {
 	}
 }
 
-// WithRemote enables mirroring to a remote object store — cold surfaces
-// evict through [Env.OffloadFile] and everything else syncs through
-// [Env.SyncArchive]: client reaches the store, and cfg with orgName compose
-// the object keys through [Env.RemoteKey]. A nil client keeps the archive
-// local-only. It returns an [Option].
+// WithRemote enables mirroring to a remote object store: cold surfaces evict
+// through [Env.OffloadFile] and everything else syncs through
+// [Env.SyncArchive]. The client reaches the store, and cfg with orgName
+// compose the object keys through [Env.RemoteKey]. A nil client keeps the
+// archive local-only. It returns an [Option].
 func WithRemote(client *remote.Client, cfg remote.Config, orgName string) Option {
 	return func(e *Env) {
 		e.remote = client
@@ -220,8 +220,8 @@ func (e *Env) Remote() *remote.Client {
 	return e.remote
 }
 
-// EagerFailures returns how many eager remote uploads — as-written syncs and
-// seal-boundary subtree files — failed so far. Eager failures warn and defer
+// EagerFailures returns how many eager remote uploads (as-written syncs and
+// seal-boundary subtree files) failed so far. Eager failures warn and defer
 // to the close sweep, which retries them; they never mark the run incomplete,
 // so this count is visibility, not a gate.
 func (e *Env) EagerFailures() int {
@@ -230,8 +230,8 @@ func (e *Env) EagerFailures() int {
 
 // remoteTally is the run-wide accumulator behind [RemoteStats]: unlike the
 // per-pass [SyncStats], it spans every remote motion of the organization's
-// run — the eager as-written uploads, the seal-boundary subtree syncs, the
-// eviction transfers, and the close sweep — so the progress reporter can
+// run: the eager as-written uploads, the seal-boundary subtree syncs, the
+// eviction transfers, and the close sweep. The progress reporter can therefore
 // snapshot one live figure for the whole run.
 // The motions run concurrently, so every field is atomic and the zero value
 // is ready to use.
@@ -381,7 +381,7 @@ func (e *Env) MarkSurfaceDropped(surface string, cause error) {
 // actor, a config-version tarball) is still retried by the run walk when it
 // fails. The gate counts unsettled while any shared path is not yet settled,
 // using the same predicate ([Env.ShouldFetch]) the walk uses to decide
-// retries. Once every shared write settles, the gate clears — unless one
+// retries. Once every shared write settles, the gate clears, unless one
 // settled as a confirmed absence, which marks the gate absent instead: the
 // absence lives in a foreign shard the run walk never scans, and the mark is
 // the trace a retry-absent run re-opens the walk through. See

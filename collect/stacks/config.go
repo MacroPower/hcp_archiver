@@ -193,8 +193,8 @@ func (c *Collector) archiveGroup(
 	// an obligation marker that settles only when the nested collection itself
 	// settled: a deployment run still executing under a terminal configuration
 	// keeps the configurations walk open until its final state and steps land.
-	// The marker sits beside the runs directory — under the configurations
-	// prefix its audience scans, but outside the runs prefix it mirrors — so
+	// The marker sits beside the runs directory (under the configurations
+	// prefix its audience scans, but outside the runs prefix it mirrors), so
 	// its own unsettled state never blocks the nested walk from settling, the
 	// cycle that would otherwise pin both forever.
 	st := c.env.Store()

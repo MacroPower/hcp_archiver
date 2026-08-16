@@ -111,10 +111,11 @@ func TestArchivePolicyChecksReReadsLogsWhileGateOpen(t *testing.T) {
 	t.Parallel()
 
 	// A single policy check whose log did not settle on an earlier pass. The
-	// checks file is already settled Done -- logBlob records a log failure and
-	// returns nil, so the list settles regardless -- yet the log must still be
-	// retried. The union gate forces the metered list again so the log re-fetches,
-	// where ShouldFetch(policy-checks.json) alone would have stranded it.
+	// checks file is already settled Done (logBlob records a log failure and
+	// returns nil, so the list settles regardless), yet the log must still be
+	// retried. The union gate forces the metered list again so the log
+	// re-fetches, where ShouldFetch(policy-checks.json) alone would have
+	// stranded it.
 	var listHits, logHits int
 
 	mux := http.NewServeMux()

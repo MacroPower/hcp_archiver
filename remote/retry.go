@@ -27,8 +27,8 @@ const (
 	maxRetryDelay = 5 * time.Second
 
 	// DefaultStallTimeout is the base window an attempt may go without
-	// observable progress — a listed object delivered, a downloaded chunk
-	// read — before the watchdog cancels it as stalled. A stalled attempt
+	// observable progress (a listed object delivered, a downloaded chunk
+	// read) before the watchdog cancels it as stalled. A stalled attempt
 	// classifies transient and retries, so a wedged connection costs one
 	// window instead of hanging a worker, a seal, or the close sweep
 	// forever; the mirror gets the same defense the API transport's
@@ -39,10 +39,10 @@ const (
 	// ingested into buffers at memory speed and transfers entirely inside
 	// the writer's commit; a parted upload's tail drains the same way), so a
 	// tight progress window would cut healthy-but-slow uploads that are
-	// moving bytes the whole time — a false failure that would repeat on
-	// every retry and every run, permanently blocking the mirror's
-	// convergence. A write's window is therefore widened by the body's size
-	// at [minWriteRate] (see [Client.writeWindow]): still a hard bound on a
+	// moving bytes the whole time. That false failure would repeat on every
+	// retry and every run, permanently blocking the mirror's convergence. A
+	// write's window is therefore widened by the body's size at
+	// [minWriteRate] (see [Client.writeWindow]): still a hard bound on a
 	// wedged connection, never a cap on a working one.
 	DefaultStallTimeout = 2 * time.Minute
 
@@ -59,8 +59,8 @@ const (
 // window plus bodySize/minWriteRate, so a link at or above this rate can
 // never be cut mid-transfer no matter the body, while a truly wedged write
 // is still bounded by the scaled deadline instead of hanging forever. The
-// floor is deliberately conservative (32 KiB/s ≈ 0.26 Mbps); a link slower
-// than that cannot sustain a mirror at all.
+// floor is deliberately conservative (32 KiB/s, about 0.26 Mbps); a link
+// slower than that cannot sustain a mirror at all.
 const minWriteRate = 32 << 10 // bytes per second
 
 // writeWindow returns the stall window for one write attempt of size bytes:
@@ -76,8 +76,8 @@ func (c *Client) writeWindow(size int64) time.Duration {
 }
 
 // errStalled marks an attempt the stall watchdog canceled: no progress
-// landed within the client's stall window. It classifies transient — the
-// path wedged, saying nothing about the object at the key — so the attempt
+// landed within the client's stall window. It classifies transient (the path
+// wedged, saying nothing about the object at the key), so the attempt
 // retries.
 var errStalled = errors.New("remote operation stalled")
 
@@ -153,17 +153,17 @@ func (c *Client) withRetry(ctx context.Context, op func() error) error {
 // fault of the store or the path to it (an internal error, a throttle, an
 // attempt that timed out, a stalled attempt the watchdog cut, anything left
 // unclassified, the shape a transport failure takes) on a call whose own
-// context is still live. An error the store pins on the request itself — an
+// context is still live. An error the store pins on the request itself (an
 // absent key, a permission denial, a failed precondition such as a digest
-// mismatch at commit — would only fail identically again and never retries,
+// mismatch at commit) would only fail identically again and never retries,
 // so an absence is settled by one response and a misconfiguration surfaces
 // immediately.
 //
 // A transport-level failure is classified before the store's code is
-// consulted: a driver can mistake one for a request fault (azblob maps any
+// consulted. A driver can mistake one for a request fault (azblob maps any
 // "no such host" DNS failure to NotFound, guessing at an invalid account
 // name), and trusting that guess would let a resolver blip settle sticky,
-// destructive decisions — a delete counted as already-removed, a Head
+// destructive decisions: a delete counted as already-removed, a Head
 // answering a permanent absence.
 //
 // A failure marked [errPermanent] is refused ahead of everything else: the

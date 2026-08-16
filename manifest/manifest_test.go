@@ -1599,11 +1599,11 @@ func TestLoad_DiscardedRecordsStayDiscardedAcrossLoads(t *testing.T) {
 	// A discard is only honored in memory: the records it skipped stay in the
 	// org-level log until a fold retires it. The run that follows re-creates
 	// the deleted subtree the moment it re-fetches into it, so a load that
-	// left the log behind would let the next one -- after a kill before any
-	// fold -- stat a present subtree and replay the very records the
-	// operator's deletion retired, freezing the deletion behind stale done
-	// entries and a re-armed early stop. The answers must therefore be the
-	// same whether or not the subtree has come back.
+	// left the log behind would let the next one (after a kill before any fold)
+	// stat a present subtree and replay the very records the operator's
+	// deletion retired, freezing the deletion behind stale done entries and a
+	// re-armed early stop. The answers must therefore be the same whether or
+	// not the subtree has come back.
 	const (
 		wsPrefix = "projects/p/workspaces/w/runs"
 		wsEntry  = wsPrefix + "/r1/run.json"
@@ -1699,9 +1699,9 @@ func TestLedger_EntryDurableTracksTheFlushLifecycle(t *testing.T) {
 
 	// Custody decisions gate on durability: an eviction may destroy a local
 	// only-copy only once the done record proving the remote copy would
-	// survive a crash. The signal must follow the flush lifecycle -- false
-	// while the record lives only in memory, true once the fsynced log holds
-	// it, and false again when a failed append hands the record back.
+	// survive a crash. The signal must follow the flush lifecycle: false while
+	// the record lives only in memory, true once the fsynced log holds it, and
+	// false again when a failed append hands the record back.
 	root := t.TempDir()
 
 	const tarball = "config-versions/cv-1.tar.gz"
@@ -1741,9 +1741,9 @@ func TestLoad_AliasTaggedRecordsSurviveTheLinkRemoval(t *testing.T) {
 	t.Parallel()
 
 	// A rename link sorting before its target claims the flush's shard tag
-	// for every drained record. Removing the link later -- the tidying the
-	// mirror heal makes safe -- must not read as a subtree deletion: the
-	// records' own paths still name the surviving physical shard.
+	// for every drained record. Removing the link later (the tidying the mirror
+	// heal makes safe) must not read as a subtree deletion: the records' own
+	// paths still name the surviving physical shard.
 	root := t.TempDir()
 
 	const (
@@ -1757,8 +1757,8 @@ func TestLoad_AliasTaggedRecordsSurviveTheLinkRemoval(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(wsDir, "web"), 0o755))
 
 	// A first run folds a snapshot into the workspace's .ledger, so the next
-	// load's discovery registers the shard -- under both names once the
-	// rename link exists beside it.
+	// load's discovery registers the shard, under both names once the rename
+	// link exists beside it.
 	first, err := manifest.Load(root)
 	require.NoError(t, err)
 
@@ -1770,9 +1770,9 @@ func TestLoad_AliasTaggedRecordsSurviveTheLinkRemoval(t *testing.T) {
 
 	require.NoError(t, os.Symlink(filepath.Join(wsDir, "web"), link))
 
-	// The second run drains under the lexically first registered key -- the
-	// alias -- and is interrupted before any fold, leaving the org log the
-	// only durable copy of its record, tagged with the alias name.
+	// The second run drains under the lexically first registered key (the alias)
+	// and is interrupted before any fold, leaving the org log the only durable
+	// copy of its record, tagged with the alias name.
 	second, err := manifest.Load(root)
 	require.NoError(t, err)
 

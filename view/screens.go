@@ -594,7 +594,7 @@ func newStatesScreen(ws *Workspace) (screen, error) {
 	for _, sv := range versions {
 		title := fmt.Sprintf("serial %d", sv.Serial)
 		if !sv.CreatedAt.IsZero() {
-			title += " — " + sv.CreatedAt.Format(theme.TimeLayout)
+			title += " - " + sv.CreatedAt.Format(theme.TimeLayout)
 		}
 
 		parts := []string{}

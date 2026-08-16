@@ -14,7 +14,7 @@ import (
 // buildRunsArchive lays out one organization whose fixture workspace has the
 // given raw NDJSON in rollups/runs.ndjson and any extra archive-relative
 // files, then returns the opened workspace. With no extras there is no runs/
-// directory at all — the fully coalesced shape.
+// directory at all: the fully coalesced shape.
 func buildRunsArchive(t *testing.T, runsNDJSON string, extras map[string]string) *view.Workspace {
 	t.Helper()
 

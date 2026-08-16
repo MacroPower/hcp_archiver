@@ -17,7 +17,7 @@ const tableMinHeight = 2
 // tableViewerScreen renders a static table over one archived JSON document
 // scrolling through the niceyaml viewport. The table is display-only: keys
 // act on the viewport or the screen, never the table, and when the screen is
-// too short to hold both, the table yields first — each of its values also
+// too short to hold both, the table yields first: each of its values also
 // appears in the document below.
 //
 // Create instances with [newTableViewerScreen].
@@ -74,7 +74,7 @@ func (s *tableViewerScreen) crumb() string { return s.name }
 // the footer line. The table gets its natural height (header plus rows) and
 // no more, so it sits flush against the document; when the body is too short
 // for both, the viewport keeps at least one line and the table is clipped and
-// then hidden — never sized below its two-line rendering floor.
+// then hidden, never sized below its two-line rendering floor.
 func (s *tableViewerScreen) setSize(width, height int) {
 	avail := max(height-1, 0)
 

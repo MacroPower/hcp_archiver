@@ -152,9 +152,9 @@ func checkMemberNames(members []Member) error {
 // Removing the loose sources is best-effort: the bundle and its sidecar are
 // already durable and verified before any removal, so a source that cannot be
 // removed (a read-only parent, a transient error) is a recognizable survivor,
-// not a loss. The caller reconciles it on the next run -- a survivor whose bytes
-// still hash to the sidecar entry is already sealed and dropped, one whose bytes
-// diverge is sealed afresh -- so a removal failure is skipped rather than
+// not a loss. The caller reconciles it on the next run (a survivor whose bytes
+// still hash to the sidecar entry is already sealed and dropped, one whose
+// bytes diverge is sealed afresh), so a removal failure is skipped rather than
 // returned, which would strand the seal with the bundle already committed.
 func Seal(bundlePath string, members []Member) ([]Entry, error) {
 	if len(members) == 0 {

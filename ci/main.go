@@ -7,7 +7,7 @@
 // The rest compose a sibling toolchain directly because their tools are not on
 // the devbox PATH: LintActions runs the zizmor toolchain, Security runs the
 // security toolchain (Trivy), and the release pipeline (build.go, publish.go)
-// runs the goreleaser toolchain -- including its folded-in cosign signing and
+// runs the goreleaser toolchain, including its folded-in cosign signing and
 // syft SBOM helpers. The release pipeline builds the binaries with GoReleaser,
 // then constructs and publishes the multi-arch runtime images natively via
 // Dagger (GoReleaser's Docker support is skipped to avoid Docker-in-Docker).

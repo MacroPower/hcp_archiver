@@ -72,7 +72,7 @@ type document struct {
 // shard the entry lives in, so resume, the newest-first early-stop, and the
 // watermarks are unchanged. Changes since the snapshots append to a single
 // org-level log whose records carry their shard key, so one flush is one
-// fsynced append and one crash tears one prefix of the whole batch — there is
+// fsynced append and one crash tears one prefix of the whole batch; there is
 // no shard-to-shard ordering for a crash to land between (see [Ledger.Flush]).
 // The log folds back into the stale shards' snapshots once it outgrows the
 // threshold or a run finishes, so a re-run's cost tracks the log's delta and
@@ -250,7 +250,7 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 
 	// A per-shard log is a pre-release layout this ledger no longer reads.
 	// Refuse it rather than load past it: the records it holds would silently
-	// drop, and the safe direction — accepting a re-fetch — is an operator
+	// drop, and the safe direction (accepting a re-fetch) is an operator
 	// decision, taken by deleting the named file. The org-root shard is
 	// excluded because its log file is the org log itself, replayed below.
 	for _, sh := range l.physShards {
@@ -310,7 +310,7 @@ func Load(root string, opts ...Option) (*Ledger, error) {
 	// before the ledger is handed back: the run is about to re-create the
 	// deleted subtree as it re-fetches it, and a kill before the first fold
 	// would leave the next load stating a present subtree and replaying the
-	// very records this load discarded -- the honored deletion silently
+	// very records this load discarded. That is the honored deletion silently
 	// un-honoring itself, with stale done entries answering every fetch
 	// decision with a skip. The fold writes each replayed shard's snapshot and
 	// then removes the log, so the surviving records keep their durability
@@ -377,8 +377,8 @@ func (l *Ledger) shardDir(sk string) string {
 // '[') cannot silently hide a shard and re-archive the organization from empty.
 //
 // Discovery follows symlinked directories (see [readSubdirs]), so one physical
-// .ledger directory can surface under several keys — a relocation symlink
-// beside its target, say. Every reachable key is returned, aliases included:
+// .ledger directory can surface under several keys (a relocation symlink
+// beside its target, say). Every reachable key is returned, aliases included:
 // each key must resolve in [Ledger.lookupShard], or the subtree behind the
 // alias would re-fetch on every run. Collapsing the aliases onto one shard is
 // [Ledger.shardAt]'s job, keyed by physical identity, so two keys over one
@@ -557,12 +557,12 @@ func (l *Ledger) shardByKey(sk string) *shard {
 
 // shardAt returns the shard backed by the physical directory dir denotes,
 // creating it if absent. Every shard creation routes through it, so a key that
-// aliases an already-registered directory — a rename symlink an operator left
-// beside its target, say — joins the existing shard rather than opening a
+// aliases an already-registered directory (a rename symlink an operator left
+// beside its target, say) joins the existing shard rather than opening a
 // second one over the same snapshot file. Two shards over one file would each
 // seed the cumulative tally from the same entries, and whichever folded second
-// would capture a snapshot missing the records only the other held — after the
-// log that carried them was already retired.
+// would capture a snapshot missing the records only the other held, by which
+// point the log that carried them was already retired.
 //
 // Identity comes from [fsid.Canonical], which resolves through the deepest
 // existing ancestor, so a symlinked workspace aliases even before its .ledger
@@ -597,8 +597,8 @@ func (l *Ledger) walPath() string {
 // than replayed: deleting an archived subtree is how an operator demands a
 // re-archive, and resurrecting the subtree's entries from the log would
 // answer every fetch decision with a skip and freeze the deletion forever.
-// The discard is logged and costs a re-fetch — every log record is re-derived
-// by re-walking — which is the safe direction. It is a memory-only edit here;
+// The discard is logged and costs a re-fetch (every log record is re-derived
+// by re-walking), which is the safe direction. It is a memory-only edit here;
 // the discarded records still sit in the log, so [Load] folds the log away
 // before the run starts (see there). Only a positively absent
 // subtree discards; a stat fault surfaces as an error, matching discovery's
@@ -612,7 +612,7 @@ func (l *Ledger) walPath() string {
 // under the lexically first registered key, which can be a rename alias
 // whose link the operator later removes while the physical subtree lives on.
 // A record whose tag path is gone therefore falls back to the shard key its
-// own payload routes to before it is discarded — an operator deletion still
+// own payload routes to before it is discarded; an operator deletion still
 // discards, because then both names are gone.
 func (l *Ledger) replayWAL() error {
 	recs, n, err := replayLog(l.walPath(), l.logger)
@@ -767,8 +767,8 @@ func (l *Ledger) Entry(relPath string) (Entry, bool) {
 }
 
 // EntryDurable reports whether relPath has an entry all of whose recorded
-// state has reached durable storage — the shard's snapshot or the fsynced
-// org log — so the record would survive a crash. Custody decisions consult
+// state has reached durable storage (the shard's snapshot or the fsynced org
+// log), so the record would survive a crash. Custody decisions consult
 // it: an eviction may destroy a local only-copy only once the done record
 // proving the remote copy is durable, or a crash between the delete and the
 // next flush would leave neither the record nor the bytes. An entry a flush
@@ -978,7 +978,7 @@ func clearGateError(_ time.Time, e *Entry) {
 
 // MirrorReferenceAbsent marks the reference gate at key settled over an
 // absence: every mirrored write settled, at least one as a confirmed 404.
-// Unlike a clear, it records even when no gate exists yet — the absence must
+// Unlike a clear, it records even when no gate exists yet: the absence must
 // leave a trace in the referencing run's own shard, because it settled in a
 // foreign shard the run walk never scans, and a retry-absent run re-opens
 // the walk through exactly this trace (see [Ledger.HasRetryableAbsentUnder]).
@@ -1225,20 +1225,20 @@ func (l *Ledger) hasUnsettledUnder(prefix string) bool {
 // retryableAbsence reports whether status records an absence a retry-absent
 // run re-probes: a directly recorded 404, or a reference gate mirroring one
 // that settled in a foreign shard the walk never scans. The two travel
-// together — a widening that saw only the direct form left the flag blind to
+// together: a widening that saw only the direct form left the flag blind to
 // exactly the absences a gate exists to carry across shards.
 func (l *Ledger) retryableAbsence(s Status) bool {
 	return l.retryAbsent && (s == StatusAbsent || s == StatusReferenceAbsent)
 }
 
-// HasRetryableAbsentUnder reports whether any object under prefix is
-// recorded [StatusAbsent] — or carries a [StatusReferenceAbsent] gate
-// mirroring a foreign absence — while retry-absent is enabled (see
-// [WithRetryAbsent]): exactly the entries a retry-absent run exists to
-// re-probe. Skip gates over metered listings consult it, because an absent
-// object reachable only through its listing can be re-probed only if the
-// listing runs again — the gate's usual settledness reads the absence as
-// done and would leave the flag inert for its own target.
+// HasRetryableAbsentUnder reports whether any object under prefix is recorded
+// [StatusAbsent], or carries a [StatusReferenceAbsent] gate mirroring a
+// foreign absence, while retry-absent is enabled (see [WithRetryAbsent]):
+// exactly the entries a retry-absent run exists to re-probe. Skip gates over
+// metered listings consult it, because an absent object reachable only through
+// its listing can be re-probed only if the listing runs again; the gate's
+// usual settledness reads the absence as done and would leave the flag inert
+// for its own target.
 func (l *Ledger) HasRetryableAbsentUnder(prefix string) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -1538,8 +1538,8 @@ func (l *Ledger) Flush() error {
 	)
 
 	// Sorted iteration makes the batch layout deterministic: a shard reachable
-	// under several alias keys drains on its first key — the drain empties it,
-	// so later aliases see nothing dirty — and any of its tags routes back to
+	// under several alias keys drains on its first key (the drain empties it,
+	// so later aliases see nothing dirty), and any of its tags routes back to
 	// the same physical shard on replay (see [Ledger.shardAt]).
 	for _, sk := range slices.Sorted(maps.Keys(l.shards)) {
 		sh := l.shards[sk]
@@ -1619,7 +1619,7 @@ func (l *Ledger) Flush() error {
 // Snapshots are written before the log is removed, and the log is removed only
 // when every stale shard folded: replaying the full log over snapshots that
 // already account for it is idempotent (records are last-writer-wins upserts),
-// so a crash — or a shard skipped for pending dirty state — between the two
+// so a crash (or a shard skipped for pending dirty state) between the two
 // steps costs a redundant replay, never a lost or regressed record.
 func (l *Ledger) fold(compactAll bool) error {
 	l.mu.RLock()

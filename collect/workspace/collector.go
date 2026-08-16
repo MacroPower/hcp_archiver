@@ -161,8 +161,8 @@ func (c *Collector) object(ctx context.Context, relPath string, value any) error
 // failure without inventing a settled state or aborting the run walk.
 //
 // A terminal cause (a 404) settles the derived paths absent, so every read
-// whose failure lands here must carry the in-run confirmation itself — run it
-// through [readConfirmed] or [paginateAll] — since no primitive's own
+// whose failure lands here must carry the in-run confirmation itself (run it
+// through [readConfirmed] or [paginateAll]), since no primitive's own
 // confirming re-probe stands between the read and the recorded outcome.
 func (c *Collector) recordErrored(ctx context.Context, relPath string, cause error) error {
 	return wrapArchive(relPath, c.env.RecordFailure(ctx, relPath, cause))

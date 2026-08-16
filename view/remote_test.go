@@ -148,7 +148,7 @@ func TestWorkspaceOpen_RemoteCachedBundleReadsDuringOtherBuild(t *testing.T) {
 	_, err := ws.Open(stateMember)
 	require.NoError(t, err)
 
-	// Block the next Head -- the logs bundle's build -- until released, signaling
+	// Block the next Head (the logs bundle's build) until released, signaling
 	// once it is in flight.
 	entered := make(chan struct{})
 	release := make(chan struct{})

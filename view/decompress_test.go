@@ -46,7 +46,7 @@ func TestDecompressMemberBounded(t *testing.T) {
 	t.Run("a member past the cap is rejected, not materialized", func(t *testing.T) {
 		t.Parallel()
 
-		// A tiny compressed span that inflates far past the cap -- the decompression
+		// A tiny compressed span that inflates far past the cap: the decompression
 		// bomb the bound exists to stop. A run of one byte compresses enormously, so
 		// the span itself stays well under the bundle-size guard.
 		bomb := deflate(t, bytes.Repeat([]byte("a"), 64<<10))

@@ -47,8 +47,8 @@ const (
 	// not-applicable and total counts. See [Ledger.MirrorReference].
 	StatusReferenceCleared Status = "reference-cleared"
 	// StatusReferenceAbsent marks a reference gate whose mirrored cross-shard
-	// writes all settled, at least one as a confirmed absence. It is settled —
-	// a normal re-run stops retrying the gate's run — but it is the trace a
+	// writes all settled, at least one as a confirmed absence. It is settled (a
+	// normal re-run stops retrying the gate's run), but it is the trace a
 	// retry-absent run re-opens through: the absence itself settled in a
 	// foreign shard the run walk never scans, so without this mark in the
 	// run's own shard the flag could never reach its target. See

@@ -66,8 +66,8 @@ const (
 	DefaultPageConcurrency = 8
 
 	// The maxConcurrentPages ceiling caps the per-page slot array [Paginate]
-	// pre-sizes from the server-reported TotalPages. A value past it -- a garbage
-	// or overflowing count from a misbehaving or hostile endpoint -- would drive
+	// pre-sizes from the server-reported TotalPages. A value past it, a garbage
+	// or overflowing count from a misbehaving or hostile endpoint, would drive
 	// an unbounded (or, at [math.MaxInt], negative-length) allocation, so the walk
 	// falls back to the serial NextPage path instead. It sits far above any real
 	// listing's page count.

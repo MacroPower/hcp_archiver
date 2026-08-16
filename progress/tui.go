@@ -28,8 +28,8 @@ const (
 	etaWidth   = 10 // "eta 59m59s", the widest value compactDuration emits.
 
 	// The display width of the spinner cell heading line one (the glyph and its
-	// trailing space). The task rows indent by the whole lead — spinner cell,
-	// phase, separating space — so their bars sit exactly under the phase bar;
+	// trailing space). The task rows indent by the whole lead (spinner cell,
+	// phase, separating space) so their bars sit exactly under the phase bar;
 	// deriving both from the same constants is what keeps the grid aligned.
 	spinnerCellWidth = 2
 	rowLeadWidth     = spinnerCellWidth + phaseWidth + 1
@@ -189,9 +189,9 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case logFlushedMsg:
-		// The in-flight batch has printed: commit its lines out of the feed —
-		// only now, so a program that died mid-batch leaves them queued for
-		// the sink's fallback flush instead of losing them — and release the
+		// The in-flight batch has printed: commit its lines out of the feed
+		// (only now, so a program that died mid-batch leaves them queued for
+		// the sink's fallback flush instead of losing them) and release the
 		// next batch, so a burst of logging flows across acks rather than
 		// waiting for ticks.
 		m.logsInFlight = false
@@ -257,9 +257,9 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // quit marks the model quitting and returns the command ending the program: a
 // final log flush sequenced ahead of the quit, so lines queued at shutdown
-// print above the panel — and their ack commits them — before the empty final
-// render erases it. The flush honors the in-flight ack gate like any other —
-// with a batch still in flight, printing another here could race it — and
+// print above the panel (and their ack commits them) before the empty final
+// render erases it. The flush honors the in-flight ack gate like any other
+// (with a batch still in flight, printing another here could race it), and
 // whatever stays uncommitted is not lost: the reporter's deactivation flushes
 // the sink's residue to the fallback writer once the program has stopped.
 func (m *tuiModel) quit() tea.Cmd {
@@ -276,7 +276,7 @@ func (m *tuiModel) quit() tea.Cmd {
 // them above the panel, or nil when there is nothing to print, a batch is
 // already in flight, or the terminal size is still unknown (unwrapped lines
 // would corrupt the renderer's row accounting; the queue holds until the
-// first size message). Each line is hard-wrapped to the terminal width — the
+// first size message). Each line is hard-wrapped to the terminal width: the
 // inline renderer estimates a printed line's height from its width to scroll
 // the panel out of the way, and a line left wider than the terminal makes
 // that estimate wrong, shifting the panel's origin so every later repaint
@@ -448,8 +448,8 @@ func (m *tuiModel) render(snap snapshot) string {
 	// currently admits. Once any rate limiting has been observed the amber 429
 	// total trails the grid for the rest of the run, and during a cooldown an
 	// amber paused readout follows it (a cooldown parks every in-flight
-	// request, so without it the panel would just look stuck) — transient
-	// last, so the paused cell vanishing never shifts the 429 total.
+	// request, so without it the panel would just look stuck). Transient cells
+	// come last, so the paused cell vanishing never shifts the 429 total.
 	if snap.hasRate {
 		metaCells = append(metaCells, cell(styleMeta, glyphRPS, fmt.Sprintf("%.0f/s", snap.rps), colRetriedWidth))
 	}
@@ -491,9 +491,9 @@ func (m *tuiModel) render(snap snapshot) string {
 // composeFrame joins the body and footer into the panel's frame, padding
 // between them with blank lines up to the frame's held height and ratcheting
 // that height to the natural line count. The frame only ever grows while the
-// program runs — the inline renderer erases and resizes on a shrinking frame,
+// program runs (the inline renderer erases and resizes on a shrinking frame,
 // which corrupts the panel when a log line is inserted above it at the same
-// moment — so as work items finish or a phase with fewer rows begins, the
+// moment), so as work items finish or a phase with fewer rows begins, the
 // frame holds steady instead of resizing. The padding sits between the task
 // region and the footer, so the footer stays glued to the frame's last rows
 // rather than bouncing with the live task count. Only a terminal too short
@@ -613,8 +613,8 @@ func (m *tuiModel) fit(line string) string {
 // cell renders one glyph-led cell of the footer grid: the glyph, a space, and
 // the text padded into the column's reserve, so the next cell starts on a
 // grid boundary however the value inside grows. A zero width keeps the cell
-// tight — the form the trailing amber readouts and the summary block's
-// compact rows use.
+// tight: the form the trailing amber readouts and the summary block's compact
+// rows use.
 func cell(style lipgloss.Style, glyph, text string, width int) string {
 	return style.Render(fmt.Sprintf("%s %-*s", glyph, width, text))
 }

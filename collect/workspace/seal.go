@@ -87,7 +87,7 @@ func (c *Collector) SealWorkspace(ctx context.Context, project, ws string) error
 	// seal is gated on moments before it runs, so they may still sit in the
 	// unflushed batch while the seal deletes the loose files they describe. A
 	// hard kill in that window would leave a durable ledger that re-fetches
-	// the sealed paths on the next run — and settles an artifact the API has
+	// the sealed paths on the next run, and settles an artifact the API has
 	// since expired as absent, even though the verified bundle holds its
 	// bytes. Flushing first makes the authorizing records durable; on a flush
 	// failure the seal aborts with the loose sources still canonical.
@@ -132,10 +132,10 @@ func (c *Collector) SealWorkspace(ctx context.Context, project, ws string) error
 	}
 
 	// With a remote store configured, sweep every sealed local bundle out to
-	// it — the ones sealed just above and any survivor of an earlier run —
-	// so peak local disk stays bounded to the search layer plus in-flight
-	// work, and pointing a remote at an existing all-local archive migrates
-	// it one re-run later.
+	// it (the ones sealed just above and any survivor of an earlier run), so
+	// peak local disk stays bounded to the search layer plus in-flight work,
+	// and pointing a remote at an existing all-local archive migrates it one
+	// re-run later.
 	if c.env.Remote() != nil {
 		err = c.evictBundles(ctx, project, ws)
 		if err != nil {
@@ -145,8 +145,8 @@ func (c *Collector) SealWorkspace(ctx context.Context, project, ws string) error
 		// The subtree now holds only the search layer, its final shape until
 		// the next run, so mirror it here rather than leaving it to the close
 		// sweep: an interrupted run then loses at most the workspaces still
-		// mid-collection. Failures are stats-only — the local tree stays
-		// canonical and the close sweep retries — so they never fail the seal.
+		// mid-collection. Failures are stats-only (the local tree stays
+		// canonical and the close sweep retries), so they never fail the seal.
 		stats := c.env.SyncSubtree(ctx, c.env.Store().WorkspaceDir(project, ws))
 		if stats.Uploaded > 0 || stats.Failed > 0 {
 			c.env.Log().LogAttrs(ctx, slog.LevelInfo, "workspace_sync_complete",
@@ -168,7 +168,7 @@ func (c *Collector) SealWorkspace(ctx context.Context, project, ws string) error
 // Only a zip with its sidecar beside it is swept: seal.Seal writes the
 // sidecar after the bundle read-back verifies, so the sidecar is the "sealed
 // and verified" marker, and an orphan zip without one (a crash mid-seal) is
-// unverified with its loose sources still canonical — it must never be
+// unverified with its loose sources still canonical; it must never be
 // uploaded. The sidecar itself always stays local; it is part of the search
 // layer and, listed by nextGeneration, is what keeps an evicted generation's
 // number from being reused.
@@ -358,9 +358,9 @@ func (c *Collector) frozenMetadata(project, ws string) (map[string][]seal.Member
 }
 
 // removeEmptyRunDirs removes the workspace's now-empty runs/<id>/ directories,
-// then the runs/ directory itself if nothing is left — the residue of a seal
-// that coalesced a run's last loose file. A vanished directory is tolerated;
-// a directory that still holds anything is left alone.
+// the residue of a seal that coalesced a run's last loose file, then the
+// runs/ directory itself if nothing is left. A vanished directory is
+// tolerated; a directory that still holds anything is left alone.
 func (c *Collector) removeEmptyRunDirs(project, ws string) error {
 	st := c.env.Store()
 	runsDir := st.AbsPath(st.Join(st.WorkspaceDir(project, ws), "runs"))
@@ -455,13 +455,13 @@ func (c *Collector) sealBundle(ctx context.Context, project, ws, prefix string, 
 // possibly crash-interrupted, run already sealed durably.
 //
 // Sealing commits the bundle and its sidecar before removing the loose
-// sources, so a crash -- or a best-effort removal failure -- between the two
+// sources, so a crash (or a best-effort removal failure) between the two
 // leaves a settled source on disk whose name a sidecar already records. Left
 // alone, the next seal would sweep that survivor into a fresh generation,
 // writing the same archive-relative name into two bundles that the remote sweep
 // would both upload. A member whose name no sidecar records is fresh; a member
 // whose name is recorded and whose current bytes hash to the recorded digest is
-// already sealed -- its loose source is removed best-effort and dropped; a
+// already sealed (its loose source is removed best-effort and dropped); a
 // member whose bytes diverge from the recorded digest is fresh, sealed into a
 // new generation rather than dropped, so changed content is never lost. When no
 // sidecar records any name, the members pass through untouched, the common case.
@@ -689,7 +689,7 @@ func isStateBlob(name string) bool {
 // The highest generation is taken over both the zips and their sidecar
 // indexes. Remote eviction removes a verified zip but always leaves its
 // sidecar, so counting sidecars is what keeps numbering monotonic once
-// bundles move off disk — a zip-only scan would restart at gen0001 and
+// bundles move off disk. A zip-only scan would restart at gen0001 and
 // overwrite remote history at the same key. Counting the zips as well means
 // a surviving zip whose sidecar was lost (a partial restore, a damaged file)
 // still blocks its generation from reuse.

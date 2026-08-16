@@ -343,7 +343,7 @@ func (w *Workspace) materializeSealedIndex() error {
 // re-reads only its one line. A duplicate path keeps the newest line: a
 // re-folded member appends an identical record, and a member re-frozen after
 // its content changed (a terminal run.json updated between seals) appends a
-// newer, different one — the newest is canonical in both cases.
+// newer, different one; the newest is canonical in both cases.
 func (w *Workspace) indexRollups(idx map[string]sealedRef) error {
 	files, err := listFiles(w.org.AbsPath(path.Join(w.dir, store.RollupsDirName)), ".ndjson")
 	if err != nil {

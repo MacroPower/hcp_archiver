@@ -57,10 +57,10 @@ const (
 // Server-error retries back off locally with a bounded doubling delay.
 // Rate-limit retries carry no local backoff: the [Governor] below has
 // already recorded the server's reset, so re-entering the transport blocks
-// there until the window reopens. A 429 that will not be retried -- its
-// budget spent, or a request unsafe to re-send -- converts to an error
-// wrapping [ErrRateLimited] rather than returning the response, so go-tfe
-// never sees a 429 and its own rate-limit machinery stays dormant.
+// there until the window reopens. A 429 that will not be retried (its budget
+// spent, or a request unsafe to re-send) converts to an error wrapping
+// [ErrRateLimited] rather than returning the response, so go-tfe never sees a
+// 429 and its own rate-limit machinery stays dormant.
 //
 // Only a request with no body (every read this client makes) is retried, so a
 // consumed body is never re-sent. A context cancellation ends the retries
@@ -74,7 +74,7 @@ type retryTransport struct {
 
 // RoundTrip delegates to the wrapped transport, retrying each retryable
 // failed attempt within its budget. The final attempt's response or error is
-// returned as-is -- except a final 429, which converts to an error wrapping
+// returned as-is, except a final 429, which converts to an error wrapping
 // [ErrRateLimited] so the layers above never see one.
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	delay := t.delay

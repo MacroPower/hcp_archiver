@@ -46,9 +46,9 @@ type SyncStats struct {
 	// Pruned counts stale remote keys deleted because nothing local backs
 	// them anymore.
 	Pruned int
-	// Failed counts failed sweep operations — a file's upload or eviction,
-	// the inventory listing, the walk, or a prune batch; each is logged and
-	// the next run's sweep retries.
+	// Failed counts failed sweep operations: a file's upload or eviction, the
+	// inventory listing, the walk, or a prune batch. Each is logged and the
+	// next run's sweep retries.
 	Failed int
 }
 
@@ -56,11 +56,11 @@ type SyncStats struct {
 // files to settle once the tree is classified, then one advance per settled
 // file. The archiver's progress reporter satisfies it, so the sweep drives the
 // live phase bar without this package importing the progress machinery. The
-// bar covers file settling only — the verify and prune passes run after the
+// bar covers file settling only: the verify and prune passes run after the
 // last advance, so the bar sits full (the spinner still live) through that
-// tail; the total stays decoupled from the prune's size on purpose. Only the
-// whole-tree close sweep drives the hook: the eager and seal-boundary syncs
-// run mid-phase and must not move it.
+// tail, and the total stays decoupled from the prune's size on purpose. Only
+// the whole-tree close sweep drives the hook: the eager and seal-boundary
+// syncs run mid-phase and must not move it.
 type SyncProgress interface {
 	// SetTotal seeds the denominator: how many files the sweep will settle.
 	SetTotal(total int)
@@ -151,18 +151,18 @@ var (
 //
 // The gate runs at both ends of the transfer, because after the delete the
 // remote copy is the archive's only copy. Before any remote traffic the
-// local bytes are verified against their proof — a bundle zip member by
-// member against the sidecar digests [seal.Seal] recorded, a
-// configuration-version tarball against its ledger signature — so rot that
-// crept in after the artifact was proven is refused ([ErrOffloadUnproven])
-// rather than enshrined as the long-term record. The upload then records the
-// file's digests as object metadata, and the confirm compares size plus
-// every digest both sides carry, so a foreign or stale object at the key
-// refuses the delete ([ErrRemoteCopyMismatch]); an object without recorded
-// digests (an upload by an older build) still gates on size.
+// local bytes are verified against their proof (a bundle zip member by member
+// against the sidecar digests [seal.Seal] recorded, a configuration-version
+// tarball against its ledger signature), so rot that crept in after the
+// artifact was proven is refused ([ErrOffloadUnproven]) rather than enshrined
+// as the long-term record. The upload then records the file's digests as
+// object metadata, and the confirm compares size plus every digest both sides
+// carry, so a foreign or stale object at the key refuses the delete
+// ([ErrRemoteCopyMismatch]); an object without recorded digests (an upload by
+// an older build) still gates on size.
 //
-// Every state is derived from what is observable — the local file, its
-// recorded proof, and a metadata probe — so any crash point self-heals on
+// Every state is derived from what is observable (the local file, its
+// recorded proof, and a metadata probe), so any crash point self-heals on
 // the next sweep with no persisted flags: an interrupted upload re-uploads
 // (an aborted parted upload is not an object), an upload that finished
 // before the local delete is found by the probe, matched digest for digest,
@@ -442,8 +442,8 @@ func (e *Env) proveOffloadSource(relPath, absPath string) (remote.Digests, error
 // content before the local copy is released: the sizes must match, and so
 // must every digest both sides carry. A remote object without recorded
 // digests passes this egress-free screen on size alone, and the caller then
-// escalates it to a full content read-back (see [Env.confirmRemoteContent])
-// — size is a screen here, never the custody gate.
+// escalates it to a full content read-back (see [Env.confirmRemoteContent]);
+// size is a screen here, never the custody gate.
 func confirmRemoteCopy(info remote.ObjectInfo, size int64, digests remote.Digests, key string) error {
 	switch {
 	case info.Size != size:
@@ -578,8 +578,8 @@ const (
 // whose local bytes contradict their ledger signature is suspect: it is
 // neither evicted nor synced, and it counts a sweep failure so the run exits
 // incomplete rather than clean over a corrupt only-copy. The ledger flock
-// target and the ledger's log.ndjson are never uploaded — a stale remote log
-// replayed onto a restored tree could resurrect old ledger state; the
+// target and the ledger's log.ndjson are never uploaded: a stale remote log
+// replayed onto a restored tree could resurrect old ledger state, and the
 // post-compaction snapshot.json is the durable record. Nor is an eviction
 // stub, which points at the mirror from outside it and would be wrong the
 // moment a restore brought its object back. Everything else syncs
@@ -701,13 +701,13 @@ func (e *Env) SyncArchive(ctx context.Context, opts ...SyncOption) SyncStats {
 // the bundles a sidecar records as evicted (the zip no longer beside it,
 // gathered by the walk) and the configuration-version tarballs the ledger
 // records done with no local file. It runs before any of the current sweep's
-// evictions, so a surface still local — about to evict against the same
-// pre-eviction inventory — is never an obligation.
+// evictions, so a surface still local (about to evict against the same
+// pre-eviction inventory) is never an obligation.
 //
 // A tarball whose local presence cannot be determined (a stat fault under
-// config-versions/) is unverifiable either way. It joins no obligation — it
-// may still be local and about to evict this sweep, and demanding it of the
-// pre-eviction inventory would report a false hole — but the fault logs an
+// config-versions/) is unverifiable either way. It joins no obligation, since
+// it may still be local and about to evict this sweep and demanding it of the
+// pre-eviction inventory would report a false hole, but the fault logs an
 // error and counts a sweep failure, so the run exits incomplete instead of
 // clean over an only-copy check that never ran.
 func (e *Env) evictedObligations(
@@ -762,14 +762,14 @@ func (e *Env) evictedObligations(
 // it is (see [Env.evictedObligations]). Everything else in the mirror
 // re-derives from local bytes on the next sweep; these alone cannot, so
 // their absence is the one gap that is invisible to a local walk and
-// unrepairable once noticed late — a re-pointed remote block, a mis-scoped
+// unrepairable once noticed late: a re-pointed remote block, a mis-scoped
 // lifecycle rule, or a bucket-side delete would otherwise leave every later
 // run reporting a complete mirror over a hole in the archive's long-term
 // record. Each missing or size-mismatched object logs an error and counts a
 // failure, so the run exits incomplete.
 //
-// The check is a lookup against the inventory listing already in hand — no
-// extra requests — comparing sizes where the ledger recorded one (a sidecar
+// The check is a lookup against the inventory listing already in hand, with no
+// extra requests, comparing sizes where the ledger recorded one (a sidecar
 // records its members' digests, not the zip's, so bundles verify by
 // presence).
 //
@@ -935,12 +935,12 @@ func aliasRewrites(aliases map[string]string, relPath string) []string {
 // healHistoricalKey converges a credited only-copy onto its current name: a
 // copy from the historical key, proven to carry the credited content (see
 // [Env.healCopy]), and only then the historical key's delete. Until the copy
-// lands, the credit depends on the rename link surviving on disk — an operator
+// lands, the credit depends on the rename link surviving on disk (an operator
 // tidying the stale link away would turn an intact archive into a permanent
-// false hole — so the heal trades that standing dependency for one converged
-// object. Every step fails safe: a fault leaves the historical copy
-// in place, logs, and counts nothing, since the credit already succeeded. A
-// failed copy retries here next sweep; a failed delete retries through
+// false hole), so the heal trades that standing dependency for one converged
+// object. Every step fails safe: a fault leaves the historical copy in place,
+// logs, and counts nothing, since the credit already succeeded. A failed copy
+// retries here next sweep; a failed delete retries through
 // [Env.releaseHistoricalKeys], where the next sweep's direct hit at the
 // current key proves the release safe.
 func (e *Env) healHistoricalKey(ctx context.Context, histKey, relPath string) {
@@ -1201,7 +1201,7 @@ func (s *treeSweep) reshaped(relPath string) bool {
 // declined to touch; staging temps and ledger-internal files mark nothing.
 //
 // A bundle sidecar whose zip is no longer beside it is the local record of a
-// finished eviction — the zip's only copy is the store — so the walk also
+// finished eviction (the zip's only copy is the store), so the walk also
 // collects those zips' paths for the sweep's remote-presence verification.
 //
 // Every sealed-form file also marks its workspace as one a seal has re-shaped
@@ -1253,7 +1253,7 @@ func (e *Env) classifyTree(ctx context.Context, counters *syncCounters) (*treeSw
 // recordEvictedZip notes the zip behind one walked sidecar as a finished
 // eviction when the zip is no longer beside it, feeding the sweep's
 // remote-presence verification. A stat fault leaves the zip's custody
-// unknown — it may be local, it may be remote-only — so the zip joins no
+// unknown (it may be local, it may be remote-only), so the zip joins no
 // obligation, but the fault logs an error and counts a sweep failure rather
 // than silently dropping the only-copy check for the run.
 func (e *Env) recordEvictedZip(
@@ -1284,8 +1284,8 @@ func (e *Env) recordEvictedZip(
 // archive-relative path to fn: the shared skeleton of the sync passes'
 // walks, owning the cancellation check, the relativization, and the
 // [syncEligible] gate. The traversal is [fsid.WalkFiles]: relocation
-// symlinks are followed — a subtree an operator moved behind a symlink is a
-// supported layout the ledger's shard discovery already reads through — and
+// symlinks are followed (a subtree an operator moved behind a symlink is a
+// supported layout the ledger's shard discovery already reads through), and
 // every file reports under its physical name, so the walked paths agree
 // with the API-derived names the ledger and remote keys use. The intra-tree
 // rename links the walk declined are returned as archive-relative alias to
@@ -1400,15 +1400,15 @@ func (e *Env) bundleSealed(relPath string) bool {
 // only a done entry whose recorded size matches the local bytes classifies
 // for eviction (the eviction itself then re-proves the bytes against the
 // signature's SHA-256; this check is the cheap stat-only screen). Neither of
-// the other outcomes is evicted or synced — a synced copy at the eviction key
+// the other outcomes is evicted or synced (a synced copy at the eviction key
 // carries unproven bytes and could later pass a proper eviction's confirm,
-// letting it delete the only local copy — but they differ in weight: a
+// letting it delete the only local copy), but they differ in weight: a
 // tarball with no settled entry at all skips with a warning, while a done
 // entry whose signature the local bytes contradict marks the file suspect
-// (see [actionSuspect]) — the ledger's proven record now disagrees with the
-// file backing it, the same rot the eviction gate refuses when the size is
-// preserved, so it must count against the run instead of exiting clean over
-// a corrupt, unmirrorable only-copy.
+// (see [actionSuspect]). In that case the ledger's proven record disagrees
+// with the file backing it, the same rot the eviction gate refuses when the
+// size is preserved, so it must count against the run instead of exiting
+// clean over a corrupt, unmirrorable only-copy.
 func (e *Env) classifyTarball(ctx context.Context, relPath string) syncAction {
 	entry, ok := e.ledger.Entry(relPath)
 	if !ok || entry.Status != manifest.StatusDone || entry.Signature == nil {
@@ -1423,8 +1423,8 @@ func (e *Env) classifyTarball(ctx context.Context, relPath string) syncAction {
 	// gone, so the eviction waits for it to be durable: after a failed final
 	// flush the record lives only in memory, and deleting the file would
 	// leave the next run neither the record nor the bytes. The skip is not a
-	// counted failure — the failed flush already marks the run incomplete —
-	// and the file evicts on a later sweep once a flush has landed.
+	// counted failure, since the failed flush already marks the run
+	// incomplete, and the file evicts on a later sweep once a flush has landed.
 	if !e.ledger.EntryDurable(relPath) {
 		e.logger.LogAttrs(ctx, slog.LevelWarn, "sync_tarball_record_not_durable",
 			slog.String("path", relPath),
@@ -1466,7 +1466,7 @@ func isBundleZip(relPath string) bool {
 
 // isBundleSidecar reports a sealed bundle's sidecar index: the sidecar
 // suffix over a bundle-zip stem. After eviction the sidecar is the local
-// side's only record of the bundle — the presence obligation the sweep
+// side's only record of the bundle: the presence obligation the sweep
 // verifies against the store, and the proof index the prune must never
 // delete out from under a remote-only zip.
 func isBundleSidecar(relPath string) bool {
@@ -1550,7 +1550,7 @@ func sealBoundarySkip(relPath string) bool {
 
 // EagerSync mirrors one just-committed file to the remote store through the
 // as-written motion (see eagerSync): the archiver routes writes that bypass
-// the archive primitives — today only the organization's remote marker —
+// the archive primitives (today only the organization's remote marker)
 // through it, so their mirror failures warn, count into
 // [Env.EagerFailures], and defer to the close sweep exactly like every
 // other eager upload.
@@ -1562,8 +1562,8 @@ func (e *Env) EagerSync(ctx context.Context, relPath string, res store.WriteResu
 // as-written motion behind the archive primitives: [Env.recordDone] calls it
 // after every ledger record, and it uploads only when a remote is configured,
 // the commit actually changed the on-disk bytes, and the file is org-scope
-// ([eagerScope]). The upload is unconditional — the bytes just changed, so
-// the remote copy is stale by definition and no inventory probe is needed.
+// ([eagerScope]). The upload is unconditional: the bytes just changed, so the
+// remote copy is stale by definition and no inventory probe is needed.
 //
 // A semaphore sized [DefaultConcurrency] bounds the burst: the per-page
 // archive fan-out is not limited, so without it hundreds of writes landing at
@@ -1610,14 +1610,14 @@ func (e *Env) eagerSync(ctx context.Context, relPath string, res store.WriteResu
 // It runs one scoped inventory listing and settles each eligible file through
 // the same incremental gate as [Env.SyncArchive], so an unchanged file skips
 // and a file left stale by an interrupted prior run still uploads. Files
-// under a .ledger/ directory are skipped whole — a mid-run shard snapshot is
-// stale by construction; the close sweep mirrors the post-compaction one —
-// and bundle zips are skipped too (an evicted zip is already gone, and an
-// orphan without its sidecar must never be uploaded). Files settle
-// sequentially: workspaces seal concurrently, so the workspace goroutines are
-// the parallelism, exactly as they are for bundle eviction.
+// under a .ledger/ directory are skipped whole, because a mid-run shard
+// snapshot is stale by construction and the close sweep mirrors the
+// post-compaction one. Bundle zips are skipped too (an evicted zip is already
+// gone, and an orphan without its sidecar must never be uploaded). Files
+// settle sequentially: workspaces seal concurrently, so the workspace
+// goroutines are the parallelism, exactly as they are for bundle eviction.
 //
-// There is no prune — deletion reconciliation stays global at the close
+// There is no prune: deletion reconciliation stays global at the close
 // sweep. Per-file failures warn, count in the returned stats, and add to
 // [Env.EagerFailures]; they never abort the subtree or the seal, and the
 // close sweep retries them. A cancellation winds down settling nothing.
@@ -1694,7 +1694,7 @@ func (e *Env) syncFiles(
 			}
 
 			// A file the wind-down declined settled nothing, so it must not
-			// advance the settled counter either — the progress line's counts
+			// advance the settled counter either: the progress line's counts
 			// stay a sum of real outcomes, as the evict loop already keeps them.
 			if e.syncFile(ctx, relPath, inventory, counters) {
 				e.recordSyncProgress(ctx, counters)
@@ -1710,7 +1710,7 @@ func (e *Env) syncFiles(
 
 // syncFile settles one file against the remote store: upload when the remote
 // copy is absent or differs, skip when it matches. It reports whether the
-// file reached an outcome — false only on the wind-down path, where nothing
+// file reached an outcome, false only on the wind-down path, where nothing
 // settled and nothing may count.
 func (e *Env) syncFile(
 	ctx context.Context,
@@ -1808,7 +1808,7 @@ func (e *Env) streamFile(ctx context.Context, relPath string, size int64) error 
 
 // uploadNeeded is the incremental gate: it reports whether the file's remote
 // copy is absent or differs, and the local size. The comparison degrades in
-// order — size, then the local MD5 against the digest the inventory records
+// order: size, then the local MD5 against the digest the inventory records
 // when its listing carries one, then one Head for backends whose listings
 // omit a digest the object still carries, then size alone when the store
 // recorded none at all.
@@ -1913,8 +1913,8 @@ const pruneGuardFloor = 100
 // beside a newer snapshot and replay into resurrected ledger state.
 //
 // Two guards refuse pruning, each the fingerprint of a local tree that is
-// not the tree the mirror mirrors — where "nothing local backs it" means
-// loss, not deletion — and each counts a failure so the run exits
+// not the tree the mirror mirrors (where "nothing local backs it" means loss,
+// not deletion), and each counts a failure so the run exits
 // incomplete rather than reporting a clean mirror it knowingly diverged
 // from:
 //
@@ -1925,7 +1925,7 @@ const pruneGuardFloor = 100
 //     refuses the whole prune.
 //   - a delete set of **unbacked** keys past [pruneGuardFloor] that
 //     outnumbers the keys the walk matched means most of the mirror has no
-//     local trace at all — loss, or a deliberate mass deletion that must be
+//     local trace at all: loss, or a deliberate mass deletion that must be
 //     an explicit act. This refuses only the unbacked keys.
 //
 // Provenance splits the stale set for that second guard, and clearing it
@@ -1982,7 +1982,7 @@ func (e *Env) pruneRemote(
 
 		// A last physical fence before a key is deletable: the stat resolves
 		// through any symlink, so a live file the walk reported under another
-		// name can never lose its remote copy — deleting is the one direction
+		// name can never lose its remote copy; deleting is the one direction
 		// doubt must not take. A key whose local presence cannot be determined
 		// is left in place and counted, so the run exits incomplete instead of
 		// clean over a prune it could not prove safe.
@@ -2086,7 +2086,7 @@ func (e *Env) pruneRemote(
 // evictedSurface reports whether a remote-only key has an eviction shape: a
 // sealed-bundle zip or a configuration-version tarball. The shape alone
 // exempts it from pruning, with no look at the local sidecar or ledger entry
-// that proved the eviction — after eviction the remote copy is the only copy,
+// that proved the eviction: after eviction the remote copy is the only copy,
 // and gating its survival on local metadata would let a local loss (a wiped
 // .ledger, a deleted workspace subtree taking its sidecars with it) cascade
 // into deleting the archive's only bytes. The cost is that a deliberately
