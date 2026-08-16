@@ -1,6 +1,6 @@
 module go.jacobcolvin.com/hcp_archiver
 
-go 1.26.0
+go 1.26.4
 
 require (
 	charm.land/bubbles/v2 v2.1.1
@@ -10,7 +10,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/charmbracelet/x/exp/golden v0.0.0-20260813141921-f091cedeaf78
 	github.com/hashicorp/go-cleanhttp v0.5.2
-	github.com/hashicorp/go-tfe v1.109.0
+	github.com/hashicorp/go-tfe v1.110.0
 	github.com/hashicorp/go-version v1.9.0
 	github.com/hashicorp/jsonapi v1.5.0
 	github.com/spf13/cobra v1.10.2
