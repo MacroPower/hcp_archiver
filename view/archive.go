@@ -16,6 +16,7 @@ import (
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
 	"go.jacobcolvin.com/hcp_archiver/remote"
+	"go.jacobcolvin.com/hcp_archiver/store"
 )
 
 var (
@@ -695,10 +696,8 @@ func (o *Org) subdirs(relPath string) ([]string, error) {
 
 // looseNames returns the regular-file names directly under an archive-relative
 // directory, tolerating one that does not exist, merged with the file names the
-// organization's mirror holds there. The archive's own machinery is hidden the
-// way [*Org.List] hides it: a staging leftover or identity sidecar beside a
-// run's artifacts is bookkeeping, not archived content. Callers dedupe and
-// sort.
+// organization's mirror holds there. The merge already hides the archive's own
+// machinery (see [*Org.mergedChildren]). Callers dedupe and sort.
 func (o *Org) looseNames(relPath string) ([]string, error) {
 	entries, err := o.mergedChildren(relPath)
 	if err != nil {
@@ -708,11 +707,9 @@ func (o *Org) looseNames(relPath string) ([]string, error) {
 	var names []string
 
 	for _, e := range entries {
-		if e.Dir || isMachinery(path.Join(relPath, e.Name)) {
-			continue
+		if !e.Dir {
+			names = append(names, e.Name)
 		}
-
-		names = append(names, e.Name)
 	}
 
 	return names, nil
@@ -731,8 +728,10 @@ type TreeEntry struct {
 	Size int64
 	// Dir reports a subdirectory.
 	Dir bool
-	// Remote reports a file the mirror holds that is not on disk yet; reading
-	// it fetches and persists it locally.
+	// Remote reports a file whose bytes are only in the remote store: one the
+	// mirror holds that is not on disk yet (reading it fetches and persists
+	// it locally), or one an eviction stub stands in for, listed under the
+	// object's own name with the size the stub records.
 	Remote bool
 }
 
@@ -763,9 +762,16 @@ func (o *Org) Entries(relDir string) ([]TreeEntry, error) {
 // (tolerating an absent directory) unioned with the mirror's children, a
 // local child winning over its mirror record whichever form the two take, so
 // a name is emitted once. Directories come first, each group sorted by name.
+//
+// The merge is clean by construction, applying the rules [*Org.List] applies
+// so every consumer sees the same archive: machinery is hidden on both sides
+// (a staging leftover, an identity sidecar, or a ledger directory is
+// bookkeeping, not archived content), and an eviction stub folds onto the
+// object it stands in for, marked Remote with the size its record carries.
 func (o *Org) mergedChildren(relDir string) ([]TreeEntry, error) {
 	dirSet := make(map[string]struct{})
 	files := make(map[string]TreeEntry)
+	stubbed := make(map[string]TreeEntry)
 
 	local, err := os.ReadDir(o.AbsPath(relDir))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -773,6 +779,25 @@ func (o *Org) mergedChildren(relDir string) ([]TreeEntry, error) {
 	}
 
 	for _, e := range local {
+		rel := path.Join(relDir, e.Name())
+
+		// An eviction stub diverts before the machinery filter, the way the
+		// recursive walk diverts it, and folds onto its target below; a stub
+		// [*Org.readRemoteStub] refuses drops, the listing then short by the
+		// object exactly as it would be with no stub at all.
+		if _, isStub := store.RemoteStubTarget(rel); isStub && !e.IsDir() {
+			if target, size, ok := o.evictedObject(rel); ok {
+				leaf := path.Base(target)
+				stubbed[leaf] = TreeEntry{Name: leaf, Size: size, Remote: true}
+			}
+
+			continue
+		}
+
+		if isMachinery(rel) {
+			continue
+		}
+
 		if e.IsDir() {
 			dirSet[e.Name()] = struct{}{}
 
@@ -789,6 +814,22 @@ func (o *Org) mergedChildren(relDir string) ([]TreeEntry, error) {
 		files[e.Name()] = entry
 	}
 
+	// A stub's target folds in only when nothing local claims the name: the
+	// local file is authoritative and the stub a leftover, the precedence
+	// stubEntries applies. Folding before the mirror merge gives the stub's
+	// record the same precedence over the mirror's listing of the target key.
+	for name, entry := range stubbed {
+		if _, ok := files[name]; ok {
+			continue
+		}
+
+		if _, ok := dirSet[name]; ok {
+			continue
+		}
+
+		files[name] = entry
+	}
+
 	remoteDirs, remoteFiles := o.remoteChildren(relDir)
 
 	// The local child wins whichever form it takes: a mirror record of the
@@ -798,6 +839,10 @@ func (o *Org) mergedChildren(relDir string) ([]TreeEntry, error) {
 	// (a mirror holding keys beneath a name the local tree holds as a file),
 	// and the local tree is the form every read of that name resolves to.
 	for _, name := range remoteDirs {
+		if isMachinery(path.Join(relDir, name)) {
+			continue
+		}
+
 		if _, ok := files[name]; ok {
 			continue
 		}
@@ -806,6 +851,10 @@ func (o *Org) mergedChildren(relDir string) ([]TreeEntry, error) {
 	}
 
 	for name, size := range remoteFiles {
+		if hiddenMirrorKey(path.Join(relDir, name)) {
+			continue
+		}
+
 		if _, ok := files[name]; ok {
 			continue
 		}
