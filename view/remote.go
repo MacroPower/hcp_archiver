@@ -14,7 +14,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -540,8 +539,7 @@ func (r *orgRemote) fetchLocal(root, relPath string) error {
 	// Confine the landing path to the org root exactly as [*Org.AbsPath]
 	// confines the read side: a relPath carrying ".." segments must not let
 	// the write escape what the follow-up read would then miss.
-	clean := strings.TrimPrefix(path.Clean("/"+filepath.ToSlash(relPath)), "/")
-	abs := filepath.Join(root, filepath.FromSlash(clean))
+	abs := pathkit.ConfineJoin(root, relPath)
 
 	err = atomicfile.Write(abs, func(w io.Writer) error {
 		_, dlErr := r.downloadVerified(r.ctx, key, info.Size, info.SHA256, "its upload", w)

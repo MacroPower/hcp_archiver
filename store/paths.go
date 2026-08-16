@@ -4,6 +4,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"go.jacobcolvin.com/hcp_archiver/pathkit"
 )
 
 // timeLayout formats a timestamp into the lexically-sortable, filesystem-safe
@@ -472,12 +474,10 @@ func (s *Store) StackStateFile(project, stack, deployment, generation string) st
 }
 
 // cleanJoin joins already-sanitized segments into a clean forward-slash path
-// and confines it beneath the root by resolving the join as if absolute, so any
-// residual ".." collapses at the root rather than escaping it.
+// confined beneath the root (see [pathkit.ConfineSlash]), so any residual
+// ".." collapses at the root rather than escaping it.
 func cleanJoin(elem ...string) string {
-	joined := path.Join(elem...)
-
-	return strings.TrimPrefix(path.Clean("/"+joined), "/")
+	return pathkit.ConfineSlash(path.Join(elem...))
 }
 
 // seg neutralizes a single untrusted path segment: path separators and control

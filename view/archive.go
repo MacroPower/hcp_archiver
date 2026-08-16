@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"go.jacobcolvin.com/hcp_archiver/atomicfile"
+	"go.jacobcolvin.com/hcp_archiver/pathkit"
 	"go.jacobcolvin.com/hcp_archiver/remote"
 	"go.jacobcolvin.com/hcp_archiver/store"
 )
@@ -593,9 +594,7 @@ func (o *Org) context() context.Context {
 // otherwise escape, before being joined under the root. A clean archive-relative
 // path is unchanged.
 func (o *Org) AbsPath(relPath string) string {
-	clean := strings.TrimPrefix(path.Clean("/"+filepath.ToSlash(relPath)), "/")
-
-	return filepath.Join(o.root, filepath.FromSlash(clean))
+	return pathkit.ConfineJoin(o.root, relPath)
 }
 
 // ReadFile reads a loose file at an archive-relative path. A file absent
