@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -10,6 +11,7 @@ import (
 	tfe "github.com/hashicorp/go-tfe"
 
 	"go.jacobcolvin.com/hcp_archiver/collect"
+	"go.jacobcolvin.com/hcp_archiver/manifest"
 )
 
 // configFile is the leaf name of the organization audit-configuration file
@@ -150,6 +152,17 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 
 		relPath := st.AuditTrailFile(pageName(since, page))
 
+		// A page slot recorded absent is a prior release's terminal list error
+		// settled wrongly (see archiveTrailPage): no file was ever written for it,
+		// so left settled it would short-circuit the write and wedge the walk on
+		// the read-back below, on every run. When the re-list carries events for
+		// the slot, unsettle it so this walk writes the page fresh; a clean
+		// re-list with nothing to write leaves the record standing, and
+		// persistedEvents reads it as contributing nothing.
+		if len(fresh) > 0 && c.pageSettledAbsent(relPath) {
+			c.env.Unsettle(relPath, errors.New("audit trail page settled absent by a prior release"))
+		}
+
 		// Whether Object will persist fresh or short-circuit on an already-settled
 		// page is fixed by the ledger before the call decides it.
 		settled := c.pageShortCircuited(relPath)
@@ -283,11 +296,13 @@ func (c *Collector) archiveTrailPage(
 // set was never written), so they are read back from the stored file; a freshly
 // written page persisted its fresh events, so those are the source. Sourcing
 // from the raw re-listed items instead would step the cursor past an event the
-// short-circuited write never persisted, dropping it. A short-circuited page is
-// Done (a list error no longer settles a page absent; see archiveTrailPage),
-// search-layer JSON that is never evicted, so a read-back failure is not
-// expected; if it happens, the page contributes nothing to the watermark and the
-// walk halts, so a transient read error cannot advance the cursor.
+// short-circuited write never persisted, dropping it. A short-circuited Done
+// page is search-layer JSON that is never evicted, so a read-back failure is
+// not expected; if it happens, the page contributes nothing to the watermark
+// and the walk halts, so a transient read error cannot advance the cursor. A
+// slot still settled absent (a prior release's list error the caller found
+// nothing fresh to rewrite with) never had a file, so it contributes nothing
+// and the walk carries on past it.
 func (c *Collector) persistedEvents(
 	key, relPath string,
 	fresh []*tfe.AuditTrail,
@@ -295,6 +310,10 @@ func (c *Collector) persistedEvents(
 ) ([]*tfe.AuditTrail, bool) {
 	if !settled {
 		return fresh, false
+	}
+
+	if c.pageSettledAbsent(relPath) {
+		return nil, false
 	}
 
 	stored, err := c.readPersistedPage(relPath)
@@ -319,6 +338,18 @@ func (c *Collector) pageShortCircuited(relPath string) bool {
 	_, ok := c.env.Entry(relPath)
 
 	return ok && !c.env.ShouldFetch(relPath)
+}
+
+// pageSettledAbsent reports whether the audit-trail page at relPath sits in the
+// ledger as a settled absence, the record a pre-v0.4 release left behind when a
+// terminal list error was routed through [collect.Env.Object] (see
+// archiveTrailPage). No file was ever written for such a slot, so it must never
+// be read back; under retry-absent the slot is not settled and the ordinary
+// path re-fetches it.
+func (c *Collector) pageSettledAbsent(relPath string) bool {
+	entry, ok := c.env.Entry(relPath)
+
+	return ok && entry.Status == manifest.StatusAbsent && !c.env.ShouldFetch(relPath)
 }
 
 // readPersistedPage decodes the stored audit-trail page at relPath into its

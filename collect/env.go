@@ -342,6 +342,14 @@ func (e *Env) NotApplicable(relPath string) {
 	e.ledger.RecordNotApplicable(relPath)
 }
 
+// Unsettle re-records the object at relPath as errored, so the current pass
+// (and any later one) fetches it again. It is the repair for an entry an
+// earlier release settled wrongly: a collector that recognizes such a record
+// unsettles it and lets its ordinary write path re-archive the object.
+func (e *Env) Unsettle(relPath string, cause error) {
+	e.ledger.RecordErrored(relPath, cause, false)
+}
+
 // Obligation returns the ledger marker at relPath for work whose outcome no
 // object entry carries (see [manifest.Obligation]): a child enumeration
 // beneath a walk-frozen element, or a nested walk whose settlement the

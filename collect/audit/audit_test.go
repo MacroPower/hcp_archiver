@@ -2,6 +2,7 @@ package audit_test
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -224,6 +225,56 @@ func TestCollectTrailsDoesNotSettlePageOnTerminalListError(t *testing.T) {
 
 	assert.Equal(t, 1, f.ledger.Tally().SurfacesDropped,
 		"the unreached tail of the trail is a dropped surface")
+}
+
+func TestCollectTrailsRepairsPageSettledAbsentByAPriorRelease(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+
+	f := newAuditFixture(t, map[int]trailPage{
+		1: {events: []*tfe.AuditTrail{event("ev-1", base)}, nextPage: 0},
+	})
+
+	// A pre-v0.4 release routed a terminal list error through Object, which
+	// settled the fileless page slot absent. Seed that legacy record directly:
+	// left alone, the settled slot short-circuits the write and the read-back
+	// of the never-created file halts the walk on every run.
+	relPath := f.store.AuditTrailFile(audit.PageName(time.Time{}, 1))
+	f.ledger.RecordAbsent(relPath, errors.New("list audit trails: resource not found"))
+
+	require.NoError(t, f.collector.CollectTrails(t.Context()))
+
+	assert.Equal(t, []string{"ev-1"}, f.pageIDs(t, time.Time{}, 1),
+		"the re-listed events are written over the repaired slot")
+	assert.Equal(t, base, f.watermark(),
+		"the walk completes and advances the cursor instead of wedging")
+	assert.Zero(t, f.ledger.Tally().SurfacesDropped)
+
+	entry, ok := f.ledger.Entry(relPath)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusDone, entry.Status, "the repaired slot settles done")
+}
+
+func TestCollectTrailsPassesAnAbsentSlotWithNothingToRewrite(t *testing.T) {
+	t.Parallel()
+
+	// The same legacy record, but the re-list returns nothing for the slot (its
+	// events aged out of the retention window). There is no file to read back
+	// and nothing to rewrite, so the walk carries on past the slot instead of
+	// halting on the missing file.
+	f := newAuditFixture(t, map[int]trailPage{
+		1: {nextPage: 0},
+	})
+
+	relPath := f.store.AuditTrailFile(audit.PageName(time.Time{}, 1))
+	f.ledger.RecordAbsent(relPath, errors.New("list audit trails: resource not found"))
+
+	require.NoError(t, f.collector.CollectTrails(t.Context()))
+
+	assert.Zero(t, f.ledger.Tally().SurfacesDropped,
+		"an absent slot with no file is not a read-back halt")
+	assert.True(t, f.watermark().IsZero(), "nothing was persisted, so the cursor holds")
 }
 
 func TestCollectTrailsHaltsOnStalledPagination(t *testing.T) {
