@@ -122,22 +122,17 @@ func (o *Org) List(prefix string) ([]Entry, error) {
 
 // appendRemoteEntries appends one entry per object the organization's mirror
 // holds at or beneath prefix that nothing local already claims, so a listing
-// over a partly or wholly absent tree is still the whole archive. Machinery
-// keys are hidden exactly as local machinery is; a stub key is skipped as
-// belt-and-braces (stubs are never mirrored, and the tarball one stands for
-// lists from its own key). The entries are flagged Offloaded: their bytes are
-// only in the mirror until a read pulls them down.
+// over a partly or wholly absent tree is still the whole archive. Keys no
+// listing surfaces (see [hiddenMirrorKey]) are skipped. The entries are
+// flagged Offloaded: their bytes are only in the mirror until a read pulls
+// them down.
 func (o *Org) appendRemoteEntries(entries []Entry, seen map[string]struct{}, prefix string) []Entry {
 	for rel, info := range o.remoteKeysUnder(prefix) {
 		if _, ok := seen[rel]; ok {
 			continue
 		}
 
-		if isMachinery(rel) {
-			continue
-		}
-
-		if _, ok := store.RemoteStubTarget(rel); ok {
+		if hiddenMirrorKey(rel) {
 			continue
 		}
 
@@ -386,17 +381,12 @@ func (o *Org) looseEntries(prefix string) ([]Entry, map[string]struct{}, error) 
 // must not be emitted.
 func (o *Org) stubEntries(entries []Entry, seen map[string]struct{}, stubs []string, prefix string) []Entry {
 	for _, rel := range stubs {
-		target, ok := store.RemoteStubTarget(rel)
+		target, size, ok := o.evictedObject(rel)
 		if !ok || !underPrefix(target, prefix) {
 			continue
 		}
 
 		if _, claimed := seen[target]; claimed {
-			continue
-		}
-
-		stub, ok := o.readRemoteStub(rel)
-		if !ok {
 			continue
 		}
 
@@ -406,12 +396,43 @@ func (o *Org) stubEntries(entries []Entry, seen map[string]struct{}, stubs []str
 			Org:       o.Name,
 			Path:      target,
 			Form:      FormLoose,
-			Size:      stub.Size,
+			Size:      size,
 			Offloaded: true,
 		})
 	}
 
 	return entries
+}
+
+// evictedObject resolves an eviction stub to the object it stands in for and
+// the size its [store.RemoteStub] records. A path that is no stub, or a stub
+// [*Org.readRemoteStub] refuses for any of the grounds it names, answers
+// false.
+func (o *Org) evictedObject(relStub string) (string, int64, bool) {
+	target, ok := store.RemoteStubTarget(relStub)
+	if !ok {
+		return "", 0, false
+	}
+
+	stub, ok := o.readRemoteStub(relStub)
+	if !ok {
+		return "", 0, false
+	}
+
+	return target, stub.Size, true
+}
+
+// hiddenMirrorKey reports a mirror key no listing surfaces: machinery (see
+// [isMachinery]), or an eviction stub, which is never mirrored and whose
+// target lists from its own key.
+func hiddenMirrorKey(rel string) bool {
+	if isMachinery(rel) {
+		return true
+	}
+
+	_, ok := store.RemoteStubTarget(rel)
+
+	return ok
 }
 
 // readRemoteStub reads one eviction stub, reporting whether it can be rendered
