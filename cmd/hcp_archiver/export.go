@@ -119,9 +119,15 @@ stands in for an omitted --target.`,
 			return err //nolint:wrapcheck // Sentinel-bearing export errors render as-is.
 		}
 
-		eprintf(cc.OutOrStdout(), "exported %s for %s into %s\n",
+		// The summary is the command's only output, so a stdout write fault
+		// surfaces rather than exiting 0 in silence, matching extract's
+		// summary; eprintf's swallowing is for best-effort stderr progress.
+		_, err = fmt.Fprintf(cc.OutOrStdout(), "exported %s for %s into %s\n",
 			theme.CountNoun(sum.Pages, "page", "pages"),
 			theme.CountNoun(sum.Orgs, "organization", "organizations"), target)
+		if err != nil {
+			return fmt.Errorf("write summary: %w", err)
+		}
 
 		return nil
 	}
