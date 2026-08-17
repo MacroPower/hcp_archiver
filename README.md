@@ -28,9 +28,130 @@ bundles, so grepping those means unzipping the one bundle a sidecar points at.
 
 ## Install
 
+<details>
+<summary><strong>Homebrew</strong></summary>
+
+`hcp_archiver` is published as a cask in my
+[tap](https://github.com/MacroPower/homebrew-tap), for macOS and Linux.
+
+With `brew`:
+
+```bash
+brew install macropower/tap/hcp_archiver --cask
+```
+
+With your `Brewfile`:
+
+```ruby
+tap "macropower/tap"
+cask "hcp_archiver"
+```
+
+</details>
+
+<details>
+<summary><strong>Go</strong></summary>
+
 ```bash
 go install go.jacobcolvin.com/hcp_archiver/cmd/hcp_archiver@latest
 ```
+
+</details>
+
+<details>
+<summary><strong>Docker</strong></summary>
+
+Images are published to
+[ghcr.io/macropower](https://github.com/MacroPower/hcp_archiver/pkgs/container/hcp_archiver),
+tagged `latest`, `vX`, `vX.Y`, and `vX.Y.Z`.
+
+The image is `scratch` plus the static binary and a root certificate bundle:
+no shell, and every path it touches is one you mount. Mount the archive root
+and point `--output` at it:
+
+```bash
+docker run --rm -e HCP_TOKEN \
+  -v "$PWD/archive:/archive" \
+  ghcr.io/macropower/hcp_archiver:latest --output /archive
+```
+
+A configuration file rides in the same way, named by its in-container path:
+
+```bash
+docker run --rm -e HCP_TOKEN \
+  -v "$PWD/archive:/archive" \
+  -v "$PWD/hcp_archiver.yaml:/hcp_archiver.yaml:ro" \
+  ghcr.io/macropower/hcp_archiver:latest -c /hcp_archiver.yaml -o /archive
+```
+
+</details>
+
+<details>
+<summary><strong>GitHub CLI</strong></summary>
+
+```bash
+gh release download -R MacroPower/hcp_archiver \
+  -p "hcp_archiver_$(uname -s)_$(uname -m | sed s/aarch64/arm64/).tar.gz" -O - | tar -xz
+```
+
+And then move `hcp_archiver` to a directory in your `PATH`.
+
+</details>
+
+<details>
+<summary><strong>Curl</strong></summary>
+
+```bash
+curl -s https://api.github.com/repos/MacroPower/hcp_archiver/releases/latest | \
+  jq -r ".assets[] |
+    select(.name | test(\"hcp_archiver_$(uname -s)_$(uname -m | sed s/aarch64/arm64/).tar.gz\")) |
+    .browser_download_url" | \
+  xargs curl -L | tar -xz
+```
+
+And then move `hcp_archiver` to a directory in your `PATH`.
+
+</details>
+
+Or, download a binary from
+[releases](https://github.com/MacroPower/hcp_archiver/releases). Builds cover
+Linux and macOS on `x86_64` and `arm64`, and each archive holds the single
+`hcp_archiver` binary plus the license.
+
+### Verifying a download
+
+Each release's `checksums.txt` is signed with [cosign][cosign] keylessly, so
+verifying the file's signature and then the checksums covers every artifact:
+
+```bash
+HCP_ARCHIVER_TAG=v0.10.1 # the tag you downloaded
+gh release download -R MacroPower/hcp_archiver "$HCP_ARCHIVER_TAG" \
+  -p 'checksums.txt' -p 'checksums.txt.sigstore.json'
+cosign verify-blob \
+  --certificate-identity "https://github.com/MacroPower/hcp_archiver/.github/workflows/release.yaml@refs/tags/$HCP_ARCHIVER_TAG" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --bundle ./checksums.txt.sigstore.json \
+  ./checksums.txt
+sha256sum --ignore-missing -c checksums.txt
+```
+
+The release also attests build provenance for everything `checksums.txt`
+covers, which the GitHub CLI checks directly against the downloaded archive:
+
+```bash
+gh attestation verify --owner MacroPower hcp_archiver_*.tar.gz
+```
+
+Published images are signed against the same identity:
+
+```bash
+cosign verify -o text \
+  --certificate-identity "https://github.com/MacroPower/hcp_archiver/.github/workflows/release.yaml@refs/tags/$HCP_ARCHIVER_TAG" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "ghcr.io/macropower/hcp_archiver:$HCP_ARCHIVER_TAG"
+```
+
+[cosign]: https://github.com/sigstore/cosign
 
 ## Usage
 

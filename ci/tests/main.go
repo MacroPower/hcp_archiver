@@ -13,6 +13,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// caBundlePath is where the runtime images carry the root certificates. It
+// mirrors the constant of the same name in the `ci` module, which this module
+// cannot import.
+const caBundlePath = "/etc/ssl/certs/ca-certificates.crt"
+
 // Tests provides integration tests for the [Ci] module. Create instances
 // with [New].
 type Tests struct{}
@@ -110,6 +115,16 @@ func (m *Tests) TestBuildImageMetadata(ctx context.Context) error {
 		}
 		if len(ep) != 1 || ep[0] != "hcp_archiver" {
 			return fmt.Errorf("[%d]: entrypoint = %v, want [hcp_archiver]", i, ep)
+		}
+
+		// Without the bundle every HTTPS call fails on an unknown authority,
+		// which a scratch image gives no other sign of until it runs.
+		size, err := ctr.File(caBundlePath).Size(ctx)
+		if err != nil {
+			return fmt.Errorf("[%d]: ca bundle %s: %w", i, caBundlePath, err)
+		}
+		if size == 0 {
+			return fmt.Errorf("[%d]: ca bundle %s is empty", i, caBundlePath)
 		}
 	}
 

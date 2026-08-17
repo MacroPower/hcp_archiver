@@ -40,6 +40,13 @@ const (
 	renovateImage   = "public.ecr.aws/docker/library/node:24-slim" // renovate: datasource=docker depName=public.ecr.aws/docker/library/node
 	renovateVersion = "44.30.4"                                    // renovate: datasource=npm depName=renovate
 
+	// certsImage supplies the root certificate bundle copied into the runtime
+	// images; nothing else from it ships.
+	certsImage = "public.ecr.aws/docker/library/alpine:3.22" // renovate: datasource=docker depName=public.ecr.aws/docker/library/alpine
+	// caBundlePath is where the runtime images carry the root certificates,
+	// the location Go's certificate loader probes first on Linux.
+	caBundlePath = "/etc/ssl/certs/ca-certificates.crt"
+
 	// zizmorConfig is the zizmor configuration file used by [Ci.LintActions],
 	// relative to the source root.
 	zizmorConfig = ".github/zizmor.yaml"

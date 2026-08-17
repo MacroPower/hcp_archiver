@@ -54,7 +54,8 @@ syft SBOM tooling (`with-cosign`/`with-syft`/`sign-keyless`).
   `MacroPower/homebrew-tap` and the Nix package to `MacroPower/nur-packages`
   (via GoReleaser's `homebrew_casks`/`nix` sections, using the GITHUB_TOKEN
   passed into the release container), builds the multi-arch runtime image from
-  the dist binaries (scratch base + the hcp_archiver binary), publishes it
+  the dist binaries (scratch base + the hcp_archiver binary + the root
+  certificate bundle), publishes it
   natively via Dagger, and signs the published digests with cosign keyless
   signing. Signing
   is keyless (Sigstore Fulcio + Rekor): the workflow forwards the GitHub Actions
@@ -68,7 +69,10 @@ syft SBOM tooling (`with-cosign`/`with-syft`/`sign-keyless`).
   goreleaser job succeeds. The schema is also attached to each GitHub release
   via GoReleaser's `release.extra_files`.
 
-The container image build (scratch + binary) is the preserved release artifact.
+The container image build (scratch + binary + CA bundle) is the preserved
+release artifact. The binary is statically linked (`CGO_ENABLED=0` with
+`-buildmode=exe`, not `pie`, which records a dynamic loader that scratch has
+no way to provide).
 
 ## Layout
 

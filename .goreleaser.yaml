@@ -32,7 +32,11 @@ builds:
       - -X go.jacobcolvin.com/x/version.BuildDate={{.Date}}
     flags:
       - -trimpath
-    buildmode: pie
+      # exe, not pie: with CGO_ENABLED=0 a PIE build still records a dynamic
+      # loader in the ELF header, which no loader-less image (scratch) can
+      # satisfy. exe links the Linux binaries fully statically; darwin/arm64
+      # is PIE regardless, since the toolchain forces it there.
+      - -buildmode=exe
 
 dockers:
   - goos: linux

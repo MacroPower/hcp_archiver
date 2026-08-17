@@ -121,8 +121,16 @@ var platformDistDirs = []platformDistDir{
 
 // runtimeImages builds a multi-arch set of runtime container images from a
 // pre-built GoReleaser dist/ directory.
+//
+// The images are scratch plus the statically linked binary and the root
+// certificate bundle. The bundle is the one thing the binary cannot supply
+// itself: every HCP Terraform and object-store call is HTTPS, and with no
+// system trust store Go rejects each one as signed by an unknown authority.
 func runtimeImages(dist *dagger.Directory, version, created string) ([]*dagger.Container, error) {
 	containers := make([]*dagger.Container, len(platformDistDirs))
+	// The bundle is architecture-independent, so one pull serves every
+	// platform image.
+	caBundle := dag.Container().From(certsImage).File(caBundlePath)
 
 	for i, p := range platformDistDirs {
 		containers[i] = withOCILabels(dag.Container(dagger.ContainerOpts{Platform: p.platform})).
@@ -130,6 +138,7 @@ func runtimeImages(dist *dagger.Directory, version, created string) ([]*dagger.C
 			WithLabel("org.opencontainers.image.created", created).
 			WithAnnotation("org.opencontainers.image.version", version).
 			WithAnnotation("org.opencontainers.image.created", created).
+			WithFile(caBundlePath, caBundle).
 			WithFile("/usr/local/bin/hcp_archiver", dist.File(p.distDir+"/hcp_archiver")).
 			WithEntrypoint([]string{"hcp_archiver"})
 	}
