@@ -1045,6 +1045,42 @@ backend's error until restored by hand, which is why the mirror should not
 be lifecycled into such tiers. A local-only archive has no marker and never
 constructs a client.
 
+### Reading an archive back from its mirror (bootstrap)
+
+The read commands (`view`, `list`, `show`, `extract`, `export`) work even
+when the local tree is partly or completely absent, as long as the mirror
+holds it. The mirror's location arrives three ways: `--remote <bucket-url>`
+(plus `--remote-prefix`), a `--config` file whose `remote:` block records
+it, or `$HCP_ARCHIVER_CONFIG` naming that file. Pointed at an empty
+directory, an open bootstraps it: one listing discovers the mirror's
+organizations, and each gets its `org.json` and a `.remote.json` marker
+materialized locally, so the flags are needed only once; later invocations
+find the mirror through the marker alone.
+
+A bootstrapped tree is a browse cache, not a canonical archive, and its
+marker says so: it records `"partial": true`, which is what tells later
+opens to keep merging the mirror's inventory into every listing and to fall
+through to the mirror for any object not on disk. Local files always win
+when present; anything fetched is verified against the digest its upload
+recorded, then persisted at its archive path, so everything read once is
+local from then on. The partial flag is written only by the open that
+materialized the marker: stamping an archiver-written tree partial would
+flip every later flag-less open into merged network mode. Running the
+archiver against a bootstrapped directory collects and mirrors it properly,
+rewriting the marker and returning the tree to fully-local reads.
+
+The same trust rules as the write side apply. A supplied `--remote` that
+disagrees with the mirror an existing marker records is refused, exactly as
+the archiver refuses a re-pointed `remote:` block. A mirror that cannot be
+listed (offline, missing credentials) degrades the commands to local
+content with a warning on stderr (or the browser's status line), at most
+one line per organization per run, rather than failing: an unknown
+organization may exist only in the mirror the session could not list, so
+the degradation is context the reader needs, never silent. Reads need the
+same object-store credentials as any evicted-bundle access, from the
+backend provider's default chain; a read-only identity scoped to the
+archive prefix is the right shape for browsing.
+
 ### Container format and compression
 
 Bundles are `zip` (Zip64), not `.tar.gz`. A zip's central directory is a member

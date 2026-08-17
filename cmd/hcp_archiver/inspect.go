@@ -198,6 +198,12 @@ func newListCmd() *cobra.Command {
 		Long: `List the archived objects at or beneath an archive path, one line per object
 whichever physical form (loose, roll-up, bundle) holds it.
 
+The text listing prints size, physical form, and path, with sealed members
+labeled by the form that carries them and anything evicted to the mirror
+shown as "remote" (reading one back needs object-store credentials). With
+--json each line is one JSON object carrying "path", "org", "form", and
+"size", plus "container", "modified", and "offloaded" where they apply.
+
 ` + inspectLong + `
 
 ` + remoteLong + `
@@ -264,6 +270,11 @@ func newShowCmd() *cobra.Command {
 		Short: "Print one archived object's bytes to stdout",
 		Long: `Print the exact bytes of one archived object to stdout, whichever physical
 form (loose, roll-up, bundle) holds it.
+
+The one object show refuses is an evicted configuration-version tarball: it
+holds what it reads whole in memory and a tarball has no bound, so the error
+names the object's mirrored key instead, to fetch with any client for the
+backing store (extract streams such an object to disk without this limit).
 
 ` + inspectLong + `
 
@@ -346,6 +357,13 @@ from it, needing object-store credentials from the backend provider's default
 chain. An organization whose archive root records no mirror leaves one
 unrecoverable before the run starts, counted and named among the run's
 failures; a fetch can still fail against a mirror that is configured.
+
+Per-file failures always stream to stderr, and --verbose adds a line per
+recovered file. A run in which every object recovers exits 0; when any
+object fails, the failures are counted and reported and the command exits 1,
+and a dry run whose plan already holds an unrecoverable object exits the
+same way. An interrupted run reports its partial totals to stderr and exits
+0; a fetch cut off mid-object leaves no partial file behind.
 
 ` + inspectLong + `
 

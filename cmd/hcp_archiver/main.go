@@ -164,8 +164,43 @@ func newRootCmd() *cobra.Command {
 	profileCfg := profile.NewConfig()
 
 	cmd := &cobra.Command{
-		Use:          appName,
-		Short:        "Archive an HCP Terraform organization to disk.",
+		Use:   appName,
+		Short: "Archive an HCP Terraform organization to disk.",
+		Long: `Archive HCP Terraform (formerly Terraform Cloud) organizations to plain files
+on disk for long-term reference: state history, run history, plan and apply
+logs, the configuration that produced each run, and the surrounding org-level
+metadata. Nothing is restored back into HCP Terraform.
+
+The API token comes from the environment: HCP_TOKEN, falling back to
+TFC_TOKEN and then TFE_TOKEN, first non-empty wins. What and how to archive
+lives in the YAML configuration file --config names (or $HCP_ARCHIVER_CONFIG);
+with neither, every organization the token can see is archived with the
+default surfaces.
+
+The output directory is the unit of resume: re-running against the same
+directory skips what is done or permanently gone, retries what errored,
+appends new runs and state versions, and refreshes mutable metadata
+(retaining every superseded version in a history sidecar) without
+re-downloading immutable blobs. An interrupted run (ctrl-c or SIGTERM) exits
+cleanly, and the next invocation continues from where it stopped; there is no
+separate resume command.
+
+A run ends with a per-status summary, the resume model made visible:
+
+  done       fetched and written.
+  absent     gone upstream (a 404, confirmed by an in-run re-probe);
+             re-probed only with --retry-absent.
+  forbidden  the token may not read it (a 403); retried on the next run,
+             so a differently scoped token can still capture it.
+  errored    a transient or unclassified failure, retried next run; a
+             healthy archive ends with errored=0.
+  skipped    intentionally deferred or not applicable to this archive;
+  n/a        settled, and never mistaken for a gap.
+
+A non-zero errored count is the one to investigate; the others are recorded
+gaps, not failures. Coverage is bounded by the archiving identity, so no
+single token necessarily sees everything: point several tokens at the same
+output directory in turn to accumulate the union of what each can read.`,
 		SilenceUsage: true,
 		Version:      version.GetVersion(),
 	}
