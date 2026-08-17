@@ -16,7 +16,7 @@ require (
 	github.com/hashicorp/jsonapi v1.5.0
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
-	go.jacobcolvin.com/niceyaml v0.0.0-20260621005747-e8ef30e73d1b
+	go.jacobcolvin.com/niceyaml v0.0.0-20260710133523-9ad36ecf8e1c
 	go.jacobcolvin.com/x/cobras v0.1.0
 	go.jacobcolvin.com/x/jsonschema v0.2.0
 	go.jacobcolvin.com/x/version v0.2.0
