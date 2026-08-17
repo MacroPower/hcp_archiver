@@ -23,7 +23,10 @@
       "description": "ExtractDir is the default --target directory for the extract and export\ncommands. A relative path resolves against this file's directory. An\nexplicit --target always wins."
     },
     "organizations": {
-      "type": ["null", "array"],
+      "type": [
+        "null",
+        "array"
+      ],
       "items": {
         "type": "string"
       },
@@ -31,7 +34,10 @@
       "description": "Organizations limits the run to the named organizations. An empty list\narchives every organization the token can see."
     },
     "projects": {
-      "type": ["null", "array"],
+      "type": [
+        "null",
+        "array"
+      ],
       "items": {
         "type": "string"
       },
@@ -39,7 +45,10 @@
       "description": "Projects limits the run to the named projects within each archived\norganization. An empty list archives every project."
     },
     "workspaces": {
-      "type": ["null", "array"],
+      "type": [
+        "null",
+        "array"
+      ],
       "items": {
         "type": "string"
       },

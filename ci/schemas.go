@@ -9,7 +9,7 @@ import (
 // so it serves at <pages-base>/schemas/config.schema.json.
 func (m *Ci) Schemas() *dagger.Directory {
 	schema := m.env().
-		WithExec([]string{"devbox", "run", "--", "go", "generate", "./config"}).
+		WithExec([]string{"devbox", "run", "--", "go", "generate", "./pkg/config"}).
 		File("pkg/config/config.schema.json")
 
 	return dag.Directory().WithFile("schemas/config.schema.json", schema)

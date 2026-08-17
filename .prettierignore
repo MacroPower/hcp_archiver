@@ -4,7 +4,7 @@
 # Test fixtures, some intentionally malformed for negative tests.
 **/testdata/**
 
-# Generated from config.File by `go generate ./config`.
+# Generated from config.File by `go generate ./pkg/config`.
 pkg/config/config.schema.json
 
 # Local archive output and run config.
