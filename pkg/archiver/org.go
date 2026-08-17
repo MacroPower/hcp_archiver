@@ -1,0 +1,398 @@
+package archiver
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"path/filepath"
+	"slices"
+	"sync"
+	"time"
+
+	"github.com/hashicorp/go-tfe"
+
+	"go.jacobcolvin.com/hcp_archiver/pkg/collect"
+	"go.jacobcolvin.com/hcp_archiver/pkg/collect/audit"
+	"go.jacobcolvin.com/hcp_archiver/pkg/collect/orgscope"
+	"go.jacobcolvin.com/hcp_archiver/pkg/config"
+	"go.jacobcolvin.com/hcp_archiver/pkg/manifest"
+	"go.jacobcolvin.com/hcp_archiver/pkg/progress"
+	"go.jacobcolvin.com/hcp_archiver/pkg/store"
+	"go.jacobcolvin.com/hcp_archiver/pkg/tfeclient"
+)
+
+// resolveOrgs resolves the organizations to archive.
+//
+// When cfg names one or more organizations only those are archived and list is
+// never called; otherwise it enumerates every organization the token can see.
+func (a *Archiver) resolveOrgs(ctx context.Context) ([]string, error) {
+	return resolveOrgs(ctx, a.cfg.Organizations, func(ctx context.Context) ([]string, error) {
+		return listOrgNames(ctx, a.client)
+	})
+}
+
+// resolveOrgs picks the named organizations, or defers to list when none are
+// named. Factoring the choice out of the client wiring keeps it testable
+// without a network.
+func resolveOrgs(ctx context.Context, orgs []string, list func(context.Context) ([]string, error)) ([]string, error) {
+	if len(orgs) > 0 {
+		// Clone so the returned slice never aliases the caller's config backing
+		// array; the run loop owns its list.
+		return slices.Clone(orgs), nil
+	}
+
+	return list(ctx)
+}
+
+// listOrgNames enumerates the names of every organization visible to the
+// client, paginating through the shared governor.
+func listOrgNames(ctx context.Context, client *tfeclient.Client) ([]string, error) {
+	orgs, err := tfeclient.Paginate(ctx, client,
+		func(ctx context.Context, tc *tfe.Client, o tfe.ListOptions) ([]*tfe.Organization, *tfe.Pagination, error) {
+			l, e := tc.Organizations.List(ctx, &tfe.OrganizationListOptions{ListOptions: o})
+			if e != nil {
+				return nil, nil, fmt.Errorf("list organizations: %w", e)
+			}
+
+			return l.Items, l.Pagination, nil
+		})
+	if err != nil {
+		return nil, fmt.Errorf("paginate organizations: %w", err)
+	}
+
+	names := make([]string, 0, len(orgs))
+	for _, o := range orgs {
+		names = append(names, o.Name)
+	}
+
+	return names, nil
+}
+
+// runOrg archives one organization end to end.
+//
+// It builds the org's store, ledger, environment, and reporter, opens a run,
+// starts the background progress and flush goroutines each bounded to its own
+// cancelable child context, drives the collectors with the parent ctx so an
+// interrupt cancels the work, and then closes the run: it writes the run
+// record, stops the flush loop, flushes the ledger a final time, runs the
+// close sweep with the reporter still live under the finalize phase (for a
+// large mirror the sweep is the longest part of the close, and the panel's
+// bar and remote readout are what keep it from reading as a hang), and only
+// then stops the reporter and prints the summary.
+//
+// The int result is how many files the close sweep failed to mirror, so the
+// caller sees the sweep's outcome alongside the tally.
+//
+// The organization name is checked before anything is rooted on it. Every path
+// below the store root is confined by the store, but the root itself is a join
+// of the output directory and the name, and the remote key is the same join
+// under the bucket prefix, so a name that is not a single path segment would
+// escape both. Auto-discovery takes names straight from the server's listing,
+// which is why the check sits here rather than only on the configured list.
+func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, int, error) {
+	err := config.ValidateOrganizationName(orgName)
+	if err != nil {
+		return manifest.Tally{}, 0, fmt.Errorf("validate organization: %w", err)
+	}
+
+	st := store.New(filepath.Join(a.cfg.OutputDir, orgName), store.WithLogger(a.logger))
+	envOpts := []collect.Option{collect.WithLogger(a.logger)}
+
+	if a.remote != nil {
+		envOpts = append(envOpts,
+			collect.WithRemote(a.remote, RemoteConfig(a.cfg.Remote), orgName),
+		)
+	}
+
+	ledger, err := manifest.Load(
+		st.Root(),
+		manifest.WithLogger(a.logger),
+		manifest.WithRetryAbsent(a.cfg.RetryAbsent),
+		manifest.WithRecordOnlyPrefixes(collect.RecordOnlyLedgerPrefixes()...),
+		manifest.WithMigrations(audit.LedgerMigration(st), orgscope.LedgerMigration(st)),
+	)
+	if err != nil {
+		return manifest.Tally{}, 0, fmt.Errorf("load manifest: %w", err)
+	}
+
+	env := collect.NewEnv(a.client, st, ledger, envOpts...)
+
+	// The marker is written before any collector runs, so even an archive
+	// interrupted mid-run records where its evicted bundles live. The write
+	// waits for manifest.Load to acquire the cross-process flock, since it
+	// mutates the org root like any other write and must not race a run in
+	// progress.
+	if a.remote != nil {
+		markerErr := a.writeRemoteMarker(ctx, env, st)
+		if markerErr != nil {
+			closeErr := ledger.Close()
+			if closeErr != nil {
+				a.logger.LogAttrs(ctx, slog.LevelWarn, "manifest_close_error",
+					slog.String("org", orgName),
+					slog.String("error", closeErr.Error()),
+				)
+			}
+
+			return manifest.Tally{}, 0, markerErr
+		}
+	}
+
+	reporterOpts := []progress.Option{
+		progress.WithInterval(a.cfg.ProgressInterval),
+		progress.WithInterrupt(a.cancelRun),
+		progress.WithLogSink(a.logSink),
+		progress.WithWireBytes(a.wireBytes),
+		progress.WithRateStatus(a.client.RateStatus),
+		progress.WithRateLimited(a.rateLimited),
+	}
+
+	// With a remote configured the reporter watches the environment's run-wide
+	// transfer tally, so uploads and evictions read live in every output form.
+	// A plain conversion carries the snapshot across the package boundary: the
+	// two structs are field-identical, and a drift in either fails to compile
+	// here rather than silently dropping a field.
+	if a.remote != nil {
+		reporterOpts = append(reporterOpts,
+			progress.WithRemoteStats(func() progress.RemoteStats {
+				return progress.RemoteStats(env.RemoteTally())
+			}),
+			progress.WithUploadWireBytes(a.uploadWireBytes),
+		)
+	}
+
+	reporter := progress.New(a.w, a.cfg.ProgressMode, ledger, reporterOpts...)
+
+	ledger.StartRun()
+
+	// The reporter and the flush loop get independent child contexts: the close
+	// stops the flush loop before the authoritative final flush, but keeps the
+	// reporter live through the flush, the failure logging, and the close sweep,
+	// so the panel is the run's visibility for the whole close. Both are
+	// children of the parent ctx, so an interrupt still cancels both at once.
+	reporterCtx, cancelReporter := context.WithCancel(ctx)
+	flushCtx, cancelFlush := context.WithCancel(ctx)
+
+	var reporterWG, flushWG sync.WaitGroup
+
+	reporterWG.Go(func() {
+		// The interval is already configured via WithInterval above; a non-positive
+		// value here falls back to it, so it need not be passed again.
+		rerr := reporter.Run(reporterCtx, 0)
+		if rerr != nil {
+			a.logger.LogAttrs(reporterCtx, slog.LevelWarn, "progress_report_error",
+				slog.String("org", orgName),
+				slog.String("error", rerr.Error()),
+			)
+		}
+	})
+
+	flushWG.Go(func() {
+		a.flushLoop(flushCtx, orgName, ledger)
+	})
+
+	// The closeRun function below settles the organization's run exactly
+	// once, recording how many files the close sweep failed to mirror. It is
+	// called explicitly on the normal path so its outcome reaches the caller,
+	// and deferred for the panic path so an unwinding run still flushes and
+	// releases the ledger; the sync.Once keeps the two from running it twice.
+	// Marker promotion is gated on collectClean, set only when collectOrg
+	// returned without cancellation, so the panic path never promotes.
+	var (
+		closeOnce    sync.Once
+		syncFailed   int
+		collectClean bool
+	)
+
+	closeRun := func() {
+		closeOnce.Do(func() {
+			ledger.FinishRun()
+
+			// Only the flush loop stops here, so the final flush below is the
+			// sole writer; the reporter keeps running so the close stays visible.
+			cancelFlush()
+			flushWG.Wait()
+
+			// The finalize phase spans the whole close: the final flush, the
+			// failure logging, and the sweep. It starts indeterminate; the sweep
+			// flips it to a determinate bar once it has classified the tree and
+			// knows how many files it will settle.
+			reporter.SetPhase(phaseFinalize)
+			reporter.SetTotal(-1)
+
+			ferr := ledger.Flush()
+			if ferr != nil {
+				a.logFlushError(ctx, orgName, ferr)
+			}
+
+			a.logFailures(ctx, orgName, ledger)
+			a.logDroppedSurfaces(ctx, orgName, ledger)
+
+			// The close sweep runs after the final flush above, so every touched
+			// shard is compacted (its durable form is the snapshot the sweep
+			// mirrors), and before Close below, so the cross-process flock still
+			// guards the tree. An interrupted run skips it; the next run sweeps.
+			// The reporter rides along as the sweep's progress hook, so the phase
+			// bar moves file by file while the mirror catches up.
+			syncFailed = a.syncOrg(ctx, env, orgName, reporter).Failed
+
+			// The sweep deliberately skips the per-shard replay logs and mirrors
+			// only the snapshots, on the guarantee the final flush just made
+			// them current. A failed flush breaks that guarantee: the sweep
+			// mirrored a ledger the run knows is behind, and a restore from the
+			// bucket would replay resurrected state. Local disk self-heals on
+			// the next flush, but the mirror is the long-term record, so the
+			// run must not exit clean over it.
+			if ferr != nil && a.remote != nil && ctx.Err() == nil {
+				syncFailed++
+
+				a.logger.LogAttrs(ctx, slog.LevelError, "remote_ledger_stale",
+					slog.String("org", orgName),
+					slog.String("detail", "the final ledger flush failed, so the mirrored "+
+						"snapshots are stale; the run is marked incomplete and the next "+
+						"run's flush and sweep re-mirror them"),
+				)
+			}
+
+			// A partial marker (a bootstrapped browse cache) is promoted to
+			// complete only over a fully clean close: the collectors finished
+			// uncanceled, no surface was dropped, and the sweep settled with
+			// zero failures, so the mirror provably holds nothing the local
+			// tree does not account for. Anything less leaves it partial,
+			// which costs later opens only a mirror union, never hidden
+			// objects.
+			if a.remote != nil && collectClean && ctx.Err() == nil &&
+				syncFailed == 0 && !orgIncomplete(ledger.Tally()) {
+				perr := a.promoteRemoteMarker(ctx, env, st)
+				if perr != nil {
+					a.logger.LogAttrs(ctx, slog.LevelWarn, "remote_marker_promote_error",
+						slog.String("org", orgName),
+						slog.String("error", perr.Error()),
+					)
+				}
+			}
+
+			// The reporter stops only after the sweep: its panel's final render
+			// erases itself, so the summary below prints on a clean tail.
+			cancelReporter()
+			reporterWG.Wait()
+
+			serr := reporter.Summary()
+			if serr != nil {
+				a.logger.LogAttrs(ctx, slog.LevelWarn, "progress_summary_error",
+					slog.String("org", orgName),
+					slog.String("error", serr.Error()),
+				)
+			}
+
+			// Release the org's cross-process ledger lock last, after the final
+			// flush above, so no other process can open the root while this run's
+			// unflushed state is still in memory.
+			cerr := ledger.Close()
+			if cerr != nil {
+				a.logger.LogAttrs(ctx, slog.LevelWarn, "manifest_close_error",
+					slog.String("org", orgName),
+					slog.String("error", cerr.Error()),
+				)
+			}
+		})
+	}
+
+	defer closeRun()
+
+	// Capture the final per-status counts before the close runs; the
+	// collectors are done once collectOrg returns, so the tally is settled.
+	// Run uses it to tell an organization that captured nothing but failures
+	// from a clean one, since the collectors record per-object failures in
+	// the ledger and return non-nil only on cancellation.
+	collectErr := a.collectOrg(ctx, env, reporter, orgName)
+	tally := ledger.Tally()
+	collectClean = collectErr == nil
+
+	closeRun()
+
+	return tally, syncFailed, collectErr
+}
+
+// orgIncomplete is the one predicate deciding whether an organization's run
+// leaves the whole run incomplete, so a scheduled run exits non-zero rather
+// than reporting success over a gap. Two conditions mark it:
+//
+//   - a dropped surface: some listing failed for a non-cancellation reason,
+//     so an unknown number of objects were never even named. Every collector
+//     records its drops through [collect.Env.MarkSurfaceDropped], which is what
+//     makes this check cover all of them rather than whichever ones remembered
+//     to plumb an error back.
+//   - a wholly-failed org: no object settled done while at least one errored or
+//     was forbidden. An empty organization (nothing recorded) is not a failure,
+//     and a run whose listings completed is merely partial if some objects
+//     failed. Those failures are visible as errored entries, logged at close,
+//     and retried next run.
+func orgIncomplete(t manifest.Tally) bool {
+	whollyFailed := t.Done == 0 && (t.Errored > 0 || t.Forbidden > 0)
+
+	return t.SurfacesDropped > 0 || whollyFailed
+}
+
+// flushLoop flushes the ledger on a fixed cadence until ctx is done, then
+// flushes once more so a hard kill loses at most the last unflushed batch.
+func (a *Archiver) flushLoop(ctx context.Context, orgName string, ledger *manifest.Ledger) {
+	ticker := time.NewTicker(a.flushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			err := ledger.Flush()
+			if err != nil {
+				a.logFlushError(ctx, orgName, err)
+			}
+
+			return
+
+		case <-ticker.C:
+			err := ledger.Flush()
+			if err != nil {
+				a.logFlushError(ctx, orgName, err)
+			}
+		}
+	}
+}
+
+// logFailures writes one error log per object still recorded errored or
+// forbidden when the organization's run closes. The log stream truncates
+// nothing, so the full failure text survives there, and the summary that
+// follows only counts the failures. The per-object errors are recorded
+// silently as the walk proceeds, so this is where they surface.
+func (a *Archiver) logFailures(ctx context.Context, orgName string, ledger *manifest.Ledger) {
+	for _, f := range ledger.Failures() {
+		a.logger.LogAttrs(ctx, slog.LevelError, "object_archive_error",
+			slog.String("org", orgName),
+			slog.String("status", string(f.Status)),
+			slog.String("path", f.RelPath),
+			slog.String("error", f.Error),
+		)
+	}
+}
+
+// logDroppedSurfaces writes one error log per enumeration surface dropped this
+// run when the organization's run closes, naming each listing whose failure
+// left the archive's extent unknown. The drops are recorded silently as the
+// collectors proceed, so this is where they surface alongside the per-object
+// failures.
+func (a *Archiver) logDroppedSurfaces(ctx context.Context, orgName string, ledger *manifest.Ledger) {
+	for _, d := range ledger.DroppedSurfaces() {
+		a.logger.LogAttrs(ctx, slog.LevelError, "surface_dropped",
+			slog.String("org", orgName),
+			slog.String("surface", d.Surface),
+			slog.String("error", d.Error),
+		)
+	}
+}
+
+// logFlushError records a non-fatal manifest flush failure.
+func (a *Archiver) logFlushError(ctx context.Context, orgName string, err error) {
+	a.logger.LogAttrs(ctx, slog.LevelWarn, "manifest_flush_error",
+		slog.String("org", orgName),
+		slog.String("error", err.Error()),
+	)
+}

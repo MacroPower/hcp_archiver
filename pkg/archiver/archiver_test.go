@@ -1,0 +1,606 @@
+package archiver_test
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/hashicorp/go-tfe"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.jacobcolvin.com/hcp_archiver/pkg/archiver"
+	"go.jacobcolvin.com/hcp_archiver/pkg/collect"
+	"go.jacobcolvin.com/hcp_archiver/pkg/collect/collecttest"
+	"go.jacobcolvin.com/hcp_archiver/pkg/config"
+	"go.jacobcolvin.com/hcp_archiver/pkg/manifest"
+	"go.jacobcolvin.com/hcp_archiver/pkg/remote"
+	"go.jacobcolvin.com/hcp_archiver/pkg/remote/remotetest"
+	"go.jacobcolvin.com/hcp_archiver/pkg/store"
+)
+
+func TestLogFailures(t *testing.T) {
+	t.Parallel()
+
+	ledger, err := manifest.Load(t.TempDir())
+	require.NoError(t, err)
+
+	ledger.StartRun()
+	ledger.RecordDone("ok.json", manifest.Signature{Size: 1})
+
+	longErr := "list github app installations: list github app installations: " +
+		"bad request no github app oauth token, the token must be created by the github app owner"
+	ledger.RecordErrored("github-app-installations.json", errors.New(longErr), false)
+
+	buf := &bytes.Buffer{}
+	a := archiver.New(
+		&config.Config{},
+		archiver.WithLogger(slog.New(slog.NewTextHandler(buf, nil))),
+	)
+
+	archiver.LogFailures(a, t.Context(), "acme", ledger)
+
+	out := buf.String()
+	assert.Contains(t, out, "object_archive_error")
+	assert.Contains(t, out, "path=github-app-installations.json")
+	assert.Contains(t, out, "status=errored")
+	assert.Contains(t, out, longErr, "the full error text survives, untruncated")
+}
+
+func TestOrgIncomplete(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		tally manifest.Tally
+		want  bool
+	}{
+		"empty org is complete": {
+			tally: manifest.Tally{},
+			want:  false,
+		},
+		"clean run is complete": {
+			tally: manifest.Tally{Done: 10},
+			want:  false,
+		},
+		"partial per-object failures stay complete": {
+			tally: manifest.Tally{Done: 10, Errored: 2, Forbidden: 1},
+			want:  false,
+		},
+		"wholly failed org is incomplete": {
+			tally: manifest.Tally{Errored: 3},
+			want:  true,
+		},
+		"forbidden-only org is incomplete": {
+			tally: manifest.Tally{Forbidden: 1},
+			want:  true,
+		},
+		"a dropped surface is incomplete even with work done": {
+			tally: manifest.Tally{Done: 100, SurfacesDropped: 1},
+			want:  true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, archiver.OrgIncomplete(tc.tally))
+		})
+	}
+}
+
+func TestRunOutcome(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		canceled   bool
+		incomplete bool
+		err        error
+	}{
+		"clean loop returns nil": {},
+		"incomplete loop reports the incomplete run": {
+			incomplete: true,
+			err:        archiver.ErrRunIncomplete,
+		},
+		"cancellation returns the context error": {
+			canceled: true,
+			err:      context.Canceled,
+		},
+		"cancellation wins over pre-interrupt failures": {
+			// An interrupt during the final organization's close sweep keeps
+			// the graceful cancellation exit even when the sweep had already
+			// counted failures before the interrupt landed.
+			canceled:   true,
+			incomplete: true,
+			err:        context.Canceled,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := t.Context()
+			if tc.canceled {
+				var cancel context.CancelFunc
+
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			err := archiver.RunOutcome(ctx, tc.incomplete)
+
+			if tc.err != nil {
+				require.ErrorIs(t, err, tc.err)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestNew(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Token:        "secret",
+		Address:      config.DefaultAddress,
+		OutputDir:    t.TempDir(),
+		ProgressMode: config.ProgressModeQuiet,
+	}
+
+	buf := &bytes.Buffer{}
+
+	a := archiver.New(cfg, archiver.WithWriter(buf))
+	require.NotNil(t, a)
+}
+
+func TestRunInvalidConfig(t *testing.T) {
+	t.Parallel()
+
+	// A config missing its output directory fails validation before any I/O.
+	cfg := &config.Config{
+		Token:        "secret",
+		Address:      config.DefaultAddress,
+		ProgressMode: config.ProgressModeQuiet,
+	}
+
+	a := archiver.New(cfg, archiver.WithWriter(&bytes.Buffer{}))
+
+	err := a.Run(t.Context())
+	require.ErrorIs(t, err, config.ErrMissingOutputDir)
+}
+
+func TestResolveOrgs(t *testing.T) {
+	t.Parallel()
+
+	errList := errors.New("list called")
+
+	tests := map[string]struct {
+		orgs      []string
+		listOrgs  []string
+		listErr   error
+		want      []string
+		wantErr   error
+		wantCalls int
+	}{
+		"named orgs skip listing": {
+			orgs:      []string{"acme", "globex"},
+			listErr:   errList,
+			want:      []string{"acme", "globex"},
+			wantCalls: 0,
+		},
+		"empty list enumerates every visible org": {
+			orgs:      nil,
+			listOrgs:  []string{"one", "two"},
+			want:      []string{"one", "two"},
+			wantCalls: 1,
+		},
+		"list error propagates": {
+			orgs:      nil,
+			listErr:   errList,
+			wantErr:   errList,
+			wantCalls: 1,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			calls := 0
+			list := func(_ context.Context) ([]string, error) {
+				calls++
+
+				return tc.listOrgs, tc.listErr
+			}
+
+			got, err := archiver.ResolveOrgs(t.Context(), tc.orgs, list)
+
+			assert.Equal(t, tc.wantCalls, calls)
+
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestRunOrgRejectsEscapingName(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		org string
+	}{
+		"empty":             {org: ""},
+		"parent directory":  {org: ".."},
+		"traversal prefix":  {org: "../../home/user/.ssh"},
+		"nested segments":   {org: "acme/sub"},
+		"absolute path":     {org: "/etc/cron.d"},
+		"windows separator": {org: `acme\sub`},
+		"terminal escape":   {org: "\x1b[2Jacme"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// The output directory sits inside a sandbox; that both stay empty
+			// is what proves the run rooted nothing on the hostile name, since
+			// the store root, the manifest lock, and the remote marker are all
+			// created before the first collector runs.
+			sandbox := t.TempDir()
+			outputDir := filepath.Join(sandbox, "archive")
+			require.NoError(t, os.Mkdir(outputDir, 0o750))
+
+			a := archiver.New(
+				&config.Config{OutputDir: outputDir},
+				archiver.WithWriter(&bytes.Buffer{}),
+			)
+
+			tally, syncFailed, err := archiver.RunOrg(a, t.Context(), tc.org)
+			require.ErrorIs(t, err, config.ErrInvalidOrganization)
+			assert.Zero(t, tally)
+			assert.Zero(t, syncFailed)
+
+			outside, err := os.ReadDir(sandbox)
+			require.NoError(t, err)
+			assert.Len(t, outside, 1)
+
+			inside, err := os.ReadDir(outputDir)
+			require.NoError(t, err)
+			assert.Empty(t, inside)
+		})
+	}
+}
+
+func TestProjectNameFor(t *testing.T) {
+	t.Parallel()
+
+	names := map[string]string{
+		"prj-1": "networking",
+		"prj-2": "",
+	}
+
+	tests := map[string]struct {
+		ws   *tfe.Workspace
+		want string
+	}{
+		"resolves from the map by id": {
+			ws:   &tfe.Workspace{Project: &tfe.Project{ID: "prj-1"}},
+			want: "networking",
+		},
+		"nil project falls back to default": {
+			ws:   &tfe.Workspace{Project: nil},
+			want: archiver.DefaultProjectName,
+		},
+		"unknown id falls back to the relation name": {
+			ws:   &tfe.Workspace{Project: &tfe.Project{ID: "prj-9", Name: "hydrated"}},
+			want: "hydrated",
+		},
+		"blank map entry falls back to the relation name": {
+			ws:   &tfe.Workspace{Project: &tfe.Project{ID: "prj-2", Name: "from-relation"}},
+			want: "from-relation",
+		},
+		"unknown id and no relation name falls back to default": {
+			ws:   &tfe.Workspace{Project: &tfe.Project{ID: "prj-9"}},
+			want: archiver.DefaultProjectName,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := archiver.ProjectNameFor(names, tc.ws)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// newSyncOrgFixture builds an archiver with an injected fake-backed remote
+// client plus a collect environment over a temp store, so the close sweep can
+// be driven directly.
+func newSyncOrgFixture(t *testing.T, buf *bytes.Buffer) (*archiver.Archiver, *collect.Env, *remotetest.Fake) {
+	t.Helper()
+
+	root := t.TempDir()
+	st := store.New(root)
+
+	ledger, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	fake := remotetest.New()
+	cfg := remote.Config{Prefix: "hcp"}
+
+	client, err := remote.New(t.Context(), cfg,
+		remote.WithBucket(fake.Bucket()), remote.WithRetry(0, 0))
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(buf, nil))
+
+	env := collect.NewEnv(nil, st, ledger,
+		collect.WithRemote(client, cfg, "acme"),
+		collect.WithLogger(logger),
+	)
+
+	_, err = st.WriteBytes("org.json", []byte(`{"org":"acme"}`))
+	require.NoError(t, err)
+
+	a := archiver.New(
+		&config.Config{Remote: &config.RemoteConfig{Prefix: "hcp"}},
+		archiver.WithLogger(logger),
+	)
+	a.SetRemote(client)
+
+	return a, env, fake
+}
+
+func TestSyncOrgCanceledContextSkipsSweep(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	archiver.SyncOrg(a, ctx, env, "acme", nil)
+
+	assert.Empty(t, fake.Keys(), "an interrupted run uploads nothing; the next run sweeps")
+	assert.NotContains(t, buf.String(), "remote_sync_complete")
+}
+
+func TestSyncOrgFailureWarnsAndReportsFailed(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+	fake.PutErr = assert.AnError
+
+	stats := archiver.SyncOrg(a, t.Context(), env, "acme", nil)
+
+	assert.Equal(t, 1, stats.Failed,
+		"the sweep's failures come back to the run loop, which marks the run incomplete")
+
+	out := buf.String()
+	assert.Contains(t, out, "remote_sync_complete")
+	assert.Contains(t, out, "level=WARN")
+	assert.Contains(t, out, "failed=1")
+}
+
+func TestSyncOrgLogsSummary(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+
+	archiver.SyncOrg(a, t.Context(), env, "acme", nil)
+
+	assert.Contains(t, fake.Keys(), "hcp/acme/org.json")
+
+	out := buf.String()
+	assert.Contains(t, out, "remote_sync_complete")
+	assert.Contains(t, out, "uploaded=1")
+	assert.Contains(t, out, "eager_failed=0")
+}
+
+func TestSyncOrgForwardsProgressHook(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+	prog := &collecttest.RecordingSyncProgress{}
+
+	archiver.SyncOrg(a, t.Context(), env, "acme", prog)
+
+	assert.Contains(t, fake.Keys(), "hcp/acme/org.json")
+
+	totals := prog.Totals()
+	require.Len(t, totals, 1,
+		"the sweep seeds the settle total once, after classifying the tree")
+	assert.Positive(t, totals[0])
+	assert.Equal(t, totals[0], prog.Advanced(),
+		"one advance per settled file, summing to the seeded total")
+}
+
+func TestSyncOrgEagerFailureIsVisibilityOnly(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+
+	// One eager as-written upload fails; the close sweep retries it cleanly,
+	// so the run stays complete (only the sweep's own Failed marks it).
+	fake.PutErr = assert.AnError
+	fake.PutErrN = 1
+
+	require.NoError(t, env.Bytes(t.Context(), "users/user-1.json",
+		func(context.Context) ([]byte, error) { return []byte(`{"id":"user-1"}`), nil }))
+	require.Equal(t, 1, env.EagerFailures())
+
+	stats := archiver.SyncOrg(a, t.Context(), env, "acme", nil)
+
+	assert.Zero(t, stats.Failed, "a retried eager failure never marks the run incomplete")
+	assert.Contains(t, fake.Keys(), "hcp/acme/users/user-1.json")
+	assert.Contains(t, buf.String(), "eager_failed=1")
+
+	// The run-wide tally the reporter renders (via WithRemoteStats) spans both
+	// motions: the failed eager upload and the sweep's two retried uploads.
+	tally := env.RemoteTally()
+	assert.Equal(t, 2, tally.Uploaded)
+	assert.Equal(t, 1, tally.Failed)
+	assert.Zero(t, tally.Evicted)
+	assert.Positive(t, tally.UploadedBytes)
+}
+
+func TestWriteRemoteMarkerMirrorsEagerly(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), env, st))
+
+	local, err := st.Exists(remote.MarkerName)
+	require.NoError(t, err)
+	assert.True(t, local, "the marker lands at the archive root")
+
+	_, ok := fake.Object("hcp/acme/" + remote.MarkerName)
+	assert.True(t, ok, "the marker mirrors immediately, not at the close sweep")
+}
+
+func TestWriteRemoteMarkerMirrorFailureWarnsOnly(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	fake.PutErr = assert.AnError
+
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), env, st),
+		"a marker mirror failure defers to the close sweep")
+
+	local, err := st.Exists(remote.MarkerName)
+	require.NoError(t, err)
+	assert.True(t, local, "the local marker write still succeeds")
+
+	assert.Contains(t, buf.String(), "eager_sync_error")
+	assert.Equal(t, 1, env.EagerFailures(),
+		"the marker's eager mirror failure counts like every other as-written upload")
+}
+
+func TestWriteRemoteMarkerRefusesRepointedRemote(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, _ := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	// The archive already records its mirror elsewhere, so the configured
+	// remote must not silently take over: evicted bundles live only at the
+	// recorded location, and the marker is the sole pointer to them.
+	_, err := st.WriteBytes(remote.MarkerName,
+		[]byte(`{"url":"s3://old-bucket","prefix":"old","version":1}`+"\n"))
+	require.NoError(t, err)
+
+	err = archiver.WriteRemoteMarker(a, t.Context(), env, st)
+	require.ErrorIs(t, err, archiver.ErrRemoteRelocated)
+	assert.Contains(t, err.Error(), "s3://old-bucket",
+		"the refusal must name the recorded location the operator has to migrate from")
+
+	// Consent by clearing the marker: a marker recording nothing is
+	// rewritable, and the close sweep's evicted-surface verification still
+	// proves the new location holds every only-copy.
+	_, err = st.WriteBytes(remote.MarkerName, []byte("{}\n"))
+	require.NoError(t, err)
+
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), env, st))
+}
+
+func TestWriteRemoteMarkerSameRemoteRewrites(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, _ := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), env, st))
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), env, st),
+		"an unchanged remote config rewrites its own marker freely")
+}
+
+func TestWriteRemoteMarkerPreservesPartial(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, _ := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	// A bootstrapped browse cache carries a partial marker. The run's opening
+	// rewrite happens before anything is collected, so it must not promote the
+	// tree to complete: an interrupted or filtered run would then hide every
+	// mirror-only object from later flag-less opens.
+	_, err := st.WriteBytes(remote.MarkerName,
+		[]byte(`{"prefix":"hcp","version":1,"partial":true}`+"\n"))
+	require.NoError(t, err)
+
+	require.NoError(t, archiver.WriteRemoteMarker(a, t.Context(), env, st))
+
+	marker, ok, err := remote.ReadMarker(st.Root())
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.True(t, marker.Partial, "the opening rewrite carries the partial flag forward")
+}
+
+func TestPromoteRemoteMarker(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	_, err := st.WriteBytes(remote.MarkerName,
+		[]byte(`{"prefix":"hcp","version":1,"partial":true}`+"\n"))
+	require.NoError(t, err)
+
+	require.NoError(t, archiver.PromoteRemoteMarker(a, t.Context(), env, st))
+
+	marker, ok, err := remote.ReadMarker(st.Root())
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.False(t, marker.Partial, "a clean close promotes the marker to complete")
+
+	_, mirrored := fake.Object("hcp/acme/" + remote.MarkerName)
+	assert.True(t, mirrored, "the promoted marker mirrors eagerly")
+}
+
+func TestPromoteRemoteMarkerLeavesCompleteAlone(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	a, env, fake := newSyncOrgFixture(t, buf)
+	st := env.Store()
+
+	_, err := st.WriteBytes(remote.MarkerName,
+		[]byte(`{"prefix":"hcp","version":1}`+"\n"))
+	require.NoError(t, err)
+
+	require.NoError(t, archiver.PromoteRemoteMarker(a, t.Context(), env, st))
+
+	_, mirrored := fake.Object("hcp/acme/" + remote.MarkerName)
+	assert.False(t, mirrored, "an already-complete marker is not rewritten")
+}

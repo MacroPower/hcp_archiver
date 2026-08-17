@@ -1,0 +1,598 @@
+package progress_test
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/exp/golden"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.jacobcolvin.com/hcp_archiver/pkg/collect"
+	"go.jacobcolvin.com/hcp_archiver/pkg/manifest"
+	"go.jacobcolvin.com/hcp_archiver/pkg/progress"
+)
+
+// barPanel is a deterministic determinate-phase snapshot: a fresh model renders
+// the spinner's first frame and a static bar, so the panel is stable across
+// runs.
+func barPanel() progress.PanelSnapshot {
+	return progress.PanelSnapshot{
+		Phase: "workspaces",
+		Tally: manifest.Tally{
+			Target:          "acme/prod",
+			Done:            42,
+			Errored:         2,
+			Forbidden:       1,
+			Retried:         3,
+			BytesDownloaded: 3*1024*1024 + 512*1024,
+		},
+		Elapsed:      90 * time.Second,
+		PhaseElapsed: 63 * time.Second,
+		Rate:         128 * 1024,
+		Total:        20,
+		Completed:    7,
+	}
+}
+
+func TestRenderPanel_Bar(t *testing.T) {
+	t.Parallel()
+
+	golden.RequireEqual(t, []byte(progress.RenderPanel(barPanel())))
+}
+
+func TestRenderPanel_Indeterminate(t *testing.T) {
+	t.Parallel()
+
+	// An indeterminate phase swaps the bar for a marquee and blanks the percent,
+	// holding the same columns so the target does not move.
+	golden.RequireEqual(t, []byte(progress.RenderPanel(indeterminatePanel())))
+}
+
+func TestRenderPanel_Tasks(t *testing.T) {
+	t.Parallel()
+
+	// In-flight work items each get a line between the phase bar and the
+	// counts: their own bar, percent, unit fraction, and name, in registration
+	// order. The target is empty during the workspaces phase, since the task
+	// lines carry the names, so line one ends at its eta column.
+	panel := barPanel()
+	panel.Tally.Target = ""
+	panel.Tasks = []progress.PanelTask{
+		{Name: "acme/big-workspace", Total: 5001, Done: 600},
+		{Name: "acme/mid-workspace", Total: 60, Done: 31},
+		{Name: "acme/tiny", Total: 4, Done: 3},
+	}
+
+	golden.RequireEqual(t, []byte(progress.RenderPanel(panel)))
+}
+
+func TestRenderPanel_WideFanOut(t *testing.T) {
+	t.Parallel()
+
+	// A wide pool lists every in-flight item, one row each, with no overflow
+	// line: only a terminal too short for the pool drops rows.
+	golden.RequireEqual(t, []byte(progress.RenderPanel(tasksPanel(10))))
+}
+
+func TestRenderPanel_TaskOverflowOnShortTerminal(t *testing.T) {
+	t.Parallel()
+
+	// The overflow line's shape on a terminal too short for the pool: its
+	// indent, glyph, and dimming, under the rows that fit.
+	golden.RequireEqual(t, []byte(progress.RenderPanelAt(tasksPanel(10), 80, 6)))
+}
+
+func TestRenderPanel_FullPoolFitsNormalTerminal(t *testing.T) {
+	t.Parallel()
+
+	// The whole worker pool shows on an ordinary terminal, which has room for
+	// every concurrent worker alongside the panel's chrome.
+	panel := tasksPanel(collect.DefaultConcurrency)
+	rendered := ansi.Strip(progress.RenderPanelAt(panel, 80, 24))
+
+	for _, task := range panel.Tasks {
+		assert.Contains(t, rendered, task.Name, "every worker has a row")
+	}
+
+	assert.NotContains(t, rendered, "more active", "no worker is elided")
+}
+
+func TestRenderPanel_FullPoolNeedsOverflowReserve(t *testing.T) {
+	t.Parallel()
+
+	// The panel reserves a row for the overflow line even when it does not
+	// render one, so the whole pool needs a terminal one row taller than the
+	// panel it draws: line one, a row per worker, and the counts and metadata.
+	panel := tasksPanel(collect.DefaultConcurrency)
+	drawn := len(panel.Tasks) + 3
+
+	fits := ansi.Strip(progress.RenderPanelAt(panel, 80, drawn+1))
+	assert.NotContains(t, fits, "more active", "the reserve holds the whole pool")
+	assert.Len(t, strings.Split(fits, "\n"), drawn, "the reserved row goes unused")
+
+	tight := ansi.Strip(progress.RenderPanelAt(panel, 80, drawn))
+	assert.Contains(t, tight, "+1 more active", "one row short elides one worker")
+	assert.Len(t, strings.Split(tight, "\n"), drawn,
+		"the overflow line takes the elided row's place")
+}
+
+func TestRenderPanel_HeightHoldsAtFullPoolPeak(t *testing.T) {
+	t.Parallel()
+
+	// The frame ratchets to the widest fan-out and holds it: once every worker
+	// has had a row, a later phase that registers no work items at all pads to
+	// that height rather than shrinking back.
+	frames := progress.RenderPanelFrames(80, 24,
+		tasksPanel(collect.DefaultConcurrency), tasksPanel(0))
+
+	assert.Len(t, strings.Split(frames[0], "\n"), collect.DefaultConcurrency+3,
+		"a row per worker, plus line one and the counts and metadata rows")
+	assert.Equal(t, strings.Count(frames[0], "\n"), strings.Count(frames[1], "\n"),
+		"panel height holds once the pool drains")
+}
+
+func TestRenderPanel_TaskAlignsWithPhaseBar(t *testing.T) {
+	t.Parallel()
+
+	// Every task line's bar starts at the same column as the phase bar, so the
+	// panel reads as one grid.
+	panel := barPanel()
+	panel.Tasks = []progress.PanelTask{
+		{Name: "ws", Total: 10, Done: 5},
+		{Name: "ws2", Total: 8, Done: 1},
+	}
+
+	rendered := strings.Split(progress.RenderPanel(panel), "\n")
+	require.Len(t, rendered, 5)
+
+	for _, line := range rendered[1:3] {
+		assert.Equal(t, barColumn(t, rendered[0]), barColumn(t, line),
+			"task bar column matches phase bar column")
+	}
+}
+
+func TestRenderPanel_TaskLinesFitTerminalHeight(t *testing.T) {
+	t.Parallel()
+
+	// A short terminal tightens the task budget so the whole panel fits: at
+	// six rows there is room for two task lines beside the first line, the
+	// overflow line, the counts, and the metadata.
+	rendered := progress.RenderPanelAt(tasksPanel(11), 80, 6)
+	lines := strings.Split(rendered, "\n")
+
+	assert.Len(t, lines, 6, "panel height matches the terminal")
+	assert.Contains(t, ansi.Strip(rendered), "+9 more active")
+}
+
+func TestRenderPanel_HeightHoldsAsTasksFinish(t *testing.T) {
+	t.Parallel()
+
+	// The panel must not shrink as work items finish; a shrinking frame corrupts
+	// it mid-log (see composeFrame). The height holds and the surviving task
+	// still shows.
+	frames := progress.RenderPanelFrames(0, 0, tasksPanel(5), tasksPanel(2))
+
+	assert.Equal(t, strings.Count(frames[0], "\n"), strings.Count(frames[1], "\n"),
+		"panel height holds as tasks finish")
+	assert.Contains(t, ansi.Strip(frames[1]), "acme/ws-00", "remaining task still shown")
+}
+
+func TestRenderPanel_FooterHoldsAsTasksFinish(t *testing.T) {
+	t.Parallel()
+
+	// The frame pads between the task region and the footer, so the counts,
+	// metadata, and remote lines hold their rows as the live task count
+	// fluctuates instead of bouncing with it.
+	frames := progress.RenderPanelFrames(0, 0, tasksPanel(5), tasksPanel(2))
+
+	assert.Equal(t, footerRow(t, frames[0]), footerRow(t, frames[1]),
+		"the counts line holds its row as tasks finish")
+}
+
+// footerRow returns the row index of a frame's status-counts line.
+func footerRow(t *testing.T, frame string) int {
+	t.Helper()
+
+	for i, line := range strings.Split(frame, "\n") {
+		if strings.Contains(ansi.Strip(line), "done") {
+			return i
+		}
+	}
+
+	t.Fatal("frame carries no counts line")
+
+	return -1
+}
+
+func TestRenderPanel_FrameClampsOnResizeDown(t *testing.T) {
+	t.Parallel()
+
+	// The held frame height is capped at what the terminal fits, so a resize to
+	// a shorter terminal pulls it back down and the panel still fits without
+	// truncating a live task row.
+	//
+	// Grow to peak on a tall terminal, then shrink to six rows.
+	frame := progress.RenderPanelResize(80, 20, 80, 6, tasksPanel(8), tasksPanel(1))
+	lines := strings.Split(frame, "\n")
+
+	assert.LessOrEqual(t, len(lines), 6, "panel fits the shorter terminal")
+	assert.Contains(t, ansi.Strip(frame), "acme/ws-00", "live task not truncated by padding")
+}
+
+// barColumn returns the display column at which a rendered line's bar begins.
+func barColumn(t *testing.T, line string) int {
+	t.Helper()
+
+	stripped := ansi.Strip(line)
+	i := strings.IndexRune(stripped, '▌')
+	require.GreaterOrEqual(t, i, 0, "line carries a bar")
+
+	return ansi.StringWidth(stripped[:i])
+}
+
+func TestRenderPanel_Resumed(t *testing.T) {
+	t.Parallel()
+
+	// A resumed run tags the end of line one; the cumulative counts already
+	// reflect prior work, so nothing else about the panel changes.
+	panel := barPanel()
+	panel.Tally.Resumed = true
+
+	golden.RequireEqual(t, []byte(progress.RenderPanel(panel)))
+}
+
+// tasksPanel is barPanel with the target cleared and n in-flight work items,
+// shared by the task-region tests. Each item's total outruns its done count by
+// a widening margin, so however wide the pool no two rows share a bar fill.
+func tasksPanel(n int) progress.PanelSnapshot {
+	p := barPanel()
+	p.Tally.Target = ""
+
+	for i := range n {
+		p.Tasks = append(p.Tasks, progress.PanelTask{
+			Name:  fmt.Sprintf("acme/ws-%02d", i),
+			Total: 10 + i,
+			Done:  i,
+		})
+	}
+
+	return p
+}
+
+// indeterminatePanel is barPanel with the phase's total unknown, so the bar
+// becomes a marquee and the percent goes blank.
+func indeterminatePanel() progress.PanelSnapshot {
+	panel := barPanel()
+	panel.Phase = "registry"
+	panel.Total = -1
+	panel.Completed = 0
+
+	return panel
+}
+
+// line1 renders a panel and returns its stripped, undecorated first line.
+func line1(panel progress.PanelSnapshot) string {
+	return ansi.Strip(strings.SplitN(progress.RenderPanel(panel), "\n", 2)[0])
+}
+
+// line2 renders a panel and returns its stripped, undecorated second line, the
+// status counts on a task-less panel.
+func line2(panel progress.PanelSnapshot) string {
+	parts := strings.Split(progress.RenderPanel(panel), "\n")
+
+	return ansi.Strip(parts[1])
+}
+
+func TestRenderPanel_CountRolloverIsStable(t *testing.T) {
+	t.Parallel()
+
+	// A count growing a digit (99 -> 100) must not shift what follows it: the
+	// trailing metadata stays at the same column.
+	before := barPanel()
+	before.Tally.Done = 99
+
+	after := barPanel()
+	after.Tally.Done = 100
+
+	b := line2(before)
+	a := line2(after)
+
+	assert.Equal(t, ansi.StringWidth(b), ansi.StringWidth(a), "line width holds")
+	assert.Equal(t, strings.Index(b, "errored"), strings.Index(a, "errored"),
+		"errored column holds as done rolls over")
+	assert.Equal(t, strings.Index(b, "retried"), strings.Index(a, "retried"),
+		"retried column holds as done rolls over")
+}
+
+func TestRenderPanel_MetaAlignsWithCounts(t *testing.T) {
+	t.Parallel()
+
+	// Each metadata glyph sits in the display column of the status glyph above
+	// it, so the panel's two closing lines read as one grid.
+	panel := barPanel()
+	panel.HasRate = true
+	panel.RPS = 12
+
+	lines := strings.Split(progress.RenderPanel(panel), "\n")
+	require.Len(t, lines, 3)
+
+	counts := ansi.Strip(lines[1])
+	meta := ansi.Strip(lines[2])
+
+	pairs := map[string]string{"✓": "⇣", "✗": "⇢", "⊘": "◷", "↻": "⇉"}
+	for status, readout := range pairs {
+		assert.Equal(t, column(t, counts, status), column(t, meta, readout),
+			"%s sits under %s", readout, status)
+	}
+}
+
+// column returns the display column at which line's first occurrence of sub
+// begins.
+func column(t *testing.T, line, sub string) int {
+	t.Helper()
+
+	i := strings.Index(line, sub)
+	require.GreaterOrEqual(t, i, 0, "line carries %q", sub)
+
+	return ansi.StringWidth(line[:i])
+}
+
+func TestRenderPanel_OvercompleteIsStable(t *testing.T) {
+	t.Parallel()
+
+	// A miscounted completed past total must not widen the percent past its
+	// reserve: it clamps to 100% and holds the target column.
+	full := barPanel()
+	full.Completed = full.Total
+
+	over := barPanel()
+	over.Completed = full.Total * 50
+
+	f := line1(full)
+	o := line1(over)
+
+	assert.Equal(t, ansi.StringWidth(f), ansi.StringWidth(o), "line width holds when overcomplete")
+	assert.Equal(t, strings.Index(f, "acme/prod"), strings.Index(o, "acme/prod"),
+		"target column holds when overcomplete")
+	assert.Contains(t, o, "100%", "percent clamps to 100%")
+}
+
+func TestRenderPanel_BarToggleIsStable(t *testing.T) {
+	t.Parallel()
+
+	// The bar appearing or disappearing between a determinate and an
+	// indeterminate phase must not shift the target column.
+	determinate := barPanel()
+	indeterminate := indeterminatePanel()
+	indeterminate.Tally.Target = determinate.Tally.Target
+
+	d := line1(determinate)
+	i := line1(indeterminate)
+
+	assert.Equal(t, ansi.StringWidth(d), ansi.StringWidth(i), "line width holds")
+	assert.Equal(t, strings.Index(d, "acme/prod"), strings.Index(i, "acme/prod"),
+		"target column holds whether or not the bar is shown")
+}
+
+func TestRenderSummary(t *testing.T) {
+	t.Parallel()
+
+	panel := progress.PanelSnapshot{
+		Tally: manifest.Tally{
+			Done:            100,
+			Absent:          3,
+			Skipped:         2,
+			Errored:         4,
+			Forbidden:       6,
+			NotApplicable:   1,
+			Retried:         5,
+			BytesDownloaded: 5 * 1024 * 1024,
+		},
+		Elapsed: 200 * time.Second,
+	}
+
+	golden.RequireEqual(t, []byte(progress.RenderSummary(panel)))
+}
+
+func TestRenderPanel_RateStatus(t *testing.T) {
+	t.Parallel()
+
+	// The adaptive request-rate cell closes the metadata row's grid; once any
+	// rate limiting has been observed the amber 429 total trails the grid,
+	// and during a cooldown the amber paused readout follows it (transient
+	// last), so a slowed rate carries its own explanation.
+	panel := barPanel()
+	panel.HasRate = true
+	panel.RPS = 12
+	panel.PausedFor = 4 * time.Second
+	panel.RateLimited = 12
+
+	golden.RequireEqual(t, []byte(progress.RenderPanel(panel)))
+}
+
+func TestRenderPanel_RateStatusCleanRunOmitsAmber(t *testing.T) {
+	t.Parallel()
+
+	panel := barPanel()
+	panel.HasRate = true
+	panel.RPS = 30
+
+	out := ansi.Strip(progress.RenderPanel(panel))
+	assert.Contains(t, out, "30/s")
+	assert.NotContains(t, out, "429", "a run never rate limited shows no 429 readout")
+	assert.NotContains(t, out, "paused", "no cooldown means no paused readout")
+}
+
+func TestRenderSummary_RateLimited(t *testing.T) {
+	t.Parallel()
+
+	panel := progress.PanelSnapshot{
+		Tally: manifest.Tally{
+			Done:            100,
+			BytesDownloaded: 5 * 1024 * 1024,
+		},
+		Elapsed:     200 * time.Second,
+		RateLimited: 42,
+	}
+
+	golden.RequireEqual(t, []byte(progress.RenderSummary(panel)))
+}
+
+// remotePanel is barPanel with a remote configured and a clean transfer tally,
+// shared by the remote-readout tests. The upload rate is non-zero so the
+// goldens show the panel's live rate segment with a real figure.
+func remotePanel() progress.PanelSnapshot {
+	panel := barPanel()
+	panel.HasRemote = true
+	panel.UploadRate = 3.4 * 1024 * 1024 // 3.4 MiB/s
+	panel.Remote = progress.RemoteStats{
+		UploadedBytes: 1288490188, // 1.2 GiB
+		Uploaded:      5432,
+		Evicted:       87,
+	}
+
+	return panel
+}
+
+func TestRenderPanel_Remote(t *testing.T) {
+	t.Parallel()
+
+	// A remote-configured run closes the panel with the transfer readout; with
+	// nothing failed the whole line stays muted, no amber segment.
+	golden.RequireEqual(t, []byte(progress.RenderPanel(remotePanel())))
+}
+
+func TestRenderPanel_RemoteFailed(t *testing.T) {
+	t.Parallel()
+
+	// Once any remote motion has failed the amber failed cell trails the
+	// row's grid, the same convention as the 429 total.
+	panel := remotePanel()
+	panel.Remote.Failed = 3
+
+	golden.RequireEqual(t, []byte(progress.RenderPanel(panel)))
+}
+
+func TestRenderPanel_NoRemoteOmitsLine(t *testing.T) {
+	t.Parallel()
+
+	// A local-only run carries no remote line at all: presence is gated by the
+	// option, not the sampled values.
+	out := ansi.Strip(progress.RenderPanel(barPanel()))
+
+	assert.NotContains(t, out, "☁")
+	assert.NotContains(t, out, "uploaded")
+}
+
+func TestRenderSummary_Remote(t *testing.T) {
+	t.Parallel()
+
+	panel := progress.PanelSnapshot{
+		Tally: manifest.Tally{
+			Done:            100,
+			BytesDownloaded: 5 * 1024 * 1024,
+		},
+		Elapsed:   200 * time.Second,
+		HasRemote: true,
+		Remote: progress.RemoteStats{
+			UploadedBytes: 1288490188,
+			Uploaded:      5432,
+			Evicted:       87,
+			Failed:        3,
+		},
+	}
+
+	golden.RequireEqual(t, []byte(progress.RenderSummary(panel)))
+}
+
+func TestRenderPanel_RemoteTaskLinesFitTerminalHeight(t *testing.T) {
+	t.Parallel()
+
+	// The remote readout claims a footer line, so a short terminal reserves
+	// five lines rather than four: at six rows one task line fits beside the
+	// first line, the overflow line, the counts, the metadata, and the readout.
+	panel := remotePanel()
+	for i := range 11 {
+		panel.Tasks = append(panel.Tasks, progress.PanelTask{
+			Name:  fmt.Sprintf("acme/ws-%02d", i),
+			Total: 10,
+			Done:  i,
+		})
+	}
+
+	rendered := progress.RenderPanelAt(panel, 80, 6)
+	lines := strings.Split(rendered, "\n")
+
+	assert.Len(t, lines, 6, "panel height matches the terminal")
+	assert.Contains(t, ansi.Strip(rendered), "+10 more active")
+	assert.Contains(t, ansi.Strip(rendered), "☁")
+}
+
+func TestRenderPanel_ShorterThanChromeFitsTerminal(t *testing.T) {
+	t.Parallel()
+
+	// Below the chrome's own height the task budget has nothing left to give
+	// (it shrinks task rows and nothing else), so the frame is cut to the
+	// screen rather than rendering taller than the terminal on every repaint.
+	// The topmost rows give way, so the footer survives the cut.
+	for _, height := range []int{1, 2, 3, 4, 5} {
+		panel := remotePanel()
+		panel.Tasks = []progress.PanelTask{{Name: "acme/ws-00", Total: 10, Done: 3}}
+
+		rendered := progress.RenderPanelAt(panel, 80, height)
+		lines := strings.Split(rendered, "\n")
+
+		require.Len(t, lines, height, "frame fits a %d-row terminal", height)
+		assert.Contains(t, ansi.Strip(lines[len(lines)-1]), "☁",
+			"the remote readout holds the last row at %d rows", height)
+	}
+}
+
+func TestRenderPanel_ShortTerminalHoldsAcrossFrames(t *testing.T) {
+	t.Parallel()
+
+	// The held height is a ratchet, so a frame rendered while the pool was
+	// wide must not carry a taller panel onto a terminal that cannot hold it.
+	frames := progress.RenderPanelFrames(80, 3, tasksPanel(8), tasksPanel(1))
+
+	for i, frame := range frames {
+		assert.Len(t, strings.Split(frame, "\n"), 3, "frame %d fits the terminal", i)
+	}
+}
+
+func TestRenderPanel_RemoteHeightHoldsOnShortTerminal(t *testing.T) {
+	t.Parallel()
+
+	// The frame pad must respect the tighter remote budget: as tasks finish on
+	// a short terminal the held height keeps the panel steady without ever
+	// outgrowing the screen.
+	peak := remotePanel()
+	peak.Tally.Target = ""
+
+	for i := range 11 {
+		peak.Tasks = append(peak.Tasks, progress.PanelTask{
+			Name:  fmt.Sprintf("acme/ws-%02d", i),
+			Total: 10,
+			Done:  i,
+		})
+	}
+
+	after := remotePanel()
+	after.Tally.Target = ""
+	after.Tasks = peak.Tasks[:1]
+
+	frames := progress.RenderPanelFrames(80, 6, peak, after)
+
+	for i, frame := range frames {
+		assert.LessOrEqual(t, strings.Count(frame, "\n")+1, 6,
+			"frame %d fits the terminal", i)
+	}
+
+	assert.Equal(t, strings.Count(frames[0], "\n"), strings.Count(frames[1], "\n"),
+		"panel height holds as tasks finish")
+	assert.Contains(t, ansi.Strip(frames[1]), "acme/ws-00", "remaining task still shown")
+}

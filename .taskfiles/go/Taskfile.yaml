@@ -60,7 +60,7 @@ tasks:
       Runs the unit tests with the race detector.
 
       For a single package or extra flags, call go directly:
-        go test -run TestName ./cmd/hcp_archiver/...
+        go test -run TestName ./internal/cli/...
     cmds:
       - go test -timeout={{.TEST_TIMEOUT}} -race {{.GO_PKGS}}
 
@@ -116,7 +116,7 @@ tasks:
         FLAGS: Additional flags to pass to `go test` (default: "")
 
       Examples:
-        task go:bench PKG=./cmd/hcp_archiver FLAGS="-cpuprofile profile.out -run=^\$"
+        task go:bench PKG=./internal/cli FLAGS="-cpuprofile profile.out -run=^\$"
     vars:
       PKG: '{{.PKG | default "go.jacobcolvin.com/hcp_archiver/..."}}'
       FLAGS: '{{.FLAGS | default ""}}'

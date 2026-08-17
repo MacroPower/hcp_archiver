@@ -1,0 +1,1539 @@
+package tfeclient_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"testing/iotest"
+	"time"
+
+	"github.com/hashicorp/go-tfe"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.jacobcolvin.com/hcp_archiver/pkg/tfeclient"
+)
+
+// roundTripFunc adapts a function to an [http.RoundTripper].
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+// newOfflineClient builds a [tfeclient.Client] whose HTTP transport answers
+// go-tfe's constructor ping locally, so no test touches the network.
+func newOfflineClient(t *testing.T, opts ...tfeclient.Option) *tfeclient.Client {
+	t.Helper()
+
+	hc := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    r,
+			}, nil
+		}),
+	}
+
+	base := []tfeclient.Option{
+		tfeclient.WithToken("test-token"),
+		tfeclient.WithHTTPClient(hc),
+	}
+
+	c, err := tfeclient.New(append(base, opts...)...)
+	require.NoError(t, err)
+
+	return c
+}
+
+func TestNewMissingToken(t *testing.T) {
+	t.Parallel()
+
+	c, err := tfeclient.New(tfeclient.WithAddress("https://example.com"))
+
+	require.ErrorIs(t, err, tfeclient.ErrMissingToken)
+	assert.Nil(t, c)
+}
+
+func TestNewWiresUnderlyingClient(t *testing.T) {
+	t.Parallel()
+
+	c := newOfflineClient(t)
+
+	assert.NotNil(t, c.TFE())
+}
+
+func TestDoInvokesFnAndReturnsError(t *testing.T) {
+	t.Parallel()
+
+	c := newOfflineClient(t)
+
+	t.Run("returns fn error and passes the client", func(t *testing.T) {
+		t.Parallel()
+
+		sentinel := errors.New("from fn")
+
+		var got *tfe.Client
+
+		err := c.Do(t.Context(), func(_ context.Context, tc *tfe.Client) error {
+			got = tc
+
+			return sentinel
+		})
+
+		require.ErrorIs(t, err, sentinel)
+		assert.Same(t, c.TFE(), got)
+	})
+
+	t.Run("returns nil when fn succeeds", func(t *testing.T) {
+		t.Parallel()
+
+		called := false
+
+		err := c.Do(t.Context(), func(_ context.Context, _ *tfe.Client) error {
+			called = true
+
+			return nil
+		})
+
+		require.NoError(t, err)
+		assert.True(t, called)
+	})
+
+	t.Run("canceled context is not passed to fn", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		called := false
+
+		err := c.Do(ctx, func(_ context.Context, _ *tfe.Client) error {
+			called = true
+
+			return nil
+		})
+
+		require.Error(t, err)
+		assert.False(t, called)
+	})
+}
+
+func TestResponseHeaderTimeoutBoundsStalledConnection(t *testing.T) {
+	t.Parallel()
+
+	// The server blocks before writing any response header, so with a tiny header
+	// timeout the request must fail promptly rather than hang the worker.
+	release := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		<-release
+	}))
+	// Cleanups run last-registered-first: unblock the handler before closing the
+	// server, so the close does not deadlock on the still-blocked request.
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+
+	// Server-error retry is disabled so the elapsed bound measures the header
+	// timeout alone rather than the retry backoff on top of it.
+	client := tfeclient.ResolveHTTPClient(
+		tfeclient.WithResponseHeaderTimeout(50*time.Millisecond),
+		tfeclient.WithServerErrorRetry(0, 0),
+	)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+	require.NoError(t, err)
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	elapsed := time.Since(start)
+
+	if resp != nil {
+		require.NoError(t, resp.Body.Close())
+	}
+
+	require.Error(t, err, "a stalled connection must fail rather than hang")
+	assert.Less(t, elapsed, 5*time.Second, "the failure is bounded by the header timeout")
+}
+
+func TestResponseHeaderTimeoutAllowsSlowBody(t *testing.T) {
+	t.Parallel()
+
+	// Headers arrive at once, then the body dribbles out over writes that in total
+	// far exceed the header timeout. The transfer must still succeed: the timeout
+	// bounds only the time to first byte, so large streaming downloads are safe.
+	const chunks = 5
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+
+		for range chunks {
+			time.Sleep(20 * time.Millisecond)
+
+			_, werr := io.WriteString(w, "chunk")
+			if werr != nil {
+				return
+			}
+
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := tfeclient.ResolveHTTPClient(tfeclient.WithResponseHeaderTimeout(10 * time.Millisecond))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+
+	defer func() { assert.NoError(t, resp.Body.Close()) }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, strings.Repeat("chunk", chunks), string(body))
+}
+
+func TestResolveHTTPClientTransportTuning(t *testing.T) {
+	t.Parallel()
+
+	// The built transport must keep the connection-churn tuning: a handshake
+	// bound generous enough to survive a saturated link, and a per-host idle pool
+	// wide enough that HTTP/1 chunked log reads reuse connections instead of
+	// redialing (and re-handshaking) per chunk.
+	tr := tfeclient.UnderlyingTransport(tfeclient.ResolveHTTPClient())
+	require.NotNil(t, tr)
+
+	assert.Equal(t, tfeclient.DefaultTLSHandshakeTimeout, tr.TLSHandshakeTimeout)
+	assert.Equal(t, tr.MaxIdleConns, tr.MaxIdleConnsPerHost,
+		"every pooled connection may idle per host")
+	assert.False(t, tr.ForceAttemptHTTP2,
+		"HTTP/2 stays disabled so the header and idle-read bounds keep working")
+	assert.Equal(t, tfeclient.DefaultResponseHeaderTimeout, tr.ResponseHeaderTimeout)
+}
+
+func TestCallerSuppliedClientIsThrottled(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+
+	stub := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    r,
+			}, nil
+		}),
+	}
+
+	// A near-zero rate ceiling leaves the governor's bucket a single token:
+	// the first request spends it, and the second could not be served for
+	// days, so a short deadline must surface the governor rather than the
+	// stub's instant answer.
+	hc := tfeclient.ResolveHTTPClient(
+		tfeclient.WithHTTPClient(stub),
+		tfeclient.WithRateLimit(0.000001),
+	)
+
+	require.NotSame(t, stub, hc, "the caller's client is wrapped as a copy, not mutated")
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://offline.invalid/", http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := hc.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+	defer cancel()
+
+	req, err = http.NewRequestWithContext(ctx, http.MethodGet, "http://offline.invalid/", http.NoBody)
+	require.NoError(t, err)
+
+	_, err = hc.Do(req) //nolint:bodyclose // The throttled attempt returns no response.
+
+	require.ErrorContains(t, err, "rate governor wait", "the deadline surfaces the governor, not the network")
+	assert.Equal(t, 1, calls, "the throttled attempt never reaches the wrapped transport")
+}
+
+func TestPaginate(t *testing.T) {
+	t.Parallel()
+
+	c := newOfflineClient(t)
+
+	t.Run("accumulates all pages and halts at next page zero", func(t *testing.T) {
+		t.Parallel()
+
+		pages := [][]int{{1, 2}, {3, 4}, {5, 6}}
+		nextPage := []int{2, 3, 0}
+
+		var (
+			calls    int
+			seenPage []int
+		)
+
+		fetch := func(
+			_ context.Context,
+			_ *tfe.Client,
+			opts tfe.ListOptions,
+		) ([]int, *tfe.Pagination, error) {
+			seenPage = append(seenPage, opts.PageNumber)
+			idx := calls
+			calls++
+
+			return pages[idx], &tfe.Pagination{
+				CurrentPage: opts.PageNumber,
+				NextPage:    nextPage[idx],
+			}, nil
+		}
+
+		got, err := tfeclient.Paginate(t.Context(), c, fetch)
+
+		require.NoError(t, err)
+		assert.Equal(t, []int{1, 2, 3, 4, 5, 6}, got)
+		assert.Equal(t, 3, calls)
+		assert.Equal(t, []int{1, 2, 3}, seenPage)
+	})
+
+	t.Run("propagates fetch error", func(t *testing.T) {
+		t.Parallel()
+
+		sentinel := errors.New("fetch broke")
+
+		fetch := func(
+			_ context.Context,
+			_ *tfe.Client,
+			_ tfe.ListOptions,
+		) ([]int, *tfe.Pagination, error) {
+			return nil, nil, sentinel
+		}
+
+		got, err := tfeclient.Paginate(t.Context(), c, fetch)
+
+		require.ErrorIs(t, err, sentinel)
+		assert.Nil(t, got)
+	})
+
+	t.Run("nil pagination halts after one page", func(t *testing.T) {
+		t.Parallel()
+
+		fetch := func(
+			_ context.Context,
+			_ *tfe.Client,
+			_ tfe.ListOptions,
+		) ([]int, *tfe.Pagination, error) {
+			return []int{7}, nil, nil
+		}
+
+		got, err := tfeclient.Paginate(t.Context(), c, fetch)
+
+		require.NoError(t, err)
+		assert.Equal(t, []int{7}, got)
+	})
+
+	t.Run("non-advancing next page is an error, not a truncated listing", func(t *testing.T) {
+		t.Parallel()
+
+		var calls int
+
+		fetch := func(
+			_ context.Context,
+			_ *tfe.Client,
+			opts tfe.ListOptions,
+		) ([]int, *tfe.Pagination, error) {
+			calls++
+
+			return []int{calls}, &tfe.Pagination{
+				CurrentPage: opts.PageNumber,
+				NextPage:    opts.PageNumber, // claims more pages but never advances
+			}, nil
+		}
+
+		got, err := tfeclient.Paginate(t.Context(), c, fetch)
+
+		require.ErrorIs(t, err, tfeclient.ErrPaginationStalled)
+		assert.Nil(t, got, "a stalled pagination must not surface a partial listing as complete")
+		assert.Equal(t, 1, calls, "the stall is detected on the first non-advancing page")
+	})
+
+	t.Run("known extent loads pages concurrently and stitches page order", func(t *testing.T) {
+		t.Parallel()
+
+		const totalPages = 4
+
+		var (
+			mu       sync.Mutex
+			seenSize []int
+		)
+
+		// The fetch answers purely from the requested page number, so it is safe
+		// for the concurrent batch and the stitched order proves itself.
+		fetch := func(
+			_ context.Context,
+			_ *tfe.Client,
+			opts tfe.ListOptions,
+		) ([]int, *tfe.Pagination, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			seenSize = append(seenSize, opts.PageSize)
+
+			p := opts.PageNumber
+			next := p + 1
+			if p == totalPages {
+				next = 0
+			}
+
+			return []int{p*2 - 1, p * 2}, &tfe.Pagination{
+				CurrentPage: p,
+				NextPage:    next,
+				TotalPages:  totalPages,
+			}, nil
+		}
+
+		got, err := tfeclient.Paginate(t.Context(), c, fetch)
+
+		require.NoError(t, err)
+		assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, got, "items keep the listing's page order")
+		assert.Len(t, seenSize, totalPages)
+
+		for _, size := range seenSize {
+			assert.Equal(t, tfeclient.MaxPageSize, size, "every page is requested at the maximum size")
+		}
+	})
+
+	t.Run("a garbage-large TotalPages falls back to the serial walk", func(t *testing.T) {
+		t.Parallel()
+
+		// A misbehaving endpoint advertises an absurd total-pages count. Sizing the
+		// per-page slot array from it would OOM (or panic on a negative length at
+		// math.MaxInt), so the walk must follow NextPage serially to the real end
+		// instead.
+		fetch := func(
+			_ context.Context,
+			_ *tfe.Client,
+			opts tfe.ListOptions,
+		) ([]int, *tfe.Pagination, error) {
+			p := opts.PageNumber
+			next := p + 1
+			if p == 3 {
+				next = 0
+			}
+
+			return []int{p}, &tfe.Pagination{
+				CurrentPage: p,
+				NextPage:    next,
+				TotalPages:  math.MaxInt,
+			}, nil
+		}
+
+		got, err := tfeclient.Paginate(t.Context(), c, fetch)
+
+		require.NoError(t, err)
+		assert.Equal(t, []int{1, 2, 3}, got, "the serial walk reaches the real end without a huge allocation")
+	})
+
+	t.Run("a listing that grew during the batch is walked to its new end", func(t *testing.T) {
+		t.Parallel()
+
+		// The first page claims two pages, but by the time page 2 is read the
+		// listing has grown a third; its NextPage advertises the tail.
+		fetch := func(
+			_ context.Context,
+			_ *tfe.Client,
+			opts tfe.ListOptions,
+		) ([]int, *tfe.Pagination, error) {
+			switch opts.PageNumber {
+			case 1:
+				return []int{1, 2}, &tfe.Pagination{CurrentPage: 1, NextPage: 2, TotalPages: 2}, nil
+			case 2:
+				return []int{3, 4}, &tfe.Pagination{CurrentPage: 2, NextPage: 3, TotalPages: 3}, nil
+			default:
+				return []int{5}, &tfe.Pagination{CurrentPage: 3, NextPage: 0, TotalPages: 3}, nil
+			}
+		}
+
+		got, err := tfeclient.Paginate(t.Context(), c, fetch)
+
+		require.NoError(t, err)
+		assert.Equal(t, []int{1, 2, 3, 4, 5}, got, "the grown tail is appended after the batch")
+	})
+
+	t.Run("a stalled tail after the batch is an error", func(t *testing.T) {
+		t.Parallel()
+
+		// The final batch page claims a further page that does not advance past
+		// it, so the tail walk must surface the stall.
+		fetch := func(
+			_ context.Context,
+			_ *tfe.Client,
+			opts tfe.ListOptions,
+		) ([]int, *tfe.Pagination, error) {
+			if opts.PageNumber == 1 {
+				return []int{1}, &tfe.Pagination{CurrentPage: 1, NextPage: 2, TotalPages: 2}, nil
+			}
+
+			return []int{2}, &tfe.Pagination{CurrentPage: 2, NextPage: 2, TotalPages: 2}, nil
+		}
+
+		got, err := tfeclient.Paginate(t.Context(), c, fetch)
+
+		require.ErrorIs(t, err, tfeclient.ErrPaginationStalled)
+		assert.Nil(t, got, "a stalled tail must not surface a partial listing as complete")
+	})
+}
+
+// recordingGate records the order of gate and fn events so tests can assert
+// that Do brackets fn with an acquire and a release.
+type recordingGate struct {
+	mu         sync.Mutex
+	events     []string
+	acquireErr error
+}
+
+func (g *recordingGate) Acquire(_ context.Context) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.acquireErr != nil {
+		return g.acquireErr
+	}
+
+	g.events = append(g.events, "acquire")
+
+	return nil
+}
+
+func (g *recordingGate) Release() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.events = append(g.events, "release")
+}
+
+func (g *recordingGate) record(event string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.events = append(g.events, event)
+}
+
+func TestDoGate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("brackets fn with acquire and release", func(t *testing.T) {
+		t.Parallel()
+
+		gate := &recordingGate{}
+		c := newOfflineClient(t, tfeclient.WithGate(gate))
+
+		err := c.Do(t.Context(), func(_ context.Context, _ *tfe.Client) error {
+			gate.record("fn")
+
+			return nil
+		})
+		require.NoError(t, err)
+
+		assert.Equal(t, []string{"acquire", "fn", "release"}, gate.events)
+	})
+
+	t.Run("releases the slot when fn errors", func(t *testing.T) {
+		t.Parallel()
+
+		gate := &recordingGate{}
+		c := newOfflineClient(t, tfeclient.WithGate(gate))
+
+		sentinel := errors.New("from fn")
+
+		err := c.Do(t.Context(), func(_ context.Context, _ *tfe.Client) error {
+			return sentinel
+		})
+		require.ErrorIs(t, err, sentinel)
+
+		assert.Equal(t, []string{"acquire", "release"}, gate.events)
+	})
+
+	t.Run("acquire error propagates and skips fn", func(t *testing.T) {
+		t.Parallel()
+
+		sentinel := errors.New("gate closed")
+		gate := &recordingGate{acquireErr: sentinel}
+		c := newOfflineClient(t, tfeclient.WithGate(gate))
+
+		called := false
+
+		err := c.Do(t.Context(), func(_ context.Context, _ *tfe.Client) error {
+			called = true
+
+			return nil
+		})
+
+		require.ErrorIs(t, err, sentinel)
+		assert.False(t, called, "fn must not run without a slot")
+		assert.Empty(t, gate.events, "a denied acquire leaves nothing to release")
+	})
+}
+
+func TestDoRunsListUsesSeparateGate(t *testing.T) {
+	t.Parallel()
+
+	gate := &recordingGate{}
+	c := newOfflineClient(t, tfeclient.WithGate(gate))
+
+	called := false
+
+	err := c.DoRunsList(t.Context(), func(_ context.Context, _ *tfe.Client) error {
+		called = true
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	assert.True(t, called)
+	assert.Empty(t, gate.events, "the runs list bucket must not touch the general gate")
+}
+
+func TestDoRunsListConcurrency(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		slots int
+		unset bool
+		calls int
+		want  int
+	}{
+		"bounds concurrent calls at the configured size": {slots: 2, calls: 3, want: 2},
+		// Both counts sit above the default, so a disable path that silently fell
+		// back to it would stall in the admit loop rather than pass.
+		"a non-positive size leaves the bucket ungated": {
+			slots: 0,
+			calls: tfeclient.DefaultRunsListConcurrency + 1,
+			want:  tfeclient.DefaultRunsListConcurrency + 1,
+		},
+		"the unset default bounds the bucket": {
+			unset: true,
+			calls: tfeclient.DefaultRunsListConcurrency + 1,
+			want:  tfeclient.DefaultRunsListConcurrency,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var opts []tfeclient.Option
+
+			if !tc.unset {
+				opts = append(opts, tfeclient.WithRunsListConcurrency(tc.slots))
+			}
+
+			c := newOfflineClient(t, opts...)
+
+			// The callback issues no request, so nothing but the gate can bound
+			// it: the governor lives in the transport, and a real call would
+			// serialize there whatever the gate does.
+			var (
+				entered = make(chan struct{}, tc.calls)
+				release = make(chan struct{})
+				wg      sync.WaitGroup
+			)
+
+			// The error is always nil; the callback exists to occupy a slot until
+			// the test releases it.
+			//nolint:unparam // The signature is [tfeclient.Client.DoRunsList]'s.
+			hold := func(_ context.Context, _ *tfe.Client) error {
+				entered <- struct{}{}
+
+				<-release
+
+				return nil
+			}
+
+			for range tc.calls {
+				wg.Go(func() {
+					_ = c.DoRunsList(t.Context(), hold) //nolint:errcheck // The call's own error is not under test.
+				})
+			}
+
+			for range tc.want {
+				select {
+				case <-entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("a call the gate should admit never started")
+				}
+			}
+
+			// One more would mean the gate admitted past its size. Nothing is
+			// left to wait on, so this window only has to outlast the scheduling
+			// of goroutines already running. An ungated bucket admits every call
+			// by design, leaving no held-back one to watch for.
+			if tc.calls > tc.want {
+				select {
+				case <-entered:
+					t.Fatalf("more than %d calls ran at once", tc.want)
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
+
+			close(release)
+			wg.Wait()
+		})
+	}
+}
+
+// TestRunsListBypassesAFullGeneralGate drives the whole stack: with the general
+// gate permanently full, a runs list request must still reach the server, and a
+// general one must not.
+func TestRunsListBypassesAFullGeneralGate(t *testing.T) {
+	t.Parallel()
+
+	var (
+		runsHit = make(chan struct{}, 1)
+		readHit = make(chan struct{}, 1)
+		mux     = http.NewServeMux()
+	)
+
+	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Both signals are non-blocking, so a retried request reports and moves on
+	// rather than wedging its handler on a full channel.
+	mux.HandleFunc("/api/v2/workspaces/ws-1/runs", func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case runsHit <- struct{}{}:
+		default:
+		}
+
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		fmt.Fprint(w, `{"data":[]}`) //nolint:errcheck // Best-effort test response.
+	})
+
+	mux.HandleFunc("/api/v2/workspaces/ws-1", func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case readHit <- struct{}{}:
+		default:
+		}
+
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		fmt.Fprint(w, `{"data":{"type":"workspaces","id":"ws-1"}}`) //nolint:errcheck // Best-effort test response.
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	// A gate with no slots never grants one, standing in for a general gate the
+	// rest of the run has fully occupied.
+	c, err := tfeclient.New(
+		tfeclient.WithToken("test-token"),
+		tfeclient.WithAddress(srv.URL),
+		tfeclient.WithGate(tfeclient.NewSemaphore(0)),
+	)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var wg sync.WaitGroup
+
+	wg.Go(func() {
+		//nolint:errcheck // Only the request reaching the server is under test.
+		_ = c.DoRunsList(ctx, func(ctx context.Context, tc *tfe.Client) error {
+			_, e := tc.Runs.List(ctx, "ws-1", &tfe.RunListOptions{})
+
+			return fmt.Errorf("list runs: %w", e)
+		})
+	})
+
+	wg.Go(func() {
+		//nolint:errcheck // This call is expected never to launch.
+		_ = c.Do(ctx, func(ctx context.Context, tc *tfe.Client) error {
+			_, e := tc.Workspaces.ReadByID(ctx, "ws-1")
+
+			return fmt.Errorf("read workspace: %w", e)
+		})
+	})
+
+	select {
+	case <-runsHit:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a runs list request must not queue behind the general gate")
+	}
+
+	select {
+	case <-readHit:
+		t.Fatal("a general request must still wait for a general slot")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Unblock the general request still parked in the gate, so neither goroutine
+	// outlives the test.
+	cancel()
+	wg.Wait()
+}
+
+// newServerClient builds a [tfeclient.Client] against a live test server
+// serving mux, answering the constructor ping itself, so download methods
+// exercise the real request path end to end.
+func newServerClient(t *testing.T, mux *http.ServeMux) *tfeclient.Client {
+	t.Helper()
+
+	c, _ := newServerClientURL(t, mux)
+
+	return c
+}
+
+// newServerClientURL is [newServerClient] that also returns the server's base
+// URL, for exercising the Open methods that fetch an absolute signed URL.
+func newServerClientURL(t *testing.T, mux *http.ServeMux) (*tfeclient.Client, string) {
+	t.Helper()
+
+	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, err := tfeclient.New(tfeclient.WithToken("test-token"), tfeclient.WithAddress(srv.URL))
+	require.NoError(t, err)
+
+	return c, srv.URL
+}
+
+func TestOpenPlanLog(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		served string
+		hasURL bool
+		want   string
+		err    error
+	}{
+		"trims stx etx framing": {
+			served: "\x02plan output\x03",
+			hasURL: true,
+			want:   "plan output",
+		},
+		"unframed log passes through": {
+			served: "plain output",
+			hasURL: true,
+			want:   "plain output",
+		},
+		"etx kept without a leading stx": {
+			served: "tail\x03",
+			hasURL: true,
+			want:   "tail\x03",
+		},
+		"missing log url": {
+			err: tfeclient.ErrMissingLogURL,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var artifactHits atomic.Int64
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v2/plans/plan-1", func(w http.ResponseWriter, r *http.Request) {
+				logURL := ""
+				if tc.hasURL {
+					logURL = "http://" + r.Host + "/artifact/plan-1"
+				}
+
+				w.Header().Set("Content-Type", "application/vnd.api+json")
+
+				_, werr := fmt.Fprintf(
+					w,
+					`{"data":{"id":"plan-1","type":"plans","attributes":{"log-read-url":%q}}}`,
+					logURL,
+				)
+				if werr != nil {
+					return
+				}
+			})
+			mux.HandleFunc("/artifact/plan-1", func(w http.ResponseWriter, r *http.Request) {
+				artifactHits.Add(1)
+
+				// Archivist rejects the SDK's JSON:API accept header with a
+				// 400, so the fake does too; the download must send an accept
+				// that admits text/plain.
+				if !strings.Contains(r.Header.Get("Accept"), "*/*") {
+					w.WriteHeader(http.StatusBadRequest)
+
+					return
+				}
+
+				_, werr := io.WriteString(w, tc.served)
+				if werr != nil {
+					return
+				}
+			})
+
+			c := newServerClient(t, mux)
+
+			r, err := c.OpenPlanLog(t.Context(), "plan-1")
+
+			if tc.err != nil {
+				require.ErrorIs(t, err, tc.err)
+
+				return
+			}
+
+			require.NoError(t, err)
+
+			got, err := io.ReadAll(r)
+			require.NoError(t, err)
+			require.NoError(t, r.Close())
+
+			assert.Equal(t, tc.want, string(got))
+			assert.Equal(t, int64(1), artifactHits.Load(), "the whole log downloads in one request")
+		})
+	}
+}
+
+func TestOpenApplyLog(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/applies/apply-1", func(w http.ResponseWriter, r *http.Request) {
+		logURL := "http://" + r.Host + "/artifact/apply-1"
+
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+
+		_, werr := fmt.Fprintf(w, `{"data":{"id":"apply-1","type":"applies","attributes":{"log-read-url":%q}}}`, logURL)
+		if werr != nil {
+			return
+		}
+	})
+	mux.HandleFunc("/artifact/apply-1", func(w http.ResponseWriter, r *http.Request) {
+		// Mirrors archivist's rejection of the JSON:API accept header; see
+		// TestOpenPlanLog.
+		if !strings.Contains(r.Header.Get("Accept"), "*/*") {
+			w.WriteHeader(http.StatusBadRequest)
+
+			return
+		}
+
+		_, werr := io.WriteString(w, "\x02apply output\x03")
+		if werr != nil {
+			return
+		}
+	})
+
+	c := newServerClient(t, mux)
+
+	r, err := c.OpenApplyLog(t.Context(), "apply-1")
+	require.NoError(t, err)
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+
+	assert.Equal(t, "apply output", string(got))
+}
+
+func TestLogReader(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		in   string
+		want string
+	}{
+		"framed trim":              {in: "\x02plan output\x03", want: "plan output"},
+		"unframed passthrough":     {in: "plain output", want: "plain output"},
+		"etx without stx is kept":  {in: "tail\x03", want: "tail\x03"},
+		"interior etx unframed":    {in: "a\x03b", want: "a\x03b"},
+		"empty":                    {in: "", want: ""},
+		"framed empty":             {in: "\x02\x03", want: ""},
+		"stx only":                 {in: "\x02", want: ""},
+		"interior etx framed":      {in: "\x02a\x03b\x03", want: "a\x03b"},
+		"double trailing etx kept": {in: "\x02abc\x03\x03", want: "abc\x03"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// Whole read.
+			r := tfeclient.NewLogReader(io.NopCloser(strings.NewReader(tc.in)))
+
+			got, err := io.ReadAll(r)
+			require.NoError(t, err)
+			require.NoError(t, r.Close())
+			assert.Equal(t, tc.want, string(got))
+
+			// One byte at a time over a one-byte-at-a-time underlying reader, to
+			// exercise the hold-back across chunk boundaries in both directions.
+			chunked := tfeclient.NewLogReader(io.NopCloser(iotest.OneByteReader(strings.NewReader(tc.in))))
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, readByteAtATime(t, chunked))
+			require.NoError(t, chunked.Close())
+		})
+	}
+}
+
+// bytesThenErr yields data once, then returns err on every subsequent read, so a
+// reader can be driven to a non-EOF read fault at a chosen point in the stream.
+type bytesThenErr struct {
+	err  error
+	data []byte
+	off  int
+}
+
+func (r *bytesThenErr) Read(p []byte) (int, error) {
+	if r.off < len(r.data) {
+		n := copy(p, r.data[r.off:])
+		r.off += n
+
+		return n, nil
+	}
+
+	return 0, r.err
+}
+
+func TestLogReaderSurfacesPeekError(t *testing.T) {
+	t.Parallel()
+
+	errBoom := errors.New("boom")
+
+	// A framed stream delivers its trailing ETX, then the underlying read faults
+	// with a non-EOF error before EOF is reached. The ETX must not be emitted as
+	// content; the fault surfaces instead.
+	src := &bytesThenErr{data: []byte("\x02abc\x03"), err: errBoom}
+	r := tfeclient.NewLogReader(io.NopCloser(src))
+
+	got, err := io.ReadAll(r)
+	require.ErrorIs(t, err, errBoom)
+	assert.Equal(t, "abc", string(got))
+	require.NoError(t, r.Close())
+}
+
+// readByteAtATime drains r one byte per Read call, so a reader is exercised at
+// the smallest possible buffer size.
+func readByteAtATime(t *testing.T, r io.Reader) string {
+	t.Helper()
+
+	var out []byte
+
+	buf := make([]byte, 1)
+
+	for {
+		n, err := r.Read(buf)
+		out = append(out, buf[:n]...)
+
+		if errors.Is(err, io.EOF) {
+			return string(out)
+		}
+
+		require.NoError(t, err)
+	}
+}
+
+func TestOpenState(t *testing.T) {
+	t.Parallel()
+
+	// A raw payload with an embedded NUL proves the blob streams byte-for-byte,
+	// unparsed and untransformed, rather than round-tripping through a decoder.
+	const body = "raw state blob\x00\x01\x02 bytes"
+
+	var hits atomic.Int64
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/dl/state", func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+
+		assert.Equal(t, "application/json", r.Header.Get("Accept"))
+
+		_, werr := io.WriteString(w, body)
+		if werr != nil {
+			return
+		}
+	})
+
+	c, base := newServerClientURL(t, mux)
+
+	r, err := c.OpenState(t.Context(), base+"/dl/state")
+	require.NoError(t, err)
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+
+	assert.Equal(t, body, string(got))
+	assert.Equal(t, int64(1), hits.Load(), "the blob streams in one request")
+}
+
+func TestOpenConfigurationVersion(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "\x1f\x8b\x08 fake tar.gz \x00\x01\x02"
+
+	var hits atomic.Int64
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/configuration-versions/cv-1/download", func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+
+		_, werr := io.WriteString(w, tarball)
+		if werr != nil {
+			return
+		}
+	})
+
+	c := newServerClient(t, mux)
+
+	r, err := c.OpenConfigurationVersion(t.Context(), "cv-1")
+	require.NoError(t, err)
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+
+	assert.Equal(t, tarball, string(got))
+	assert.Equal(t, int64(1), hits.Load(), "the tarball streams in one request")
+}
+
+func TestOpenPlanJSON(t *testing.T) {
+	t.Parallel()
+
+	// A raw payload with an embedded NUL proves the artifact streams byte-for-byte
+	// rather than round-tripping through a JSON decoder.
+	const body = "structured plan\x00 output"
+
+	var hits atomic.Int64
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/plans/plan-1/json-output", func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+
+		_, werr := io.WriteString(w, body)
+		if werr != nil {
+			return
+		}
+	})
+
+	c := newServerClient(t, mux)
+
+	r, err := c.OpenPlanJSON(t.Context(), "plan-1")
+	require.NoError(t, err)
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+
+	assert.Equal(t, body, string(got))
+	assert.Equal(t, int64(1), hits.Load(), "the structured plan streams in one request")
+}
+
+func TestOpenClassifiesStatus(t *testing.T) {
+	t.Parallel()
+
+	// DoRaw discards the SDK's typed error, so each Open method translates the
+	// captured status back to the Kind the buffered path produced. 410 is left
+	// unmapped on purpose, since the buffered checkResponseCode did not map it.
+	tests := map[string]struct {
+		status int
+		want   tfeclient.Kind
+	}{
+		"404 is terminal":  {status: http.StatusNotFound, want: tfeclient.KindTerminal},
+		"403 is forbidden": {status: http.StatusForbidden, want: tfeclient.KindForbidden},
+		"401 is unknown":   {status: http.StatusUnauthorized, want: tfeclient.KindUnknown},
+		"410 is unknown":   {status: http.StatusGone, want: tfeclient.KindUnknown},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v2/configuration-versions/cv-1/download",
+				func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(tc.status)
+				})
+
+			c := newServerClient(t, mux)
+
+			r, err := c.OpenConfigurationVersion(t.Context(), "cv-1")
+			if r != nil {
+				require.NoError(t, r.Close())
+			}
+
+			require.Error(t, err)
+			assert.Equal(t, tc.want, tfeclient.Classify(err))
+		})
+	}
+}
+
+func TestRateLimitCounterCounts429s(t *testing.T) {
+	t.Parallel()
+
+	// The governor counts each rate-limited response on the wire, below the
+	// retry loop: the transport retries the two 429s internally, so one
+	// request from the caller counts exactly two and surfaces the eventual
+	// success, which counts nothing.
+	status := []int{
+		http.StatusTooManyRequests,
+		http.StatusTooManyRequests,
+		http.StatusOK,
+	}
+
+	var mu sync.Mutex
+
+	call := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+
+		code := status[min(call, len(status)-1)]
+		call++
+		mu.Unlock()
+
+		// A zero reset keeps the governor from pausing the test for its
+		// fallback cooldown.
+		if code == http.StatusTooManyRequests {
+			w.Header().Set("X-Ratelimit-Reset", "0")
+		}
+
+		w.WriteHeader(code)
+	}))
+	t.Cleanup(srv.Close)
+
+	counter := new(atomic.Int64)
+	client := tfeclient.ResolveHTTPClient(
+		tfeclient.WithRateLimitCounter(counter),
+		tfeclient.WithRateLimit(1000),
+	)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "the retried request surfaces the eventual success")
+	assert.Equal(t, int64(2), counter.Load())
+}
+
+// doGet issues a context-bound GET through hc, closes the body, and returns
+// the status code, which is all the retry tests assert on.
+func doGet(t *testing.T, hc *http.Client, url string) int {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := hc.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	return resp.StatusCode
+}
+
+func TestServerErrorRetry(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a transient 5xx is retried and succeeds", func(t *testing.T) {
+		t.Parallel()
+
+		var hits atomic.Int64
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if hits.Add(1) <= 2 {
+				w.WriteHeader(http.StatusInternalServerError)
+
+				return
+			}
+
+			_, werr := io.WriteString(w, "ok")
+			if werr != nil {
+				return
+			}
+		}))
+		t.Cleanup(srv.Close)
+
+		hc := tfeclient.ResolveHTTPClient(tfeclient.WithServerErrorRetry(3, 0))
+
+		status := doGet(t, hc, srv.URL)
+
+		assert.Equal(t, http.StatusOK, status)
+		assert.Equal(t, int64(3), hits.Load(), "two failed attempts, then the success")
+	})
+
+	t.Run("a persistent 5xx returns after the bounded attempts", func(t *testing.T) {
+		t.Parallel()
+
+		var hits atomic.Int64
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.WriteHeader(http.StatusBadGateway)
+		}))
+		t.Cleanup(srv.Close)
+
+		hc := tfeclient.ResolveHTTPClient(tfeclient.WithServerErrorRetry(2, 0))
+
+		start := time.Now()
+		status := doGet(t, hc, srv.URL)
+
+		assert.Equal(t, http.StatusBadGateway, status, "the final attempt's response is returned as-is")
+		assert.Equal(t, int64(3), hits.Load(), "the first attempt plus the configured retries")
+		assert.Less(t, time.Since(start), 5*time.Second, "the stall is bounded")
+	})
+
+	t.Run("a request with a body is not retried", func(t *testing.T) {
+		t.Parallel()
+
+		var hits atomic.Int64
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		t.Cleanup(srv.Close)
+
+		hc := tfeclient.ResolveHTTPClient(tfeclient.WithServerErrorRetry(3, 0))
+
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+		require.NoError(t, err)
+
+		resp, err := hc.Do(req)
+		require.NoError(t, err)
+
+		t.Cleanup(func() { assert.NoError(t, resp.Body.Close()) })
+
+		assert.Equal(t, int64(1), hits.Load(), "a consumed body cannot be re-sent")
+	})
+
+	t.Run("a persistent 429 converts to ErrRateLimited after its own budget", func(t *testing.T) {
+		t.Parallel()
+
+		var hits atomic.Int64
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			// A zero reset keeps the governor from pausing the test for its
+			// fallback cooldown.
+			w.Header().Set("X-Ratelimit-Reset", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		t.Cleanup(srv.Close)
+
+		hc := tfeclient.ResolveHTTPClient(
+			tfeclient.WithServerErrorRetry(3, 0),
+			tfeclient.WithRateLimit(1000),
+		)
+
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+		require.NoError(t, err)
+
+		resp, err := hc.Do(req) //nolint:bodyclose // An exhausted rate-limit budget returns no response.
+
+		require.ErrorIs(t, err, tfeclient.ErrRateLimited, "an unretried 429 is an error, never a response")
+		assert.Nil(t, resp)
+		assert.Equal(t, int64(1+tfeclient.DefaultRateLimitRetries), hits.Load(),
+			"the first attempt plus the fixed rate-limit budget; the server-error budget does not multiply it")
+		assert.Equal(t, tfeclient.KindTransient, tfeclient.Classify(err),
+			"an exhausted budget stays retryable on the next run")
+	})
+
+	t.Run("a 429 on a request with a body is not retried and still converts", func(t *testing.T) {
+		t.Parallel()
+
+		var hits atomic.Int64
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.Header().Set("X-Ratelimit-Reset", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		t.Cleanup(srv.Close)
+
+		hc := tfeclient.ResolveHTTPClient(tfeclient.WithRateLimit(1000))
+
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+		require.NoError(t, err)
+
+		resp, err := hc.Do(req) //nolint:bodyclose // The converted 429 returns no response.
+
+		require.ErrorIs(t, err, tfeclient.ErrRateLimited)
+		assert.Nil(t, resp)
+		assert.Equal(t, int64(1), hits.Load(), "a consumed body cannot be re-sent")
+	})
+}
+
+func TestRateLimit429StormEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	// The regression this pins: go-tfe retries a 429 unconditionally (30
+	// times), sleeping every 429'd request to the same reset instant so they
+	// stampede the reopened window together, and its reset-header parse exits
+	// the process on a malformed value. The transport now owns 429s, so the
+	// whole go-tfe call must come back after exactly the bounded attempts with
+	// an error wrapping ErrRateLimited; go-tfe adds no attempts of its own.
+	var hits atomic.Int64
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/v2/organization/audit-trail", func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("X-Ratelimit-Reset", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, err := tfeclient.New(
+		tfeclient.WithToken("test-token"),
+		tfeclient.WithAddress(srv.URL),
+		tfeclient.WithRateLimit(1000),
+	)
+	require.NoError(t, err)
+
+	start := time.Now()
+
+	err = c.Do(t.Context(), func(ctx context.Context, tc *tfe.Client) error {
+		_, e := tc.AuditTrails.List(ctx, &tfe.AuditTrailListOptions{})
+		if e != nil {
+			return fmt.Errorf("list audit trails: %w", e)
+		}
+
+		return nil
+	})
+
+	require.ErrorIs(t, err, tfeclient.ErrRateLimited)
+	assert.Equal(t, int64(1+tfeclient.DefaultRateLimitRetries), hits.Load(),
+		"the first attempt plus the bounded rate-limit retries, not go-tfe's 30")
+	assert.Equal(t, tfeclient.KindTransient, tfeclient.Classify(err))
+	assert.Less(t, time.Since(start), 10*time.Second)
+}
+
+func TestRateLimitHeaderStrippedEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	// Every response advertises a crawl-speed X-RateLimit-Limit. The go-tfe
+	// client reads that header during construction to configure an internal
+	// limiter of its own (a fraction of the advertised limit, waited on for every request);
+	// the governor transport strips the header off every response, including
+	// the constructor ping, so that limiter must never engage and the
+	// requests complete at the governor's pace.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Ratelimit-Limit", "1")
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/v2/plans/plan-1", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Ratelimit-Limit", "1")
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+
+		_, werr := io.WriteString(w, `{"data":{"id":"plan-1","type":"plans","attributes":{}}}`)
+		if werr != nil {
+			return
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, err := tfeclient.New(
+		tfeclient.WithToken("test-token"),
+		tfeclient.WithAddress(srv.URL),
+		tfeclient.WithRateLimit(1000),
+	)
+	require.NoError(t, err)
+
+	const requests = 5
+
+	start := time.Now()
+
+	for range requests {
+		err = c.Do(t.Context(), func(ctx context.Context, tc *tfe.Client) error {
+			_, e := tc.Plans.Read(ctx, "plan-1")
+			if e != nil {
+				return fmt.Errorf("read plan: %w", e)
+			}
+
+			return nil
+		})
+		require.NoError(t, err)
+	}
+
+	// At the advertised limit go-tfe's internal limiter would pace well under
+	// one request per second; five requests finishing promptly proves it
+	// never configured.
+	assert.Less(t, time.Since(start), 3*time.Second,
+		"go-tfe's internal limiter never engages once the header is stripped")
+}
+
+func TestServerErrorStallIsBoundedEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	// The regression this pins: with go-tfe's own RetryServerErrors enabled, a
+	// persistently failing endpoint was retried 30 times under a linearly
+	// growing backoff: over six minutes per request, none of it configurable.
+	// The bounded transport retry replaces it, so the whole go-tfe call must
+	// come back in seconds after exactly the configured attempts.
+	var hits atomic.Int64
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/v2/organization/audit-trail", func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, err := tfeclient.New(
+		tfeclient.WithToken("test-token"),
+		tfeclient.WithAddress(srv.URL),
+		tfeclient.WithServerErrorRetry(2, 0),
+	)
+	require.NoError(t, err)
+
+	start := time.Now()
+
+	err = c.Do(t.Context(), func(ctx context.Context, tc *tfe.Client) error {
+		_, e := tc.AuditTrails.List(ctx, &tfe.AuditTrailListOptions{})
+		if e != nil {
+			return fmt.Errorf("list audit trails: %w", e)
+		}
+
+		return nil
+	})
+
+	require.Error(t, err, "the failure still surfaces to the caller for recording")
+	assert.Equal(t, int64(3), hits.Load(), "the first attempt plus the configured retries, not go-tfe's 30")
+	assert.Less(t, time.Since(start), 10*time.Second)
+}
