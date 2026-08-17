@@ -199,6 +199,32 @@ func TestStablePagerServesEveryElementAcrossRepeatedDeletionWaves(t *testing.T) 
 	assert.Equal(t, all, got, "every element that outlived the walk is served exactly once")
 }
 
+func TestStablePagerSurvivesAShortMidListingPage(t *testing.T) {
+	t.Parallel()
+
+	// Fetch 2 answers a non-final page that runs short of the endpoint's page
+	// window, the shape a listing edited mid-query produces. The span kept from
+	// it must not shrink below the true window: a re-list divides the serve
+	// boundary by the span, so a shrunken span restarts the scan past the
+	// boundary and the elements the re-list exists to recover are skipped.
+	all := []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10"}
+
+	live := &listing{ids: slices.Clone(all), size: 2, edit: deleteBefore(3, "a1")}
+
+	short := func(ctx context.Context, page int) ([]string, *tfe.Pagination, error) {
+		items, pg, err := live.page(ctx, page)
+		if live.fetches == 2 && len(items) == 2 {
+			items = items[:1]
+		}
+
+		return items, pg, err
+	}
+
+	got := drain(t, workspace.NewStablePager(func(id string) string { return id }, short))
+
+	assert.Equal(t, all, got, "the re-list recovers every element the short page and the deletion displaced")
+}
+
 func TestStablePagerStopsOnAListingThatKeepsShrinking(t *testing.T) {
 	t.Parallel()
 

@@ -216,13 +216,16 @@ func (p *stablePager[T]) lost(pg *tfe.Pagination) int {
 
 // measure records what the fetched page reveals about the listing: the element
 // count the next fetch compares against, and the endpoint's page size, which
-// only a page with a further page after it reports honestly. The smallest such
-// page is kept, the conservative reading, since underestimating the page size
-// only ever sends a re-list further back than it needed to go. A page that
-// reports no total leaves the previous measurement standing rather than reading
-// the silence as an empty listing.
+// only a page with a further page after it reports honestly. The largest such
+// page is kept, the safe reading, since [stablePager.resyncPage] divides the
+// serve boundary by the span: a span short of the endpoint's true page window
+// inflates the restart page past the boundary and skips the unserved elements
+// a re-list exists to recover, while a page can run short of the window (a
+// listing edited mid-query) but never over it. A page that reports no total
+// leaves the previous measurement standing rather than reading the silence as
+// an empty listing.
 func (p *stablePager[T]) measure(pg *tfe.Pagination, items []T, hasNext bool) {
-	if hasNext && len(items) > 0 && (!p.sized || len(items) < p.span) {
+	if hasNext && len(items) > 0 && (!p.sized || len(items) > p.span) {
 		p.span = len(items)
 		p.sized = true
 	}
