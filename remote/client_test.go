@@ -626,6 +626,24 @@ func TestDeleteEmpty(t *testing.T) {
 	assert.Zero(t, deleted)
 }
 
+func TestDeleteCancellationSurfaces(t *testing.T) {
+	t.Parallel()
+
+	// A cancellation that stops the fan-out leaves keys unattempted; the
+	// wind-down must not read as a settled prune to a caller checking only
+	// the error.
+	client, fake := newClient(t, remote.Config{})
+	fake.SetObject("a", remotetest.Object{Data: []byte("x")})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	deleted, err := client.Delete(ctx, []string{"a"})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, deleted)
+	assert.Empty(t, fake.Deleted(), "no delete lands after the cancellation")
+}
+
 func TestCopyDuplicatesServerSide(t *testing.T) {
 	t.Parallel()
 

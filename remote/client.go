@@ -619,7 +619,9 @@ const maxDeleteErrs = 8
 // while the fan-out settles the rest (one bad key must not strand every other
 // stale key for another run), and the failures come back as one joined error
 // beside the truthful count. A context cancellation stops the fan-out early,
-// leaving the rest to the next run.
+// leaving the rest to the next run, and comes back as the context's error
+// beside the count, so keys left unattempted are never mistaken for a settled
+// prune.
 func (c *Client) Delete(ctx context.Context, keys []string) (int, error) {
 	var (
 		deleted atomic.Int64
@@ -688,7 +690,16 @@ func (c *Client) Delete(ctx context.Context, keys []string) (int, error) {
 			"%d of %d deletes failed: %w", failed, len(keys), errors.Join(errs...))
 	}
 
-	return int(deleted.Load()), nil
+	settled := int(deleted.Load())
+
+	// The wind-down left keys unattempted with no per-key failure to carry
+	// the news; report the cancellation rather than a nil error a caller
+	// would read as a fully settled prune.
+	if settled < len(keys) && ctx.Err() != nil {
+		return settled, fmt.Errorf("delete wind-down after %d of %d keys: %w", settled, len(keys), ctx.Err())
+	}
+
+	return settled, nil
 }
 
 // defaultPartSize is the smallest default part size among the parted-upload
