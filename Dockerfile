@@ -6,7 +6,7 @@
 # carries it. Root certificates are the one thing it cannot supply itself:
 # every API call is HTTPS, and with no system trust store Go rejects each one
 # as signed by an unknown authority.
-FROM public.ecr.aws/docker/library/alpine:3.22 AS certs
+FROM public.ecr.aws/docker/library/alpine:3.24 AS certs
 
 FROM scratch
 
