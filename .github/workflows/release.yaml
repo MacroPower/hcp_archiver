@@ -114,7 +114,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Assemble schemas site via Dagger
         uses: dagger/dagger-for-github@v8.4.1
