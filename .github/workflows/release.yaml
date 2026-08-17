@@ -32,8 +32,10 @@ jobs:
           owner: "${{ github.repository_owner }}"
           repositories: |
             hcp_archiver
-          # goreleaser creates the GitHub release; the token needs only repo
-          # contents.
+            homebrew-tap
+            nur-packages
+          # goreleaser creates the GitHub release and pushes manifests to the
+          # tap/NUR repos; the token needs nothing beyond repo contents.
           permission-contents: write
 
       - name: Checkout

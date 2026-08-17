@@ -9,8 +9,9 @@ import (
 )
 
 // Build runs GoReleaser in snapshot mode, producing binaries for all
-// platforms. Returns the dist/ directory. Docker, signing, and SBOM stages
-// are skipped here: images are built natively via Dagger in [Ci.BuildImages],
+// platforms. Returns the dist/ directory. Docker, Homebrew, Nix, signing, and
+// SBOM stages are skipped here: images are built natively via Dagger in
+// [Ci.BuildImages], package publishing only happens during a real release,
 // and signing requires OIDC credentials only available during a real release.
 func (m *Ci) Build(ctx context.Context) (*dagger.Directory, error) {
 	ctr, err := m.releaserBase(ctx)
@@ -20,7 +21,7 @@ func (m *Ci) Build(ctx context.Context) (*dagger.Directory, error) {
 	return ctr.
 		WithExec([]string{
 			"goreleaser", "release", "--snapshot", "--clean",
-			"--skip=docker,sign,sbom",
+			"--skip=docker,homebrew,nix,sign,sbom",
 			"--parallelism=0",
 		}).
 		Directory("/src/dist"), nil

@@ -46,12 +46,17 @@ syft SBOM tooling (`with-cosign`/`with-syft`/`sign-keyless`).
 - `releaserBase` (private, in `build.go`) builds the release container: the
   goreleaser Go base + cosign + syft, then mounts the source and bootstraps a
   git repo via `ensure-git-repo` (now on the goreleaser toolchain).
-- `build` snapshot-cross-compiles the binaries (no publishing).
+- `build` snapshot-cross-compiles the binaries (no publishing; the Homebrew
+  and Nix stages are skipped along with Docker, signing, and SBOMs).
   `binary` / `binary-snapshot` produce a single-platform binary the same way.
 - `release --tag=vX.Y.Z` runs GoReleaser for binaries/archives/SBOMs/signing,
-  creates the GitHub release, builds the multi-arch runtime image from the dist
-  binaries (scratch base + the hcp_archiver binary), publishes it natively via
-  Dagger, and signs the published digests with cosign keyless signing. Signing
+  creates the GitHub release, publishes the Homebrew cask to
+  `MacroPower/homebrew-tap` and the Nix package to `MacroPower/nur-packages`
+  (via GoReleaser's `homebrew_casks`/`nix` sections, using the GITHUB_TOKEN
+  passed into the release container), builds the multi-arch runtime image from
+  the dist binaries (scratch base + the hcp_archiver binary), publishes it
+  natively via Dagger, and signs the published digests with cosign keyless
+  signing. Signing
   is keyless (Sigstore Fulcio + Rekor): the workflow forwards the GitHub Actions
   OIDC token; with no token the release is unsigned.
 - `publish-images` publishes pre-built runtime images under the supplied tags.

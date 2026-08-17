@@ -92,6 +92,46 @@ archives:
     files:
       - LICENSE
 
+homebrew_casks:
+  - repository:
+      owner: MacroPower
+      name: homebrew-tap
+    url:
+      template: &archiveTemplate >-
+        https://github.com/MacroPower/hcp_archiver/releases/download/{{ .Tag }}/
+        {{- .ProjectName }}_
+        {{- title .Os }}_
+        {{- if eq .Arch "amd64" }}x86_64
+        {{- else if eq .Arch "386" }}i386
+        {{- else }}{{ .Arch }}{{ end -}}
+        {{- if .Arm }}v{{ .Arm }}{{ end -}}
+        .tar.gz
+    commit_msg_template: "chore: cask update for {{ .ProjectName }} {{ .Tag }}"
+    commit_author: &commitAuthor
+      name: botty-mcbottington
+      email: 168950816+botty-mcbottington[bot]@users.noreply.github.com
+    homepage: "https://github.com/MacroPower/hcp_archiver"
+    description: "Archives an HCP Terraform organization to plain files on disk"
+    license: "Apache License"
+    skip_upload: auto
+    binaries: [hcp_archiver]
+
+nix:
+  - name: hcp_archiver
+    repository:
+      owner: MacroPower
+      name: nur-packages
+    url_template: *archiveTemplate
+    commit_msg_template: "chore: pkg update for {{ .ProjectName }} {{ .Tag }}"
+    commit_author: *commitAuthor
+    homepage: "https://github.com/MacroPower/hcp_archiver"
+    description: "Archives an HCP Terraform organization to plain files on disk"
+    license: "asl20"
+    skip_upload: auto
+    install: |
+      mkdir -p $out/bin
+      cp -vr ./hcp_archiver $out/bin/hcp_archiver
+
 signs:
   - cmd: cosign
     signature: "${artifact}.sigstore.json"
