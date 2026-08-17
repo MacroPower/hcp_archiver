@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1528,18 +1529,25 @@ func (l *Ledger) Failures() []Failure {
 	}
 
 	slices.SortFunc(out, func(a, b Failure) int {
-		if a.Status != b.Status {
-			if a.Status == StatusErrored {
-				return -1
-			}
-
-			return 1
-		}
-
-		return strings.Compare(a.RelPath, b.RelPath)
+		return cmp.Or(
+			cmp.Compare(failureRank(a.Status), failureRank(b.Status)),
+			strings.Compare(a.RelPath, b.RelPath),
+		)
 	})
 
 	return out
+}
+
+// failureRank orders failure statuses for [Ledger.Failures]: errored entries
+// sort before forbidden ones. Ranking each element keeps the comparator free
+// of order-dependent branches; out is collected from map iteration, so a
+// branchy comparator would have run-to-run nondeterministic code coverage.
+func failureRank(s Status) int {
+	if s == StatusErrored {
+		return 0
+	}
+
+	return 1
 }
 
 // DoneEntriesUnder returns a copy of every entry recorded [StatusDone] whose
