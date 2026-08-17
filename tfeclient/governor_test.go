@@ -2,6 +2,7 @@ package tfeclient_test
 
 import (
 	"context"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -209,6 +210,36 @@ func TestGovernorFloorFollowsATinyCeiling(t *testing.T) {
 
 	rps, _ := g.Snapshot()
 	assert.InEpsilon(t, 0.25, rps, 1e-9, "halving stops at the sub-1 floor set by the ceiling")
+}
+
+func TestGovernorNonPositiveCeilingStillAdmits(t *testing.T) {
+	t.Parallel()
+
+	// A ceiling that is no rate at all (zero, negative, NaN) reads as one
+	// request per second. The governor's pacing divides by the rate, so a
+	// rate of zero taken literally would compute an infinite delay and wedge
+	// every request behind the first.
+	for name, ceiling := range map[string]float64{
+		"zero":     0,
+		"negative": -3,
+		"nan":      math.NaN(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			clock := newTestClock()
+			g := tfeclient.NewGovernor(ceiling, nil, tfeclient.WithGovernorClock(clock.Now))
+
+			rps, _ := g.Snapshot()
+			assert.InEpsilon(t, 1.0, rps, 1e-9, "the rate settles at the one-per-second floor")
+
+			// The second admission needs accrued tokens, not just the initial
+			// burst, so it proves the delay arithmetic stays finite.
+			require.NoError(t, g.Wait(t.Context()))
+			clock.Advance(2 * time.Second)
+			require.NoError(t, g.Wait(t.Context()))
+		})
+	}
 }
 
 func TestGovernorWaitSpendsBurstThenBlocks(t *testing.T) {

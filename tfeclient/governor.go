@@ -89,10 +89,16 @@ func WithGovernorClock(now func() time.Time) GovernorOption {
 // NewGovernor creates a new [Governor] whose rate starts at ceiling, the
 // fastest it will ever launch, and adapts downward from the server's
 // feedback. The floor is one request per second, or the ceiling itself when
-// that is lower, so a deliberately tiny ceiling still binds. Each 429
-// reported to the governor increments rateLimited; a nil counter disables the
-// counting.
+// that is lower, so a deliberately tiny ceiling still binds. A ceiling that
+// is not a positive rate (zero, negative, or NaN) is read as one request per
+// second: the governor's pacing divides by the rate, and a rate of zero is
+// one no request could ever pass. Each 429 reported to the governor
+// increments rateLimited; a nil counter disables the counting.
 func NewGovernor(ceiling float64, rateLimited *atomic.Int64, opts ...GovernorOption) *Governor {
+	if ceiling <= 0 || math.IsNaN(ceiling) {
+		ceiling = 1
+	}
+
 	g := &Governor{
 		now:         time.Now,
 		rateLimited: rateLimited,
