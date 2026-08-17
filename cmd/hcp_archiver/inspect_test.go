@@ -624,6 +624,17 @@ func TestExtractCmd_RefusesTargetInsideArchive(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestExtractCmd_DryRunRefusesTargetInsideArchive(t *testing.T) {
+	t.Parallel()
+
+	// A dry run scripted as a preflight must predict the refusal the real run
+	// would answer, not green-light a target the real run refuses.
+	root := buildMiniArchive(t)
+
+	_, _, err := runCmd(t, "extract", root, "--dry-run", "--target", filepath.Join(root, "restore"))
+	require.ErrorIs(t, err, main.ErrTargetInArchive)
+}
+
 func TestExtractCmd_RefusesAncestorTargetReachingArchive(t *testing.T) {
 	t.Parallel()
 

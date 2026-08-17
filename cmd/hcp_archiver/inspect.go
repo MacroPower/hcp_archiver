@@ -408,17 +408,22 @@ and sidecars) from the mirror, the one egress a dry run may cost.`,
 			return hintLoneArg(err, "extract", fallback, args)
 		}
 
+		// A dry run's job is to predict the real run, so a target the real
+		// run refuses fails the dry run identically; only the target itself
+		// stays optional there.
+		if target != "" {
+			err = checkTargetOutside(dir, target, orgNames(arc))
+			if err != nil {
+				return err
+			}
+		}
+
 		if dryRun {
 			return extractDryRun(cc.OutOrStdout(), cc.ErrOrStderr(), arc, prefix, target, jsonOut)
 		}
 
 		if target == "" {
 			return view.ErrNoTarget
-		}
-
-		err = checkTargetOutside(dir, target, orgNames(arc))
-		if err != nil {
-			return err
 		}
 
 		return runExtractCmd(ctx, cc, arc, prefix, target, verbose, jsonOut)
