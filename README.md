@@ -164,7 +164,7 @@ What and how to archive lives in an optional YAML file, pointed at with
 organization is archived with the default surfaces.
 
 ```yaml
-# yaml-language-server: $schema=https://jacobcolvin.com/hcp_archiver/schemas/config.schema.json
+# yaml-language-server: $schema=https://jacobcolvin.com/hcp_archiver/config.schema.json
 
 archiveDir: ./archive # default for --output and the read commands
 organizations: # omit to archive every visible organization
@@ -183,7 +183,7 @@ completion and validation from the schema embedded in the binary, so each
 key's full contract is a hover away. The same documentation lives in the
 commented [`hcp_archiver.example.yaml`](hcp_archiver.example.yaml) at the
 repository root, and the schema is published at
-<https://jacobcolvin.com/hcp_archiver/schemas/config.schema.json> and
+<https://jacobcolvin.com/hcp_archiver/config.schema.json> and
 attached to each GitHub release.
 
 ## Reading the archive

@@ -64,7 +64,7 @@ syft SBOM tooling (`with-cosign`/`with-syft`/`sign-keyless`).
 - `release-dry-run` (non-+check) builds the snapshot, verifies each binary's
   architecture matches its target platform, and constructs the runtime images.
 - `schemas` assembles the GitHub Pages site directory (the config JSON schema,
-  regenerated in the devbox environment, under `schemas/`); the release
+  regenerated in the devbox environment, at the site root); the release
   workflow exports it and deploys it with the Pages actions after the
   goreleaser job succeeds. The schema is also attached to each GitHub release
   via GoReleaser's `release.extra_files`.

@@ -167,7 +167,7 @@ func (m *Tests) TestLintActionsClean(ctx context.Context) error {
 //
 // +check
 func (m *Tests) TestSchemas(ctx context.Context) error {
-	contents, err := dag.Ci().Schemas().File("schemas/config.schema.json").Contents(ctx)
+	contents, err := dag.Ci().Schemas().File("config.schema.json").Contents(ctx)
 	if err != nil {
 		return fmt.Errorf("read schema from site directory: %w", err)
 	}
