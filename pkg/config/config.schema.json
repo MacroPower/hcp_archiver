@@ -4,23 +4,24 @@
     "address": {
       "type": "string",
       "title": "Address",
-      "description": "Address is the HCP Terraform API address. It defaults to [DefaultAddress].",
-      "default": "https://app.terraform.io"
+      "description": "The HCP Terraform API address. Defaults to https://app.terraform.io.",
+      "default": "https://app.terraform.io",
+      "format": "uri"
     },
     "archiveDir": {
       "type": "string",
       "title": "Archive Directory",
-      "description": "ArchiveDir is the archive root directory: the default for the root\ncommand's --output flag and for the read commands' [archive-dir]\npositional. A relative path resolves against this file's directory. An\nexplicit flag or positional always wins."
+      "description": "The archive root directory: the default for the root\ncommand's --archive-dir flag and for the read commands' [archive-dir]\npositional. A relative path resolves against this file's directory. An\nexplicit flag or positional always wins."
     },
     "export": {
-      "$ref": "#/$defs/FileExport",
+      "$ref": "#/$defs/export",
       "title": "Export",
-      "description": "Export configures the export subcommand's rendering; unset keeps the\nbuilt-in page templates."
+      "description": "Configures the export subcommand's rendering; unset keeps the\nbuilt-in page templates."
     },
     "extractDir": {
       "type": "string",
       "title": "Extract Directory",
-      "description": "ExtractDir is the default --target directory for the extract and export\ncommands. A relative path resolves against this file's directory. An\nexplicit --target always wins."
+      "description": "The default --target directory for the extract and export\ncommands. A relative path resolves against this file's directory. An\nexplicit --target always wins."
     },
     "organizations": {
       "type": [
@@ -28,10 +29,13 @@
         "array"
       ],
       "items": {
-        "type": "string"
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[^\\x00-\\x1f\\x7f/\\\\]*[^\\x00-\\x1f\\x7f/\\\\.][^\\x00-\\x1f\\x7f/\\\\]*$"
       },
       "title": "Organizations",
-      "description": "Organizations limits the run to the named organizations. An empty list\narchives every organization the token can see."
+      "description": "Limits the run to the named organizations. An empty list\narchives every organization the token can see.",
+      "uniqueItems": true
     },
     "projects": {
       "type": [
@@ -39,10 +43,12 @@
         "array"
       ],
       "items": {
-        "type": "string"
+        "type": "string",
+        "minLength": 1
       },
       "title": "Projects",
-      "description": "Projects limits the run to the named projects within each archived\norganization. An empty list archives every project."
+      "description": "Limits the run to the named projects within each archived\norganization. An empty list archives every project.",
+      "uniqueItems": true
     },
     "workspaces": {
       "type": [
@@ -50,131 +56,158 @@
         "array"
       ],
       "items": {
-        "type": "string"
+        "type": "string",
+        "minLength": 1
       },
       "title": "Workspaces",
-      "description": "Workspaces limits the run to the named workspaces within each archived\norganization. An empty list archives every workspace."
+      "description": "Limits the run to the named workspaces within each archived\norganization. An empty list archives every workspace.",
+      "uniqueItems": true
     },
     "remote": {
-      "$ref": "#/$defs/FileRemote",
+      "$ref": "#/$defs/remote",
       "title": "Remote",
-      "description": "Remote mirrors the archive to a remote object store, evicting sealed\ncold bundles and settled tarballs and syncing everything else; unset\nkeeps the whole archive on local disk."
+      "description": "Mirrors the archive to a remote object store, evicting sealed\ncold bundles and settled tarballs and syncing everything else; unset\nkeeps the whole archive on local disk."
     },
     "runHistory": {
-      "$ref": "#/$defs/FileRunHistory",
+      "$ref": "#/$defs/runHistory",
       "title": "Run History",
-      "description": "RunHistory bounds how much of each workspace's run history is archived;\nunset archives every run."
+      "description": "Bounds how much of each workspace's run history is archived;\nunset archives every run."
     },
     "rateLimit": {
       "type": "number",
       "title": "Rate Limit",
-      "description": "RateLimit is the ceiling on how fast requests launch, in requests per\nsecond; omitted, the client's default of 30 (HCP Terraform's documented\nlimit) applies. The client adapts downward from the server's rate-limit\nfeedback on its own, so set this only for an organization whose granted\nlimit sits well below the default and the run should not probe past it.",
+      "description": "The ceiling on how fast requests launch, in requests per\nsecond; omitted, the client's default of 30 (HCP Terraform's documented\nlimit) applies. The client adapts downward from the server's rate-limit\nfeedback on its own, so set this only for an organization whose granted\nlimit sits well below the default and the run should not probe past it.",
       "default": 30,
       "exclusiveMinimum": 0
     },
     "scope": {
-      "$ref": "#/$defs/FileScope",
+      "$ref": "#/$defs/scope",
       "title": "Scope",
-      "description": "Scope selects the heavy or optional surfaces to archive, each off by\ndefault."
+      "description": "Selects the heavy or optional surfaces to archive, each off by\ndefault."
     }
   },
+  "$id": "https://jacobcolvin.com/hcp_archiver/config.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
-    "FileExport": {
+    "byteSize": {
+      "title": "Byte Size",
+      "description": "A byte count: a plain integer number of bytes, or a string with a decimal (KB, MB, GB, TB) or binary (KiB, MiB, GiB, TiB) suffix, such as 64MiB.",
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\d+(\\.\\d+)?(B|[KMGT]B|[KMGT]iB)?$"
+        }
+      ]
+    },
+    "export": {
       "type": "object",
       "properties": {
         "templates": {
           "type": "string",
           "title": "Templates",
-          "description": "Templates is a directory of *.md.tmpl files overriding the export's\nbuilt-in page templates by filename; pages without an override keep\ntheir default. A relative path resolves against this file's directory."
+          "description": "A directory of *.md.tmpl files overriding the export's\nbuilt-in page templates by filename; pages without an override keep\ntheir default. A relative path resolves against this file's directory."
         }
       },
-      "description": "FileExport configures the export subcommand's rendering.",
+      "title": "Export",
+      "description": "Configures the export subcommand's rendering.",
       "additionalProperties": false
     },
-    "FileRemote": {
+    "remote": {
       "type": "object",
       "properties": {
         "url": {
           "type": "string",
           "title": "URL",
-          "description": "URL locates the bucket in gocloud.dev form, selecting the backend by\nscheme: \"s3://bucket?region=us-east-1\" (AWS S3, or a compatible store\nsuch as MinIO, R2, or Ceph RGW via endpoint and use_path_style query\nparameters), \"azblob://container\" (Azure Blob Storage), or\n\"file:///path\" (a local directory tree). Required when any other\nremote field is set.",
+          "description": "Locates the bucket in gocloud.dev form, selecting the backend by\nscheme: \"s3://bucket?region=us-east-1\" (AWS S3, or a compatible store\nsuch as MinIO, R2, or Ceph RGW via endpoint and use_path_style query\nparameters), \"azblob://container\" (Azure Blob Storage), or\n\"file:///path\" (a local directory tree). Required when any other\nremote field is set.",
           "examples": [
             "s3://bucket?region=us-east-1",
             "azblob://container",
             "file:///mnt/archive-mirror"
-          ]
+          ],
+          "minLength": 1
         },
         "prefix": {
           "type": "string",
           "title": "Prefix",
-          "description": "Prefix is an optional key prefix objects are stored under."
+          "description": "An optional key prefix objects are stored under."
         },
         "partSize": {
-          "type": "integer",
+          "$ref": "#/$defs/byteSize",
           "title": "Part Size",
-          "description": "PartSize is the upload part size in bytes for backends that split a\nlarge body into parts; zero takes the backend's default.",
-          "minimum": 0,
-          "exclusiveMaximum": 9223372036854776000
+          "description": "The upload part size for backends that split a large body\ninto parts, as a plain byte count or a suffixed size such as 64MiB;\nzero takes the backend's default."
         },
         "concurrency": {
           "type": "integer",
           "title": "Concurrency",
-          "description": "Concurrency is the number of upload parts in flight per bundle; zero\ntakes the backend's default.",
+          "description": "The number of upload parts in flight per bundle; zero\ntakes the backend's default.",
           "minimum": 0
         }
       },
-      "description": "FileRemote mirrors the archive to a remote object store. With the section\nset, the store holds a complete copy: sealed cold bundles and settled\nconfiguration-version tarballs are evicted to it (uploaded, verified, then\nremoved locally), and every other archive file is synced to it\nincrementally at each organization run's close, with local disk staying\nthe canonical searchable copy. Setting any field requires URL; leaving the\nwhole section unset keeps the archive entirely local. Credentials are\nnever configured here: the URL's scheme selects the backend, and each\nbackend authenticates through its provider's default chain (the AWS SDK\nchain for s3://, Azure's environment variables or DefaultAzureCredential\nfor azblob://).",
+      "title": "Remote",
+      "description": "Mirrors the archive to a remote object store. With the section\nset, the store holds a complete copy: sealed cold bundles and settled\nconfiguration-version tarballs are evicted to it (uploaded, verified, then\nremoved locally), and every other archive file is synced to it\nincrementally at each organization run's close, with local disk staying\nthe canonical searchable copy. Setting any field requires URL; leaving the\nwhole section unset keeps the archive entirely local. Credentials are\nnever configured here: the URL's scheme selects the backend, and each\nbackend authenticates through its provider's default chain (the AWS SDK\nchain for s3://, Azure's environment variables or DefaultAzureCredential\nfor azblob://).",
+      "required": [
+        "url"
+      ],
       "additionalProperties": false
     },
-    "FileRunHistory": {
+    "runHistory": {
       "type": "object",
       "properties": {
-        "count": {
+        "maxCount": {
           "type": "integer",
-          "title": "Count",
-          "description": "Count keeps the newest count runs of each workspace; zero means\nunbounded.",
+          "title": "Max Count",
+          "description": "Keeps the newest count runs of each workspace; zero means\nunbounded.",
           "minimum": 0
         },
-        "age": {
+        "maxAge": {
           "type": "string",
-          "title": "Age",
-          "description": "Age keeps each workspace's runs created within this window before the\narchive runs, as a Go duration string such as 2160h; zero means\nunbounded.",
-          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+          "title": "Max Age",
+          "description": "Keeps each workspace's runs created within this window before the\narchive runs, as a duration string in Go syntax extended with a day\nunit, such as 90d or 2160h; zero means unbounded.",
+          "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h|d))+$"
         }
       },
-      "description": "FileRunHistory bounds how much of each workspace's run history is archived.\nEach bound is optional and off at its zero value; when both are set the run\nwalk keeps whichever admits more history, so a run is archived while it sits\namong the newest count runs or was created within the age window. With\nneither bound set every run is archived.",
+      "title": "Run History",
+      "description": "Bounds how much of each workspace's run history is archived.\nEach bound is optional and off at its zero value; when both are set the run\nwalk keeps whichever admits more history, so a run is archived while it sits\namong the newest count runs or was created within the age window. With\nneither bound set every run is archived.",
       "additionalProperties": false
     },
-    "FileScope": {
+    "scope": {
       "type": "object",
       "properties": {
         "stacks": {
           "type": "boolean",
           "title": "Stacks",
-          "description": "Stacks enables archiving of Stacks."
+          "description": "Enables archiving of Stacks.",
+          "default": false
         },
         "hyok": {
           "type": "boolean",
           "title": "HYOK",
-          "description": "HYOK enables archiving of hold-your-own-key configurations."
+          "description": "Enables archiving of hold-your-own-key configurations.",
+          "default": false
         },
         "registryDetail": {
           "type": "boolean",
           "title": "Registry Detail",
-          "description": "RegistryDetail enables the deeper registry version, platform, and binary\ndetail."
+          "description": "Enables the deeper registry version, platform, and binary\ndetail.",
+          "default": false
         },
         "auditTrail": {
           "type": "boolean",
           "title": "Audit Trail",
-          "description": "AuditTrail enables archiving of the audit trail."
+          "description": "Enables archiving of the audit trail.",
+          "default": false
         }
       },
-      "description": "FileScope holds the opt-in toggles for the heavy or most organization-specific\nsurfaces, each archived only when a configuration turns it on.",
+      "title": "Scope",
+      "description": "Holds the opt-in toggles for the heavy or most organization-specific\nsurfaces, each archived only when a configuration turns it on.",
       "additionalProperties": false
     }
   },
-  "title": "File",
-  "description": "File is the on-disk YAML configuration describing what to archive and how.\n\nIt holds the settings that are stable across runs: the API address, the\norganization, project, and workspace filters, the opt-in scope toggles, the\narchive and extract directories, and the export section. Per-run and secret\nsettings (the progress mode, the retry-absent toggle, and the API token)\nare supplied by flags and the environment instead, so a configuration file\nnever carries a credential; any path it names resolves relative to the file\nitself so the two travel together.\n\nEvery field is optional; an absent field takes the package default. Create\ninstances with [LoadFile], or [DefaultFile] for the defaults alone.",
+  "title": "hcp_archiver configuration",
+  "description": "The hcp_archiver YAML configuration: what to archive and how. Every key is optional; an absent key takes its default. Per-run settings and the API token are supplied by flags and the environment instead, so this file never carries a credential, and any relative path resolves against the file's own directory.",
   "additionalProperties": false
 }

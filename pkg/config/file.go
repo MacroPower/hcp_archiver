@@ -3,7 +3,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"go.jacobcolvin.com/niceyaml"
 	"go.jacobcolvin.com/niceyaml/paths"
@@ -51,9 +50,9 @@ var (
 // instances with [LoadFile], or [DefaultFile] for the defaults alone.
 type File struct {
 	// Address is the HCP Terraform API address. It defaults to [DefaultAddress].
-	Address string `json:"address,omitempty" jsonschema:"title=Address,default=https://app.terraform.io"`
+	Address string `json:"address,omitempty" jsonschema:"title=Address,format=uri,default=https://app.terraform.io"`
 	// ArchiveDir is the archive root directory: the default for the root
-	// command's --output flag and for the read commands' [archive-dir]
+	// command's --archive-dir flag and for the read commands' [archive-dir]
 	// positional. A relative path resolves against this file's directory. An
 	// explicit flag or positional always wins.
 	ArchiveDir string `json:"archiveDir,omitempty" jsonschema:"title=Archive Directory"`
@@ -66,13 +65,13 @@ type File struct {
 	ExtractDir string `json:"extractDir,omitempty" jsonschema:"title=Extract Directory"`
 	// Organizations limits the run to the named organizations. An empty list
 	// archives every organization the token can see.
-	Organizations []string `json:"organizations,omitempty" jsonschema:"title=Organizations"`
+	Organizations []string `json:"organizations,omitempty" jsonschema:"title=Organizations,uniqueItems=true"`
 	// Projects limits the run to the named projects within each archived
 	// organization. An empty list archives every project.
-	Projects []string `json:"projects,omitempty" jsonschema:"title=Projects"`
+	Projects []string `json:"projects,omitempty" jsonschema:"title=Projects,uniqueItems=true"`
 	// Workspaces limits the run to the named workspaces within each archived
 	// organization. An empty list archives every workspace.
-	Workspaces []string `json:"workspaces,omitempty" jsonschema:"title=Workspaces"`
+	Workspaces []string `json:"workspaces,omitempty" jsonschema:"title=Workspaces,uniqueItems=true"`
 	// Remote mirrors the archive to a remote object store, evicting sealed
 	// cold bundles and settled tarballs and syncing everything else; unset
 	// keeps the whole archive on local disk.
@@ -105,27 +104,27 @@ type FileExport struct {
 // among the newest count runs or was created within the age window. With
 // neither bound set every run is archived.
 type FileRunHistory struct {
-	// Count keeps the newest count runs of each workspace; zero means
+	// MaxCount keeps the newest count runs of each workspace; zero means
 	// unbounded.
-	Count int `json:"count,omitempty" jsonschema:"title=Count,minimum=0"`
-	// Age keeps each workspace's runs created within this window before the
-	// archive runs, as a Go duration string such as 2160h; zero means
-	// unbounded.
-	Age time.Duration `json:"age,omitempty" jsonschema:"title=Age,type=string,pattern=^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"`
+	MaxCount int `json:"maxCount,omitempty" jsonschema:"title=Max Count,minimum=0"`
+	// MaxAge keeps each workspace's runs created within this window before the
+	// archive runs, as a duration string in Go syntax extended with a day
+	// unit, such as 90d or 2160h; zero means unbounded.
+	MaxAge Duration `json:"maxAge,omitempty" jsonschema:"title=Max Age,type=string,pattern=^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h|d))+$"`
 }
 
 // FileScope holds the opt-in toggles for the heavy or most organization-specific
 // surfaces, each archived only when a configuration turns it on.
 type FileScope struct {
 	// Stacks enables archiving of Stacks.
-	Stacks bool `json:"stacks,omitempty" jsonschema:"title=Stacks"`
+	Stacks bool `json:"stacks,omitempty" jsonschema:"title=Stacks,default=false"`
 	// HYOK enables archiving of hold-your-own-key configurations.
-	HYOK bool `json:"hyok,omitempty" jsonschema:"title=HYOK"`
+	HYOK bool `json:"hyok,omitempty" jsonschema:"title=HYOK,default=false"`
 	// RegistryDetail enables the deeper registry version, platform, and binary
 	// detail.
-	RegistryDetail bool `json:"registryDetail,omitempty" jsonschema:"title=Registry Detail"`
+	RegistryDetail bool `json:"registryDetail,omitempty" jsonschema:"title=Registry Detail,default=false"`
 	// AuditTrail enables archiving of the audit trail.
-	AuditTrail bool `json:"auditTrail,omitempty" jsonschema:"title=Audit Trail"`
+	AuditTrail bool `json:"auditTrail,omitempty" jsonschema:"title=Audit Trail,default=false"`
 }
 
 // FileRemote mirrors the archive to a remote object store. With the section
@@ -146,12 +145,13 @@ type FileRemote struct {
 	// parameters), "azblob://container" (Azure Blob Storage), or
 	// "file:///path" (a local directory tree). Required when any other
 	// remote field is set.
-	URL string `json:"url,omitempty" jsonschema:"title=URL,examples=s3://bucket?region=us-east-1|azblob://container|file:///mnt/archive-mirror"`
+	URL string `json:"url,omitempty" jsonschema:"title=URL,minLength=1,examples=s3://bucket?region=us-east-1|azblob://container|file:///mnt/archive-mirror"`
 	// Prefix is an optional key prefix objects are stored under.
 	Prefix string `json:"prefix,omitempty" jsonschema:"title=Prefix"`
-	// PartSize is the upload part size in bytes for backends that split a
-	// large body into parts; zero takes the backend's default.
-	PartSize int64 `json:"partSize,omitempty" jsonschema:"title=Part Size,minimum=0"`
+	// PartSize is the upload part size for backends that split a large body
+	// into parts, as a plain byte count or a suffixed size such as 64MiB;
+	// zero takes the backend's default.
+	PartSize ByteSize `json:"partSize,omitempty" jsonschema:"title=Part Size"`
 	// Concurrency is the number of upload parts in flight per bundle; zero
 	// takes the backend's default.
 	Concurrency int `json:"concurrency,omitempty" jsonschema:"title=Concurrency,minimum=0"`
@@ -166,7 +166,12 @@ func (fr FileRemote) IsZero() bool {
 // RemoteConfig resolves the section into the [RemoteConfig] passed to
 // [WithRemote].
 func (fr FileRemote) RemoteConfig() RemoteConfig {
-	return RemoteConfig(fr)
+	return RemoteConfig{
+		URL:         fr.URL,
+		Prefix:      fr.Prefix,
+		PartSize:    int64(fr.PartSize),
+		Concurrency: fr.Concurrency,
+	}
 }
 
 // DefaultFile returns a [*File] populated with the package defaults, used when

@@ -9,6 +9,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/charmbracelet/x/exp/golden v0.0.0-20260813141921-f091cedeaf78
+	github.com/goccy/go-yaml v1.19.2
 	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/go-tfe v1.110.0
 	github.com/hashicorp/go-version v1.9.0
@@ -69,7 +70,6 @@ require (
 	github.com/go-logfmt/logfmt v0.6.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect

@@ -15,7 +15,7 @@ import (
 const remoteYAML = `remote:
   url: s3://config-bucket?region=us-east-1
   prefix: cfg
-  partSize: 8388608
+  partSize: 8MiB
   concurrency: 4
 `
 

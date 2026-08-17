@@ -23,7 +23,7 @@ func TestNewRootCmd(t *testing.T) {
 
 	assert.True(t, cmd.Runnable())
 	assert.NotNil(t, cmd.Flags().Lookup("config"))
-	assert.NotNil(t, cmd.Flags().Lookup("output"))
+	assert.NotNil(t, cmd.Flags().Lookup("archive-dir"))
 	assert.NotNil(t, cmd.Flags().Lookup("progress"))
 
 	registered := map[string]bool{}
@@ -52,7 +52,7 @@ func TestConfigFromArgs(t *testing.T) {
 	}{
 		"defaults with output and token": {
 			token: "secret",
-			args:  []string{"--output", "/tmp/archive"},
+			args:  []string{"--archive-dir", "/tmp/archive"},
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
 				assert.Equal(t, "/tmp/archive", cfg.OutputDir)
@@ -66,7 +66,7 @@ func TestConfigFromArgs(t *testing.T) {
 		"per-run flags": {
 			token: "secret",
 			args: []string{
-				"--output", "/tmp/a",
+				"--archive-dir", "/tmp/a",
 				"--progress", "json",
 				"--progress-interval", "10s",
 				"--retry-absent",
@@ -80,7 +80,7 @@ func TestConfigFromArgs(t *testing.T) {
 		},
 		"config file via flag drives archive settings": {
 			token:      "secret",
-			args:       []string{"--output", "/tmp/a"},
+			args:       []string{"--archive-dir", "/tmp/a"},
 			configYAML: fullConfig,
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
@@ -95,7 +95,7 @@ func TestConfigFromArgs(t *testing.T) {
 		},
 		"config file via environment": {
 			token:      "secret",
-			args:       []string{"--output", "/tmp/a"},
+			args:       []string{"--archive-dir", "/tmp/a"},
 			configYAML: fullConfig,
 			configEnv:  true,
 			want: func(t *testing.T, cfg *config.Config) {
@@ -105,7 +105,7 @@ func TestConfigFromArgs(t *testing.T) {
 		},
 		"remote section maps onto the config": {
 			token:      "secret",
-			args:       []string{"--output", "/tmp/a"},
+			args:       []string{"--archive-dir", "/tmp/a"},
 			configYAML: "remote:\n  url: s3://my-archive\n  prefix: hcp\n",
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
@@ -116,7 +116,7 @@ func TestConfigFromArgs(t *testing.T) {
 		},
 		"no remote section leaves offloading disabled": {
 			token: "secret",
-			args:  []string{"--output", "/tmp/a"},
+			args:  []string{"--archive-dir", "/tmp/a"},
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
 				assert.Nil(t, cfg.Remote)
@@ -133,7 +133,7 @@ func TestConfigFromArgs(t *testing.T) {
 		},
 		"output flag wins over archiveDir": {
 			token:      "secret",
-			args:       []string{"--output", "/tmp/from-flag"},
+			args:       []string{"--archive-dir", "/tmp/from-flag"},
 			configYAML: "archiveDir: /tmp/from-file\n",
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
@@ -152,17 +152,17 @@ func TestConfigFromArgs(t *testing.T) {
 			err:        config.ErrMissingOutputDir,
 		},
 		"missing token": {
-			args: []string{"--output", "/tmp/a"},
+			args: []string{"--archive-dir", "/tmp/a"},
 			err:  config.ErrMissingToken,
 		},
 		"invalid progress mode": {
 			token: "secret",
-			args:  []string{"--output", "/tmp/a", "--progress", "bogus"},
+			args:  []string{"--archive-dir", "/tmp/a", "--progress", "bogus"},
 			err:   config.ErrInvalidProgressMode,
 		},
 		"unreadable config file": {
 			token: "secret",
-			args:  []string{"--output", "/tmp/a", "--config", "/no/such/config.yaml"},
+			args:  []string{"--archive-dir", "/tmp/a", "--config", "/no/such/config.yaml"},
 			err:   config.ErrReadConfig,
 		},
 	}
@@ -209,7 +209,7 @@ func TestConfigFromArgs_ConfigFlagBeatsEnv(t *testing.T) {
 	envCfg := writeConfigFile(t, "organizations:\n  - from-env\n")
 	t.Setenv(config.EnvConfigPath, envCfg)
 
-	cfg, err := cli.ConfigFromArgs([]string{"--output", "/tmp/a", "--config", flagCfg})
+	cfg, err := cli.ConfigFromArgs([]string{"--archive-dir", "/tmp/a", "--config", flagCfg})
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	assert.Equal(t, []string{"from-flag"}, cfg.Organizations)
@@ -253,7 +253,7 @@ func TestRootHelp(t *testing.T) {
 	cmd.SetArgs([]string{"--help"})
 
 	require.NoError(t, cmd.Execute())
-	assert.Contains(t, out.String(), "output")
+	assert.Contains(t, out.String(), "archive-dir")
 }
 
 func TestVersionSubcommand(t *testing.T) {

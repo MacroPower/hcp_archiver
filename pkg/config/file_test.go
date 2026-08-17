@@ -80,7 +80,7 @@ func TestLoadFile(t *testing.T) {
 				"organizations:\n  - one\n  - two\n" +
 				"projects:\n  - networking\n" +
 				"workspaces:\n  - vpc\n  - dns\n" +
-				"runHistory:\n  count: 250\n  age: 2160h\n" +
+				"runHistory:\n  maxCount: 250\n  maxAge: 90d\n" +
 				"scope:\n  stacks: true\n  hyok: true\n  registryDetail: true\n  auditTrail: true\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
@@ -89,8 +89,8 @@ func TestLoadFile(t *testing.T) {
 				assert.Equal(t, []string{"one", "two"}, file.Organizations)
 				assert.Equal(t, []string{"networking"}, file.Projects)
 				assert.Equal(t, []string{"vpc", "dns"}, file.Workspaces)
-				assert.Equal(t, 250, file.RunHistory.Count)
-				assert.Equal(t, 2160*time.Hour, file.RunHistory.Age)
+				assert.Equal(t, 250, file.RunHistory.MaxCount)
+				assert.Equal(t, config.Duration(2160*time.Hour), file.RunHistory.MaxAge)
 				assert.True(t, file.Scope.Stacks)
 				assert.True(t, file.Scope.HYOK)
 				assert.True(t, file.Scope.RegistryDetail)
@@ -98,11 +98,11 @@ func TestLoadFile(t *testing.T) {
 			},
 		},
 		"run history bounds are each optional": {
-			yaml: "runHistory:\n  count: 100\n",
+			yaml: "runHistory:\n  maxCount: 100\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
-				assert.Equal(t, 100, file.RunHistory.Count)
-				assert.Zero(t, file.RunHistory.Age)
+				assert.Equal(t, 100, file.RunHistory.MaxCount)
+				assert.Zero(t, file.RunHistory.MaxAge)
 			},
 		},
 		"remote section decodes": {
@@ -120,6 +120,13 @@ func TestLoadFile(t *testing.T) {
 					PartSize:    67108864,
 					Concurrency: 4,
 				}, file.Remote.RemoteConfig())
+			},
+		},
+		"remote part size accepts a suffixed string": {
+			yaml: "remote:\n  url: s3://b\n  partSize: 64MiB\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.Equal(t, int64(67108864), file.Remote.RemoteConfig().PartSize)
 			},
 		},
 		"archive and extract directories decode": {
@@ -192,7 +199,7 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 			yaml: "workspaces:\n  - vpc\n  - vpc\n",
 		},
 		"negative run history count": {
-			yaml: "runHistory:\n  count: -1\n",
+			yaml: "runHistory:\n  maxCount: -1\n",
 		},
 		"zero rate limit": {
 			yaml: "rateLimit: 0\n",
@@ -201,10 +208,13 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 			yaml: "rateLimit: -1\n",
 		},
 		"run history age must be a duration string": {
-			yaml: "runHistory:\n  age: 90\n",
+			yaml: "runHistory:\n  maxAge: 90\n",
 		},
 		"run history age must not be negative": {
-			yaml: "runHistory:\n  age: -24h\n",
+			yaml: "runHistory:\n  maxAge: -24h\n",
+		},
+		"run history age rejects unknown units": {
+			yaml: "runHistory:\n  maxAge: 1w\n",
 		},
 		"archive directory must be a string": {
 			yaml: "archiveDir:\n  - x\n",
@@ -215,11 +225,26 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 		"remote without a bucket": {
 			yaml: "remote:\n  prefix: hcp\n",
 		},
+		"empty remote section": {
+			yaml: "remote: {}\n",
+		},
+		"empty remote url": {
+			yaml: "remote:\n  url: \"\"\n",
+		},
 		"negative remote part size": {
-			yaml: "remote:\n  bucket: b\n  partSize: -1\n",
+			yaml: "remote:\n  url: s3://b\n  partSize: -1\n",
+		},
+		"lowercase part size suffix": {
+			yaml: "remote:\n  url: s3://b\n  partSize: 64mib\n",
+		},
+		"unknown part size suffix": {
+			yaml: "remote:\n  url: s3://b\n  partSize: 64ZiB\n",
+		},
+		"fractional byte part size passes the pattern but fails the parse": {
+			yaml: "remote:\n  url: s3://b\n  partSize: 1.5B\n",
 		},
 		"negative remote concurrency": {
-			yaml: "remote:\n  bucket: b\n  concurrency: -1\n",
+			yaml: "remote:\n  url: s3://b\n  concurrency: -1\n",
 		},
 	}
 

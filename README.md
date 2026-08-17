@@ -50,12 +50,12 @@ tagged `latest`, `vX`, `vX.Y`, and `vX.Y.Z`.
 
 The image is `scratch` plus the static binary and a root certificate bundle:
 no shell, and every path it touches is one you mount. Mount the archive root
-and point `--output` at it:
+and point `--archive-dir` at it:
 
 ```bash
 docker run --rm -e HCP_TOKEN \
   -v "$PWD/archive:/archive" \
-  ghcr.io/macropower/hcp_archiver:latest --output /archive
+  ghcr.io/macropower/hcp_archiver:latest --archive-dir /archive
 ```
 
 A configuration file rides in the same way, named by its in-container path:
@@ -146,7 +146,7 @@ The API token comes from the environment (`HCP_TOKEN`, falling back to
 ```bash
 export HCP_TOKEN=...              # a user, team, or organization token
 
-hcp_archiver --output ./archive   # archive every organization the token sees
+hcp_archiver --archive-dir ./archive   # archive every organization the token sees
 hcp_archiver view ./archive       # browse the result in the terminal
 ```
 
@@ -166,11 +166,11 @@ organization is archived with the default surfaces.
 ```yaml
 # yaml-language-server: $schema=https://jacobcolvin.com/hcp_archiver/config.schema.json
 
-archiveDir: ./archive # default for --output and the read commands
+archiveDir: ./archive # default for --archive-dir and the read commands
 organizations: # omit to archive every visible organization
   - my-org
 runHistory: # bound archived run history; unlimited by default
-  count: 500
+  maxCount: 500
 scope: # heavy or org-specific surfaces, each off by default
   stacks: true
   auditTrail: true

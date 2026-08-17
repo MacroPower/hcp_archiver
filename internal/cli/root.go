@@ -28,7 +28,7 @@ const appName = "hcp_archiver"
 // YAML configuration file; only per-run and operational settings are flags.
 const (
 	flagConfig           = "config"
-	flagOutput           = "output"
+	flagArchiveDir       = "archive-dir"
 	flagProgress         = "progress"
 	flagProgressInterval = "progress-interval"
 	flagRetryAbsent      = "retry-absent"
@@ -42,7 +42,7 @@ var ErrLogHandler = errors.New("create log handler")
 // into a validated [config.Config].
 type archiveFlags struct {
 	configPath       string
-	output           string
+	archiveDir       string
 	progress         string
 	progressInterval time.Duration
 	retryAbsent      bool
@@ -56,7 +56,7 @@ func registerArchiveFlags(cmd *cobra.Command) *archiveFlags {
 
 	fs.StringVarP(&af.configPath, flagConfig, "c", "",
 		fmt.Sprintf("path to the YAML configuration file (defaults to $%s)", config.EnvConfigPath))
-	fs.StringVarP(&af.output, flagOutput, "o", "",
+	fs.StringVarP(&af.archiveDir, flagArchiveDir, "o", "",
 		"archive root directory (defaults to the configuration file's archiveDir)")
 	fs.StringVar(&af.progress, flagProgress, config.DefaultProgressMode.String(),
 		"progress output mode (auto|human|json|quiet)")
@@ -83,7 +83,7 @@ func (af *archiveFlags) config() (*config.Config, error) {
 		return nil, err
 	}
 
-	output := af.output
+	output := af.archiveDir
 	if output == "" {
 		output = configDir(cfgPath, file.ArchiveDir)
 	}
@@ -94,8 +94,8 @@ func (af *archiveFlags) config() (*config.Config, error) {
 		config.WithOrganizations(file.Organizations),
 		config.WithProjects(file.Projects),
 		config.WithWorkspaces(file.Workspaces),
-		config.WithRunHistoryCount(file.RunHistory.Count),
-		config.WithRunHistoryAge(file.RunHistory.Age),
+		config.WithRunHistoryCount(file.RunHistory.MaxCount),
+		config.WithRunHistoryAge(time.Duration(file.RunHistory.MaxAge)),
 		config.WithStacks(file.Scope.Stacks),
 		config.WithHYOK(file.Scope.HYOK),
 		config.WithRegistryDetail(file.Scope.RegistryDetail),

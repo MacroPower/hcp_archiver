@@ -8,7 +8,7 @@
 # HCP Terraform API address.
 address: https://app.terraform.io
 
-# Archive root directory: default for --output and for the read commands'
+# Archive root directory: default for --archive-dir and for the read commands'
 # [archive-dir] positional. A relative path resolves against this file's
 # directory. An explicit flag or positional wins.
 # archiveDir: ./archive
@@ -40,12 +40,12 @@ organizations:
 #   - my-workspace
 
 # Bound on how much of each workspace's run history is archived, unlimited by
-# default. Each bound is optional: count keeps the newest N runs, age keeps
-# runs created within the window (a Go duration, e.g. 2160h for ~90 days).
-# With both set, whichever admits more history wins.
+# default. Each bound is optional: maxCount keeps the newest N runs, maxAge
+# keeps runs created within the window (Go duration syntax plus a d day unit,
+# e.g. 90d). With both set, whichever admits more history wins.
 # runHistory:
-#   count: 500
-#   age: 2160h
+#   maxCount: 500
+#   maxAge: 90d
 
 # Heavy or organization-specific surfaces, each off by default. Enable only the
 # ones you want; they add significant time and volume to a run.
@@ -69,7 +69,7 @@ scope:
 #   # url: azblob://my-container # Azure Blob Storage
 #   # url: file:///mnt/archive-mirror # local directory tree
 #   prefix: hcp-archive
-#   partSize: 67108864
+#   partSize: 64MiB # integer bytes, or a KB/MB/GB/TB or KiB/MiB/GiB/TiB suffix
 #   concurrency: 4
 
 # Export subcommand rendering. templates names a directory of *.md.tmpl files
