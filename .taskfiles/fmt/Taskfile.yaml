@@ -25,6 +25,8 @@ tasks:
       - .prettierignore
       - exclude: "**/dagger.json"
       - exclude: "**/testdata/**"
+      - exclude: "completion/**"
+      - exclude: "man/**"
     cmds:
       - prettier --config {{.PRETTIER_CONFIG}} --check {{.PRETTIER_PATTERNS}}
 

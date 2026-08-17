@@ -8,10 +8,9 @@ env:
 
 before:
   hooks:
-    # You may remove this if you don't use go modules.
-    - go mod tidy
-    # you may remove this if you don't need go generate
-    - go generate ./...
+    # Tidies, runs go generate, and generates the shell completions and man
+    # page (completion/ and man/) that the archives and packages ship.
+    - bash gen.sh
 
 builds:
   - id: hcp_archiver
@@ -95,6 +94,8 @@ archives:
       {{- if .Arm }}v{{ .Arm }}{{ end }}
     files:
       - LICENSE
+      - completion/**/*
+      - man/*
 
 homebrew_casks:
   - repository:
@@ -119,6 +120,12 @@ homebrew_casks:
     license: "Apache License"
     skip_upload: auto
     binaries: [hcp_archiver]
+    manpages:
+      - man/hcp_archiver.1
+    completions:
+      bash: completion/bash/hcp_archiver.bash
+      zsh: completion/zsh/_hcp_archiver
+      fish: completion/fish/hcp_archiver.fish
 
 nix:
   - name: hcp_archiver
@@ -132,9 +139,11 @@ nix:
     description: "Archives an HCP Terraform organization to plain files on disk"
     license: "asl20"
     skip_upload: auto
-    install: |
-      mkdir -p $out/bin
-      cp -vr ./hcp_archiver $out/bin/hcp_archiver
+    extra_install: |
+      installManPage ./man/hcp_archiver.1
+      installShellCompletion ./completion/bash/hcp_archiver.bash
+      installShellCompletion ./completion/zsh/_hcp_archiver
+      installShellCompletion ./completion/fish/hcp_archiver.fish
 
 signs:
   - cmd: cosign

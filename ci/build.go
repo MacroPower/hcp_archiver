@@ -56,6 +56,11 @@ func (m *Ci) BinarySnapshot(
 		WithDirectory("/out", dag.Directory()).
 		WithExec([]string{
 			"goreleaser", "build", "--snapshot", "--clean",
+			// The before hook (gen.sh) builds and runs a native helper binary
+			// to generate man/completion files; under the GOOS/GOARCH set
+			// above it would cross-compile the helper and fail to exec it,
+			// and a single-binary build has no use for those files anyway.
+			"--skip=before",
 			"--single-target", "--output", "/out/hcp_archiver",
 		}).
 		File("/out/hcp_archiver"), nil
