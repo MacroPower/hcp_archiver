@@ -25,6 +25,7 @@ func TestParseDuration(t *testing.T) {
 		"single day":          {in: "1d", want: 24 * time.Hour},
 		"repeated units sum":  {in: "1d1d", want: 48 * time.Hour},
 		"micro sign spelling": {in: "5µs", want: 5 * time.Microsecond},
+		"bare zero":           {in: "0", want: 0},
 	}
 
 	for name, tc := range tests {
@@ -50,7 +51,7 @@ func TestParseDuration_Invalid(t *testing.T) {
 		"signed":                  {in: "-1d"},
 		"malformed number":        {in: "1.5.5d"},
 		"empty":                   {in: ""},
-		"bare zero":               {in: "0"},
+		"zero with leading zeros": {in: "00"},
 		"overflowing segment":     {in: "10675200d"},
 		"overflowing day scale":   {in: "1000000d"},
 		"overflowing composition": {in: "106751d106751d"},

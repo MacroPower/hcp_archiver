@@ -15,8 +15,8 @@ See the workspace's {{link "readme" "readme.md"}}.
 {{countNoun .Count "archived run" "archived runs"}}. Artifact contents are withheld; the backup holds them in full:
 
 ```sh
-{{if .Example}}hcp_archiver show <archive-dir> {{shellQuote .Example}}
-{{end}}hcp_archiver extract <archive-dir> {{shellQuote .Dir}} --target <output-dir>
+{{if .Example}}hcp_archiver show <archive-path> {{shellQuote .Example}}
+{{end}}hcp_archiver extract <archive-path> {{shellQuote .Dir}} --extract-path <output-dir>
 ```
 
 | ID | Created | Status | Message | Source | Terraform | Destroy | Changes | Archived artifacts |
@@ -28,8 +28,8 @@ See the workspace's {{link "readme" "readme.md"}}.
 {{countNoun .Count "archived state version" "archived state versions"}}. State contents are withheld; the backup holds them in full:
 
 ```sh
-{{if .Example}}hcp_archiver show <archive-dir> {{shellQuote .Example}}
-{{end}}hcp_archiver extract <archive-dir> {{shellQuote .Dir}} --target <output-dir>
+{{if .Example}}hcp_archiver show <archive-path> {{shellQuote .Example}}
+{{end}}hcp_archiver extract <archive-path> {{shellQuote .Dir}} --extract-path <output-dir>
 ```
 
 | ID | Created | Serial | Status | Size | Archived blobs |

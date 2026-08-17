@@ -22,7 +22,7 @@ func newExportCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "export [archive-dir]",
+		Use:   "export [archive-path]",
 		Short: "Render an archive's metadata as a browsable markdown tree",
 		Long: `Render an archive's non-sensitive metadata as a tree of markdown files a
 static site generator with directory-based navigation (mkdocs and its kin)
@@ -38,16 +38,17 @@ The target directory is created when absent and refused when non-empty;
 --force replaces its contents. Exporting a sealed archive whose roll-ups were
 offloaded fetches that metadata back from the mirror.
 
-Pages render through Go text/template. A configuration file's export.templates
-key names a directory of *.md.tmpl files overriding the built-in page
-templates by filename; pages without an override keep their default, and a
-relative path resolves against the configuration file's directory.
+Pages render through Go text/template. A configuration file's
+export.templates.path key names a directory of *.md.tmpl files overriding the
+built-in page templates by filename; pages without an override keep their
+default, and a relative path resolves against the configuration file's
+directory.
 
 ` + remoteLong + `
 
 A single argument names the archive directory, defaulting to the configuration
-file's archiveDir or, with none set, the current one. The file's extractDir
-stands in for an omitted --target.`,
+file's archive.path or, with none set, the current one. The file's
+export.path stands in for an omitted --export-path.`,
 		Args: cobra.MaximumNArgs(1),
 	}
 
@@ -75,7 +76,7 @@ stands in for an omitted --target.`,
 		}
 
 		if target == "" && file != nil {
-			target = configDir(cfgPath, file.ExtractDir)
+			target = configDir(cfgPath, file.Export.Path)
 		}
 
 		if target == "" {
@@ -101,8 +102,8 @@ stands in for an omitted --target.`,
 			opts = append(opts, export.WithForce())
 		}
 
-		if file != nil && file.Export.Templates != "" {
-			opts = append(opts, export.WithTemplatesDir(configDir(cfgPath, file.Export.Templates)))
+		if file != nil && file.Export.Templates.Path != "" {
+			opts = append(opts, export.WithTemplatesDir(configDir(cfgPath, file.Export.Templates.Path)))
 		}
 
 		sum, err := export.New(arc, target, opts...).Run(ctx)
@@ -133,8 +134,8 @@ stands in for an omitted --target.`,
 	}
 
 	flags := cmd.Flags()
-	flags.StringVarP(&target, flagTarget, "t", "",
-		"directory to write the markdown tree into (defaults to the configuration file's extractDir)")
+	flags.StringVarP(&target, flagExportPath, "t", "",
+		"directory to write the markdown tree into (defaults to the configuration file's export.path)")
 	flags.BoolVar(&force, flagForce, false, "replace a non-empty target directory's contents")
 
 	return cmd

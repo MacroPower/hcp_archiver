@@ -85,7 +85,7 @@ func listOrgNames(ctx context.Context, client *tfeclient.Client) ([]string, erro
 //
 // The organization name is checked before anything is rooted on it. Every path
 // below the store root is confined by the store, but the root itself is a join
-// of the output directory and the name, and the remote key is the same join
+// of the archive root and the name, and the remote key is the same join
 // under the bucket prefix, so a name that is not a single path segment would
 // escape both. Auto-discovery takes names straight from the server's listing,
 // which is why the check sits here rather than only on the configured list.
@@ -95,7 +95,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 		return manifest.Tally{}, 0, fmt.Errorf("validate organization: %w", err)
 	}
 
-	st := store.New(filepath.Join(a.cfg.OutputDir, orgName), store.WithLogger(a.logger))
+	st := store.New(filepath.Join(a.cfg.ArchiveDir, orgName), store.WithLogger(a.logger))
 	envOpts := []collect.Option{collect.WithLogger(a.logger)}
 
 	if a.remote != nil {

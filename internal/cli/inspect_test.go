@@ -207,9 +207,9 @@ func TestListCmd_ArchiveDirFromConfig(t *testing.T) {
 	t.Parallel()
 
 	root := buildMiniArchive(t)
-	cfgPath := writeConfigFile(t, "archiveDir: '"+root+"'\n")
+	cfgPath := writeConfigFile(t, "archive:\n  path: '"+root+"'\n")
 
-	// With no positional, the configuration file's archiveDir is read.
+	// With no positional, the configuration file's archive.path is read.
 	out, _, err := runCmd(t, "list", "--config", cfgPath)
 	require.NoError(t, err)
 	assert.Contains(t, out, "mini-org/org.json")
@@ -222,7 +222,7 @@ func TestListCmd_PositionalBeatsConfigArchiveDir(t *testing.T) {
 
 	// The configuration names a directory holding no archive; the explicit
 	// positional wins, so the listing still succeeds.
-	cfgPath := writeConfigFile(t, "archiveDir: '"+t.TempDir()+"'\n")
+	cfgPath := writeConfigFile(t, "archive:\n  path: '"+t.TempDir()+"'\n")
 
 	out, _, err := runCmd(t, "list", root, "--config", cfgPath)
 	require.NoError(t, err)
@@ -233,7 +233,7 @@ func TestShowCmd_ArchiveDirFromConfig(t *testing.T) {
 	t.Parallel()
 
 	root := buildMiniArchive(t)
-	cfgPath := writeConfigFile(t, "archiveDir: '"+root+"'\n")
+	cfgPath := writeConfigFile(t, "archive:\n  path: '"+root+"'\n")
 
 	// The lone argument stays the archive path; the directory comes from the
 	// configuration file.
@@ -309,7 +309,7 @@ func TestExtractCmd(t *testing.T) {
 	root := buildMiniArchive(t)
 	target := t.TempDir()
 
-	out, _, err := runCmd(t, "extract", root, "--target", target)
+	out, _, err := runCmd(t, "extract", root, "--extract-path", target)
 	require.NoError(t, err)
 	assert.Contains(t, out, "extracted")
 	assert.Contains(t, out, target)
@@ -443,7 +443,7 @@ func TestExtractCmd_FetchesEvictedTarballFromMirror(t *testing.T) {
 	// And the run delivers it: the bytes come back from the bucket, byte-exact.
 	target := t.TempDir()
 
-	summary, _, err := runCmd(t, "extract", root, "--target", target, "--json")
+	summary, _, err := runCmd(t, "extract", root, "--extract-path", target, "--json")
 	require.NoError(t, err)
 
 	var ran extractReport
@@ -513,7 +513,7 @@ func TestExtractCmd_DryRunCountsRemoteOnlyObjects(t *testing.T) {
 	// The real run reaches the same verdict, by trying.
 	target := t.TempDir()
 
-	summary, _, err := runCmd(t, "extract", root, "--target", target, "--json")
+	summary, _, err := runCmd(t, "extract", root, "--extract-path", target, "--json")
 	require.ErrorIs(t, err, cli.ErrExtractIncomplete)
 
 	require.NoError(t, json.Unmarshal([]byte(summary), &report))
@@ -555,7 +555,7 @@ func TestExtractCmd_DryRunCountsOffloadedBundleMembers(t *testing.T) {
 	// The real run reaches the same verdict, by trying.
 	target := t.TempDir()
 
-	summary, _, err := runCmd(t, "extract", root, "--target", target, "--json")
+	summary, _, err := runCmd(t, "extract", root, "--extract-path", target, "--json")
 	require.ErrorIs(t, err, cli.ErrExtractIncomplete)
 
 	var ran struct {
@@ -582,7 +582,7 @@ func TestExtractCmd_JSONSummary(t *testing.T) {
 	root := buildMiniArchive(t)
 	target := t.TempDir()
 
-	out, _, err := runCmd(t, "extract", root, "--target", target, "--json")
+	out, _, err := runCmd(t, "extract", root, "--extract-path", target, "--json")
 	require.NoError(t, err)
 
 	var report struct {
@@ -613,14 +613,14 @@ func TestExtractCmd_RefusesTargetInsideArchive(t *testing.T) {
 
 	root := buildMiniArchive(t)
 
-	_, _, err := runCmd(t, "extract", root, "--target", filepath.Join(root, "restore"))
+	_, _, err := runCmd(t, "extract", root, "--extract-path", filepath.Join(root, "restore"))
 	require.ErrorIs(t, err, cli.ErrTargetInArchive)
 
 	// A sibling sharing the directory-name prefix is outside.
 	sibling := root + "-restore"
 	t.Cleanup(func() { _ = os.RemoveAll(sibling) })
 
-	_, _, err = runCmd(t, "extract", root, "--target", sibling)
+	_, _, err = runCmd(t, "extract", root, "--extract-path", sibling)
 	require.NoError(t, err)
 }
 
@@ -631,7 +631,7 @@ func TestExtractCmd_DryRunRefusesTargetInsideArchive(t *testing.T) {
 	// would answer, not green-light a target the real run refuses.
 	root := buildMiniArchive(t)
 
-	_, _, err := runCmd(t, "extract", root, "--dry-run", "--target", filepath.Join(root, "restore"))
+	_, _, err := runCmd(t, "extract", root, "--dry-run", "--extract-path", filepath.Join(root, "restore"))
 	require.ErrorIs(t, err, cli.ErrTargetInArchive)
 }
 
@@ -644,7 +644,7 @@ func TestExtractCmd_RefusesAncestorTargetReachingArchive(t *testing.T) {
 	root := buildMiniArchive(t)
 	orgDir := filepath.Join(root, "mini-org")
 
-	_, _, err := runCmd(t, "extract", orgDir, "--target", root)
+	_, _, err := runCmd(t, "extract", orgDir, "--extract-path", root)
 	require.ErrorIs(t, err, cli.ErrTargetInArchive)
 }
 
@@ -653,7 +653,7 @@ func TestExtractCmd_TargetFromConfig(t *testing.T) {
 
 	root := buildMiniArchive(t)
 	target := filepath.Join(t.TempDir(), "restore")
-	cfgPath := writeConfigFile(t, "extractDir: '"+target+"'\n")
+	cfgPath := writeConfigFile(t, "extract:\n  path: '"+target+"'\n")
 
 	out, _, err := runCmd(t, "extract", root, "--config", cfgPath)
 	require.NoError(t, err)
@@ -670,9 +670,9 @@ func TestExtractCmd_RelativeTargetFromConfig(t *testing.T) {
 
 	root := buildMiniArchive(t)
 
-	// A relative extractDir resolves against the configuration file's own
+	// A relative extract.path resolves against the configuration file's own
 	// directory, not the working directory.
-	cfgPath := writeConfigFile(t, "extractDir: restore\n")
+	cfgPath := writeConfigFile(t, "extract:\n  path: restore\n")
 
 	_, _, err := runCmd(t, "extract", root, "--config", cfgPath)
 	require.NoError(t, err)
@@ -688,9 +688,9 @@ func TestExtractCmd_TargetFlagBeatsConfig(t *testing.T) {
 	root := buildMiniArchive(t)
 	flagTarget := filepath.Join(t.TempDir(), "flag-restore")
 	cfgTarget := filepath.Join(t.TempDir(), "cfg-restore")
-	cfgPath := writeConfigFile(t, "extractDir: '"+cfgTarget+"'\n")
+	cfgPath := writeConfigFile(t, "extract:\n  path: '"+cfgTarget+"'\n")
 
-	_, _, err := runCmd(t, "extract", root, "--config", cfgPath, "--target", flagTarget)
+	_, _, err := runCmd(t, "extract", root, "--config", cfgPath, "--extract-path", flagTarget)
 	require.NoError(t, err)
 
 	_, err = os.Stat(filepath.Join(flagTarget, "mini-org", "org.json"))
@@ -704,7 +704,7 @@ func TestExtractCmd_RefusesConfigTargetInsideArchive(t *testing.T) {
 	t.Parallel()
 
 	root := buildMiniArchive(t)
-	cfgPath := writeConfigFile(t, "extractDir: '"+filepath.Join(root, "restore")+"'\n")
+	cfgPath := writeConfigFile(t, "extract:\n  path: '"+filepath.Join(root, "restore")+"'\n")
 
 	_, _, err := runCmd(t, "extract", root, "--config", cfgPath)
 	require.ErrorIs(t, err, cli.ErrTargetInArchive)
@@ -722,7 +722,7 @@ func TestExtractCmd_PerFileFailuresExitNonzero(t *testing.T) {
 
 	target := t.TempDir()
 
-	out, stderr, err := runCmd(t, "extract", root, "--target", target)
+	out, stderr, err := runCmd(t, "extract", root, "--extract-path", target)
 	require.ErrorIs(t, err, cli.ErrExtractIncomplete)
 	assert.Contains(t, out, "extracted")
 	assert.Contains(t, out, "1 errored")
@@ -740,7 +740,7 @@ func TestExtractCmd_Verbose(t *testing.T) {
 	root := buildMiniArchive(t)
 	target := t.TempDir()
 
-	_, stderr, err := runCmd(t, "extract", root, "--target", target, "-v")
+	_, stderr, err := runCmd(t, "extract", root, "--extract-path", target, "-v")
 	require.NoError(t, err)
 	assert.Contains(t, stderr, miniPlanPath, "verbose streams one line per file to stderr")
 }

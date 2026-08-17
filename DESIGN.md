@@ -949,7 +949,7 @@ coalesced or bundled it, and the self-heal after an interrupted run
 legitimately produces thousands at once), so ledger-known keys prune
 freely at any scale. The guards then cover what the ledger has never
 heard of: a run that opened an empty ledger against a non-empty mirror is
-a fresh or wrong `--archive-dir` pointed at an existing archive and refuses
+a fresh or wrong `--archive-path` pointed at an existing archive and refuses
 the whole prune (restore the prefix, ledger included, before re-rooting
 an archive); and a ledger-unknown delete set past a floor (100 keys) that
 outnumbers the walk-matched keys means most of the mirror has no local
@@ -1197,40 +1197,42 @@ projects/<project>/workspaces/<ws>/
 Settings split by how much they vary. The token is a secret (environment only),
 the per-run knobs are flags, and everything that describes what and how to
 archive is a YAML file, validated against a JSON schema generated from the Go
-type and embedded in the binary. The output directory sits in both camps: the
-file's `archiveDir` supplies the stable default and `--archive-dir` overrides
-it per run.
+type and embedded in the binary. The archive root sits in both camps: the
+file's `archive.path` supplies the stable default and `--archive-path`
+overrides it per run.
 
 - Environment: `HCP_TOKEN`, then `TFC_TOKEN`, then `TFE_TOKEN` (required, first
   non-empty wins); `HCP_ARCHIVER_CONFIG` for the config file path.
-- Flags: `--config` / `-c` (config path), `--archive-dir` / `-o` (archive root,
-  defaulting to the file's `archiveDir`; resume/re-run is implied when it
+- Flags: `--config` / `-c` (config path), `--archive-path` / `-o` (archive root,
+  defaulting to the file's `archive.path`; resume/re-run is implied when it
   already holds an archive), `--progress=auto|human|json|quiet` (default
   `auto`: human on a TTY, quiet off one) with a progress-interval knob,
   `--retry-absent` to re-probe `absent` objects on a re-run, and the
   `--log-*` knobs.
 - Config file (all keys optional, defaults applied per field): `address`
-  (default `https://app.terraform.io`), `archiveDir` and `extractDir`
-  (directory defaults for `--archive-dir` / the read commands' positional and
-  for
-  extract/export `--target`; an explicit flag or positional wins, relative
-  paths resolve against the file's directory), `organizations` (all visible
-  orgs if empty), `projects` and `workspaces` (filters within each org;
-  everything if empty, and with both set a workspace must satisfy both), a
-  `runHistory` block bounding each workspace's archived run history
-  (`maxCount` / `maxAge`, the age in Go duration syntax extended with a day
-  unit such as `90d`; whichever admits more history wins; unlimited by
-  default), `rateLimit` (the ceiling of the client's adaptive rate governor,
+  (default `https://app.terraform.io`), `archive.path`, `extract.path`, and
+  `export.path` (directory defaults for `--archive-path` / the read commands'
+  positional, extract's `--extract-path`, and export's `--export-path`; an
+  explicit flag or positional wins,
+  relative paths resolve against the file's directory), `organizations` (all
+  visible orgs if empty), `projects` and `workspaces` (filters within each
+  org; everything if empty, and with both set a workspace must satisfy both),
+  a `runHistory` block bounding the run history a run fetches per workspace
+  (`fetchCount` / `fetchAge`, the age in Go duration syntax extended with a day
+  unit such as `90d`; each bound guarantees inclusion, so whichever admits
+  more history wins; unlimited by default, and never removing runs already
+  archived), `rateLimit` (the ceiling of the client's adaptive rate governor,
   in requests per second; default 30, HCP's documented general limit; the
   governor adapts downward from server feedback on its own, so this is set
   only for an org whose granted limit sits well below the default and the run
-  should not probe past it), a `scope` block of toggles for the heavy or
+  should not probe past it), an `include` block of toggles for the heavy or
   optional surfaces (`stacks`, `hyok`, `registryDetail`, `auditTrail`), each
   off by default, and a `remote` block enabling the full remote mirror
   described in Remote offload and full-archive sync (`url` required, its
   scheme selecting the backend: `s3://`, `azblob://`, `file://`; optional
-  `prefix`, `partSize` as a plain byte count or a suffixed size such as
-  `64MiB`, and `concurrency`). With that block set, the bucket
+  `prefix`, and an `upload` block tuning multipart uploads: `partSize` as a
+  plain byte count or a suffixed size such as `64MiB`, and `concurrency`, at
+  least 1). With that block set, the bucket
   converges on a complete copy of the archive, with no separate per-motion
   knob: sealed cold bundles and settled config-version tarballs are evicted
   off disk, and everything else (the search layer, roll-ups, sidecars, ledger

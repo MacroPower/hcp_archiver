@@ -151,7 +151,7 @@ func TestNew(t *testing.T) {
 	cfg := &config.Config{
 		Token:        "secret",
 		Address:      config.DefaultAddress,
-		OutputDir:    t.TempDir(),
+		ArchiveDir:   t.TempDir(),
 		ProgressMode: config.ProgressModeQuiet,
 	}
 
@@ -174,7 +174,7 @@ func TestRunInvalidConfig(t *testing.T) {
 	a := archiver.New(cfg, archiver.WithWriter(&bytes.Buffer{}))
 
 	err := a.Run(t.Context())
-	require.ErrorIs(t, err, config.ErrMissingOutputDir)
+	require.ErrorIs(t, err, config.ErrMissingArchiveDir)
 }
 
 func TestResolveOrgs(t *testing.T) {
@@ -265,7 +265,7 @@ func TestRunOrgRejectsEscapingName(t *testing.T) {
 			require.NoError(t, os.Mkdir(outputDir, 0o750))
 
 			a := archiver.New(
-				&config.Config{OutputDir: outputDir},
+				&config.Config{ArchiveDir: outputDir},
 				archiver.WithWriter(&bytes.Buffer{}),
 			)
 

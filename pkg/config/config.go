@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -35,10 +36,13 @@ var (
 	// ErrMissingToken indicates that no API token was supplied or found in the
 	// environment.
 	ErrMissingToken = errors.New("api token is required (set HCP_TOKEN, TFC_TOKEN, or TFE_TOKEN)")
-	// ErrMissingOutputDir indicates that no output directory was supplied.
-	ErrMissingOutputDir = errors.New(
-		"output directory is required (set --archive-dir or archiveDir in the configuration file)",
+	// ErrMissingArchiveDir indicates that no archive root was supplied.
+	ErrMissingArchiveDir = errors.New(
+		"archive path is required (set --archive-path or archive.path in the configuration file)",
 	)
+	// ErrInvalidAddress indicates an API address that is not an absolute
+	// http or https URL.
+	ErrInvalidAddress = errors.New("address must be an absolute http(s) URL")
 	// ErrInvalidOrganization indicates an organization name that is not a single
 	// path segment, and so cannot root an organization's archive.
 	ErrInvalidOrganization = errors.New("organization name must be a single path segment")
@@ -71,19 +75,21 @@ type Config struct {
 	Token string
 	// Address is the HCP Terraform API address.
 	Address string
-	// OutputDir is the archive root; pointing at an existing archive makes the
-	// run a resume rather than a fresh start.
-	OutputDir string
+	// ArchiveDir is the archive root; pointing at an existing archive makes
+	// the run a resume rather than a fresh start.
+	ArchiveDir string
 	// ProgressMode selects how the run reports live progress.
 	ProgressMode ProgressMode
-	// Organizations limits the run to the named organizations; an empty list
-	// means every organization the token can see.
+	// Organizations limits the run to the named organizations, matched
+	// exactly; an empty list means every organization the token can see.
 	Organizations []string
 	// Projects limits the run to the named projects within each archived
-	// organization; an empty list means every project.
+	// organization, matched exactly; an empty list means every project. With
+	// Workspaces also set, a workspace must satisfy both filters.
 	Projects []string
 	// Workspaces limits the run to the named workspaces within each archived
-	// organization; an empty list means every workspace.
+	// organization, matched exactly; an empty list means every workspace.
+	// With Projects also set, a workspace must satisfy both filters.
 	Workspaces []string
 	// ProgressInterval is the cadence at which progress is reported.
 	ProgressInterval time.Duration
@@ -144,7 +150,7 @@ type RemoteConfig struct {
 //   - [WithOrganizations]
 //   - [WithProjects]
 //   - [WithWorkspaces]
-//   - [WithOutputDir]
+//   - [WithArchiveDir]
 //   - [WithProgressMode]
 //   - [WithProgressInterval]
 //   - [WithRunHistoryCount]
@@ -177,8 +183,9 @@ func WithAddress(address string) Option {
 	}
 }
 
-// WithOrganizations limits the run to the named organizations. An empty list
-// archives every organization the token can see. It returns an [Option].
+// WithOrganizations limits the run to the named organizations, matched
+// exactly. An empty list archives every organization the token can see. It
+// returns an [Option].
 func WithOrganizations(orgs []string) Option {
 	return func(c *Config) {
 		c.Organizations = orgs
@@ -186,7 +193,8 @@ func WithOrganizations(orgs []string) Option {
 }
 
 // WithProjects limits the run to the named projects within each archived
-// organization. An empty list archives every project. It returns an [Option].
+// organization, matched exactly. An empty list archives every project. It
+// returns an [Option].
 func WithProjects(projects []string) Option {
 	return func(c *Config) {
 		c.Projects = projects
@@ -194,18 +202,18 @@ func WithProjects(projects []string) Option {
 }
 
 // WithWorkspaces limits the run to the named workspaces within each archived
-// organization. An empty list archives every workspace. It returns an
-// [Option].
+// organization, matched exactly. An empty list archives every workspace. It
+// returns an [Option].
 func WithWorkspaces(workspaces []string) Option {
 	return func(c *Config) {
 		c.Workspaces = workspaces
 	}
 }
 
-// WithOutputDir sets the archive root directory. It returns an [Option].
-func WithOutputDir(dir string) Option {
+// WithArchiveDir sets the archive root directory. It returns an [Option].
+func WithArchiveDir(dir string) Option {
 	return func(c *Config) {
-		c.OutputDir = dir
+		c.ArchiveDir = dir
 	}
 }
 
@@ -329,15 +337,31 @@ func New(opts ...Option) (*Config, error) {
 	return c, nil
 }
 
+// ValidateAddress reports whether address is usable as the HCP Terraform API
+// address: an absolute URL with an http or https scheme and a host. The
+// configuration schema only annotates the field with a URI format, which
+// draft 2020-12 validators do not assert, so this is the check that catches a
+// typo before the first API call. It returns [ErrInvalidAddress] wrapped with
+// the offending value.
+func ValidateAddress(address string) error {
+	u, err := url.Parse(address)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("%w: %q", ErrInvalidAddress, address)
+	}
+
+	return nil
+}
+
 // ValidateOrganizationName reports whether name is usable as the single
 // directory segment an organization's archive is rooted at.
 //
-// The archiver joins the name onto the output directory to root the
+// The archiver joins the name onto the archive root to root the
 // organization's store, and onto the remote key prefix to root its mirror.
-// Both joins collapse ".." lexically, so a name carrying path separators, dot
-// entries, or control characters would place the whole organization (its
-// store, its manifest lock, and every mirrored object) outside the archive
-// root and outside the configured prefix. Organization names arrive from the
+// Both joins collapse ".." lexically, so a name carrying path separators,
+// consisting only of dots, or carrying control characters would place the
+// whole organization (its store, its manifest lock, and every mirrored
+// object) outside the archive root and outside the configured prefix, or hide
+// it in a dot entry. Organization names arrive from the
 // server's listing as readily as from an operator, so this is a boundary the
 // archiver enforces on every organization it archives rather than a check on
 // operator input alone. It returns [ErrInvalidOrganization] wrapped with the
@@ -345,7 +369,7 @@ func New(opts ...Option) (*Config, error) {
 func ValidateOrganizationName(name string) error {
 	control := func(r rune) bool { return r < 0x20 || r == 0x7f }
 
-	if name == "" || name == "." || name == ".." ||
+	if strings.Trim(name, ".") == "" ||
 		strings.ContainsAny(name, `/\`) || strings.ContainsFunc(name, control) {
 		return fmt.Errorf("%w: %q", ErrInvalidOrganization, name)
 	}
@@ -355,7 +379,7 @@ func ValidateOrganizationName(name string) error {
 
 // Validate reports whether the [Config] is internally consistent.
 //
-// It returns [ErrMissingToken], [ErrMissingOutputDir],
+// It returns [ErrMissingToken], [ErrMissingArchiveDir], [ErrInvalidAddress],
 // [ErrInvalidOrganization], [ErrInvalidRunHistoryCount],
 // [ErrInvalidRunHistoryAge], [ErrInvalidProgressMode],
 // [ErrInvalidProgressInterval], or, when a remote section is configured,
@@ -367,8 +391,15 @@ func (c *Config) Validate() error {
 		return ErrMissingToken
 	}
 
-	if c.OutputDir == "" {
-		return ErrMissingOutputDir
+	if c.ArchiveDir == "" {
+		return ErrMissingArchiveDir
+	}
+
+	// Checked unconditionally: an empty address is as unusable as a malformed
+	// one, and [New] always supplies the default.
+	err := ValidateAddress(c.Address)
+	if err != nil {
+		return err
 	}
 
 	// Named organizations are rejected here so an operator's typo fails before

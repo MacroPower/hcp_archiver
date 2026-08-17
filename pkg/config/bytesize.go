@@ -20,10 +20,11 @@ var (
 	// non-negative integer or a suffixed size string [ParseByteSize] accepts.
 	ErrInvalidByteSize = errors.New("invalid byte size")
 
-	// The anchored grammar of the suffixed size string: an unsigned decimal
-	// number with an optional decimal or binary unit. It is the same pattern
-	// the configuration schema enforces on the string form.
-	byteSizePattern = regexp.MustCompile(`^\d+(\.\d+)?(B|[KMGT]B|[KMGT]iB)?$`)
+	// The anchored grammar of the suffixed size string: an unsigned integer
+	// with an optional unit, or a fractional number with a multiplier unit,
+	// since a fractional count of bare bytes can never be whole. It is the
+	// same pattern the configuration schema enforces on the string form.
+	byteSizePattern = regexp.MustCompile(`^(\d+(B|[KMGT]B|[KMGT]iB)?|\d+\.\d+([KMGT]B|[KMGT]iB))$`)
 
 	// Each size suffix mapped to its multiplier: decimal units are powers of
 	// 1000, binary units powers of 1024, and "B" or no suffix is bytes.
@@ -57,8 +58,9 @@ var (
 // suffixed string such as "64MiB". Decimal suffixes (KB, MB, GB, TB) are
 // powers of 1000, binary suffixes (KiB, MiB, GiB, TiB) are powers of 1024,
 // and "B" or no suffix means bytes. Suffixes are case-sensitive. A fractional
-// number is accepted when the result is a whole number of bytes ("1.5GiB",
-// but not "1.5B"). Convert to a plain count with int64(b).
+// number requires a multiplier suffix and must name a whole number of bytes
+// ("1.5GiB", but not "1.5" or "1.0000001KB"). Convert to a plain count with
+// int64(b).
 type ByteSize int64
 
 // ParseByteSize parses s in the byte-size syntax described on [ByteSize]. It

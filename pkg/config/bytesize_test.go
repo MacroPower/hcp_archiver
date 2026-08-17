@@ -49,6 +49,7 @@ func TestParseByteSize_Invalid(t *testing.T) {
 		"bare suffix":       {in: "MiB"},
 		"signed":            {in: "-1MiB"},
 		"fractional byte":   {in: "1.5B"},
+		"bare fractional":   {in: "1.5"},
 		"unknown suffix":    {in: "1EB"},
 		"empty":             {in: ""},
 		"overflowing value": {in: "9000000TiB"},

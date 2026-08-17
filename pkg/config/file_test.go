@@ -24,7 +24,7 @@ func TestDefaultFile(t *testing.T) {
 	assert.Empty(t, file.Projects)
 	assert.Empty(t, file.Workspaces)
 	assert.Equal(t, config.FileRunHistory{}, file.RunHistory)
-	assert.Equal(t, config.FileScope{}, file.Scope)
+	assert.Equal(t, config.FileInclude{}, file.Include)
 }
 
 func TestLoadFile(t *testing.T) {
@@ -80,8 +80,8 @@ func TestLoadFile(t *testing.T) {
 				"organizations:\n  - one\n  - two\n" +
 				"projects:\n  - networking\n" +
 				"workspaces:\n  - vpc\n  - dns\n" +
-				"runHistory:\n  maxCount: 250\n  maxAge: 90d\n" +
-				"scope:\n  stacks: true\n  hyok: true\n  registryDetail: true\n  auditTrail: true\n",
+				"runHistory:\n  fetchCount: 250\n  fetchAge: 90d\n" +
+				"include:\n  stacks: true\n  hyok: true\n  registryDetail: true\n  auditTrail: true\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, "https://tfe.example.com", file.Address)
@@ -89,28 +89,57 @@ func TestLoadFile(t *testing.T) {
 				assert.Equal(t, []string{"one", "two"}, file.Organizations)
 				assert.Equal(t, []string{"networking"}, file.Projects)
 				assert.Equal(t, []string{"vpc", "dns"}, file.Workspaces)
-				assert.Equal(t, 250, file.RunHistory.MaxCount)
-				assert.Equal(t, config.Duration(2160*time.Hour), file.RunHistory.MaxAge)
-				assert.True(t, file.Scope.Stacks)
-				assert.True(t, file.Scope.HYOK)
-				assert.True(t, file.Scope.RegistryDetail)
-				assert.True(t, file.Scope.AuditTrail)
+				assert.Equal(t, 250, file.RunHistory.FetchCount)
+				assert.Equal(t, config.Duration(2160*time.Hour), file.RunHistory.FetchAge)
+				assert.True(t, file.Include.Stacks)
+				assert.True(t, file.Include.HYOK)
+				assert.True(t, file.Include.RegistryDetail)
+				assert.True(t, file.Include.AuditTrail)
 			},
 		},
 		"run history bounds are each optional": {
-			yaml: "runHistory:\n  maxCount: 100\n",
+			yaml: "runHistory:\n  fetchCount: 100\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
-				assert.Equal(t, 100, file.RunHistory.MaxCount)
-				assert.Zero(t, file.RunHistory.MaxAge)
+				assert.Equal(t, 100, file.RunHistory.FetchCount)
+				assert.Zero(t, file.RunHistory.FetchAge)
+			},
+		},
+		"run history age zero means unbounded": {
+			yaml: "runHistory:\n  fetchCount: 100\n  fetchAge: 0\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.Equal(t, 100, file.RunHistory.FetchCount)
+				assert.Zero(t, file.RunHistory.FetchAge)
+			},
+		},
+		"run history age accepts a float zero": {
+			yaml: "runHistory:\n  fetchAge: 0.0\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.Zero(t, file.RunHistory.FetchAge)
+			},
+		},
+		"bare section keys are unset": {
+			yaml: "archive:\nexport:\nextract:\ninclude:\nremote:\nrunHistory:\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.Equal(t, config.DefaultAddress, file.Address)
+				assert.Empty(t, file.Archive.Path)
+				assert.Empty(t, file.Export.Templates.Path)
+				assert.Empty(t, file.Extract.Path)
+				assert.True(t, file.Remote.IsZero())
+				assert.Equal(t, config.FileRunHistory{}, file.RunHistory)
+				assert.Equal(t, config.FileInclude{}, file.Include)
 			},
 		},
 		"remote section decodes": {
 			yaml: "remote:\n" +
 				"  url: s3://my-archive?region=us-east-1\n" +
 				"  prefix: hcp\n" +
-				"  partSize: 67108864\n" +
-				"  concurrency: 4\n",
+				"  upload:\n" +
+				"    partSize: 67108864\n" +
+				"    concurrency: 4\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.False(t, file.Remote.IsZero())
@@ -123,26 +152,43 @@ func TestLoadFile(t *testing.T) {
 			},
 		},
 		"remote part size accepts a suffixed string": {
-			yaml: "remote:\n  url: s3://b\n  partSize: 64MiB\n",
+			yaml: "remote:\n  url: s3://b\n  upload:\n    partSize: 64MiB\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, int64(67108864), file.Remote.RemoteConfig().PartSize)
 			},
 		},
-		"archive and extract directories decode": {
-			yaml: "archiveDir: ./archive\nextractDir: /mnt/restore\n",
+		"bare upload section is unset": {
+			yaml: "remote:\n  url: s3://b\n  upload:\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
-				assert.Equal(t, "./archive", file.ArchiveDir)
-				assert.Equal(t, "/mnt/restore", file.ExtractDir)
+				assert.False(t, file.Remote.IsZero())
+				assert.Zero(t, file.Remote.RemoteConfig().PartSize)
+				assert.Zero(t, file.Remote.RemoteConfig().Concurrency)
 			},
 		},
-		"directories left unset stay empty": {
+		"archive and extract paths decode": {
+			yaml: "archive:\n  path: ./archive\nextract:\n  path: /mnt/restore\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.Equal(t, "./archive", file.Archive.Path)
+				assert.Equal(t, "/mnt/restore", file.Extract.Path)
+			},
+		},
+		"empty archive and extract sections stay empty": {
+			yaml: "archive: {}\nextract: {}\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.Empty(t, file.Archive.Path)
+				assert.Empty(t, file.Extract.Path)
+			},
+		},
+		"paths left unset stay empty": {
 			yaml: "organizations:\n  - acme\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
-				assert.Empty(t, file.ArchiveDir)
-				assert.Empty(t, file.ExtractDir)
+				assert.Empty(t, file.Archive.Path)
+				assert.Empty(t, file.Extract.Path)
 			},
 		},
 		"remote left unset disables offloading": {
@@ -175,7 +221,7 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 		yaml string
 	}{
 		"concurrency below the schema minimum": {
-			yaml: "concurrency: 0\n",
+			yaml: "remote:\n  url: s3://b\n  upload:\n    concurrency: 0\n",
 		},
 		"unknown property": {
 			yaml: "notaproperty: true\n",
@@ -199,7 +245,13 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 			yaml: "workspaces:\n  - vpc\n  - vpc\n",
 		},
 		"negative run history count": {
-			yaml: "runHistory:\n  maxCount: -1\n",
+			yaml: "runHistory:\n  fetchCount: -1\n",
+		},
+		"retired keepCount key is rejected": {
+			yaml: "runHistory:\n  keepCount: 100\n",
+		},
+		"retired keepAge key is rejected": {
+			yaml: "runHistory:\n  keepAge: 90d\n",
 		},
 		"zero rate limit": {
 			yaml: "rateLimit: 0\n",
@@ -208,19 +260,34 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 			yaml: "rateLimit: -1\n",
 		},
 		"run history age must be a duration string": {
-			yaml: "runHistory:\n  maxAge: 90\n",
+			yaml: "runHistory:\n  fetchAge: 90\n",
+		},
+		"run history age rejects a non-zero fraction": {
+			yaml: "runHistory:\n  fetchAge: 0.5\n",
+		},
+		"address without a scheme": {
+			yaml: "address: app.terraform.io\n",
+		},
+		"address with a non-http scheme": {
+			yaml: "address: ftp://app.terraform.io\n",
 		},
 		"run history age must not be negative": {
-			yaml: "runHistory:\n  maxAge: -24h\n",
+			yaml: "runHistory:\n  fetchAge: -24h\n",
 		},
 		"run history age rejects unknown units": {
-			yaml: "runHistory:\n  maxAge: 1w\n",
+			yaml: "runHistory:\n  fetchAge: 1w\n",
 		},
-		"archive directory must be a string": {
-			yaml: "archiveDir:\n  - x\n",
+		"archive path must be a string": {
+			yaml: "archive:\n  path:\n    - x\n",
 		},
-		"extract directory must be a string": {
-			yaml: "extractDir:\n  - x\n",
+		"extract path must be a string": {
+			yaml: "extract:\n  path:\n    - x\n",
+		},
+		"retired flat archiveDir key is rejected": {
+			yaml: "archiveDir: ./archive\n",
+		},
+		"retired flat extractDir key is rejected": {
+			yaml: "extractDir: ./restore\n",
 		},
 		"remote without a bucket": {
 			yaml: "remote:\n  prefix: hcp\n",
@@ -232,19 +299,22 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 			yaml: "remote:\n  url: \"\"\n",
 		},
 		"negative remote part size": {
-			yaml: "remote:\n  url: s3://b\n  partSize: -1\n",
+			yaml: "remote:\n  url: s3://b\n  upload:\n    partSize: -1\n",
 		},
 		"lowercase part size suffix": {
-			yaml: "remote:\n  url: s3://b\n  partSize: 64mib\n",
+			yaml: "remote:\n  url: s3://b\n  upload:\n    partSize: 64mib\n",
 		},
 		"unknown part size suffix": {
-			yaml: "remote:\n  url: s3://b\n  partSize: 64ZiB\n",
+			yaml: "remote:\n  url: s3://b\n  upload:\n    partSize: 64ZiB\n",
 		},
-		"fractional byte part size passes the pattern but fails the parse": {
-			yaml: "remote:\n  url: s3://b\n  partSize: 1.5B\n",
+		"fractional byte part size": {
+			yaml: "remote:\n  url: s3://b\n  upload:\n    partSize: 1.5B\n",
+		},
+		"fractional part size without a multiplier": {
+			yaml: "remote:\n  url: s3://b\n  upload:\n    partSize: \"1.5\"\n",
 		},
 		"negative remote concurrency": {
-			yaml: "remote:\n  url: s3://b\n  concurrency: -1\n",
+			yaml: "remote:\n  url: s3://b\n  upload:\n    concurrency: -1\n",
 		},
 	}
 
@@ -269,11 +339,13 @@ func TestLoadFile_Example(t *testing.T) {
 	t.Parallel()
 
 	// The example shipped at the repository root must stay valid against the
-	// schema so a copy of it is a working starting point.
+	// schema, and its uncommented keys must all carry defaults, so an unedited
+	// copy of it is a working starting point that archives everything the
+	// token can see.
 	file, err := config.LoadFile(filepath.Join("..", "..", "hcp_archiver.example.yaml"))
 	require.NoError(t, err)
 	assert.Equal(t, config.DefaultAddress, file.Address)
-	assert.Equal(t, []string{"my-org"}, file.Organizations)
+	assert.Empty(t, file.Organizations)
 }
 
 func TestLoadFile_ReadError(t *testing.T) {

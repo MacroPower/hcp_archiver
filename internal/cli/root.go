@@ -28,7 +28,7 @@ const appName = "hcp_archiver"
 // YAML configuration file; only per-run and operational settings are flags.
 const (
 	flagConfig           = "config"
-	flagArchiveDir       = "archive-dir"
+	flagArchivePath      = "archive-path"
 	flagProgress         = "progress"
 	flagProgressInterval = "progress-interval"
 	flagRetryAbsent      = "retry-absent"
@@ -42,7 +42,7 @@ var ErrLogHandler = errors.New("create log handler")
 // into a validated [config.Config].
 type archiveFlags struct {
 	configPath       string
-	archiveDir       string
+	archivePath      string
 	progress         string
 	progressInterval time.Duration
 	retryAbsent      bool
@@ -56,8 +56,8 @@ func registerArchiveFlags(cmd *cobra.Command) *archiveFlags {
 
 	fs.StringVarP(&af.configPath, flagConfig, "c", "",
 		fmt.Sprintf("path to the YAML configuration file (defaults to $%s)", config.EnvConfigPath))
-	fs.StringVarP(&af.archiveDir, flagArchiveDir, "o", "",
-		"archive root directory (defaults to the configuration file's archiveDir)")
+	fs.StringVarP(&af.archivePath, flagArchivePath, "o", "",
+		"archive root directory (defaults to the configuration file's archive.path)")
 	fs.StringVar(&af.progress, flagProgress, config.DefaultProgressMode.String(),
 		"progress output mode (auto|human|json|quiet)")
 	fs.DurationVar(&af.progressInterval, flagProgressInterval, config.DefaultProgressInterval,
@@ -83,9 +83,9 @@ func (af *archiveFlags) config() (*config.Config, error) {
 		return nil, err
 	}
 
-	output := af.archiveDir
+	output := af.archivePath
 	if output == "" {
-		output = configDir(cfgPath, file.ArchiveDir)
+		output = configDir(cfgPath, file.Archive.Path)
 	}
 
 	opts := []config.Option{
@@ -94,13 +94,13 @@ func (af *archiveFlags) config() (*config.Config, error) {
 		config.WithOrganizations(file.Organizations),
 		config.WithProjects(file.Projects),
 		config.WithWorkspaces(file.Workspaces),
-		config.WithRunHistoryCount(file.RunHistory.MaxCount),
-		config.WithRunHistoryAge(time.Duration(file.RunHistory.MaxAge)),
-		config.WithStacks(file.Scope.Stacks),
-		config.WithHYOK(file.Scope.HYOK),
-		config.WithRegistryDetail(file.Scope.RegistryDetail),
-		config.WithAuditTrail(file.Scope.AuditTrail),
-		config.WithOutputDir(output),
+		config.WithRunHistoryCount(file.RunHistory.FetchCount),
+		config.WithRunHistoryAge(time.Duration(file.RunHistory.FetchAge)),
+		config.WithStacks(file.Include.Stacks),
+		config.WithHYOK(file.Include.HYOK),
+		config.WithRegistryDetail(file.Include.RegistryDetail),
+		config.WithAuditTrail(file.Include.AuditTrail),
+		config.WithArchiveDir(output),
 		config.WithProgressMode(mode),
 		config.WithProgressInterval(af.progressInterval),
 		config.WithRetryAbsent(af.retryAbsent),
@@ -242,15 +242,15 @@ output directory in turn to accumulate the union of what each can read.`,
 // interactive terminal UI mirroring the HCP interface: organizations open into
 // projects, workspaces, runs, and state versions. The directory may be the
 // archive root or a single organization's directory; it defaults to the
-// configuration file's archiveDir or, with none set, the current directory.
+// configuration file's archive.path or, with none set, the current directory.
 func newViewCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "view [archive-dir]",
+		Use:   "view [archive-path]",
 		Short: "Browse an archive in an interactive terminal UI",
 		Long: `Browse an archive in an interactive terminal UI mirroring the HCP interface:
 organizations open into projects, workspaces, runs, and state versions. The
 directory may be the archive root or a single organization's directory; it
-defaults to the configuration file's archiveDir or, with none set, the
+defaults to the configuration file's archive.path or, with none set, the
 current directory.
 
 ` + remoteLong,

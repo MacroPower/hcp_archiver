@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/goccy/go-yaml"
 	"github.com/goccy/go-yaml/ast"
+	"go.jacobcolvin.com/x/jsonschema"
 )
 
 var (
@@ -16,11 +18,11 @@ var (
 	// extended duration syntax [ParseDuration] accepts.
 	ErrInvalidDuration = errors.New("invalid duration")
 
-	// The anchored grammar of the extended duration syntax: one or more
-	// unsigned decimal numbers, each with a unit suffix. It is the same
-	// pattern the configuration schema enforces, so a value that decodes is a
-	// value the schema admits.
-	durationPattern = regexp.MustCompile(`^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h|d))+$`)
+	// The anchored grammar of the extended duration syntax: a bare "0", or one
+	// or more unsigned decimal numbers, each with a unit suffix.
+	// [Duration.JSONSchema] emits it into the configuration schema, so a value
+	// that decodes is a value the schema admits.
+	durationPattern = regexp.MustCompile(`^(0|(\d+(\.\d+)?(ns|us|µs|ms|s|m|h|d))+)$`)
 
 	// One number-and-unit segment of a duration string validated by
 	// durationPattern.
@@ -33,8 +35,9 @@ var (
 // to [time.Duration] recovers the standard type.
 //
 // Values are unsigned, and the syntax is slightly stricter than
-// [time.ParseDuration]: no sign, no bare "0", and only the micro sign "µs"
-// spelling of microseconds.
+// [time.ParseDuration]: no sign, and microseconds spell as "us" or the micro
+// sign "µs", not the Greek mu "μs". A bare "0", or the number 0 in YAML, is
+// the zero duration.
 type Duration time.Duration
 
 // ParseDuration parses s in the extended duration syntax described on
@@ -90,11 +93,29 @@ func (d Duration) String() string {
 	return v.String()
 }
 
-// UnmarshalYAML decodes the YAML scalar as an extended duration string. A
-// named duration type does not inherit the YAML decoder's built-in
-// [time.Duration] handling, so the type carries its own. A bad value is
-// returned as a token-carrying YAML error, so the loader reports it against
-// the offending source line.
+// JSONSchema describes the extended duration string, replacing the schema
+// that would be reflected from the underlying integer. It implements the
+// schema generator's provider interface, so the generated configuration
+// schema carries one shared definition for the type.
+func (Duration) JSONSchema(_ context.Context, _ jsonschema.TypeContext) (*jsonschema.Schema, error) {
+	zero := any(0)
+
+	return &jsonschema.Schema{
+		Title: "Duration",
+		Description: "A duration: a string in Go duration syntax extended with a day unit, " +
+			"such as 90d, 36h, or 1d12h, or 0 for the zero duration.",
+		OneOf: []*jsonschema.Schema{
+			{Type: "string", Pattern: durationPattern.String()},
+			{Const: &zero},
+		},
+	}, nil
+}
+
+// UnmarshalYAML decodes the YAML scalar as an extended duration string, or as
+// the number 0 for the zero duration. A named duration type does not inherit
+// the YAML decoder's built-in [time.Duration] handling, so the type carries
+// its own. A bad value is returned as a token-carrying YAML error, so the
+// loader reports it against the offending source line.
 func (d *Duration) UnmarshalYAML(node ast.Node) error {
 	var v any
 
@@ -104,20 +125,35 @@ func (d *Duration) UnmarshalYAML(node ast.Node) error {
 		return err
 	}
 
-	s, ok := v.(string)
-	if !ok {
+	fail := func() error {
 		return &yaml.SyntaxError{
-			Message: fmt.Sprintf("%v: %v: must be a duration string", ErrInvalidDuration, v),
+			Message: fmt.Sprintf("%v: %v: must be a duration string or 0", ErrInvalidDuration, v),
 			Token:   node.GetToken(),
 		}
 	}
 
-	parsed, err := ParseDuration(s)
-	if err != nil {
-		return &yaml.SyntaxError{Message: err.Error(), Token: node.GetToken()}
-	}
+	switch t := v.(type) {
+	case string:
+		parsed, err := ParseDuration(t)
+		if err != nil {
+			return &yaml.SyntaxError{Message: err.Error(), Token: node.GetToken()}
+		}
 
-	*d = parsed
+		*d = parsed
+
+	case int64, uint64, float64:
+		// The schema's zero constant matches a YAML 0 or 0.0 numerically, so
+		// the decoder agrees: a numeric zero is the zero duration, and any
+		// other number must carry a unit.
+		if t != int64(0) && t != uint64(0) && t != float64(0) {
+			return fail()
+		}
+
+		*d = 0
+
+	default:
+		return fail()
+	}
 
 	return nil
 }

@@ -16,7 +16,7 @@ func TestNew_Defaults(t *testing.T) {
 
 	cfg, err := config.New(
 		config.WithToken("tok"),
-		config.WithOutputDir("/tmp/archive"),
+		config.WithArchiveDir("/tmp/archive"),
 	)
 	require.NoError(t, err)
 
@@ -42,7 +42,7 @@ func TestNew_EmptyAddressKeepsDefault(t *testing.T) {
 
 	cfg, err := config.New(
 		config.WithToken("tok"),
-		config.WithOutputDir("/tmp/archive"),
+		config.WithArchiveDir("/tmp/archive"),
 		config.WithAddress(""),
 	)
 	require.NoError(t, err)
@@ -55,7 +55,7 @@ func TestNew_OptionsOverrideDefaults(t *testing.T) {
 
 	cfg, err := config.New(
 		config.WithToken("tok"),
-		config.WithOutputDir("/tmp/archive"),
+		config.WithArchiveDir("/tmp/archive"),
 		config.WithAddress("https://tfe.example.com"),
 		config.WithOrganizations([]string{"acme"}),
 		config.WithProjects([]string{"networking"}),
@@ -94,7 +94,7 @@ func TestNew_NonPositiveRateLimitKeepsDefault(t *testing.T) {
 
 	cfg, err := config.New(
 		config.WithToken("tok"),
-		config.WithOutputDir("/tmp/archive"),
+		config.WithArchiveDir("/tmp/archive"),
 		config.WithRateLimit(0),
 		config.WithRateLimit(-5),
 	)
@@ -185,7 +185,7 @@ func TestNew_TokenFromEnv(t *testing.T) {
 				t.Setenv(config.EnvTokenFallback, "")
 			}
 
-			opts := []config.Option{config.WithOutputDir("/tmp/archive")}
+			opts := []config.Option{config.WithArchiveDir("/tmp/archive")}
 			if tc.optionToken != "" {
 				opts = append(opts, config.WithToken(tc.optionToken))
 			}
@@ -218,6 +218,8 @@ func TestValidateOrganizationName(t *testing.T) {
 		"empty":                  {name: "", err: config.ErrInvalidOrganization},
 		"current directory":      {name: ".", err: config.ErrInvalidOrganization},
 		"parent directory":       {name: "..", err: config.ErrInvalidOrganization},
+		"three dots":             {name: "...", err: config.ErrInvalidOrganization},
+		"four dots":              {name: "....", err: config.ErrInvalidOrganization},
 		"traversal prefix":       {name: "../../home/user/.ssh", err: config.ErrInvalidOrganization},
 		"traversal suffix":       {name: "acme/..", err: config.ErrInvalidOrganization},
 		"nested segments":        {name: "acme/sub", err: config.ErrInvalidOrganization},
@@ -248,23 +250,68 @@ func TestValidateOrganizationName(t *testing.T) {
 	}
 }
 
+func TestValidateAddress(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		address string
+		err     error
+	}{
+		"default address":  {address: config.DefaultAddress},
+		"self-hosted tfe":  {address: "https://tfe.example.com"},
+		"plain http":       {address: "http://localhost:8080"},
+		"empty":            {address: "", err: config.ErrInvalidAddress},
+		"missing scheme":   {address: "app.terraform.io", err: config.ErrInvalidAddress},
+		"non-http scheme":  {address: "ftp://app.terraform.io", err: config.ErrInvalidAddress},
+		"scheme only":      {address: "https://", err: config.ErrInvalidAddress},
+		"relative path":    {address: "/api/v2", err: config.ErrInvalidAddress},
+		"unparseable":      {address: "https://bad\nhost", err: config.ErrInvalidAddress},
+		"spaces in a name": {address: "not a url", err: config.ErrInvalidAddress},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			err := config.ValidateAddress(tc.address)
+
+			if tc.err != nil {
+				require.ErrorIs(t, err, tc.err)
+				assert.Contains(t, err.Error(), strconv.Quote(tc.address))
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestNew_ValidationErrors(t *testing.T) {
 	tests := map[string]struct {
 		opts    []config.Option
 		wantErr error
 	}{
 		"missing token": {
-			opts:    []config.Option{config.WithOutputDir("/tmp/archive")},
+			opts:    []config.Option{config.WithArchiveDir("/tmp/archive")},
 			wantErr: config.ErrMissingToken,
 		},
 		"missing output dir": {
 			opts:    []config.Option{config.WithToken("tok")},
-			wantErr: config.ErrMissingOutputDir,
+			wantErr: config.ErrMissingArchiveDir,
+		},
+		"invalid address": {
+			opts: []config.Option{
+				config.WithToken("tok"),
+				config.WithArchiveDir("/tmp/archive"),
+				config.WithAddress("app.terraform.io"),
+			},
+			wantErr: config.ErrInvalidAddress,
 		},
 		"negative run history count": {
 			opts: []config.Option{
 				config.WithToken("tok"),
-				config.WithOutputDir("/tmp/archive"),
+				config.WithArchiveDir("/tmp/archive"),
 				config.WithRunHistoryCount(-1),
 			},
 			wantErr: config.ErrInvalidRunHistoryCount,
@@ -272,7 +319,7 @@ func TestNew_ValidationErrors(t *testing.T) {
 		"negative run history age": {
 			opts: []config.Option{
 				config.WithToken("tok"),
-				config.WithOutputDir("/tmp/archive"),
+				config.WithArchiveDir("/tmp/archive"),
 				config.WithRunHistoryAge(-time.Hour),
 			},
 			wantErr: config.ErrInvalidRunHistoryAge,
@@ -280,7 +327,7 @@ func TestNew_ValidationErrors(t *testing.T) {
 		"invalid progress mode": {
 			opts: []config.Option{
 				config.WithToken("tok"),
-				config.WithOutputDir("/tmp/archive"),
+				config.WithArchiveDir("/tmp/archive"),
 				config.WithProgressMode(config.ProgressMode("loud")),
 			},
 			wantErr: config.ErrInvalidProgressMode,
@@ -288,7 +335,7 @@ func TestNew_ValidationErrors(t *testing.T) {
 		"remote without a url": {
 			opts: []config.Option{
 				config.WithToken("tok"),
-				config.WithOutputDir("/tmp/archive"),
+				config.WithArchiveDir("/tmp/archive"),
 				config.WithRemote(config.RemoteConfig{Prefix: "hcp"}),
 			},
 			wantErr: config.ErrMissingRemoteURL,
@@ -296,7 +343,7 @@ func TestNew_ValidationErrors(t *testing.T) {
 		"negative remote part size": {
 			opts: []config.Option{
 				config.WithToken("tok"),
-				config.WithOutputDir("/tmp/archive"),
+				config.WithArchiveDir("/tmp/archive"),
 				config.WithRemote(config.RemoteConfig{URL: "s3://b", PartSize: -1}),
 			},
 			wantErr: config.ErrInvalidRemotePartSize,
@@ -304,7 +351,7 @@ func TestNew_ValidationErrors(t *testing.T) {
 		"negative remote concurrency": {
 			opts: []config.Option{
 				config.WithToken("tok"),
-				config.WithOutputDir("/tmp/archive"),
+				config.WithArchiveDir("/tmp/archive"),
 				config.WithRemote(config.RemoteConfig{URL: "s3://b", Concurrency: -1}),
 			},
 			wantErr: config.ErrInvalidRemoteConcurrency,
@@ -312,7 +359,7 @@ func TestNew_ValidationErrors(t *testing.T) {
 		"traversing organization name": {
 			opts: []config.Option{
 				config.WithToken("tok"),
-				config.WithOutputDir("/tmp/archive"),
+				config.WithArchiveDir("/tmp/archive"),
 				config.WithOrganizations([]string{"acme", "../../etc"}),
 			},
 			wantErr: config.ErrInvalidOrganization,

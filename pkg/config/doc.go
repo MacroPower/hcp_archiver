@@ -12,14 +12,14 @@
 // with both set a workspace must satisfy both), an optional bound on each
 // workspace's archived run history (a newest-run count and/or an age window
 // written as a [Duration], keeping whichever admits more history when both are
-// set), and a set of scope toggles for the heavy or optional surfaces (Stacks,
+// set), and a set of include toggles for the heavy or optional surfaces (Stacks,
 // hold-your-own-key configurations, the deeper registry version/platform/binary
 // detail, and the audit trail), each off unless a configuration opts into it.
 // [LoadFile] validates the document against a JSON schema generated from the Go
 // type and reports any violation against the offending source line, so a bad
 // file fails before any network call.
 //
-// The per-run settings are supplied separately. The output directory is the
+// The per-run settings are supplied separately. The archive path names the
 // archive root, and because resume and incremental re-run are driven by the
 // ledger already on disk, pointing a run at a directory that already holds an
 // archive is what makes it a resume rather than a fresh start. A progress mode

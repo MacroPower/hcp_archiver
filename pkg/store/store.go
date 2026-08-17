@@ -44,7 +44,7 @@ import (
 type Store struct {
 	// The logger history sidecar scans report skipped records through.
 	logger *slog.Logger
-	// The organization's archive directory, e.g. <outputDir>/<org>.
+	// The organization's archive directory, e.g. <archiveDir>/<org>.
 	root string
 	// Serializes the commits that touch one object's history sidecar.
 	historyLocks [historyStripes]sync.Mutex
@@ -71,7 +71,7 @@ func WithLogger(logger *slog.Logger) Option {
 // New creates a new [Store] rooted at root.
 //
 // The archiver builds one Store per organization, so root is typically
-// <outputDir>/<org>. The directory need not exist; write methods create any
+// <archiveDir>/<org>. The directory need not exist; write methods create any
 // missing parent as they commit. The options carry what the Store cannot
 // derive from its root, currently only where its history sidecars report
 // damage they walk past.

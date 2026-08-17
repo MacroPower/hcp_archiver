@@ -8,15 +8,6 @@
 # HCP Terraform API address.
 address: https://app.terraform.io
 
-# Archive root directory: default for --archive-dir and for the read commands'
-# [archive-dir] positional. A relative path resolves against this file's
-# directory. An explicit flag or positional wins.
-# archiveDir: ./archive
-
-# Default --target for extract and export; relative paths resolve against
-# this file's directory.
-# extractDir: ./restore
-
 # Ceiling on how fast requests launch, in requests per second. The default of
 # 30 is HCP Terraform's documented limit, and the client adapts downward from
 # the server's rate-limit feedback on its own; set this only for an
@@ -24,9 +15,9 @@ address: https://app.terraform.io
 # rateLimit: 10
 
 # Organizations to archive. Leave empty (or omit) to archive every organization
-# the token can see, each into its own <output>/<org>/ subtree.
-organizations:
-  - my-org
+# the token can see, each into its own <org>/ subtree under the archive root.
+# organizations:
+#   - my-org
 
 # Projects to archive within each organization. Leave empty (or omit) to
 # archive every project.
@@ -39,21 +30,29 @@ organizations:
 # workspaces:
 #   - my-workspace
 
-# Bound on how much of each workspace's run history is archived, unlimited by
-# default. Each bound is optional: maxCount keeps the newest N runs, maxAge
-# keeps runs created within the window (Go duration syntax plus a d day unit,
-# e.g. 90d). With both set, whichever admits more history wins.
-# runHistory:
-#   maxCount: 500
-#   maxAge: 90d
-
 # Heavy or organization-specific surfaces, each off by default. Enable only the
 # ones you want; they add significant time and volume to a run.
-scope:
+include:
   stacks: false
   hyok: false
   registryDetail: false
   auditTrail: false
+
+# Bound on how much of each workspace's run history a run fetches, unlimited
+# by default. Each bound is optional and guarantees inclusion: fetchCount
+# fetches the newest N runs, fetchAge fetches runs created within the window
+# (Go duration syntax plus a d day unit, e.g. 90d; 0 means unbounded). With
+# both set, whichever admits more history wins. The bounds limit fetching
+# only; runs already archived are never removed.
+# runHistory:
+#   fetchCount: 500
+#   fetchAge: 90d
+
+# Archive root directory: default for --archive-path and for the read
+# commands' [archive-path] positional. A relative path resolves against this
+# file's directory. An explicit flag or positional wins.
+# archive:
+#   path: ./archive
 
 # Mirror the archive to a remote object store: sealed cold bundles and
 # settled configuration tarballs are evicted there (uploaded, verified, then
@@ -68,14 +67,23 @@ scope:
 #   # url: s3://my-bucket?endpoint=s3.example.com&use_path_style=true # MinIO, R2, Ceph
 #   # url: azblob://my-container # Azure Blob Storage
 #   # url: file:///mnt/archive-mirror # local directory tree
-#   prefix: hcp-archive
-#   partSize: 64MiB # integer bytes, or a KB/MB/GB/TB or KiB/MiB/GiB/TiB suffix
-#   concurrency: 4
+#   prefix: hcp-archive # keys compose as <prefix>/<org>/<path>
+#   upload: # multipart-upload tuning; omit for the backend's defaults
+#     partSize: 64MiB # integer bytes, or a KB/MB/GB/TB or KiB/MiB/GiB/TiB suffix
+#     concurrency: 4 # parts in flight per bundle, at least 1
 
-# Export subcommand rendering. templates names a directory of *.md.tmpl files
+# Default --extract-path for the extract command; a relative path resolves
+# against this file's directory.
+# extract:
+#   path: ./restore
+
+# Export subcommand: path is the default --export-path directory the markdown
+# tree is written into, and templates.path names a directory of *.md.tmpl files
 # overriding the export's built-in page templates by filename (archive, org,
 # teams, variable-sets, policy-sets, projects, project, workspace, stack, each
-# with the .md.tmpl suffix); pages without an override keep their default. A
-# relative path resolves against this file's directory.
+# with the .md.tmpl suffix); pages without an override keep their default.
+# Relative paths resolve against this file's directory.
 # export:
-#   templates: export-templates
+#   path: ./site
+#   templates:
+#     path: export-templates

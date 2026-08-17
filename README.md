@@ -50,12 +50,12 @@ tagged `latest`, `vX`, `vX.Y`, and `vX.Y.Z`.
 
 The image is `scratch` plus the static binary and a root certificate bundle:
 no shell, and every path it touches is one you mount. Mount the archive root
-and point `--archive-dir` at it:
+and point `--archive-path` at it:
 
 ```bash
 docker run --rm -e HCP_TOKEN \
   -v "$PWD/archive:/archive" \
-  ghcr.io/macropower/hcp_archiver:latest --archive-dir /archive
+  ghcr.io/macropower/hcp_archiver:latest --archive-path /archive
 ```
 
 A configuration file rides in the same way, named by its in-container path:
@@ -146,7 +146,7 @@ The API token comes from the environment (`HCP_TOKEN`, falling back to
 ```bash
 export HCP_TOKEN=...              # a user, team, or organization token
 
-hcp_archiver --archive-dir ./archive   # archive every organization the token sees
+hcp_archiver --archive-path ./archive   # archive every organization the token sees
 hcp_archiver view ./archive       # browse the result in the terminal
 ```
 
@@ -166,12 +166,13 @@ organization is archived with the default surfaces.
 ```yaml
 # yaml-language-server: $schema=https://jacobcolvin.com/hcp_archiver/config.schema.json
 
-archiveDir: ./archive # default for --archive-dir and the read commands
+archive:
+  path: ./archive # default for --archive-path and the read commands
 organizations: # omit to archive every visible organization
   - my-org
-runHistory: # bound archived run history; unlimited by default
-  maxCount: 500
-scope: # heavy or org-specific surfaces, each off by default
+runHistory: # bound the run history a run fetches; unlimited by default
+  fetchCount: 500
+include: # heavy or org-specific surfaces, each off by default
   stacks: true
   auditTrail: true
 remote: # mirror the archive to object storage; omit to stay local
@@ -213,7 +214,7 @@ generator with directory-based navigation (mkdocs and its kin) builds
 without configuration. Pages are curated for sharing: sensitive values are
 withheld, and content that can embed secrets (state, logs) is represented by
 name, size, and timestamp only. Page templates can be overridden per file
-through the configuration's `export.templates` key.
+through the configuration's `export.templates.path` key.
 
 All of these read the archive's physical forms transparently: a freshly
 collected tree and one whose cold artifacts have been sealed into bundles or

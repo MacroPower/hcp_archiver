@@ -39,8 +39,9 @@ var (
 // File is the on-disk YAML configuration describing what to archive and how.
 //
 // It holds the settings that are stable across runs: the API address, the
-// organization, project, and workspace filters, the opt-in scope toggles, the
-// archive and extract directories, and the export section. Per-run and secret
+// organization, project, and workspace filters, the opt-in include toggles, the
+// archive, extract, and export directories, and the export templates. Per-run
+// and secret
 // settings (the progress mode, the retry-absent toggle, and the API token)
 // are supplied by flags and the environment instead, so a configuration file
 // never carries a credential; any path it names resolves relative to the file
@@ -48,74 +49,114 @@ var (
 //
 // Every field is optional; an absent field takes the package default. Create
 // instances with [LoadFile], or [DefaultFile] for the defaults alone.
+//
+//nolint:govet // Field order sets the generated schema's property order.
 type File struct {
 	// Address is the HCP Terraform API address. It defaults to [DefaultAddress].
-	Address string `json:"address,omitempty" jsonschema:"title=Address,format=uri,default=https://app.terraform.io"`
-	// ArchiveDir is the archive root directory: the default for the root
-	// command's --archive-dir flag and for the read commands' [archive-dir]
-	// positional. A relative path resolves against this file's directory. An
-	// explicit flag or positional always wins.
-	ArchiveDir string `json:"archiveDir,omitempty" jsonschema:"title=Archive Directory"`
-	// Export configures the export subcommand's rendering; unset keeps the
-	// built-in page templates.
-	Export FileExport `json:"export,omitzero" jsonschema:"title=Export"`
-	// ExtractDir is the default --target directory for the extract and export
-	// commands. A relative path resolves against this file's directory. An
-	// explicit --target always wins.
-	ExtractDir string `json:"extractDir,omitempty" jsonschema:"title=Extract Directory"`
-	// Organizations limits the run to the named organizations. An empty list
-	// archives every organization the token can see.
-	Organizations []string `json:"organizations,omitempty" jsonschema:"title=Organizations,uniqueItems=true"`
-	// Projects limits the run to the named projects within each archived
-	// organization. An empty list archives every project.
-	Projects []string `json:"projects,omitempty" jsonschema:"title=Projects,uniqueItems=true"`
-	// Workspaces limits the run to the named workspaces within each archived
-	// organization. An empty list archives every workspace.
-	Workspaces []string `json:"workspaces,omitempty" jsonschema:"title=Workspaces,uniqueItems=true"`
-	// Remote mirrors the archive to a remote object store, evicting sealed
-	// cold bundles and settled tarballs and syncing everything else; unset
-	// keeps the whole archive on local disk.
-	Remote FileRemote `json:"remote,omitzero" jsonschema:"title=Remote"`
-	// RunHistory bounds how much of each workspace's run history is archived;
-	// unset archives every run.
-	RunHistory FileRunHistory `json:"runHistory,omitzero" jsonschema:"title=Run History"`
+	Address string `json:"address,omitempty" jsonschema:"title=Address,format=uri,default=https://app.terraform.io,examples=https://app.terraform.io|https://tfe.example.com"`
 	// RateLimit is the ceiling on how fast requests launch, in requests per
 	// second; omitted, the client's default of 30 (HCP Terraform's documented
 	// limit) applies. The client adapts downward from the server's rate-limit
 	// feedback on its own, so set this only for an organization whose granted
 	// limit sits well below the default and the run should not probe past it.
 	RateLimit float64 `json:"rateLimit,omitempty" jsonschema:"title=Rate Limit,exclusiveMinimum=0,default=30"`
-	// Scope selects the heavy or optional surfaces to archive, each off by
+	// Organizations limits the run to the named organizations. Names match
+	// exactly; there are no glob patterns. An empty list archives every
+	// organization the token can see.
+	Organizations []string `json:"organizations,omitempty" jsonschema:"title=Organizations,uniqueItems=true"`
+	// Projects limits the run to the named projects within each archived
+	// organization. Names match exactly; there are no glob patterns. An empty
+	// list archives every project. With both projects and workspaces set, a
+	// workspace must satisfy both filters.
+	Projects []string `json:"projects,omitempty" jsonschema:"title=Projects,uniqueItems=true"`
+	// Workspaces limits the run to the named workspaces within each archived
+	// organization. Names match exactly; there are no glob patterns. An empty
+	// list archives every workspace. With both projects and workspaces set, a
+	// workspace must satisfy both filters.
+	Workspaces []string `json:"workspaces,omitempty" jsonschema:"title=Workspaces,uniqueItems=true"`
+	// Include selects the heavy or optional surfaces to archive, each off by
 	// default.
-	Scope FileScope `json:"scope,omitzero" jsonschema:"title=Scope"`
+	Include FileInclude `json:"include,omitzero" jsonschema:"title=Include"`
+	// RunHistory bounds how much of each workspace's run history a run
+	// fetches; unset fetches every run.
+	RunHistory FileRunHistory `json:"runHistory,omitzero" jsonschema:"title=Run History"`
+	// Archive locates the archive on local disk; unset leaves the location to
+	// the --archive-path flag.
+	Archive FileArchive `json:"archive,omitzero" jsonschema:"title=Archive"`
+	// Remote mirrors the archive to a remote object store, evicting sealed
+	// cold bundles and settled tarballs and syncing everything else; unset
+	// keeps the whole archive on local disk.
+	Remote FileRemote `json:"remote,omitzero" jsonschema:"title=Remote"`
+	// Extract configures where the extract command writes; unset leaves the
+	// location to the --extract-path flag.
+	Extract FileExtract `json:"extract,omitzero" jsonschema:"title=Extract"`
+	// Export configures the export command: where it writes and the page
+	// templates it renders with. Unset leaves the location to the
+	// --export-path flag and keeps the built-in templates.
+	Export FileExport `json:"export,omitzero" jsonschema:"title=Export"`
 }
 
-// FileExport configures the export subcommand's rendering.
+// FileArchive locates the archive on local disk.
+type FileArchive struct {
+	// Path is the archive root directory: the default for the root command's
+	// --archive-path flag and for the read commands' [archive-path]
+	// positional. A relative path resolves against this file's directory. An
+	// explicit flag or positional always wins.
+	Path string `json:"path,omitempty" jsonschema:"title=Path"`
+}
+
+// FileExtract configures where the extract command writes.
+type FileExtract struct {
+	// Path is the default --extract-path directory the extract command
+	// recovers files into. A relative path resolves against this file's
+	// directory. An explicit --extract-path always wins.
+	Path string `json:"path,omitempty" jsonschema:"title=Path"`
+}
+
+// FileExport configures the export command: the directory it writes into and
+// the page templates it renders with.
 type FileExport struct {
-	// Templates is a directory of *.md.tmpl files overriding the export's
-	// built-in page templates by filename; pages without an override keep
-	// their default. A relative path resolves against this file's directory.
-	Templates string `json:"templates,omitempty" jsonschema:"title=Templates"`
+	// Path is the default --export-path directory the export command writes
+	// its markdown tree into. A relative path resolves against this file's
+	// directory. An explicit --export-path always wins.
+	Path string `json:"path,omitempty" jsonschema:"title=Path"`
+	// Templates locates the page templates the export renders with; unset
+	// keeps the built-in templates.
+	Templates FileExportTemplates `json:"templates,omitzero" jsonschema:"title=Templates"`
 }
 
-// FileRunHistory bounds how much of each workspace's run history is archived.
-// Each bound is optional and off at its zero value; when both are set the run
-// walk keeps whichever admits more history, so a run is archived while it sits
-// among the newest count runs or was created within the age window. With
-// neither bound set every run is archived.
+// FileExportTemplates locates the page templates the export command renders
+// with.
+type FileExportTemplates struct {
+	// Path is a directory of *.md.tmpl files overriding the export's
+	// built-in page templates by filename: archive, org, projects, project,
+	// workspace, stack, teams, variable-sets, and policy-sets, each with the
+	// .md.tmpl suffix. Pages without an override keep their default. A
+	// relative path resolves against this file's directory.
+	Path string `json:"path,omitempty" jsonschema:"title=Path"`
+}
+
+// FileRunHistory bounds how much of each workspace's run history a run
+// fetches. Each bound is a guarantee of inclusion, optional and off at its
+// zero value; when both are set the run walk fetches whichever admits more
+// history, so a run is archived while it sits among the newest fetchCount
+// runs or was created within the fetchAge window. With neither bound set
+// every run is fetched. The bounds limit what a run fetches; they never
+// remove runs already archived.
 type FileRunHistory struct {
-	// MaxCount keeps the newest count runs of each workspace; zero means
+	// FetchCount fetches the newest count runs of each workspace; zero means
 	// unbounded.
-	MaxCount int `json:"maxCount,omitempty" jsonschema:"title=Max Count,minimum=0"`
-	// MaxAge keeps each workspace's runs created within this window before the
-	// archive runs, as a duration string in Go syntax extended with a day
-	// unit, such as 90d or 2160h; zero means unbounded.
-	MaxAge Duration `json:"maxAge,omitempty" jsonschema:"title=Max Age,type=string,pattern=^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h|d))+$"`
+	FetchCount int `json:"fetchCount,omitempty" jsonschema:"title=Fetch Count,minimum=0"`
+	// FetchAge fetches each workspace's runs created within this window
+	// before the archive runs, as a duration string in Go syntax extended
+	// with a day unit, such as 90d or 2160h; zero means unbounded.
+	FetchAge Duration `json:"fetchAge,omitempty" jsonschema:"title=Fetch Age"`
 }
 
-// FileScope holds the opt-in toggles for the heavy or most organization-specific
-// surfaces, each archived only when a configuration turns it on.
-type FileScope struct {
+// FileInclude holds the opt-in toggles for the heavy or most
+// organization-specific surfaces, each archived only when a configuration
+// turns it on.
+type FileInclude struct {
 	// Stacks enables archiving of Stacks.
 	Stacks bool `json:"stacks,omitempty" jsonschema:"title=Stacks,default=false"`
 	// HYOK enables archiving of hold-your-own-key configurations.
@@ -146,15 +187,26 @@ type FileRemote struct {
 	// "file:///path" (a local directory tree). Required when any other
 	// remote field is set.
 	URL string `json:"url,omitempty" jsonschema:"title=URL,minLength=1,examples=s3://bucket?region=us-east-1|azblob://container|file:///mnt/archive-mirror"`
-	// Prefix is an optional key prefix objects are stored under.
+	// Prefix is an optional key prefix objects are stored under: keys compose
+	// as <prefix>/<org>/<path>, and leading or trailing slashes in the prefix
+	// are normalized away.
 	Prefix string `json:"prefix,omitempty" jsonschema:"title=Prefix"`
+	// Upload tunes the multipart uploads that carry large bodies to the
+	// store; unset takes each backend's defaults.
+	Upload FileRemoteUpload `json:"upload,omitzero" jsonschema:"title=Upload"`
+}
+
+// FileRemoteUpload tunes the multipart uploads that carry large bodies to the
+// remote store. Each knob is optional; omitted, the backend's default
+// applies.
+type FileRemoteUpload struct {
 	// PartSize is the upload part size for backends that split a large body
 	// into parts, as a plain byte count or a suffixed size such as 64MiB;
-	// zero takes the backend's default.
+	// omitted, the backend's default applies.
 	PartSize ByteSize `json:"partSize,omitempty" jsonschema:"title=Part Size"`
-	// Concurrency is the number of upload parts in flight per bundle; zero
-	// takes the backend's default.
-	Concurrency int `json:"concurrency,omitempty" jsonschema:"title=Concurrency,minimum=0"`
+	// Concurrency is the number of upload parts in flight per bundle, at
+	// least one; omitted, the backend's default applies.
+	Concurrency int `json:"concurrency,omitempty" jsonschema:"title=Concurrency,minimum=1"`
 }
 
 // IsZero reports whether the whole remote section was left unset, which
@@ -169,8 +221,8 @@ func (fr FileRemote) RemoteConfig() RemoteConfig {
 	return RemoteConfig{
 		URL:         fr.URL,
 		Prefix:      fr.Prefix,
-		PartSize:    int64(fr.PartSize),
-		Concurrency: fr.Concurrency,
+		PartSize:    int64(fr.Upload.PartSize),
+		Concurrency: fr.Upload.Concurrency,
 	}
 }
 
@@ -254,24 +306,19 @@ func (f File) ValidateSchema(data any) error {
 }
 
 // Validate reports whether the [File] is internally consistent after decoding.
-// It implements [niceyaml.Validator] so [LoadFile] runs it automatically, and
-// rejects an empty or duplicated name in the organization, project, or
-// workspace filter with an error pointing at the offending entry.
+// It implements [niceyaml.Validator] so [LoadFile] runs it automatically. The
+// per-entry filter constraints live in the JSON schema, which validates before
+// decoding; these checks cover what the schema cannot express: the remote
+// cross-field invariant, and the address URL shape (the schema's URI format is
+// an annotation draft 2020-12 validators do not assert). An empty address is
+// fine here, meaning the default; the resolved [Config] requires a usable one.
 func (f File) Validate() error {
-	filters := []struct {
-		field string
-		noun  string
-		names []string
-	}{
-		{field: "organizations", noun: "organization", names: f.Organizations},
-		{field: "projects", noun: "project", names: f.Projects},
-		{field: "workspaces", noun: "workspace", names: f.Workspaces},
-	}
-
-	for _, filter := range filters {
-		err := validateNames(filter.field, filter.noun, filter.names)
+	if f.Address != "" {
+		err := ValidateAddress(f.Address)
 		if err != nil {
-			return err
+			return niceyaml.NewError(err.Error(),
+				niceyaml.WithPath(paths.Root().Child("address").Value()),
+			)
 		}
 	}
 
@@ -279,30 +326,6 @@ func (f File) Validate() error {
 		return niceyaml.NewError("remote url is required when any remote field is set",
 			niceyaml.WithPath(paths.Root().Child("remote").Value()),
 		)
-	}
-
-	return nil
-}
-
-// validateNames rejects an empty or duplicated name in the filter list under
-// field with an error pointing at the offending entry, naming it by noun.
-func validateNames(field, noun string, names []string) error {
-	seen := make(map[string]struct{}, len(names))
-
-	for i, name := range names {
-		if name == "" {
-			return niceyaml.NewError(fmt.Sprintf("%s name must not be empty", noun),
-				niceyaml.WithPath(paths.Root().Child(field).Index(i).Value()),
-			)
-		}
-
-		if _, dup := seen[name]; dup {
-			return niceyaml.NewError(fmt.Sprintf("duplicate %s %q", noun, name),
-				niceyaml.WithPath(paths.Root().Child(field).Index(i).Value()),
-			)
-		}
-
-		seen[name] = struct{}{}
 	}
 
 	return nil

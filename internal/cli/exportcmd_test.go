@@ -18,7 +18,7 @@ func TestExportCmd(t *testing.T) {
 	root := buildMiniArchive(t)
 	target := filepath.Join(t.TempDir(), "site")
 
-	out, _, err := runCmd(t, "export", root, "--target", target)
+	out, _, err := runCmd(t, "export", root, "--export-path", target)
 	require.NoError(t, err)
 	assert.Contains(t, out, "exported")
 	assert.Contains(t, out, target)
@@ -45,7 +45,7 @@ func TestExportCmd_RefusesTargetInsideArchive(t *testing.T) {
 
 	root := buildMiniArchive(t)
 
-	_, _, err := runCmd(t, "export", root, "--target", filepath.Join(root, "site"))
+	_, _, err := runCmd(t, "export", root, "--export-path", filepath.Join(root, "site"))
 	require.ErrorIs(t, err, cli.ErrTargetInArchive)
 }
 
@@ -54,7 +54,7 @@ func TestExportCmd_TargetFromConfig(t *testing.T) {
 
 	root := buildMiniArchive(t)
 	target := filepath.Join(t.TempDir(), "site")
-	cfgPath := writeConfigFile(t, "extractDir: '"+target+"'\n")
+	cfgPath := writeConfigFile(t, "export:\n  path: '"+target+"'\n")
 
 	out, _, err := runCmd(t, "export", root, "--config", cfgPath)
 	require.NoError(t, err)
@@ -80,9 +80,9 @@ func TestExportCmd_TemplatesFromConfig(t *testing.T) {
 		[]byte("# {{escape .Title}} (custom)"), 0o600))
 
 	cfgPath := filepath.Join(cfgDir, "config.yaml")
-	require.NoError(t, os.WriteFile(cfgPath, []byte("export:\n  templates: export-templates\n"), 0o600))
+	require.NoError(t, os.WriteFile(cfgPath, []byte("export:\n  templates:\n    path: export-templates\n"), 0o600))
 
-	_, _, err := runCmd(t, "export", root, "--target", target, "--config", cfgPath)
+	_, _, err := runCmd(t, "export", root, "--export-path", target, "--config", cfgPath)
 	require.NoError(t, err)
 
 	page, err := os.ReadFile(filepath.Join(target, "mini-org", filepath.FromSlash(miniWs), "index.md"))
@@ -105,9 +105,9 @@ func TestExportCmd_BadTemplatesPreserveForcedTarget(t *testing.T) {
 		filepath.Join(cfgDir, "tmpl", "workspace.md.tmpl"), []byte("{{escape .Title"), 0o600))
 
 	cfgPath := filepath.Join(cfgDir, "config.yaml")
-	require.NoError(t, os.WriteFile(cfgPath, []byte("export:\n  templates: tmpl\n"), 0o600))
+	require.NoError(t, os.WriteFile(cfgPath, []byte("export:\n  templates:\n    path: tmpl\n"), 0o600))
 
-	_, _, err := runCmd(t, "export", root, "--target", target, "--force", "--config", cfgPath)
+	_, _, err := runCmd(t, "export", root, "--export-path", target, "--force", "--config", cfgPath)
 	require.ErrorIs(t, err, export.ErrTemplateInvalid)
 
 	assert.FileExists(t, stale, "a template refusal must precede the forced clear")
@@ -120,11 +120,11 @@ func TestExportCmd_NonEmptyTargetHintsForce(t *testing.T) {
 	target := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(target, "stale.md"), []byte("old"), 0o600))
 
-	_, _, err := runCmd(t, "export", root, "--target", target)
+	_, _, err := runCmd(t, "export", root, "--export-path", target)
 	require.ErrorIs(t, err, export.ErrTargetNotEmpty)
 	require.ErrorContains(t, err, "--force")
 
-	_, _, err = runCmd(t, "export", root, "--target", target, "--force")
+	_, _, err = runCmd(t, "export", root, "--export-path", target, "--force")
 	require.NoError(t, err)
 	assert.NoFileExists(t, filepath.Join(target, "stale.md"))
 }

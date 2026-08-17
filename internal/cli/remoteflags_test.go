@@ -15,8 +15,9 @@ import (
 const remoteYAML = `remote:
   url: s3://config-bucket?region=us-east-1
   prefix: cfg
-  partSize: 8MiB
-  concurrency: 4
+  upload:
+    partSize: 8MiB
+    concurrency: 4
 `
 
 func TestResolveRemote(t *testing.T) {

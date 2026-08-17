@@ -26,7 +26,8 @@ import (
 // Flag names shared by the inspect commands.
 const (
 	flagJSON         = "json"
-	flagTarget       = "target"
+	flagExtractPath  = "extract-path"
+	flagExportPath   = "export-path"
 	flagDryRun       = "dry-run"
 	flagVerbose      = "verbose"
 	flagRemote       = "remote"
@@ -193,7 +194,7 @@ func newListCmd() *cobra.Command {
 	var jsonOut bool
 
 	cmd := &cobra.Command{
-		Use:   "list [archive-dir] [path]",
+		Use:   "list [archive-path] [path]",
 		Short: "List archived objects under a path prefix",
 		Long: `List the archived objects at or beneath an archive path, one line per object
 whichever physical form (loose, roll-up, bundle) holds it.
@@ -210,7 +211,7 @@ shown as "remote" (reading one back needs object-store credentials). With
 
 A single argument names the archive directory; pass "." explicitly to address
 a path in the current directory. With no directory argument the configuration
-file's archiveDir, when set, is read instead of the current directory.`,
+file's archive.path, when set, is read instead of the current directory.`,
 		Args: cobra.MaximumNArgs(2),
 	}
 
@@ -266,7 +267,7 @@ file's archiveDir, when set, is read instead of the current directory.`,
 // to stdout, whichever physical form holds it.
 func newShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "show [archive-dir] <path>",
+		Use:   "show [archive-path] <path>",
 		Short: "Print one archived object's bytes to stdout",
 		Long: `Print the exact bytes of one archived object to stdout, whichever physical
 form (loose, roll-up, bundle) holds it.
@@ -281,7 +282,7 @@ backing store (extract streams such an object to disk without this limit).
 ` + remoteLong + `
 
 A single argument is the archive path, read from the directory the
-configuration file's archiveDir names, or from the current directory when
+configuration file's archive.path names, or from the current directory when
 none is set.`,
 		Args: cobra.RangeArgs(1, 2),
 	}
@@ -345,7 +346,7 @@ func newExtractCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "extract [archive-dir] [path]",
+		Use:   "extract [archive-path] [path]",
 		Short: "Extract archived objects into a plain directory tree",
 		Long: `Extract every archived object at or beneath an archive path into a target
 directory, expanding roll-ups and bundles back into loose files. The target
@@ -371,10 +372,11 @@ same way. An interrupted run reports its partial totals to stderr and exits
 
 A single argument names the archive directory; pass "." explicitly to address
 a path in the current directory. With no directory argument the configuration
-file's archiveDir, when set, is read instead of the current directory, and the
-file's extractDir stands in for an omitted --target. With --dry-run the plan,
-including how much it would fetch from the mirror, is summarized from the
-listing and nothing is written into the target; --target is not required.
+file's archive.path, when set, is read instead of the current directory, and
+the file's extract.path stands in for an omitted --extract-path. With
+--dry-run the plan, including how much it would fetch from the mirror, is
+summarized from the listing and nothing is written into the target;
+--extract-path is not required.
 Sizing the plan can itself fetch a workspace's absent sealed indexes (roll-ups
 and sidecars) from the mirror, the one egress a dry run may cost.`,
 		Args: cobra.MaximumNArgs(2),
@@ -400,7 +402,7 @@ and sidecars) from the mirror, the one egress a dry run may cost.`,
 		dir, prefix := archiveArgs(args, fallback)
 
 		if target == "" && file != nil {
-			target = configDir(cfgPath, file.ExtractDir)
+			target = configDir(cfgPath, file.Extract.Path)
 		}
 
 		arc, err := openArchive(ctx, dir, rcfg)
@@ -430,8 +432,8 @@ and sidecars) from the mirror, the one egress a dry run may cost.`,
 	}
 
 	flags := cmd.Flags()
-	flags.StringVarP(&target, flagTarget, "t", "",
-		"directory to write recovered files into (defaults to the configuration file's extractDir)")
+	flags.StringVarP(&target, flagExtractPath, "t", "",
+		"directory to write recovered files into (defaults to the configuration file's extract.path)")
 	flags.BoolVar(&dryRun, flagDryRun, false, "summarize what would be extracted without writing")
 	flags.BoolVarP(&verbose, flagVerbose, "v", false, "stream one line per recovered file to stderr")
 	flags.BoolVar(&jsonOut, flagJSON, false, "emit the summary as JSON")
@@ -748,14 +750,14 @@ func configDir(cfgPath, dir string) string {
 }
 
 // defaultArchiveDir is the directory a read command falls back to when no
-// positional names one: the configuration file's archiveDir, else the current
+// positional names one: the configuration file's archive.path, else the current
 // directory. A nil file (no configuration named anywhere) yields ".".
 func defaultArchiveDir(file *config.File, cfgPath string) string {
-	if file == nil || file.ArchiveDir == "" {
+	if file == nil || file.Archive.Path == "" {
 		return "."
 	}
 
-	return configDir(cfgPath, file.ArchiveDir)
+	return configDir(cfgPath, file.Archive.Path)
 }
 
 // archiveArgs binds the list/extract positionals to (directory, archive path):
