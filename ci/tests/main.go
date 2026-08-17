@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -25,6 +26,7 @@ func (m *Tests) All(ctx context.Context) error {
 	g.Go(func() error { return m.TestLintReleaserClean(ctx) })
 	g.Go(func() error { return m.TestBinary(ctx) })
 	g.Go(func() error { return m.TestLintActionsClean(ctx) })
+	g.Go(func() error { return m.TestSchemas(ctx) })
 
 	return g.Wait()
 }
@@ -143,4 +145,24 @@ func (m *Tests) TestBinary(ctx context.Context) error {
 // +check
 func (m *Tests) TestLintActionsClean(ctx context.Context) error {
 	return dag.Ci().LintActions(ctx)
+}
+
+// TestSchemas verifies that [Ci.Schemas] produces the Pages site directory
+// with a valid config schema at the published path.
+//
+// +check
+func (m *Tests) TestSchemas(ctx context.Context) error {
+	contents, err := dag.Ci().Schemas().File("schemas/config.schema.json").Contents(ctx)
+	if err != nil {
+		return fmt.Errorf("read schema from site directory: %w", err)
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal([]byte(contents), &schema); err != nil {
+		return fmt.Errorf("schema is not valid JSON: %w", err)
+	}
+	if _, ok := schema["$schema"]; !ok {
+		return fmt.Errorf("schema missing $schema key")
+	}
+	return nil
 }

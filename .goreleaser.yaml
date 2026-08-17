@@ -112,8 +112,14 @@ docker_signs:
       - "${artifact}@${digest}"
       - "--yes"
 
+release:
+  extra_files:
+    - glob: ./config/config.schema.json
+
 checksum:
   name_template: "checksums.txt"
+  extra_files:
+    - glob: ./config/config.schema.json
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 changelog:

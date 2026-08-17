@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=./config/config.schema.json
+# yaml-language-server: $schema=https://jacobcolvin.com/hcp_archiver/schemas/config.schema.json
 #
 # hcp_archiver configuration. Copy to hcp_archiver.yaml and edit, then point the
 # tool at it with --config (or set HCP_ARCHIVER_CONFIG). Every key is optional

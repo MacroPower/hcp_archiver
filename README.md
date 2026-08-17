@@ -51,7 +51,7 @@ the file or set `HCP_ARCHIVER_CONFIG`; with neither, the built-in defaults apply
 (every visible organization, default surfaces only).
 
 ```yaml
-# yaml-language-server: $schema=./config/config.schema.json
+# yaml-language-server: $schema=https://jacobcolvin.com/hcp_archiver/schemas/config.schema.json
 
 # HCP Terraform API address (the default).
 address: https://app.terraform.io
@@ -115,7 +115,9 @@ remote:
 Every key is optional and defaults as shown. The `yaml-language-server`
 directive gives editors completion and validation from the same schema embedded
 in the binary, so a malformed file is reported with the offending line
-highlighted before any network call. A ready-to-copy
+highlighted before any network call. The schema is published at
+<https://jacobcolvin.com/hcp_archiver/schemas/config.schema.json> and attached
+to each GitHub release. A ready-to-copy
 [`hcp_archiver.example.yaml`](hcp_archiver.example.yaml) sits at the repository
 root.
 

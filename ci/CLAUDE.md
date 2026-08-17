@@ -57,6 +57,11 @@ syft SBOM tooling (`with-cosign`/`with-syft`/`sign-keyless`).
 - `publish-images` publishes pre-built runtime images under the supplied tags.
 - `release-dry-run` (non-+check) builds the snapshot, verifies each binary's
   architecture matches its target platform, and constructs the runtime images.
+- `schemas` assembles the GitHub Pages site directory (the config JSON schema,
+  regenerated in the devbox environment, under `schemas/`); the release
+  workflow exports it and deploys it with the Pages actions after the
+  goreleaser job succeeds. The schema is also attached to each GitHub release
+  via GoReleaser's `release.extra_files`.
 
 The container image build (scratch + binary) is the preserved release artifact.
 
@@ -70,12 +75,13 @@ The container image build (scratch + binary) is the preserved release artifact.
   builders, and `releaserBase`.
 - `publish.go` holds `Release`/`PublishImages` and the image publish/sign
   helpers.
+- `schemas.go` holds `Schemas`, the Pages site-directory assembly.
 - Dependencies in `dagger.json`: the `devbox` toolchain (checks), the
   `goreleaser` toolchain (release, carrying cosign + syft), the `security`
   toolchain (the vulnerability scan), and the `zizmor` toolchain (the Actions
   workflow lint), all referenced remotely from `github.com/MacroPower/x`.
 - The `tests/` submodule exercises the +check functions (build dist, image
-  metadata, lint-releaser, binary, lint-actions).
+  metadata, lint-releaser, binary, lint-actions, schemas).
 
 The `engineVersion` in `dagger.json` is pinned in lockstep with the root
 `dagger.json` and with the CLI version in `.github/workflows`; bump them together
