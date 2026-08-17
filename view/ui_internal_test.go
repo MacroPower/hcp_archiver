@@ -203,7 +203,7 @@ func TestModelShowsSpinnerWhileLoadOutlivesGrace(t *testing.T) {
 
 	// The grace elapses while the build is still in flight: the status row
 	// becomes a spinner.
-	_, tick := m.Update(loadGraceMsg{})
+	_, tick := m.Update(loadGraceMsg{seq: m.graceSeq})
 	require.NotNil(t, tick, "an outlived grace starts the spinner ticking")
 	assert.True(t, m.spinning)
 	assert.Contains(t, m.View().Content, "loading")
@@ -235,7 +235,7 @@ func TestModelGraceAfterSettledLoadStaysQuiet(t *testing.T) {
 	m.Update(start)
 	m.Update(start.build())
 
-	_, tick := m.Update(loadGraceMsg{})
+	_, tick := m.Update(loadGraceMsg{seq: m.graceSeq})
 	assert.Nil(t, tick, "a grace firing after the build settles starts nothing")
 	assert.False(t, m.spinning)
 	assert.NotContains(t, m.View().Content, "loading")
@@ -246,26 +246,35 @@ func TestModelStaleGraceStartsNoSecondSpinnerChain(t *testing.T) {
 
 	// Two navigations inside the grace window: the first load settles, the
 	// second arms its own timer, and the first load's timer is still pending.
-	// Both fire while the second build is in flight, and the stale one must
-	// not start a chain of its own beside the one already ticking.
+	// The stale timer fires first (it was armed first) while the second build
+	// is still inside its own grace, and must not light the spinner for a
+	// build that may yet settle quickly; only the second flight's own timer
+	// starts the chain, and a duplicate fire rides it rather than forking one.
 	m := newTestModel(stubScreen{name: "root"})
 
 	first := push(func() (screen, error) { return stubScreen{name: "first"}, nil })
 	firstStart := announce(t, m, first)
 
 	m.Update(firstStart)
+
+	firstSeq := m.graceSeq
+
 	m.Update(firstStart.build())
 
 	second := push(func() (screen, error) { return stubScreen{name: "second"}, nil })
 
 	m.Update(announce(t, m, second))
 
-	_, tick := m.Update(loadGraceMsg{})
-	require.NotNil(t, tick, "the first grace to arrive starts the chain")
+	_, stale := m.Update(loadGraceMsg{seq: firstSeq})
+	assert.Nil(t, stale, "the settled flight's timer starts nothing")
+	assert.False(t, m.spinning, "the second build is still inside its own grace")
+
+	_, tick := m.Update(loadGraceMsg{seq: m.graceSeq})
+	require.NotNil(t, tick, "the current flight's own grace starts the chain")
 	require.True(t, m.spinning)
 
-	_, stale := m.Update(loadGraceMsg{})
-	assert.Nil(t, stale, "a second grace rides the running chain rather than forking one")
+	_, dup := m.Update(loadGraceMsg{seq: m.graceSeq})
+	assert.Nil(t, dup, "a duplicate grace rides the running chain rather than forking one")
 	assert.True(t, m.spinning, "the indicator stays up for the load still in flight")
 }
 
@@ -280,7 +289,7 @@ func TestModelLoadErrorSurfacesOnStatusLine(t *testing.T) {
 	require.True(t, ok)
 
 	m.Update(start)
-	m.Update(loadGraceMsg{})
+	m.Update(loadGraceMsg{seq: m.graceSeq})
 	require.True(t, m.spinning, "the fixture reaches the spinning state before failing")
 
 	m.Update(start.build())
@@ -303,7 +312,7 @@ func TestModelEscAbandonsInFlightLoad(t *testing.T) {
 	_, cmd := m.Update(announce(t, m, stale))
 	staleDone := settleLoad(t, cmd)
 
-	m.Update(loadGraceMsg{})
+	m.Update(loadGraceMsg{seq: m.graceSeq})
 	require.True(t, m.spinning, "the fixture reaches the spinning state before the esc")
 
 	// Esc abandons the load: the indicator clears at once and the key never

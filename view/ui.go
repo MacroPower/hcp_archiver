@@ -144,8 +144,14 @@ type loadStartMsg struct {
 }
 
 // loadGraceMsg fires when [loadingGrace] elapses; a build still in flight then
-// turns the status line into a spinner.
-type loadGraceMsg struct{}
+// turns the status line into a spinner. The seq names the flight of builds
+// that armed the timer: timers are never canceled, so one left running by an
+// already-settled flight can fire while a later flight is still inside its
+// own grace, and without the stamp it would light the spinner for a build
+// young enough to have earned none.
+type loadGraceMsg struct {
+	seq int
+}
 
 // loadDoneMsg settles one screen build, carrying its outcome (a [pushMsg] or a
 // [statusMsg]), which the root model applies after clearing the indicator. The
@@ -169,8 +175,10 @@ type model struct {
 	orgs []*Org
 	// The loading indicator: spin renders on the status line while a screen
 	// build outlives loadingGrace, loading counts the in-flight builds,
-	// spinning marks the indicator visible, and epoch numbers the current
-	// generation of builds so an abandoned one settles into the void.
+	// spinning marks the indicator visible, epoch numbers the current
+	// generation of builds so an abandoned one settles into the void, and
+	// graceSeq numbers the armed grace timers so only the newest flight's
+	// timer is honored (see [loadGraceMsg]).
 	spin         spinner.Model
 	width        int
 	height       int
@@ -178,6 +186,7 @@ type model struct {
 	spinning     bool
 	remoteWarned bool
 	epoch        int
+	graceSeq     int
 }
 
 // newModel creates a new [model] opening at the organization list, or directly
@@ -285,18 +294,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, build
 		}
 
-		grace := tea.Tick(loadingGrace, func(time.Time) tea.Msg { return loadGraceMsg{} })
+		m.graceSeq++
+		seq := m.graceSeq
+		grace := tea.Tick(loadingGrace, func(time.Time) tea.Msg { return loadGraceMsg{seq: seq} })
 
 		return m, tea.Batch(build, grace)
 
 	case loadGraceMsg:
-		// A grace timer is never canceled, so one armed by a settled load can
-		// still fire while a later load is in flight. Starting a chain from it
-		// while the spinner already ticks would leave two chains running, each
-		// re-arming the other's frame: the indicator would spin at twice the
-		// rate and the pair would never rejoin. Only a grace that finds the
-		// indicator dark starts one.
-		if m.loading == 0 || m.spinning {
+		// A grace timer is never canceled, so one armed by a settled flight
+		// can still fire while a later flight is in its own grace; the seq
+		// admits only the timer the current flight armed, so a fast build
+		// never flickers the spinner on a predecessor's clock. The spinning
+		// guard keeps a duplicate fire from starting a second chain beside
+		// the one already ticking: two chains would re-arm each other's
+		// frame, spinning the indicator at twice the rate, never to rejoin.
+		if msg.seq != m.graceSeq || m.loading == 0 || m.spinning {
 			return m, nil
 		}
 
