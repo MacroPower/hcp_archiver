@@ -42,7 +42,7 @@ const (
 
 	// certsImage supplies the root certificate bundle copied into the runtime
 	// images; nothing else from it ships.
-	certsImage = "public.ecr.aws/docker/library/alpine:3.22" // renovate: datasource=docker depName=public.ecr.aws/docker/library/alpine
+	certsImage = "public.ecr.aws/docker/library/alpine:3.24" // renovate: datasource=docker depName=public.ecr.aws/docker/library/alpine
 	// caBundlePath is where the runtime images carry the root certificates,
 	// the location Go's certificate loader probes first on Linux.
 	caBundlePath = "/etc/ssl/certs/ca-certificates.crt"
