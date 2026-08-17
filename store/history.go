@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io/fs"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"go.jacobcolvin.com/hcp_archiver/history"
 )
@@ -129,6 +131,17 @@ func (s *Store) BuryHistory(relPath string, fetchedAt, deletedAt time.Time) (boo
 		content = nil
 	}
 
+	// Content rotted past valid UTF-8 is unrecordable for the reason
+	// [Store.supersedeHistory] gives; treat it like an absent file rather
+	// than let a rotted object block its own disappearance from recording.
+	if !utf8.Valid(content) {
+		s.logger.Warn("history_content_not_utf8",
+			slog.String("path", relPath),
+		)
+
+		content = nil
+	}
+
 	if fetchedAt.IsZero() && content != nil {
 		fetchedAt = modTime(abs)
 	}
@@ -156,6 +169,19 @@ func (s *Store) supersedeHistory(relPath, abs string, existing []byte, cfg *writ
 	// content marshals away under omitempty, leaving a line readers can
 	// classify as neither a version nor a tombstone.
 	if len(existing) == 0 {
+		return nil
+	}
+
+	// Bytes rotted past valid UTF-8 cannot be recorded faithfully (a record
+	// carries content as a JSON string), and [history.Supersede]'s refusal
+	// would wedge every future commit of the object behind a version that is
+	// already lost. Skip the record and let the fresh bytes land, warning the
+	// way any other unrecoverable sidecar content is warned about.
+	if !utf8.Valid(existing) {
+		s.logger.Warn("history_content_not_utf8",
+			slog.String("path", relPath),
+		)
+
 		return nil
 	}
 

@@ -88,6 +88,65 @@ func TestStore_HistoryPath(t *testing.T) {
 		s.HistoryPath("projects/p/workspaces/ws/variables.json"))
 }
 
+func TestStore_WriteJSONBytes_RottenExistingContentStillCommits(t *testing.T) {
+	t.Parallel()
+
+	// A history-kept object whose on-disk bytes rotted past valid UTF-8 must
+	// not wedge: the version is unrecordable either way, so it is skipped with
+	// a warning and the fresh bytes land, rather than every future commit
+	// repeating the refusal until an operator hand-deletes the file.
+	const relPath = "projects/p/workspaces/ws/variables.json"
+
+	fetchedAt := time.Date(2026, time.August, 11, 9, 0, 0, 0, time.UTC)
+	s := store.New(t.TempDir())
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(s.AbsPath(relPath)), 0o750))
+	require.NoError(t, os.WriteFile(s.AbsPath(relPath), []byte("{\"v\":\xff}"), 0o600))
+
+	v2 := []byte("{\n  \"v\": 2\n}")
+
+	res, err := s.WriteJSONBytes(relPath, v2, store.WithHistory(fetchedAt, fetchedAt))
+	require.NoError(t, err)
+	assert.True(t, res.Changed)
+
+	got, err := os.ReadFile(s.AbsPath(relPath))
+	require.NoError(t, err)
+	assert.Equal(t, v2, got, "the fresh bytes land past the unrecordable version")
+
+	assert.False(t, sidecarExists(t, s, relPath), "the rotted version is not recorded")
+}
+
+func TestStore_BuryHistory_RottenContentStillLandsTombstone(t *testing.T) {
+	t.Parallel()
+
+	const relPath = "projects/p/workspaces/ws/variables.json"
+
+	fetchedAt := time.Date(2026, time.August, 11, 9, 0, 0, 0, time.UTC)
+	deletedAt := fetchedAt.Add(48 * time.Hour)
+	v1 := []byte("{\n  \"v\": 1\n}")
+	v2 := []byte("{\n  \"v\": 2\n}")
+
+	s := store.New(t.TempDir())
+
+	_, err := s.WriteJSONBytes(relPath, v1, store.WithHistory(time.Time{}, fetchedAt))
+	require.NoError(t, err)
+
+	_, err = s.WriteJSONBytes(relPath, v2, store.WithHistory(fetchedAt, fetchedAt))
+	require.NoError(t, err)
+
+	// The file rots after the commit; the disappearance must still record.
+	require.NoError(t, os.WriteFile(s.AbsPath(relPath), []byte("{\"v\":\xff}"), 0o600))
+
+	buried, err := s.BuryHistory(relPath, fetchedAt, deletedAt)
+	require.NoError(t, err)
+	assert.True(t, buried)
+
+	recs := historyRecords(t, s, relPath)
+	require.Len(t, recs, 2, "the superseded version, then the tombstone; the rot flushes nothing")
+	assert.Equal(t, string(v1), recs[0].Content)
+	assert.True(t, recs[1].Deleted, "the tombstone lands past the unrecordable content")
+}
+
 func TestStore_WriteJSONBytes_WithHistory(t *testing.T) {
 	t.Parallel()
 
