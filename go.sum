@@ -226,8 +226,8 @@ github.com/stretchr/testify v1.12.0 h1:K6Mr6jO9JICuend/5xzTM03ydSV3vdNRYAdPSukj8
 github.com/stretchr/testify v1.12.0/go.mod h1:bOYBZb5qJ00vPzWfIqBUZPaxK8jWiXc6d3ErP4Ca9Gw=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e h1:JVG44RsyaB9T2KIHavMF/ppJZNG9ZpyihvCd0w101no=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e/go.mod h1:RbqR21r5mrJuqunuUZ/Dhy/avygyECGrLceyNeo4LiM=
-go.jacobcolvin.com/niceyaml v0.0.0-20260621005747-e8ef30e73d1b h1:4AJHSY8h6SXbDGKv8e22XPnH/vNov1CKxvHIRRnSsRg=
-go.jacobcolvin.com/niceyaml v0.0.0-20260621005747-e8ef30e73d1b/go.mod h1:Ht0mnyWR3lSCtBau9HikhguXqKXMIG/F+K+TropMzzI=
+go.jacobcolvin.com/niceyaml v0.0.0-20260710133523-9ad36ecf8e1c h1:Vk/xPGxlwRzGLkx9DNdwqPkWSyYklcfkkE5jz8TZL1s=
+go.jacobcolvin.com/niceyaml v0.0.0-20260710133523-9ad36ecf8e1c/go.mod h1:u5Bb2Qd0R0DIjP6TG9fptk6oCJfxv6r9LE0Xzo+Zqzc=
 go.jacobcolvin.com/x/cobras v0.1.0 h1:oSyOR1Hpx7gGaCPCma7Y2bqngfhvbuYAbEocGVwkuqU=
 go.jacobcolvin.com/x/cobras v0.1.0/go.mod h1:6y8CxzhC4ces5/tLVRRy02sb//SXfevkrc7Ijxl0Xcg=
 go.jacobcolvin.com/x/jsonschema v0.2.0 h1:KBUWlozr061n90xVtZG+r6T3QuZsBDRqiYwkE+pV1oM=

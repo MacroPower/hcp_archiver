@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -300,9 +301,9 @@ func LoadFile(path string) (*File, error) {
 // ValidateSchema validates arbitrary decoded data against the configuration
 // JSON schema. It implements [niceyaml.SchemaValidator] so [LoadFile] can
 // report constraint violations with source annotations.
-func (f File) ValidateSchema(data any) error {
+func (f File) ValidateSchema(ctx context.Context, data any) error {
 	//nolint:wrapcheck // ValidateSchema returns a niceyaml.Error with path info.
-	return configValidator.ValidateSchema(data)
+	return configValidator.ValidateSchema(ctx, data)
 }
 
 // Validate reports whether the [File] is internally consistent after decoding.
