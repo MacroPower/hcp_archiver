@@ -347,6 +347,28 @@ func TestReadFile_TraversalRefused(t *testing.T) {
 		"nothing is fetched or persisted for a refused path")
 }
 
+func TestWorkspaceOpen_TraversalRefused(t *testing.T) {
+	t.Parallel()
+
+	fake := buildMirroredArchive(t)
+
+	// Seed a key in a sibling organization's namespace: a ".." path that
+	// slipped through would collapse into it via the mirror key's path.Join.
+	fake.SetObject(viewPrefix+"/other-org/secret.json", remotetest.Object{
+		Data: []byte(`{"leak":true}`),
+	})
+
+	orgs, dir := openBootstrap(t, fake)
+	ws := orgs[0].Workspace("default", "app")
+
+	_, err := ws.Open("../other-org/secret.json")
+	require.ErrorIs(t, err, view.ErrInvalidPath,
+		"a path escaping the organization is refused, not cleaned into a sibling's key")
+
+	assert.NoFileExists(t, filepath.Join(dir, "my-org", "other-org", "secret.json"),
+		"nothing is fetched or persisted for a refused path")
+}
+
 func TestRead_ReadThroughPersists(t *testing.T) {
 	t.Parallel()
 

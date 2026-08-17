@@ -102,22 +102,36 @@ func (w *Workspace) File(name string) string {
 // canonical copy. The sealed forms win over the mirror for the mirror-image
 // reason: a loose key still in the mirror beside a local sealed copy is a
 // leftover the next sweep prunes, not the canonical bytes.
+//
+// An unclean path (absolute, or carrying "..", ".", or empty segments) is
+// refused with [ErrInvalidPath], the same rule [*Org.Read] applies: the mirror
+// key joins the path under the organization's prefix, so a path that could
+// climb must never reach the read-through.
 func (w *Workspace) Open(relPath string) ([]byte, error) {
-	data, err := os.ReadFile(w.org.AbsPath(relPath))
+	rel, err := cleanRel(relPath)
+
+	switch {
+	case err != nil:
+		return nil, err
+	case rel == "":
+		return nil, fmt.Errorf("%w: %q", ErrNotFile, relPath)
+	}
+
+	data, err := os.ReadFile(w.org.AbsPath(rel))
 
 	switch {
 	case err == nil:
 		return data, nil
 	case !errors.Is(err, fs.ErrNotExist):
-		return nil, fmt.Errorf("read %q: %w", relPath, err)
+		return nil, fmt.Errorf("read %q: %w", rel, err)
 	}
 
-	data, sealedErr := w.openSealed(relPath)
+	data, sealedErr := w.openSealed(rel)
 	if sealedErr == nil || !errors.Is(sealedErr, ErrObjectNotFound) {
 		return data, sealedErr
 	}
 
-	return w.org.readThrough(relPath, sealedErr)
+	return w.org.readThrough(rel, sealedErr)
 }
 
 // openSealed reads the object at an archive-relative path from the workspace's
