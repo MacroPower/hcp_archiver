@@ -39,14 +39,15 @@ include:
   auditTrail: false
 
 # Bound on how much of each workspace's run history a run fetches, unlimited
-# by default. Each bound is optional and guarantees inclusion: fetchCount
-# fetches the newest N runs, fetchAge fetches runs created within the window
+# by default. Each bound is optional and guarantees inclusion: fetch.count
+# fetches the newest N runs, fetch.age fetches runs created within the window
 # (Go duration syntax plus a d day unit, e.g. 90d; 0 means unbounded). With
 # both set, whichever admits more history wins. The bounds limit fetching
 # only; runs already archived are never removed.
 # runHistory:
-#   fetchCount: 500
-#   fetchAge: 90d
+#   fetch:
+#     count: 500
+#     age: 90d
 
 # Archive root directory: default for --archive-path and for the read
 # commands' [archive-path] positional. A relative path resolves against this

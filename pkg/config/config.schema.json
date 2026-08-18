@@ -173,6 +173,28 @@
       "description": "Configures where the extract command writes.",
       "additionalProperties": false
     },
+    "fetch": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "count": {
+          "type": "integer",
+          "title": "Count",
+          "description": "Fetches the newest count runs of each workspace; zero means unbounded.",
+          "minimum": 0
+        },
+        "age": {
+          "$ref": "#/$defs/duration",
+          "title": "Age",
+          "description": "Fetches each workspace's runs created within this window before the archive runs, as a duration string in Go syntax extended with a day unit, such as 90d or 2160h; zero means unbounded."
+        }
+      },
+      "title": "Fetch",
+      "description": "Bounds how much of each workspace's run history a run fetches. Each bound is a guarantee of inclusion, optional and off at its zero value; when both are set the run walk fetches whichever admits more history, so a run is archived while it sits among the newest count runs or was created within the age window. With neither bound set every run is fetched. The bounds limit what a run fetches; they never remove runs already archived.",
+      "additionalProperties": false
+    },
     "include": {
       "type": [
         "object",
@@ -249,20 +271,14 @@
         "null"
       ],
       "properties": {
-        "fetchCount": {
-          "type": "integer",
-          "title": "Fetch Count",
-          "description": "Fetches the newest count runs of each workspace; zero means unbounded.",
-          "minimum": 0
-        },
-        "fetchAge": {
-          "$ref": "#/$defs/duration",
-          "title": "Fetch Age",
-          "description": "Fetches each workspace's runs created within this window before the archive runs, as a duration string in Go syntax extended with a day unit, such as 90d or 2160h; zero means unbounded."
+        "fetch": {
+          "$ref": "#/$defs/fetch",
+          "title": "Fetch",
+          "description": "Bounds what the run walk fetches; unset fetches every run."
         }
       },
       "title": "Run History",
-      "description": "Bounds how much of each workspace's run history a run fetches. Each bound is a guarantee of inclusion, optional and off at its zero value; when both are set the run walk fetches whichever admits more history, so a run is archived while it sits among the newest fetchCount runs or was created within the fetchAge window. With neither bound set every run is fetched. The bounds limit what a run fetches; they never remove runs already archived.",
+      "description": "Bounds how much of each workspace's run history a run fetches; unset fetches every run.",
       "additionalProperties": false
     },
     "templates": {

@@ -1218,8 +1218,8 @@ overrides it per run.
   visible orgs if empty), `projects` and `workspaces` (filters within each
   org; everything if empty, and with both set a workspace must satisfy both),
   a `runHistory` block bounding the run history a run fetches per workspace
-  (`fetchCount` / `fetchAge`, the age in Go duration syntax extended with a day
-  unit such as `90d`; each bound guarantees inclusion, so whichever admits
+  (`fetch.count` / `fetch.age`, the age in Go duration syntax extended with a
+  day unit such as `90d`; each bound guarantees inclusion, so whichever admits
   more history wins; unlimited by default, and never removing runs already
   archived), `rateLimit` (the ceiling of the client's adaptive rate governor,
   in requests per second; default 30, HCP's documented general limit; the

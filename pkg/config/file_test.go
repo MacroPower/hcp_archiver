@@ -80,7 +80,7 @@ func TestLoadFile(t *testing.T) {
 				"organizations:\n  - one\n  - two\n" +
 				"projects:\n  - networking\n" +
 				"workspaces:\n  - vpc\n  - dns\n" +
-				"runHistory:\n  fetchCount: 250\n  fetchAge: 90d\n" +
+				"runHistory:\n  fetch:\n    count: 250\n    age: 90d\n" +
 				"include:\n  stacks: true\n  hyok: true\n  registryDetail: true\n  auditTrail: true\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
@@ -89,8 +89,8 @@ func TestLoadFile(t *testing.T) {
 				assert.Equal(t, []string{"one", "two"}, file.Organizations)
 				assert.Equal(t, []string{"networking"}, file.Projects)
 				assert.Equal(t, []string{"vpc", "dns"}, file.Workspaces)
-				assert.Equal(t, 250, file.RunHistory.FetchCount)
-				assert.Equal(t, config.Duration(2160*time.Hour), file.RunHistory.FetchAge)
+				assert.Equal(t, 250, file.RunHistory.Fetch.Count)
+				assert.Equal(t, config.Duration(2160*time.Hour), file.RunHistory.Fetch.Age)
 				assert.True(t, file.Include.Stacks)
 				assert.True(t, file.Include.HYOK)
 				assert.True(t, file.Include.RegistryDetail)
@@ -98,26 +98,26 @@ func TestLoadFile(t *testing.T) {
 			},
 		},
 		"run history bounds are each optional": {
-			yaml: "runHistory:\n  fetchCount: 100\n",
+			yaml: "runHistory:\n  fetch:\n    count: 100\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
-				assert.Equal(t, 100, file.RunHistory.FetchCount)
-				assert.Zero(t, file.RunHistory.FetchAge)
+				assert.Equal(t, 100, file.RunHistory.Fetch.Count)
+				assert.Zero(t, file.RunHistory.Fetch.Age)
 			},
 		},
 		"run history age zero means unbounded": {
-			yaml: "runHistory:\n  fetchCount: 100\n  fetchAge: 0\n",
+			yaml: "runHistory:\n  fetch:\n    count: 100\n    age: 0\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
-				assert.Equal(t, 100, file.RunHistory.FetchCount)
-				assert.Zero(t, file.RunHistory.FetchAge)
+				assert.Equal(t, 100, file.RunHistory.Fetch.Count)
+				assert.Zero(t, file.RunHistory.Fetch.Age)
 			},
 		},
 		"run history age accepts a float zero": {
-			yaml: "runHistory:\n  fetchAge: 0.0\n",
+			yaml: "runHistory:\n  fetch:\n    age: 0.0\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
-				assert.Zero(t, file.RunHistory.FetchAge)
+				assert.Zero(t, file.RunHistory.Fetch.Age)
 			},
 		},
 		"bare section keys are unset": {
@@ -156,6 +156,13 @@ func TestLoadFile(t *testing.T) {
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, int64(67108864), file.Remote.RemoteConfig().PartSize)
+			},
+		},
+		"bare run history fetch section is unset": {
+			yaml: "runHistory:\n  fetch:\n",
+			want: func(t *testing.T, file *config.File) {
+				t.Helper()
+				assert.Equal(t, config.FileRunHistory{}, file.RunHistory)
 			},
 		},
 		"bare upload section is unset": {
@@ -245,13 +252,19 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 			yaml: "workspaces:\n  - vpc\n  - vpc\n",
 		},
 		"negative run history count": {
-			yaml: "runHistory:\n  fetchCount: -1\n",
+			yaml: "runHistory:\n  fetch:\n    count: -1\n",
 		},
 		"retired keepCount key is rejected": {
 			yaml: "runHistory:\n  keepCount: 100\n",
 		},
 		"retired keepAge key is rejected": {
 			yaml: "runHistory:\n  keepAge: 90d\n",
+		},
+		"retired flat fetchCount key is rejected": {
+			yaml: "runHistory:\n  fetchCount: 100\n",
+		},
+		"retired flat fetchAge key is rejected": {
+			yaml: "runHistory:\n  fetchAge: 90d\n",
 		},
 		"zero rate limit": {
 			yaml: "rateLimit: 0\n",
@@ -260,10 +273,10 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 			yaml: "rateLimit: -1\n",
 		},
 		"run history age must be a duration string": {
-			yaml: "runHistory:\n  fetchAge: 90\n",
+			yaml: "runHistory:\n  fetch:\n    age: 90\n",
 		},
 		"run history age rejects a non-zero fraction": {
-			yaml: "runHistory:\n  fetchAge: 0.5\n",
+			yaml: "runHistory:\n  fetch:\n    age: 0.5\n",
 		},
 		"address without a scheme": {
 			yaml: "address: app.terraform.io\n",
@@ -272,10 +285,10 @@ func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 			yaml: "address: ftp://app.terraform.io\n",
 		},
 		"run history age must not be negative": {
-			yaml: "runHistory:\n  fetchAge: -24h\n",
+			yaml: "runHistory:\n  fetch:\n    age: -24h\n",
 		},
 		"run history age rejects unknown units": {
-			yaml: "runHistory:\n  fetchAge: 1w\n",
+			yaml: "runHistory:\n  fetch:\n    age: 1w\n",
 		},
 		"archive path must be a string": {
 			yaml: "archive:\n  path:\n    - x\n",

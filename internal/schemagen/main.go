@@ -62,6 +62,7 @@ var (
 		"FileRemote":          "remote",
 		"FileRemoteUpload":    "upload",
 		"FileRunHistory":      "runHistory",
+		"FileRunHistoryFetch": "fetch",
 		"ByteSize":            "byteSize",
 		"Duration":            "duration",
 	}
@@ -76,6 +77,7 @@ var (
 		"remote":     "Remote",
 		"upload":     "Upload",
 		"runHistory": "Run History",
+		"fetch":      "Fetch",
 	}
 
 	// Go doc-link syntax: [Name], [*Name], and [pkg.Name]. It cannot match

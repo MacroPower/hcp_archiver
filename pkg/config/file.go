@@ -138,20 +138,27 @@ type FileExportTemplates struct {
 }
 
 // FileRunHistory bounds how much of each workspace's run history a run
+// fetches; unset fetches every run.
+type FileRunHistory struct {
+	// Fetch bounds what the run walk fetches; unset fetches every run.
+	Fetch FileRunHistoryFetch `json:"fetch,omitzero" jsonschema:"title=Fetch"`
+}
+
+// FileRunHistoryFetch bounds how much of each workspace's run history a run
 // fetches. Each bound is a guarantee of inclusion, optional and off at its
 // zero value; when both are set the run walk fetches whichever admits more
-// history, so a run is archived while it sits among the newest fetchCount
-// runs or was created within the fetchAge window. With neither bound set
-// every run is fetched. The bounds limit what a run fetches; they never
-// remove runs already archived.
-type FileRunHistory struct {
-	// FetchCount fetches the newest count runs of each workspace; zero means
+// history, so a run is archived while it sits among the newest count runs
+// or was created within the age window. With neither bound set every run is
+// fetched. The bounds limit what a run fetches; they never remove runs
+// already archived.
+type FileRunHistoryFetch struct {
+	// Count fetches the newest count runs of each workspace; zero means
 	// unbounded.
-	FetchCount int `json:"fetchCount,omitempty" jsonschema:"title=Fetch Count,minimum=0"`
-	// FetchAge fetches each workspace's runs created within this window
-	// before the archive runs, as a duration string in Go syntax extended
-	// with a day unit, such as 90d or 2160h; zero means unbounded.
-	FetchAge Duration `json:"fetchAge,omitempty" jsonschema:"title=Fetch Age"`
+	Count int `json:"count,omitempty" jsonschema:"title=Count,minimum=0"`
+	// Age fetches each workspace's runs created within this window before
+	// the archive runs, as a duration string in Go syntax extended with a
+	// day unit, such as 90d or 2160h; zero means unbounded.
+	Age Duration `json:"age,omitempty" jsonschema:"title=Age"`
 }
 
 // FileInclude holds the opt-in toggles for the heavy or most

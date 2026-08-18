@@ -171,7 +171,8 @@ archive:
 organizations: # omit to archive every visible organization
   - my-org
 runHistory: # bound the run history a run fetches; unlimited by default
-  fetchCount: 500
+  fetch:
+    count: 500
 include: # heavy or org-specific surfaces, each off by default
   stacks: true
   auditTrail: true
