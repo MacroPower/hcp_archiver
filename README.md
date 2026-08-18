@@ -15,7 +15,7 @@ metadata. It is not a restore tool; nothing goes back into HCP Terraform.
 <summary><strong>Homebrew</strong></summary>
 
 `hcp_archiver` is published as a cask in my
-[tap](https://github.com/MacroPower/homebrew-tap), for macOS and Linux.
+[tap](https://tap.jacobcolvin.com), for macOS and Linux.
 
 With `brew`:
 
@@ -45,8 +45,9 @@ go install go.jacobcolvin.com/hcp_archiver/cmd/hcp_archiver@latest
 <summary><strong>Docker</strong></summary>
 
 Images are published to
-[ghcr.io/macropower](https://github.com/MacroPower/hcp_archiver/pkgs/container/hcp_archiver),
-tagged `latest`, `vX`, `vX.Y`, and `vX.Y.Z`.
+[ghcr.io/macropower](https://git.jacobcolvin.com/hcp_archiver/pkgs/container/hcp_archiver)
+and mirrored at `oci.jacobcolvin.com/hcp_archiver`, tagged `latest`, `vX`,
+`vX.Y`, and `vX.Y.Z`.
 
 The image is `scratch` plus the static binary and a root certificate bundle:
 no shell, and every path it touches is one you mount. Mount the archive root
@@ -55,7 +56,7 @@ and point `--archive-path` at it:
 ```bash
 docker run --rm -e HCP_TOKEN \
   -v "$PWD/archive:/archive" \
-  ghcr.io/macropower/hcp_archiver:latest --archive-path /archive
+  oci.jacobcolvin.com/hcp_archiver:latest --archive-path /archive
 ```
 
 A configuration file rides in the same way, named by its in-container path:
@@ -64,7 +65,7 @@ A configuration file rides in the same way, named by its in-container path:
 docker run --rm -e HCP_TOKEN \
   -v "$PWD/archive:/archive" \
   -v "$PWD/hcp_archiver.yaml:/hcp_archiver.yaml:ro" \
-  ghcr.io/macropower/hcp_archiver:latest -c /hcp_archiver.yaml -o /archive
+  oci.jacobcolvin.com/hcp_archiver:latest -c /hcp_archiver.yaml -o /archive
 ```
 
 </details>
@@ -97,7 +98,7 @@ And then move `hcp_archiver` to a directory in your `PATH`.
 </details>
 
 Or, download a binary from
-[releases](https://github.com/MacroPower/hcp_archiver/releases). Builds cover
+[releases](https://git.jacobcolvin.com/hcp_archiver/releases). Builds cover
 Linux and macOS on `x86_64` and `arm64`.
 
 <details>
@@ -131,7 +132,7 @@ Published images are signed against the same identity:
 cosign verify -o text \
   --certificate-identity "https://github.com/MacroPower/hcp_archiver/.github/workflows/release.yaml@refs/tags/$HCP_ARCHIVER_TAG" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  "ghcr.io/macropower/hcp_archiver:$HCP_ARCHIVER_TAG"
+  "oci.jacobcolvin.com/hcp_archiver:$HCP_ARCHIVER_TAG"
 ```
 
 [cosign]: https://github.com/sigstore/cosign
@@ -306,4 +307,4 @@ This is a self-contained Go module so the `go-tfe` dependency tree stays
 isolated. CI runs through a local Dagger toolchain (`dagger call ci <task>`),
 composing shared toolchains from [go.jacobcolvin.com/x][x].
 
-[x]: https://github.com/MacroPower/x
+[x]: https://git.jacobcolvin.com/x

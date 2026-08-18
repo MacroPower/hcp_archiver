@@ -103,7 +103,7 @@ homebrew_casks:
       name: homebrew-tap
     url:
       template: &archiveTemplate >-
-        https://github.com/MacroPower/hcp_archiver/releases/download/{{ .Tag }}/
+        https://git.jacobcolvin.com/hcp_archiver/releases/download/{{ .Tag }}/
         {{- .ProjectName }}_
         {{- title .Os }}_
         {{- if eq .Arch "amd64" }}x86_64
@@ -115,7 +115,7 @@ homebrew_casks:
     commit_author: &commitAuthor
       name: botty-mcbottington
       email: 168950816+botty-mcbottington[bot]@users.noreply.github.com
-    homepage: "https://github.com/MacroPower/hcp_archiver"
+    homepage: "https://git.jacobcolvin.com/hcp_archiver"
     description: "Archives an HCP Terraform organization to plain files on disk"
     license: "Apache License"
     skip_upload: auto
@@ -135,7 +135,7 @@ nix:
     url_template: *archiveTemplate
     commit_msg_template: "chore: pkg update for {{ .ProjectName }} {{ .Tag }}"
     commit_author: *commitAuthor
-    homepage: "https://github.com/MacroPower/hcp_archiver"
+    homepage: "https://git.jacobcolvin.com/hcp_archiver"
     description: "Archives an HCP Terraform organization to plain files on disk"
     license: "asl20"
     skip_upload: auto

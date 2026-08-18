@@ -156,7 +156,7 @@ func withOCILabels(ctr *dagger.Container) *dagger.Container {
 	return ctr.
 		WithLabel("org.opencontainers.image.title", "hcp_archiver").
 		WithLabel("org.opencontainers.image.source", "https://github.com/MacroPower/hcp_archiver").
-		WithLabel("org.opencontainers.image.url", "https://github.com/MacroPower/hcp_archiver").
+		WithLabel("org.opencontainers.image.url", "https://git.jacobcolvin.com/hcp_archiver").
 		WithLabel("org.opencontainers.image.licenses", "Apache-2.0").
 		WithAnnotation("org.opencontainers.image.title", "hcp_archiver").
 		WithAnnotation("org.opencontainers.image.source", "https://github.com/MacroPower/hcp_archiver")

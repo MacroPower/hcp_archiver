@@ -101,6 +101,14 @@ func (m *Tests) TestBuildImageMetadata(ctx context.Context) error {
 			return fmt.Errorf("[%d]: title label = %q, want %q", i, title, "hcp_archiver")
 		}
 
+		url, err := ctr.Label(ctx, "org.opencontainers.image.url")
+		if err != nil {
+			return fmt.Errorf("[%d]: url label: %w", i, err)
+		}
+		if url != "https://git.jacobcolvin.com/hcp_archiver" {
+			return fmt.Errorf("[%d]: url label = %q, want %q", i, url, "https://git.jacobcolvin.com/hcp_archiver")
+		}
+
 		created, err := ctr.Label(ctx, "org.opencontainers.image.created")
 		if err != nil {
 			return fmt.Errorf("[%d]: created label: %w", i, err)
