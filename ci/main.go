@@ -151,7 +151,7 @@ func (m *Ci) runTask(ctx context.Context, target string) error {
 
 // Binary compiles the hcp_archiver binary for the given platform via GoReleaser in
 // snapshot mode. There is no longer a lightweight Go toolchain to delegate to,
-// so this routes through the release toolchain (releaserBase), producing the
+// so this routes through the release toolchain (ReleaserBase), producing the
 // same artifact the release pipeline ships.
 func (m *Ci) Binary(
 	ctx context.Context,

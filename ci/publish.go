@@ -170,13 +170,13 @@ func (m *Ci) Release(
 	// +optional
 	oidcRequestToken *dagger.Secret,
 ) (*ReleaseReport, error) {
-	ctr, err := m.releaserBase(ctx)
+	ctr, err := m.ReleaserBase(ctx)
 	if err != nil {
 		return nil, err
 	}
 	ctr = ctr.WithSecretVariable("GITHUB_TOKEN", githubToken)
 
-	// releaserBase bootstraps a tagless git repo (the release pipeline ignores
+	// ReleaserBase bootstraps a tagless git repo (the release pipeline ignores
 	// .git), but goreleaser release resolves the release version from a git tag
 	// and aborts with ErrNoTag when none is present. Tag the bootstrapped HEAD
 	// with the release version so both goreleaser's tag lookup and its git

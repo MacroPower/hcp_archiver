@@ -14,7 +14,7 @@ import (
 // [Ci.BuildImages], package publishing only happens during a real release,
 // and signing requires OIDC credentials only available during a real release.
 func (m *Ci) Build(ctx context.Context) (*dagger.Directory, error) {
-	ctr, err := m.releaserBase(ctx)
+	ctr, err := m.ReleaserBase(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +34,7 @@ func (m *Ci) BinarySnapshot(
 	// Target build platform (e.g. "linux/arm64").
 	platform dagger.Platform,
 ) (*dagger.File, error) {
-	ctr, err := m.releaserBase(ctx)
+	ctr, err := m.ReleaserBase(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -162,21 +162,34 @@ func withOCILabels(ctr *dagger.Container) *dagger.Container {
 		WithAnnotation("org.opencontainers.image.source", "https://github.com/MacroPower/hcp_archiver")
 }
 
-// releaserBase builds the full release toolset: the shared GoReleaser base
+// ReleaserBase builds the full release toolset: the shared GoReleaser base
 // (the Go build base plus the goreleaser binary, from the [Goreleaser]
-// toolchain) extended with cosign, syft, project source, and a bootstrapped
-// git repo (everything goreleaser release needs for signing and SBOMs).
-// cosign and syft are folded into the goreleaser toolchain, so its
-// WithCosign/WithSyft install those binaries for GoReleaser's sign and sbom
-// steps. Config-only validation goes through the [Goreleaser] toolchain
-// directly; see [Ci.LintReleaser].
-func (m *Ci) releaserBase(_ context.Context) (*dagger.Container, error) {
+// toolchain) extended with cosign, syft, a nix-hash shim, project source, and
+// a bootstrapped git repo (everything goreleaser release needs for signing,
+// SBOMs, and the Nix package). cosign and syft are folded into the goreleaser
+// toolchain, so its WithCosign/WithSyft install those binaries for
+// GoReleaser's sign and sbom steps. Config-only validation goes through the
+// [Goreleaser] toolchain directly; see [Ci.LintReleaser].
+func (m *Ci) ReleaserBase(_ context.Context) (*dagger.Container, error) {
 	// WithCosign/WithSyft take and return a container, so they are applied as
 	// statements rather than chained.
 	ctr := m.Goreleaser.GoreleaserBase()
 	ctr = m.Goreleaser.WithCosign(ctr)
 	ctr = m.Goreleaser.WithSyft(ctr)
 	ctr = ctr.
+		// GoReleaser's nix pipe silently skips itself when nix-hash is not on
+		// the PATH, so the shim is what keeps the NUR publish alive.
+		WithNewFile("/usr/local/bin/nix-hash", `#!/bin/sh
+# nix-hash shim for goreleaser's nix pipe. Ignores flags (goreleaser invokes
+# --type sha256 --flat --base32) and always emits an SRI hash, which Nix
+# accepts anywhere a base32 hash is expected.
+file=""
+for arg in "$@"; do
+  case "$arg" in --*) ;; *) file="$arg" ;; esac
+done
+printf 'sha256-%s\n' "$(openssl dgst -sha256 -binary "$file" | base64 -w0)"
+`,
+			dagger.ContainerWithNewFileOpts{Permissions: 0o755}).
 		// Env vars used by GoReleaser ldflags and templates.
 		WithEnvVariable("HOSTNAME", "dagger").
 		WithEnvVariable("USER", "dagger").

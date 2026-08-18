@@ -43,9 +43,12 @@ Docker support is skipped to avoid Docker-in-Docker. It composes the
 `goreleaser` toolchain directly, which carries the folded-in cosign signing and
 syft SBOM tooling (`with-cosign`/`with-syft`/`sign-keyless`).
 
-- `releaserBase` (private, in `build.go`) builds the release container: the
-  goreleaser Go base + cosign + syft, then mounts the source and bootstraps a
-  git repo via `ensure-git-repo` (now on the goreleaser toolchain).
+- `releaser-base` (in `build.go`) builds the release container: the
+  goreleaser Go base + cosign + syft + a `nix-hash` shim (GoReleaser's nix
+  pipe silently skips the NUR publish without one on the PATH), then mounts
+  the source and bootstraps a git repo via `ensure-git-repo` (now on the
+  goreleaser toolchain). It is exposed as a module function so the tests can
+  verify the shim.
 - `build` snapshot-cross-compiles the binaries (no publishing; the Homebrew
   and Nix stages are skipped along with Docker, signing, and SBOMs).
   `binary` / `binary-snapshot` produce a single-platform binary the same way.
@@ -90,7 +93,8 @@ no way to provide).
   toolchain (the vulnerability scan), and the `zizmor` toolchain (the Actions
   workflow lint), all referenced remotely from `github.com/MacroPower/x`.
 - The `tests/` submodule exercises the +check functions (build dist, image
-  metadata, lint-releaser, binary, lint-actions, schemas).
+  metadata, lint-releaser, binary, lint-actions, schemas, the release
+  container's nix-hash shim).
 
 The `engineVersion` in `dagger.json` is pinned in lockstep with the root
 `dagger.json` and with the CLI version in `.github/workflows`; bump them together

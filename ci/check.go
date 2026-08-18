@@ -122,7 +122,7 @@ func (m *Ci) LintRenovate(ctx context.Context) error {
 // For a fast goreleaser config-only check, see [Ci.LintReleaser].
 func (m *Ci) ReleaseDryRun(ctx context.Context) error {
 	// Snapshot build: exercises goreleaser cross-compilation for all
-	// platforms, releaserBase tool setup (cosign, syft), and
+	// platforms, ReleaserBase tool setup (cosign, syft), and
 	// archive/checksum generation.
 	dist, err := m.Build(ctx)
 	if err != nil {

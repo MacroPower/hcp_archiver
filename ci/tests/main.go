@@ -32,6 +32,7 @@ func (m *Tests) All(ctx context.Context) error {
 	g.Go(func() error { return m.TestBinary(ctx) })
 	g.Go(func() error { return m.TestLintActionsClean(ctx) })
 	g.Go(func() error { return m.TestSchemas(ctx) })
+	g.Go(func() error { return m.TestReleaserNixHash(ctx) })
 
 	return g.Wait()
 }
@@ -168,6 +169,26 @@ func (m *Tests) TestBinary(ctx context.Context) error {
 // +check
 func (m *Tests) TestLintActionsClean(ctx context.Context) error {
 	return dag.Ci().LintActions(ctx)
+}
+
+// TestReleaserNixHash verifies the release container answers the exact
+// nix-hash invocation GoReleaser's nix pipe makes with an SRI hash. The pipe
+// silently skips the NUR publish when nix-hash is missing or fails, so
+// nothing else surfaces a dropped shim.
+//
+// +check
+func (m *Tests) TestReleaserNixHash(ctx context.Context) error {
+	out, err := dag.Ci().ReleaserBase().
+		WithNewFile("/tmp/nix-hash-input", "nix-hash shim probe").
+		WithExec([]string{"nix-hash", "--type", "sha256", "--flat", "--base32", "/tmp/nix-hash-input"}).
+		Stdout(ctx)
+	if err != nil {
+		return fmt.Errorf("run nix-hash in release container: %w", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(out), "sha256-") {
+		return fmt.Errorf("nix-hash output %q is not an SRI hash", strings.TrimSpace(out))
+	}
+	return nil
 }
 
 // TestSchemas verifies that [Ci.Schemas] produces the Pages site directory

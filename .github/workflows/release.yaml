@@ -20,9 +20,6 @@ jobs:
       packages: write
       attestations: write
     steps:
-      # TODO: configure GitHub App secrets (BOT_APP_ID, BOT_APP_PRIVATE_KEY).
-      # Until then, replace this step with a checkout that uses the default
-      # GITHUB_TOKEN, or skip the workflow until the app is set up.
       - name: Generate Token
         uses: actions/create-github-app-token@v3
         id: app-token

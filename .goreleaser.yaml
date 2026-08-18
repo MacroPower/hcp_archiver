@@ -166,6 +166,10 @@ docker_signs:
       - "--yes"
 
 release:
+  # A re-run of a failed release otherwise 422s on every asset the earlier
+  # attempt already uploaded. Replaced archives embed a fresh BuildDate, so
+  # their checksums differ from prior downloads of the same tag.
+  replace_existing_artifacts: true
   extra_files:
     - glob: ./pkg/config/config.schema.json
 
