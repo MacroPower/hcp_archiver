@@ -6,8 +6,6 @@ import (
 	"strings"
 
 	"dagger/ci/internal/dagger"
-
-	"golang.org/x/sync/errgroup"
 )
 
 // ReleaseReport captures the results of a release operation including
@@ -266,22 +264,15 @@ func (m *Ci) publishImages(
 	}
 
 	digests := make([]string, len(tags))
-	g, gCtx := errgroup.WithContext(ctx)
 	for i, t := range tags {
 		ref := fmt.Sprintf("%s:%s", m.Registry, t)
-		g.Go(func() error {
-			digest, err := publisher.Publish(gCtx, ref, dagger.ContainerPublishOpts{
-				PlatformVariants: variants,
-			})
-			if err != nil {
-				return fmt.Errorf("publish %s: %w", ref, err)
-			}
-			digests[i] = digest
-			return nil
+		digest, err := publisher.Publish(ctx, ref, dagger.ContainerPublishOpts{
+			PlatformVariants: variants,
 		})
-	}
-	if err := g.Wait(); err != nil {
-		return nil, err
+		if err != nil {
+			return nil, fmt.Errorf("publish %s: %w", ref, err)
+		}
+		digests[i] = digest
 	}
 
 	return digests, nil
