@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"slices"
@@ -724,6 +725,36 @@ func (r *Reporter) Run(ctx context.Context, interval time.Duration) error {
 				return err
 			}
 		}
+	}
+}
+
+// RunBackground starts [Reporter.Run] on its own goroutine under a child of
+// ctx and returns the stop function: it cancels the loop and waits for its
+// final render, so the caller's next write lands on a clean tail. The
+// interval is the reporter's configured one. A render fault is progress-only,
+// logged through logger at warn level as progress_report_error and never
+// surfaced to the caller. A nil logger falls back to [slog.Default]. The stop
+// function is idempotent.
+func (r *Reporter) RunBackground(ctx context.Context, logger *slog.Logger) func() {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+
+	var wg sync.WaitGroup
+
+	wg.Go(func() {
+		err := r.Run(runCtx, 0)
+		if err != nil {
+			logger.LogAttrs(runCtx, slog.LevelWarn, "progress_report_error",
+				slog.String("error", err.Error()))
+		}
+	})
+
+	return func() {
+		cancel()
+		wg.Wait()
 	}
 }
 

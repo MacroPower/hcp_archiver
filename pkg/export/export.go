@@ -62,6 +62,7 @@ type Summary struct {
 type Exporter struct {
 	arc          *view.Archive
 	tmpl         *template.Template
+	progress     Progress
 	target       string
 	templatesDir string
 	pages        int
@@ -72,6 +73,7 @@ type Exporter struct {
 //
 // Options of this type:
 //   - [WithForce]
+//   - [WithProgress]
 //   - [WithTemplatesDir]
 type Option func(*Exporter)
 
@@ -95,7 +97,7 @@ func WithTemplatesDir(dir string) Option {
 
 // New creates a new [Exporter] rendering arc's metadata beneath target.
 func New(arc *view.Archive, target string, opts ...Option) *Exporter {
-	e := &Exporter{arc: arc, target: target}
+	e := &Exporter{arc: arc, target: target, progress: nopProgress{}}
 
 	for _, opt := range opts {
 		opt(e)
@@ -107,8 +109,8 @@ func New(arc *view.Archive, target string, opts ...Option) *Exporter {
 // Run renders the archive and returns what it produced. The target directory
 // is created when absent; see [ErrNoTarget], [ErrTargetNotDir],
 // [ErrTargetNotEmpty], and [ErrTargetOverlapsArchive] for the shapes it
-// refuses. Cancellation stops the run between workspaces, returning the
-// context's error with the partial totals.
+// refuses. Cancellation stops the run between workspaces and stacks,
+// returning the context's error with the partial totals.
 func (e *Exporter) Run(ctx context.Context) (Summary, error) {
 	e.pages = 0
 

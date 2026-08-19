@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"go.jacobcolvin.com/x/cobras/log"
 	"go.jacobcolvin.com/x/cobras/profile"
 	"go.jacobcolvin.com/x/version"
@@ -58,14 +59,21 @@ func registerArchiveFlags(cmd *cobra.Command) *archiveFlags {
 		fmt.Sprintf("path to the YAML configuration file (defaults to $%s)", config.EnvConfigPath))
 	fs.StringVarP(&af.archivePath, flagArchivePath, "o", "",
 		"archive root directory (defaults to the configuration file's archive.path)")
-	fs.StringVar(&af.progress, flagProgress, config.DefaultProgressMode.String(),
-		"progress output mode (auto|human|json|quiet)")
-	fs.DurationVar(&af.progressInterval, flagProgressInterval, config.DefaultProgressInterval,
-		"progress reporting cadence")
+	registerProgressFlags(fs, &af.progress, &af.progressInterval)
 	fs.BoolVar(&af.retryAbsent, flagRetryAbsent, false,
 		"re-probe objects previously recorded as absent")
 
 	return af
+}
+
+// registerProgressFlags binds the progress output flags onto fs, writing into
+// mode and interval, so every command carrying the pair shares one definition
+// of its names, defaults, and help text.
+func registerProgressFlags(fs *pflag.FlagSet, mode *string, interval *time.Duration) {
+	fs.StringVar(mode, flagProgress, config.DefaultProgressMode.String(),
+		"progress output mode (auto|human|json|quiet)")
+	fs.DurationVar(interval, flagProgressInterval, config.DefaultProgressInterval,
+		"progress reporting cadence")
 }
 
 // config loads the YAML configuration and merges the per-run flag values into a
@@ -233,7 +241,10 @@ output directory in turn to accumulate the union of what each can read.`,
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newShowCmd())
 	cmd.AddCommand(newExtractCmd())
-	cmd.AddCommand(newExportCmd())
+	// The sink closes over logWriter by reference: the writer only exists once
+	// PersistentPreRunE has run, so the export command resolves it at run time
+	// rather than capturing the pre-run nil.
+	cmd.AddCommand(newExportCmd(func() progress.LogSink { return logWriter }))
 
 	return cmd
 }

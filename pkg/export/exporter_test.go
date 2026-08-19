@@ -497,6 +497,69 @@ func TestExportStopsOnCancel(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+func TestExportStopsOnCancelBetweenStacks(t *testing.T) {
+	t.Parallel()
+
+	// The fixture has no workspaces, so the workspace loop's guard never runs
+	// and the cancellation must trip the stack loop's own guard.
+	root := t.TempDir()
+	org := filepath.Join(root, "stack-org")
+
+	writeFile(t, org, "org.json",
+		`{"data":{"id":"org-2","type":"organizations","attributes":{"name":"stack-org"}}}`)
+	writeFile(t, org, "projects/default/project.json",
+		`{"data":{"id":"prj-2","type":"projects","attributes":{"name":"default"}}}`)
+	writeFile(t, org, "projects/default/stacks/net/stack.json",
+		`{"data":{"id":"st-2","type":"stacks","attributes":{"name":"net"}}}`)
+
+	target := filepath.Join(t.TempDir(), "site")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := export.New(openFixture(t, root), target).Run(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// recordingProgress records every hook call the export makes.
+type recordingProgress struct {
+	targets  []string
+	totals   []int
+	advanced int
+}
+
+func (r *recordingProgress) SetTarget(name string) { r.targets = append(r.targets, name) }
+func (r *recordingProgress) SetTotal(total int)    { r.totals = append(r.totals, total) }
+func (r *recordingProgress) Advance(n int)         { r.advanced += n }
+
+func TestExportReportsProgress(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+	target := filepath.Join(t.TempDir(), "site")
+
+	rec := &recordingProgress{}
+
+	_, err := export.New(openFixture(t, root), target, export.WithProgress(rec)).Run(t.Context())
+	require.NoError(t, err)
+
+	// The fixture org holds one project with one workspace and one stack:
+	// three units seeded up front, all advanced by the end of the run.
+	assert.Equal(t, []string{"my-org"}, rec.targets)
+	assert.Equal(t, []int{3}, rec.totals)
+	assert.Equal(t, 3, rec.advanced)
+}
+
+func TestExportNilProgress(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+	target := filepath.Join(t.TempDir(), "site")
+
+	_, err := export.New(openFixture(t, root), target, export.WithProgress(nil)).Run(t.Context())
+	require.NoError(t, err)
+}
+
 func TestExportEscapesRunMessage(t *testing.T) {
 	t.Parallel()
 

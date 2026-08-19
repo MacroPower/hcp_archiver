@@ -164,27 +164,16 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 
 	ledger.StartRun()
 
-	// The reporter and the flush loop get independent child contexts: the close
-	// stops the flush loop before the authoritative final flush, but keeps the
-	// reporter live through the flush, the failure logging, and the close sweep,
-	// so the panel is the run's visibility for the whole close. Both are
+	// The reporter and the flush loop stop independently: the close stops the
+	// flush loop before the authoritative final flush, but keeps the reporter
+	// live through the flush, the failure logging, and the close sweep, so the
+	// panel is the run's visibility for the whole close. Both run under
 	// children of the parent ctx, so an interrupt still cancels both at once.
-	reporterCtx, cancelReporter := context.WithCancel(ctx)
+	stopReporter := reporter.RunBackground(ctx, a.logger.With(slog.String("org", orgName)))
+
 	flushCtx, cancelFlush := context.WithCancel(ctx)
 
-	var reporterWG, flushWG sync.WaitGroup
-
-	reporterWG.Go(func() {
-		// The interval is already configured via WithInterval above; a non-positive
-		// value here falls back to it, so it need not be passed again.
-		rerr := reporter.Run(reporterCtx, 0)
-		if rerr != nil {
-			a.logger.LogAttrs(reporterCtx, slog.LevelWarn, "progress_report_error",
-				slog.String("org", orgName),
-				slog.String("error", rerr.Error()),
-			)
-		}
-	})
+	var flushWG sync.WaitGroup
 
 	flushWG.Go(func() {
 		a.flushLoop(flushCtx, orgName, ledger)
@@ -273,8 +262,7 @@ func (a *Archiver) runOrg(ctx context.Context, orgName string) (manifest.Tally, 
 
 			// The reporter stops only after the sweep: its panel's final render
 			// erases itself, so the summary below prints on a clean tail.
-			cancelReporter()
-			reporterWG.Wait()
+			stopReporter()
 
 			serr := reporter.Summary()
 			if serr != nil {

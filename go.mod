@@ -15,6 +15,7 @@ require (
 	github.com/hashicorp/go-version v1.9.0
 	github.com/hashicorp/jsonapi v1.5.0
 	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.12.0
 	go.jacobcolvin.com/niceyaml v0.0.0-20260710133523-9ad36ecf8e1c
 	go.jacobcolvin.com/x/cobras v0.1.0
@@ -91,7 +92,6 @@ require (
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sahilm/fuzzy v0.1.3 // indirect
-	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect

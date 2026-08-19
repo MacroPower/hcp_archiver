@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"go.jacobcolvin.com/hcp_archiver/pkg/config"
 	"go.jacobcolvin.com/hcp_archiver/pkg/export"
+	"go.jacobcolvin.com/hcp_archiver/pkg/progress"
 	"go.jacobcolvin.com/hcp_archiver/pkg/theme"
 )
 
@@ -14,11 +18,15 @@ import (
 const flagForce = "force"
 
 // newExportCmd returns a command that renders an archive's metadata as a
-// markdown tree a static site generator can build.
-func newExportCmd() *cobra.Command {
+// markdown tree a static site generator can build. The sink resolves the
+// shared log writer the root command builds in PersistentPreRunE, so log
+// lines scroll above the progress panel while it runs.
+func newExportCmd(sink func() progress.LogSink) *cobra.Command {
 	var (
-		target string
-		force  bool
+		target           string
+		force            bool
+		progressFlag     string
+		progressInterval time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -55,8 +63,21 @@ export.path stands in for an omitted --export-path.`,
 	rf := registerRemoteFlags(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, args []string) error {
+		// The mode parses before any I/O, so a bad value fails without
+		// touching the archive or the target.
+		mode, err := config.ParseProgressMode(progressFlag)
+		if err != nil {
+			return err //nolint:wrapcheck // The sentinel-bearing config error renders as-is.
+		}
+
 		ctx, stop := signalContext(cc.Context())
 		defer stop()
+
+		// The run gets its own cancelable child: under the terminal UI's raw
+		// mode the kernel never raises SIGINT, so ctrl+c arrives through the
+		// reporter's interrupt callback instead.
+		runCtx, cancelRun := context.WithCancel(ctx)
+		defer cancelRun()
 
 		// The file loads once and unconditionally: its export section and
 		// directory defaults apply even when the mirror comes from the flag.
@@ -83,7 +104,27 @@ export.path stands in for an omitted --export-path.`,
 			return export.ErrNoTarget
 		}
 
-		arc, err := openArchive(ctx, dir, rcfg)
+		// The reporter starts before the archive opens: a sealed archive's
+		// roll-up fetch-back from the mirror can be the slow part of the
+		// command, and the open runs under the spinner (the phase stays
+		// indeterminate until the first organization's total is known) with
+		// the interrupt path already live.
+		prog := &exportProgress{}
+		reporter := progress.New(cc.ErrOrStderr(), mode, prog,
+			progress.WithInterval(progressInterval),
+			progress.WithInterrupt(cancelRun),
+			progress.WithLogSink(sink()),
+		)
+		prog.reporter = reporter
+		reporter.SetPhase("export")
+
+		// Every exit past this point erases the panel first, so an error
+		// prints on a restored terminal; the success path stops it inline
+		// before the stderr warning and the stdout summary.
+		stopReporter := reporter.RunBackground(ctx, nil)
+		defer stopReporter()
+
+		arc, err := openArchive(runCtx, dir, rcfg)
 		if err != nil {
 			return err
 		}
@@ -106,7 +147,11 @@ export.path stands in for an omitted --export-path.`,
 			opts = append(opts, export.WithTemplatesDir(configDir(cfgPath, file.Export.Templates.Path)))
 		}
 
-		sum, err := export.New(arc, target, opts...).Run(ctx)
+		opts = append(opts, export.WithProgress(prog))
+
+		sum, err := export.New(arc, target, opts...).Run(runCtx)
+
+		stopReporter()
 
 		warnDegraded(cc.ErrOrStderr(), arc)
 
@@ -137,6 +182,11 @@ export.path stands in for an omitted --export-path.`,
 	flags.StringVarP(&target, flagExportPath, "t", "",
 		"directory to write the markdown tree into (defaults to the configuration file's export.path)")
 	flags.BoolVar(&force, flagForce, false, "replace a non-empty target directory's contents")
+	registerProgressFlags(flags, &progressFlag, &progressInterval)
+
+	// Completion registration panics on a missing flag, so it follows the
+	// --progress registration above.
+	registerProgressCompletion(cmd)
 
 	return cmd
 }

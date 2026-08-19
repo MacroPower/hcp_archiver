@@ -1,15 +1,19 @@
 package cli_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"go.jacobcolvin.com/hcp_archiver/internal/cli"
+	"go.jacobcolvin.com/hcp_archiver/pkg/config"
 	"go.jacobcolvin.com/hcp_archiver/pkg/export"
+	"go.jacobcolvin.com/hcp_archiver/pkg/progress"
 )
 
 func TestExportCmd(t *testing.T) {
@@ -127,4 +131,53 @@ func TestExportCmd_NonEmptyTargetHintsForce(t *testing.T) {
 	_, _, err = runCmd(t, "export", root, "--export-path", target, "--force")
 	require.NoError(t, err)
 	assert.NoFileExists(t, filepath.Join(target, "stale.md"))
+}
+
+func TestExportCmd_RejectsBadProgressMode(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+	target := filepath.Join(t.TempDir(), "site")
+
+	_, _, err := runCmd(t, "export", root, "--export-path", target, "--progress", "bogus")
+	require.ErrorIs(t, err, config.ErrInvalidProgressMode)
+}
+
+func TestExportCmd_ProgressAdapter(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	adapter, reporter := cli.ExportProgressForTest(buf, config.ProgressModeHuman,
+		progress.WithClock(func() time.Time { return base }))
+
+	// The command's RunE owns the phase; the adapter carries only the
+	// target, total, and advances.
+	reporter.SetPhase("export")
+
+	adapter.SetTarget("my-org")
+	adapter.SetTotal(5)
+	adapter.Advance(2)
+
+	require.NoError(t, reporter.Report())
+
+	line := buf.String()
+	assert.Contains(t, line, "phase=export")
+	assert.Contains(t, line, "target=my-org")
+	assert.Contains(t, line, "done=2")
+	assert.Contains(t, line, "completed=2/5")
+
+	// A new organization's total resets both counters, so done= and
+	// completed= keep reading per-organization.
+	buf.Reset()
+	adapter.SetTarget("next-org")
+	adapter.SetTotal(7)
+	adapter.Advance(3)
+
+	require.NoError(t, reporter.Report())
+
+	line = buf.String()
+	assert.Contains(t, line, "target=next-org")
+	assert.Contains(t, line, "done=3")
+	assert.Contains(t, line, "completed=3/7")
 }

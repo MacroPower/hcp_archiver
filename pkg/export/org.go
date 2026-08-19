@@ -242,6 +242,17 @@ func (e *Exporter) renderOrg(ctx context.Context, org *view.Org) error {
 		return err
 	}
 
+	// Each project index, workspace, and stack counts as one unit; the
+	// handful of org-level pages outside the project loop stay outside the
+	// total, so it tracks the units that dominate a large org's runtime.
+	total := 0
+	for _, listing := range listings {
+		total += 1 + len(listing.workspaces) + len(listing.stacks)
+	}
+
+	e.progress.SetTarget(org.Name)
+	e.progress.SetTotal(total)
+
 	sectionIDs := make([][]string, len(orgSections))
 	for i, section := range orgSections {
 		sectionIDs[i] = subdirNames(org, section.dir)
@@ -451,23 +462,45 @@ func (e *Exporter) renderProject(ctx context.Context, org *view.Org, listing pro
 		return err
 	}
 
+	e.progress.Advance(1)
+
 	for _, name := range listing.workspaces {
-		ctxErr := ctx.Err()
-		if ctxErr != nil {
-			return fmt.Errorf("export stopped: %w", ctxErr)
+		err = stopOnCancel(ctx)
+		if err != nil {
+			return err
 		}
 
 		err = e.renderWorkspace(org.Workspace(listing.name, name), org.Name)
 		if err != nil {
 			return err
 		}
+
+		e.progress.Advance(1)
 	}
 
 	for _, name := range listing.stacks {
+		err = stopOnCancel(ctx)
+		if err != nil {
+			return err
+		}
+
 		err = e.renderStack(org, listing.name, name)
 		if err != nil {
 			return err
 		}
+
+		e.progress.Advance(1)
+	}
+
+	return nil
+}
+
+// stopOnCancel surfaces ctx's cancellation as the export's stop error, the
+// check each render loop runs between units.
+func stopOnCancel(ctx context.Context) error {
+	ctxErr := ctx.Err()
+	if ctxErr != nil {
+		return fmt.Errorf("export stopped: %w", ctxErr)
 	}
 
 	return nil

@@ -1,11 +1,30 @@
 package cli
 
 import (
+	"io"
+
 	"github.com/spf13/cobra"
 
 	"go.jacobcolvin.com/hcp_archiver/pkg/config"
+	"go.jacobcolvin.com/hcp_archiver/pkg/export"
+	"go.jacobcolvin.com/hcp_archiver/pkg/progress"
 	"go.jacobcolvin.com/hcp_archiver/pkg/remote"
 )
+
+// ExportProgressForTest builds the export command's progress adapter over a
+// reporter rendering to w in mode, returning the adapter and its reporter. It
+// exposes the command's wiring for offline tests.
+func ExportProgressForTest(
+	w io.Writer,
+	mode config.ProgressMode,
+	opts ...progress.Option,
+) (export.Progress, *progress.Reporter) {
+	p := &exportProgress{}
+	r := progress.New(w, mode, p, opts...)
+	p.reporter = r
+
+	return p, r
+}
 
 // ConfigFromArgs registers the archive flags on a fresh command, parses args
 // against them, and resolves the result into a [config.Config]. It exposes the
