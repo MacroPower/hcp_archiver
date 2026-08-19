@@ -29,7 +29,6 @@ const appName = "hcp_archiver"
 // YAML configuration file; only per-run and operational settings are flags.
 const (
 	flagConfig           = "config"
-	flagArchivePath      = "archive-path"
 	flagProgress         = "progress"
 	flagProgressInterval = "progress-interval"
 	flagRetryAbsent      = "retry-absent"
@@ -42,8 +41,7 @@ var ErrLogHandler = errors.New("create log handler")
 // config method loads the YAML configuration and merges these per-run settings
 // into a validated [config.Config].
 type archiveFlags struct {
-	configPath       string
-	archivePath      string
+	configPath       *string
 	progress         string
 	progressInterval time.Duration
 	retryAbsent      bool
@@ -52,13 +50,9 @@ type archiveFlags struct {
 // registerArchiveFlags binds the archive flags onto cmd and returns the
 // [*archiveFlags] they write into.
 func registerArchiveFlags(cmd *cobra.Command) *archiveFlags {
-	af := &archiveFlags{}
+	af := &archiveFlags{configPath: registerConfigFlag(cmd)}
 	fs := cmd.Flags()
 
-	fs.StringVarP(&af.configPath, flagConfig, "c", "",
-		fmt.Sprintf("path to the YAML configuration file (defaults to $%s)", config.EnvConfigPath))
-	fs.StringVarP(&af.archivePath, flagArchivePath, "o", "",
-		"archive root directory (defaults to the configuration file's archive.path)")
 	registerProgressFlags(fs, &af.progress, &af.progressInterval)
 	fs.BoolVar(&af.retryAbsent, flagRetryAbsent, false,
 		"re-probe objects previously recorded as absent")
@@ -86,15 +80,12 @@ func (af *archiveFlags) config() (*config.Config, error) {
 		return nil, err
 	}
 
-	file, cfgPath, err := af.loadFile()
+	cfg, err := loadCmdConfig(*af.configPath)
 	if err != nil {
 		return nil, err
 	}
 
-	output := af.archivePath
-	if output == "" {
-		output = configDir(cfgPath, file.Archive.Path)
-	}
+	file := cfg.file
 
 	opts := []config.Option{
 		config.WithAddress(file.Address),
@@ -108,7 +99,7 @@ func (af *archiveFlags) config() (*config.Config, error) {
 		config.WithHYOK(file.Include.HYOK),
 		config.WithRegistryDetail(file.Include.RegistryDetail),
 		config.WithAuditTrail(file.Include.AuditTrail),
-		config.WithArchiveDir(output),
+		config.WithArchiveDir(cfg.archiveDir),
 		config.WithProgressMode(mode),
 		config.WithProgressInterval(af.progressInterval),
 		config.WithRetryAbsent(af.retryAbsent),
@@ -121,29 +112,6 @@ func (af *archiveFlags) config() (*config.Config, error) {
 	}
 
 	return config.New(opts...)
-}
-
-// loadFile resolves the configuration file path from the --config flag, then
-// the environment, and loads it. When neither names a path the built-in
-// defaults are used and no file is read. The returned path is the one the
-// file was loaded from (empty when none was), the base a relative path inside
-// it resolves against.
-func (af *archiveFlags) loadFile() (*config.File, string, error) {
-	path := af.configPath
-	if path == "" {
-		path = os.Getenv(config.EnvConfigPath)
-	}
-
-	if path == "" {
-		return config.DefaultFile(), "", nil
-	}
-
-	file, err := config.LoadFile(path)
-	if err != nil {
-		return nil, "", err
-	}
-
-	return file, path, nil
 }
 
 // NewRootCmd builds the root [*cobra.Command] for the hcp_archiver CLI. Logging
@@ -164,12 +132,14 @@ logs, the configuration that produced each run, and the surrounding org-level
 metadata. Nothing is restored back into HCP Terraform.
 
 The API token comes from the environment: HCP_TOKEN, falling back to
-TFC_TOKEN and then TFE_TOKEN, first non-empty wins. What and how to archive
-lives in the YAML configuration file --config names (or $HCP_ARCHIVER_CONFIG);
-with neither, every organization the token can see is archived with the
-default surfaces.
+TFC_TOKEN and then TFE_TOKEN, first non-empty wins. What and where to archive
+lives in the YAML configuration file, which every command requires: --config
+names it, then $HCP_ARCHIVER_CONFIG, then .hcp_archiver.yaml in the working
+directory. Its one required key, archive.path, names the archive root; with
+no organization filters, every organization the token can see is archived
+with the default surfaces.
 
-The output directory is the unit of resume: re-running against the same
+The archive directory is the unit of resume: re-running against the same
 directory skips what is done or permanently gone, retries what errored,
 appends new runs and state versions, and refreshes mutable metadata
 (retaining every superseded version in a history sidecar) without
@@ -192,7 +162,7 @@ A run ends with a per-status summary, the resume model made visible:
 A non-zero errored count is the one to investigate; the others are recorded
 gaps, not failures. Coverage is bounded by the archiving identity, so no
 single token necessarily sees everything: point several tokens at the same
-output directory in turn to accumulate the union of what each can read.`,
+archive directory in turn to accumulate the union of what each can read.`,
 		SilenceUsage: true,
 		Version:      version.GetVersion(),
 	}
@@ -249,53 +219,42 @@ output directory in turn to accumulate the union of what each can read.`,
 	return cmd
 }
 
-// newViewCmd returns a command that browses an existing archive in an
-// interactive terminal UI mirroring the HCP interface: organizations open into
-// projects, workspaces, runs, and state versions. The directory may be the
-// archive root or a single organization's directory; it defaults to the
-// configuration file's archive.path or, with none set, the current directory.
+// newViewCmd returns a command that browses the archive in an interactive
+// terminal UI mirroring the HCP interface: organizations open into projects,
+// workspaces, runs, and state versions. The directory comes from the
+// configuration file's archive.path and may be the archive root or a single
+// organization's directory.
 func newViewCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "view [archive-path]",
-		Short: "Browse an archive in an interactive terminal UI",
-		Long: `Browse an archive in an interactive terminal UI mirroring the HCP interface:
+		Use:   "view",
+		Short: "Browse the archive in an interactive terminal UI",
+		Long: `Browse the archive in an interactive terminal UI mirroring the HCP interface:
 organizations open into projects, workspaces, runs, and state versions. The
-directory may be the archive root or a single organization's directory; it
-defaults to the configuration file's archive.path or, with none set, the
-current directory.
+directory comes from the configuration file's archive.path and may be the
+archive root or a single organization's directory.
 
 ` + remoteLong,
-		Args: cobra.MaximumNArgs(1),
+		Args: cobra.NoArgs,
 	}
 
-	rf := registerRemoteFlags(cmd)
+	cfgFlag := registerConfigFlag(cmd)
 
-	cmd.RunE = func(cc *cobra.Command, args []string) error {
+	cmd.RunE = func(cc *cobra.Command, _ []string) error {
 		ctx, stop := signalContext(cc.Context())
 		defer stop()
 
-		file, cfgPath, err := rf.loadFile()
+		cfg, err := loadCmdConfig(*cfgFlag)
 		if err != nil {
 			return err
-		}
-
-		rcfg, err := rf.remoteFromFile(file)
-		if err != nil {
-			return err
-		}
-
-		dir := defaultArchiveDir(file, cfgPath)
-		if len(args) == 1 {
-			dir = args[0]
 		}
 
 		var opts []view.ArchiveOption
 
-		if rcfg != nil {
+		if rcfg := remoteFromFile(cfg.file); rcfg != nil {
 			opts = append(opts, view.WithRemote(*rcfg))
 		}
 
-		err = view.Browse(ctx, dir, cc.InOrStdin(), cc.OutOrStdout(), opts...)
+		err = view.Browse(ctx, cfg.archiveDir, cc.InOrStdin(), cc.OutOrStdout(), opts...)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil

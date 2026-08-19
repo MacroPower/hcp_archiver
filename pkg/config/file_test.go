@@ -13,6 +13,10 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/pkg/config"
 )
 
+// archiveYAML is the required archive section, prepended to documents whose
+// case is about something else.
+const archiveYAML = "archive:\n  path: ./archive\n"
+
 func TestDefaultFile(t *testing.T) {
 	t.Parallel()
 
@@ -34,39 +38,24 @@ func TestLoadFile(t *testing.T) {
 		want func(*testing.T, *config.File)
 		yaml string
 	}{
-		"empty document keeps defaults": {
-			yaml: "",
+		"minimal document keeps defaults": {
+			yaml: archiveYAML,
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, config.DefaultAddress, file.Address)
 				assert.Empty(t, file.Organizations)
-			},
-		},
-		"comment-only document keeps defaults": {
-			yaml: "# yaml-language-server: $schema=./config.schema.json\n",
-			want: func(t *testing.T, file *config.File) {
-				t.Helper()
-				assert.Equal(t, config.DefaultAddress, file.Address)
-				assert.Empty(t, file.Organizations)
-			},
-		},
-		"explicit null document keeps defaults": {
-			yaml: "null\n",
-			want: func(t *testing.T, file *config.File) {
-				t.Helper()
-				assert.Equal(t, config.DefaultAddress, file.Address)
-				assert.Empty(t, file.Organizations)
+				assert.Equal(t, "./archive", file.Archive.Path)
 			},
 		},
 		"content alongside a comment document is not a second document": {
-			yaml: "organizations:\n  - acme\n---\n# trailing comment\n",
+			yaml: archiveYAML + "organizations:\n  - acme\n---\n# trailing comment\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, []string{"acme"}, file.Organizations)
 			},
 		},
 		"partial document defaults the rest": {
-			yaml: "organizations:\n  - acme\n",
+			yaml: archiveYAML + "organizations:\n  - acme\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, []string{"acme"}, file.Organizations)
@@ -75,6 +64,7 @@ func TestLoadFile(t *testing.T) {
 		},
 		"full document overrides every default": {
 			yaml: "# yaml-language-server: $schema=./config.schema.json\n" +
+				archiveYAML +
 				"address: https://tfe.example.com\n" +
 				"rateLimit: 12.5\n" +
 				"organizations:\n  - one\n  - two\n" +
@@ -98,7 +88,7 @@ func TestLoadFile(t *testing.T) {
 			},
 		},
 		"run history bounds are each optional": {
-			yaml: "runHistory:\n  fetch:\n    count: 100\n",
+			yaml: archiveYAML + "runHistory:\n  fetch:\n    count: 100\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, 100, file.RunHistory.Fetch.Count)
@@ -106,7 +96,7 @@ func TestLoadFile(t *testing.T) {
 			},
 		},
 		"run history age zero means unbounded": {
-			yaml: "runHistory:\n  fetch:\n    count: 100\n    age: 0\n",
+			yaml: archiveYAML + "runHistory:\n  fetch:\n    count: 100\n    age: 0\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, 100, file.RunHistory.Fetch.Count)
@@ -114,18 +104,17 @@ func TestLoadFile(t *testing.T) {
 			},
 		},
 		"run history age accepts a float zero": {
-			yaml: "runHistory:\n  fetch:\n    age: 0.0\n",
+			yaml: archiveYAML + "runHistory:\n  fetch:\n    age: 0.0\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Zero(t, file.RunHistory.Fetch.Age)
 			},
 		},
 		"bare section keys are unset": {
-			yaml: "archive:\nexport:\nextract:\ninclude:\nremote:\nrunHistory:\n",
+			yaml: archiveYAML + "export:\nextract:\ninclude:\nremote:\nrunHistory:\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, config.DefaultAddress, file.Address)
-				assert.Empty(t, file.Archive.Path)
 				assert.Empty(t, file.Export.Templates.Path)
 				assert.Empty(t, file.Extract.Path)
 				assert.True(t, file.Remote.IsZero())
@@ -134,7 +123,7 @@ func TestLoadFile(t *testing.T) {
 			},
 		},
 		"remote section decodes": {
-			yaml: "remote:\n" +
+			yaml: archiveYAML + "remote:\n" +
 				"  url: s3://my-archive?region=us-east-1\n" +
 				"  prefix: hcp\n" +
 				"  upload:\n" +
@@ -152,21 +141,21 @@ func TestLoadFile(t *testing.T) {
 			},
 		},
 		"remote part size accepts a suffixed string": {
-			yaml: "remote:\n  url: s3://b\n  upload:\n    partSize: 64MiB\n",
+			yaml: archiveYAML + "remote:\n  url: s3://b\n  upload:\n    partSize: 64MiB\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, int64(67108864), file.Remote.RemoteConfig().PartSize)
 			},
 		},
 		"bare run history fetch section is unset": {
-			yaml: "runHistory:\n  fetch:\n",
+			yaml: archiveYAML + "runHistory:\n  fetch:\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.Equal(t, config.FileRunHistory{}, file.RunHistory)
 			},
 		},
 		"bare upload section is unset": {
-			yaml: "remote:\n  url: s3://b\n  upload:\n",
+			yaml: archiveYAML + "remote:\n  url: s3://b\n  upload:\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.False(t, file.Remote.IsZero())
@@ -182,24 +171,23 @@ func TestLoadFile(t *testing.T) {
 				assert.Equal(t, "/mnt/restore", file.Extract.Path)
 			},
 		},
-		"empty archive and extract sections stay empty": {
-			yaml: "archive: {}\nextract: {}\n",
+		"empty extract section stays empty": {
+			yaml: archiveYAML + "extract: {}\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
-				assert.Empty(t, file.Archive.Path)
 				assert.Empty(t, file.Extract.Path)
 			},
 		},
-		"paths left unset stay empty": {
-			yaml: "organizations:\n  - acme\n",
+		"extract and export paths left unset stay empty": {
+			yaml: archiveYAML + "organizations:\n  - acme\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
-				assert.Empty(t, file.Archive.Path)
 				assert.Empty(t, file.Extract.Path)
+				assert.Empty(t, file.Export.Path)
 			},
 		},
 		"remote left unset disables offloading": {
-			yaml: "organizations:\n  - acme\n",
+			yaml: archiveYAML + "organizations:\n  - acme\n",
 			want: func(t *testing.T, file *config.File) {
 				t.Helper()
 				assert.True(t, file.Remote.IsZero())
@@ -221,113 +209,158 @@ func TestLoadFile(t *testing.T) {
 	}
 }
 
+// TestLoadFile_MissingArchivePath covers the documents that never reach schema
+// validation: nothing decodes, so the plain sentinel reports the absent
+// archive path rather than a source-annotated error.
+func TestLoadFile_MissingArchivePath(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		yaml string
+	}{
+		"empty document": {
+			yaml: "",
+		},
+		"comment-only document": {
+			yaml: "# yaml-language-server: $schema=./config.schema.json\n",
+		},
+		"explicit null document": {
+			yaml: "null\n",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeConfig(t, tc.yaml)
+
+			file, err := config.LoadFile(path)
+			require.ErrorIs(t, err, config.ErrMissingArchivePath)
+			assert.Nil(t, file)
+		})
+	}
+}
+
 func TestLoadFile_SourceAnnotatedErrors(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
 		yaml string
 	}{
+		"missing archive key": {
+			yaml: "organizations:\n  - acme\n",
+		},
+		"bare archive key": {
+			yaml: "archive:\n",
+		},
+		"empty archive section": {
+			yaml: "archive: {}\n",
+		},
+		"empty archive path": {
+			yaml: "archive:\n  path: \"\"\n",
+		},
 		"concurrency below the schema minimum": {
-			yaml: "remote:\n  url: s3://b\n  upload:\n    concurrency: 0\n",
+			yaml: archiveYAML + "remote:\n  url: s3://b\n  upload:\n    concurrency: 0\n",
 		},
 		"unknown property": {
-			yaml: "notaproperty: true\n",
+			yaml: archiveYAML + "notaproperty: true\n",
 		},
 		"empty organization name": {
-			yaml: "organizations:\n  - \"\"\n",
+			yaml: archiveYAML + "organizations:\n  - \"\"\n",
 		},
 		"duplicate organization": {
-			yaml: "organizations:\n  - acme\n  - acme\n",
+			yaml: archiveYAML + "organizations:\n  - acme\n  - acme\n",
 		},
 		"empty project name": {
-			yaml: "projects:\n  - \"\"\n",
+			yaml: archiveYAML + "projects:\n  - \"\"\n",
 		},
 		"duplicate project": {
-			yaml: "projects:\n  - networking\n  - networking\n",
+			yaml: archiveYAML + "projects:\n  - networking\n  - networking\n",
 		},
 		"empty workspace name": {
-			yaml: "workspaces:\n  - \"\"\n",
+			yaml: archiveYAML + "workspaces:\n  - \"\"\n",
 		},
 		"duplicate workspace": {
-			yaml: "workspaces:\n  - vpc\n  - vpc\n",
+			yaml: archiveYAML + "workspaces:\n  - vpc\n  - vpc\n",
 		},
 		"negative run history count": {
-			yaml: "runHistory:\n  fetch:\n    count: -1\n",
+			yaml: archiveYAML + "runHistory:\n  fetch:\n    count: -1\n",
 		},
 		"retired keepCount key is rejected": {
-			yaml: "runHistory:\n  keepCount: 100\n",
+			yaml: archiveYAML + "runHistory:\n  keepCount: 100\n",
 		},
 		"retired keepAge key is rejected": {
-			yaml: "runHistory:\n  keepAge: 90d\n",
+			yaml: archiveYAML + "runHistory:\n  keepAge: 90d\n",
 		},
 		"retired flat fetchCount key is rejected": {
-			yaml: "runHistory:\n  fetchCount: 100\n",
+			yaml: archiveYAML + "runHistory:\n  fetchCount: 100\n",
 		},
 		"retired flat fetchAge key is rejected": {
-			yaml: "runHistory:\n  fetchAge: 90d\n",
+			yaml: archiveYAML + "runHistory:\n  fetchAge: 90d\n",
 		},
 		"zero rate limit": {
-			yaml: "rateLimit: 0\n",
+			yaml: archiveYAML + "rateLimit: 0\n",
 		},
 		"negative rate limit": {
-			yaml: "rateLimit: -1\n",
+			yaml: archiveYAML + "rateLimit: -1\n",
 		},
 		"run history age must be a duration string": {
-			yaml: "runHistory:\n  fetch:\n    age: 90\n",
+			yaml: archiveYAML + "runHistory:\n  fetch:\n    age: 90\n",
 		},
 		"run history age rejects a non-zero fraction": {
-			yaml: "runHistory:\n  fetch:\n    age: 0.5\n",
+			yaml: archiveYAML + "runHistory:\n  fetch:\n    age: 0.5\n",
 		},
 		"address without a scheme": {
-			yaml: "address: app.terraform.io\n",
+			yaml: archiveYAML + "address: app.terraform.io\n",
 		},
 		"address with a non-http scheme": {
-			yaml: "address: ftp://app.terraform.io\n",
+			yaml: archiveYAML + "address: ftp://app.terraform.io\n",
 		},
 		"run history age must not be negative": {
-			yaml: "runHistory:\n  fetch:\n    age: -24h\n",
+			yaml: archiveYAML + "runHistory:\n  fetch:\n    age: -24h\n",
 		},
 		"run history age rejects unknown units": {
-			yaml: "runHistory:\n  fetch:\n    age: 1w\n",
+			yaml: archiveYAML + "runHistory:\n  fetch:\n    age: 1w\n",
 		},
 		"archive path must be a string": {
 			yaml: "archive:\n  path:\n    - x\n",
 		},
 		"extract path must be a string": {
-			yaml: "extract:\n  path:\n    - x\n",
+			yaml: archiveYAML + "extract:\n  path:\n    - x\n",
 		},
 		"retired flat archiveDir key is rejected": {
-			yaml: "archiveDir: ./archive\n",
+			yaml: archiveYAML + "archiveDir: ./archive\n",
 		},
 		"retired flat extractDir key is rejected": {
-			yaml: "extractDir: ./restore\n",
+			yaml: archiveYAML + "extractDir: ./restore\n",
 		},
 		"remote without a bucket": {
-			yaml: "remote:\n  prefix: hcp\n",
+			yaml: archiveYAML + "remote:\n  prefix: hcp\n",
 		},
 		"empty remote section": {
-			yaml: "remote: {}\n",
+			yaml: archiveYAML + "remote: {}\n",
 		},
 		"empty remote url": {
-			yaml: "remote:\n  url: \"\"\n",
+			yaml: archiveYAML + "remote:\n  url: \"\"\n",
 		},
 		"negative remote part size": {
-			yaml: "remote:\n  url: s3://b\n  upload:\n    partSize: -1\n",
+			yaml: archiveYAML + "remote:\n  url: s3://b\n  upload:\n    partSize: -1\n",
 		},
 		"lowercase part size suffix": {
-			yaml: "remote:\n  url: s3://b\n  upload:\n    partSize: 64mib\n",
+			yaml: archiveYAML + "remote:\n  url: s3://b\n  upload:\n    partSize: 64mib\n",
 		},
 		"unknown part size suffix": {
-			yaml: "remote:\n  url: s3://b\n  upload:\n    partSize: 64ZiB\n",
+			yaml: archiveYAML + "remote:\n  url: s3://b\n  upload:\n    partSize: 64ZiB\n",
 		},
 		"fractional byte part size": {
-			yaml: "remote:\n  url: s3://b\n  upload:\n    partSize: 1.5B\n",
+			yaml: archiveYAML + "remote:\n  url: s3://b\n  upload:\n    partSize: 1.5B\n",
 		},
 		"fractional part size without a multiplier": {
-			yaml: "remote:\n  url: s3://b\n  upload:\n    partSize: \"1.5\"\n",
+			yaml: archiveYAML + "remote:\n  url: s3://b\n  upload:\n    partSize: \"1.5\"\n",
 		},
 		"negative remote concurrency": {
-			yaml: "remote:\n  url: s3://b\n  upload:\n    concurrency: -1\n",
+			yaml: archiveYAML + "remote:\n  url: s3://b\n  upload:\n    concurrency: -1\n",
 		},
 	}
 
@@ -352,13 +385,14 @@ func TestLoadFile_Example(t *testing.T) {
 	t.Parallel()
 
 	// The example shipped at the repository root must stay valid against the
-	// schema, and its uncommented keys must all carry defaults, so an unedited
-	// copy of it is a working starting point that archives everything the
-	// token can see.
+	// schema, and its uncommented keys must all carry defaults (beyond the
+	// required archive path), so an unedited copy of it is a working starting
+	// point that archives everything the token can see.
 	file, err := config.LoadFile(filepath.Join("..", "..", "hcp_archiver.example.yaml"))
 	require.NoError(t, err)
 	assert.Equal(t, config.DefaultAddress, file.Address)
 	assert.Empty(t, file.Organizations)
+	assert.Equal(t, "./archive", file.Archive.Path)
 }
 
 func TestLoadFile_ReadError(t *testing.T) {
@@ -371,7 +405,7 @@ func TestLoadFile_ReadError(t *testing.T) {
 func TestLoadFile_MultipleDocuments(t *testing.T) {
 	t.Parallel()
 
-	path := writeConfig(t, "organizations:\n  - one\n---\norganizations:\n  - two\n")
+	path := writeConfig(t, archiveYAML+"organizations:\n  - one\n---\norganizations:\n  - two\n")
 
 	_, err := config.LoadFile(path)
 	require.ErrorIs(t, err, config.ErrMultipleDocuments)

@@ -72,7 +72,7 @@
     "archive": {
       "$ref": "#/$defs/archive",
       "title": "Archive",
-      "description": "Locates the archive on local disk; unset leaves the location to the --archive-path flag."
+      "description": "Locates the archive on local disk. Its path is the one key the file must carry."
     },
     "remote": {
       "$ref": "#/$defs/remote",
@@ -82,12 +82,12 @@
     "extract": {
       "$ref": "#/$defs/extract",
       "title": "Extract",
-      "description": "Configures where the extract command writes; unset leaves the location to the --extract-path flag."
+      "description": "Configures where the extract command writes; with no path set, only a dry run can proceed."
     },
     "export": {
       "$ref": "#/$defs/export",
       "title": "Export",
-      "description": "Configures the export command: where it writes and the page templates it renders with. Unset leaves the location to the --export-path flag and keeps the built-in templates."
+      "description": "Configures the export command: where it writes and the page templates it renders with. Without a path an export run has no target and is refused; unset templates keep the built-ins."
     }
   },
   "$id": "https://jacobcolvin.com/hcp_archiver/config.schema.json",
@@ -95,18 +95,21 @@
   "$defs": {
     "archive": {
       "type": [
-        "object",
-        "null"
+        "object"
       ],
       "properties": {
         "path": {
           "type": "string",
           "title": "Path",
-          "description": "The archive root directory: the default for the root command's --archive-path flag and for the read commands' [archive-path] positional. A relative path resolves against this file's directory. An explicit flag or positional always wins."
+          "description": "The archive root directory every command reads or writes, the one required key in the configuration file. A relative path resolves against this file's directory.",
+          "minLength": 1
         }
       },
       "title": "Archive",
       "description": "Locates the archive on local disk.",
+      "required": [
+        "path"
+      ],
       "additionalProperties": false
     },
     "byteSize": {
@@ -145,7 +148,7 @@
         "path": {
           "type": "string",
           "title": "Path",
-          "description": "The default --export-path directory the export command writes its markdown tree into. A relative path resolves against this file's directory. An explicit --export-path always wins."
+          "description": "The directory the export command writes its markdown tree into. A relative path resolves against this file's directory."
         },
         "templates": {
           "$ref": "#/$defs/templates",
@@ -166,7 +169,7 @@
         "path": {
           "type": "string",
           "title": "Path",
-          "description": "The default --extract-path directory the extract command recovers files into. A relative path resolves against this file's directory. An explicit --extract-path always wins."
+          "description": "The directory the extract command recovers files into. A relative path resolves against this file's directory."
         }
       },
       "title": "Extract",
@@ -321,6 +324,9 @@
     }
   },
   "title": "hcp_archiver configuration",
-  "description": "The hcp_archiver YAML configuration: what to archive and how. Every key is optional; an absent key takes its default. Per-run settings and the API token are supplied by flags and the environment instead, so this file never carries a credential, and any relative path resolves against the file's own directory.",
+  "description": "The hcp_archiver YAML configuration: what to archive and how. archive.path is required; every other key is optional, and an absent key takes its default. Per-run settings and the API token are supplied by flags and the environment instead, so this file never carries a credential, and any relative path resolves against the file's own directory.",
+  "required": [
+    "archive"
+  ],
   "additionalProperties": false
 }

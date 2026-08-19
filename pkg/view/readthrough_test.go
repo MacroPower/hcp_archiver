@@ -129,7 +129,7 @@ func TestOpenArchive_EstablishedOrgStaysUnmarked(t *testing.T) {
 
 	// A local organization that already carries its org.json but no marker is
 	// not a browse cache: a read-only open with a supplied remote must not
-	// stamp it partial and flip every later flag-less open into merged mode.
+	// stamp it partial and flip every later marker-only open into merged mode.
 	fake := buildMirroredArchive(t)
 	root := buildArchive(t)
 

@@ -1272,7 +1272,7 @@ func TestSyncArchiveFreshLedgerRefusesPrune(t *testing.T) {
 
 	f := newSyncFixture(t)
 
-	// The run opened an empty ledger (a fresh or wrong --archive-path) while the
+	// The run opened an empty ledger (a fresh or wrong archive.path) while the
 	// mirror already holds history. Pruning would delete the mirror's only
 	// record of it, so the sweep must refuse, and refuse loudly: the run
 	// exits incomplete so a scheduled run cannot silently diverge the mirror.

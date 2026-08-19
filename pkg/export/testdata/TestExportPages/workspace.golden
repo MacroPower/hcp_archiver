@@ -20,11 +20,11 @@ See the workspace's [readme](readme.md).
 
 ## Runs
 
-2 archived runs. Artifact contents are withheld; the backup holds them in full:
+2 archived runs. Artifact contents are withheld; the backup holds them in full. The commands below take the archive directory and extract target from the hcp_archiver configuration file:
 
 ```sh
-hcp_archiver show <archive-path> 'my-org/projects/default/workspaces/app/runs/run-new/plan.log'
-hcp_archiver extract <archive-path> 'my-org/projects/default/workspaces/app/runs' --extract-path <output-dir>
+hcp_archiver show 'my-org/projects/default/workspaces/app/runs/run-new/plan.log'
+hcp_archiver extract 'my-org/projects/default/workspaces/app/runs'
 ```
 
 | ID | Created | Status | Message | Source | Terraform | Destroy | Changes | Archived artifacts |
@@ -34,11 +34,11 @@ hcp_archiver extract <archive-path> 'my-org/projects/default/workspaces/app/runs
 
 ## State versions
 
-2 archived state versions. State contents are withheld; the backup holds them in full:
+2 archived state versions. State contents are withheld; the backup holds them in full. The commands below take the archive directory and extract target from the hcp_archiver configuration file:
 
 ```sh
-hcp_archiver show <archive-path> 'my-org/projects/default/workspaces/app/state-versions/20240102T030405Z-sv-2.tfstate.json'
-hcp_archiver extract <archive-path> 'my-org/projects/default/workspaces/app/state-versions' --extract-path <output-dir>
+hcp_archiver show 'my-org/projects/default/workspaces/app/state-versions/20240102T030405Z-sv-2.tfstate.json'
+hcp_archiver extract 'my-org/projects/default/workspaces/app/state-versions'
 ```
 
 | ID | Created | Serial | Status | Size | Archived blobs |

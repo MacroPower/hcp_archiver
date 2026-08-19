@@ -949,7 +949,7 @@ coalesced or bundled it, and the self-heal after an interrupted run
 legitimately produces thousands at once), so ledger-known keys prune
 freely at any scale. The guards then cover what the ledger has never
 heard of: a run that opened an empty ledger against a non-empty mirror is
-a fresh or wrong `--archive-path` pointed at an existing archive and refuses
+a fresh or wrong `archive.path` pointed at an existing archive and refuses
 the whole prune (restore the prefix, ledger included, before re-rooting
 an archive); and a ledger-unknown delete set past a floor (100 keys) that
 outnumbers the walk-matched keys means most of the mirror has no local
@@ -1049,13 +1049,13 @@ constructs a client.
 
 The read commands (`view`, `list`, `show`, `extract`, `export`) work even
 when the local tree is partly or completely absent, as long as the mirror
-holds it. The mirror's location arrives three ways: `--remote <bucket-url>`
-(plus `--remote-prefix`), a `--config` file whose `remote:` block records
-it, or `$HCP_ARCHIVER_CONFIG` naming that file. Pointed at an empty
-directory, an open bootstraps it: one listing discovers the mirror's
-organizations, and each gets its `org.json` and a `.remote.json` marker
-materialized locally, so the flags are needed only once; later invocations
-find the mirror through the marker alone.
+holds it. The mirror's location arrives from the configuration file's
+`remote:` block, in the file `--config` or `$HCP_ARCHIVER_CONFIG` names or
+the default `.hcp_archiver.yaml`. Pointed at an empty directory, an open
+bootstraps it: one listing discovers the mirror's organizations, and each
+gets its `org.json` and a `.remote.json` marker materialized locally, so the
+block is needed only once; later invocations find the mirror through the
+marker alone.
 
 A bootstrapped tree is a browse cache, not a canonical archive, and its
 marker says so: it records `"partial": true`, which is what tells later
@@ -1065,11 +1065,11 @@ when present; anything fetched is verified against the digest its upload
 recorded, then persisted at its archive path, so everything read once is
 local from then on. The partial flag is written only by the open that
 materialized the marker: stamping an archiver-written tree partial would
-flip every later flag-less open into merged network mode. Running the
+flip every later marker-only open into merged network mode. Running the
 archiver against a bootstrapped directory collects and mirrors it properly,
 rewriting the marker and returning the tree to fully-local reads.
 
-The same trust rules as the write side apply. A supplied `--remote` that
+The same trust rules as the write side apply. A configured remote that
 disagrees with the mirror an existing marker records is refused, exactly as
 the archiver refuses a re-pointed `remote:` block. A mirror that cannot be
 listed (offline, missing credentials) degrades the commands to local
@@ -1195,33 +1195,31 @@ projects/<project>/workspaces/<ws>/
 ## Config surface
 
 Settings split by how much they vary. The token is a secret (environment only),
-the per-run knobs are flags, and everything that describes what and how to
-archive is a YAML file, validated against a JSON schema generated from the Go
-type and embedded in the binary. The archive root sits in both camps: the
-file's `archive.path` supplies the stable default and `--archive-path`
-overrides it per run.
+the per-run knobs are flags, and everything that describes what and where to
+archive is a required YAML file, validated against a JSON schema generated
+from the Go type and embedded in the binary. The file resolves as `--config`,
+then `$HCP_ARCHIVER_CONFIG`, then `.hcp_archiver.yaml` in the working
+directory; its one required key is `archive.path`, the archive root
+(resume/re-run is implied when it already holds an archive).
 
 - Environment: `HCP_TOKEN`, then `TFC_TOKEN`, then `TFE_TOKEN` (required, first
   non-empty wins); `HCP_ARCHIVER_CONFIG` for the config file path.
-- Flags: `--config` / `-c` (config path), `--archive-path` / `-o` (archive root,
-  defaulting to the file's `archive.path`; resume/re-run is implied when it
-  already holds an archive), `--progress=auto|human|json|quiet` (default
-  `auto`: human on a TTY, quiet off one) with a progress-interval knob,
-  `--retry-absent` to re-probe `absent` objects on a re-run, and the
+- Flags: `--config` / `-c` (config path), `--progress=auto|human|json|quiet`
+  (default `auto`: human on a TTY, quiet off one) with a progress-interval
+  knob, `--retry-absent` to re-probe `absent` objects on a re-run, and the
   `--log-*` knobs.
-- Config file (all keys optional, defaults applied per field): `address`
-  (default `https://app.terraform.io`), `archive.path`, `extract.path`, and
-  `export.path` (directory defaults for `--archive-path` / the read commands'
-  positional, extract's `--extract-path`, and export's `--export-path`; an
-  explicit flag or positional wins,
-  relative paths resolve against the file's directory), `organizations` (all
-  visible orgs if empty), `projects` and `workspaces` (filters within each
-  org; everything if empty, and with both set a workspace must satisfy both),
-  a `runHistory` block bounding the run history a run fetches per workspace
-  (`fetch.count` / `fetch.age`, the age in Go duration syntax extended with a
-  day unit such as `90d`; each bound guarantees inclusion, so whichever admits
-  more history wins; unlimited by default, and never removing runs already
-  archived), `rateLimit` (the ceiling of the client's adaptive rate governor,
+- Config file (every key beyond `archive.path` optional, defaults applied per
+  field): `address` (default `https://app.terraform.io`), `archive.path`,
+  `extract.path`, and `export.path` (the archive root every command reads or
+  writes, extract's target, and export's target; relative paths resolve
+  against the file's directory), `organizations` (all visible orgs if empty),
+  `projects` and `workspaces` (filters within each org; everything if empty,
+  and with both set a workspace must satisfy both), a `runHistory` block
+  bounding the run history a run fetches per workspace (`fetch.count` /
+  `fetch.age`, the age in Go duration syntax extended with a day unit such as
+  `90d`; each bound guarantees inclusion, so whichever admits more history
+  wins; unlimited by default, and never removing runs already archived),
+  `rateLimit` (the ceiling of the client's adaptive rate governor,
   in requests per second; default 30, HCP's documented general limit; the
   governor adapts downward from server feedback on its own, so this is set
   only for an org whose granted limit sits well below the default and the run

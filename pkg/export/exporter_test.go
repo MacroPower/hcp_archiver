@@ -329,16 +329,16 @@ func TestExportPointsAtCLI(t *testing.T) {
 		want string
 	}{
 		"run artifact show": {
-			want: "hcp_archiver show <archive-path> '" + wsDir + "/runs/run-new/plan.log'",
+			want: "hcp_archiver show '" + wsDir + "/runs/run-new/plan.log'",
 		},
 		"runs extract": {
-			want: "hcp_archiver extract <archive-path> '" + wsDir + "/runs' --extract-path <output-dir>",
+			want: "hcp_archiver extract '" + wsDir + "/runs'",
 		},
 		"state version show": {
-			want: "hcp_archiver show <archive-path> '" + wsDir + "/state-versions/20240102T030405Z-sv-2.tfstate.json'",
+			want: "hcp_archiver show '" + wsDir + "/state-versions/20240102T030405Z-sv-2.tfstate.json'",
 		},
 		"state versions extract": {
-			want: "hcp_archiver extract <archive-path> '" + wsDir + "/state-versions' --extract-path <output-dir>",
+			want: "hcp_archiver extract '" + wsDir + "/state-versions'",
 		},
 	}
 

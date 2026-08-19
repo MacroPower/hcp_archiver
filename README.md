@@ -88,21 +88,16 @@ and mirrored at `oci.jacobcolvin.com/hcp_archiver`, tagged `latest`, `vX`,
 
 The image is `scratch` plus the static binary and a root certificate bundle:
 no shell, and every path it touches is one you mount. Mount the archive root
-and point `--archive-path` at it:
+and a configuration file whose `archive.path` names it (`/archive` here). The
+image has no working directory, so it runs from `/` and a file mounted at
+`/.hcp_archiver.yaml` is found as the default; a different in-container path
+needs `-c` or `$HCP_ARCHIVER_CONFIG`:
 
 ```bash
 docker run --rm -e HCP_TOKEN \
   -v "$PWD/archive:/archive" \
-  oci.jacobcolvin.com/hcp_archiver:latest --archive-path /archive
-```
-
-A configuration file rides in the same way, named by its in-container path:
-
-```bash
-docker run --rm -e HCP_TOKEN \
-  -v "$PWD/archive:/archive" \
-  -v "$PWD/hcp_archiver.yaml:/hcp_archiver.yaml:ro" \
-  oci.jacobcolvin.com/hcp_archiver:latest -c /hcp_archiver.yaml -o /archive
+  -v "$PWD/.hcp_archiver.yaml:/.hcp_archiver.yaml:ro" \
+  oci.jacobcolvin.com/hcp_archiver:latest
 ```
 
 </details>
@@ -179,13 +174,16 @@ cosign verify -o text \
 ## Quick start
 
 The API token comes from the environment (`HCP_TOKEN`, falling back to
-`TFC_TOKEN` and `TFE_TOKEN`); everything else has a default.
+`TFC_TOKEN` and `TFE_TOKEN`). Every command reads a YAML configuration file,
+and its one required key is the archive root.
 
 ```bash
 export HCP_TOKEN=...              # a user, team, or organization token
 
-hcp_archiver --archive-path ./archive   # archive every organization the token sees
-hcp_archiver view ./archive       # browse the result in the terminal
+printf 'archive:\n  path: ./archive\n' > .hcp_archiver.yaml
+
+hcp_archiver        # archive every organization the token sees
+hcp_archiver view   # browse the result in the terminal
 ```
 
 Run the same command again to update the archive: re-runs are incremental,
@@ -197,15 +195,17 @@ statuses in the end-of-run summary; the short version is that a non-zero
 
 ## Configuration
 
-What and how to archive lives in an optional YAML file, pointed at with
-`--config` (`-c`) or `$HCP_ARCHIVER_CONFIG`. Without one, every visible
-organization is archived with the default surfaces.
+What and where to archive lives in a required YAML file:
+`./.hcp_archiver.yaml` in the working directory, or the path `--config`
+(`-c`) or `$HCP_ARCHIVER_CONFIG` names. `archive.path` is its one required
+key; with no organization filters, every visible organization is archived
+with the default surfaces.
 
 ```yaml
 # yaml-language-server: $schema=https://jacobcolvin.com/hcp_archiver/config.schema.json
 
 archive:
-  path: ./archive # default for --archive-path and the read commands
+  path: ./archive # required: the directory every command reads or writes
 organizations: # omit to archive every visible organization
   - my-org
 runHistory: # bound the run history a run fetches; unlimited by default
@@ -218,7 +218,7 @@ remote: # mirror the archive to object storage; omit to stay local
   url: s3://my-archive-bucket?region=us-east-1
 ```
 
-Every key is optional, and the `yaml-language-server` line gives editors
+Every other key is optional, and the `yaml-language-server` line gives editors
 completion and validation from the schema embedded in the binary, so each
 key's full contract is a hover away. The same documentation lives in the
 commented [`hcp_archiver.example.yaml`](hcp_archiver.example.yaml) at the
@@ -228,15 +228,16 @@ attached to each GitHub release.
 
 ## Reading the archive
 
-Five subcommands read an archive; none needs an HCP token, and each
-documents its full contract in `--help`:
+Five subcommands read an archive; none needs an HCP token, each reads the
+same configuration file for the archive directory, and each documents its
+full contract in `--help`:
 
 ```bash
-hcp_archiver view ./archive                     # interactive terminal UI
-hcp_archiver list ./archive my-org/projects     # one line per object
-hcp_archiver show ./archive my-org/org.json     # exact bytes to stdout
-hcp_archiver extract ./archive my-org -t ./restore  # back to plain files
-hcp_archiver export ./archive -t ./site         # markdown tree for mkdocs
+hcp_archiver view                    # interactive terminal UI
+hcp_archiver list my-org/projects    # one line per object
+hcp_archiver show my-org/org.json    # exact bytes to stdout
+hcp_archiver extract my-org          # back to plain files, into extract.path
+hcp_archiver export                  # markdown tree for mkdocs, into export.path
 ```
 
 `view` mirrors the HCP interface: organizations open into projects,
@@ -275,7 +276,7 @@ as a backstop, and do not lifecycle mirrored objects into a non-readable
 archival tier (S3 Glacier, Azure Archive); there is no restore workflow.
 
 The read commands work against the mirror too: pointed at an empty directory
-with `--remote` (or a configuration naming the remote), they bootstrap a
+by a configuration whose `remote` section names the mirror, they bootstrap a
 local tree from the bucket and fetch objects on demand, so restoring is
 either one bulk download of the org prefix or just browsing in place. The
 full semantics, verification layers, and failure modes are in

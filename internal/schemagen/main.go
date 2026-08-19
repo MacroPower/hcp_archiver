@@ -35,9 +35,14 @@ const (
 	// speaks of constructors and packages rather than the file an operator
 	// edits.
 	rootDescription = "The hcp_archiver YAML configuration: what to archive and how. " +
-		"Every key is optional; an absent key takes its default. Per-run settings and the " +
-		"API token are supplied by flags and the environment instead, so this file never " +
-		"carries a credential, and any relative path resolves against the file's own directory."
+		"archive.path is required; every other key is optional, and an absent key takes its " +
+		"default. Per-run settings and the API token are supplied by flags and the environment " +
+		"instead, so this file never carries a credential, and any relative path resolves " +
+		"against the file's own directory."
+
+	// The archive section's key in the published schema, named in several
+	// mutations below.
+	archiveDef = "archive"
 
 	// The organization-name pattern, mirroring config.ValidateOrganizationName
 	// for editor feedback: no path separators, no control characters, and at
@@ -54,7 +59,7 @@ var (
 	// Go type names mapped onto the $defs keys the published schema uses,
 	// matching the configuration file's own section names.
 	defNames = map[string]string{
-		"FileArchive":         "archive",
+		"FileArchive":         archiveDef,
 		"FileExport":          "export",
 		"FileExportTemplates": "templates",
 		"FileExtract":         "extract",
@@ -69,7 +74,7 @@ var (
 
 	// Uniform hover titles for the extracted definitions.
 	defTitles = map[string]string{
-		"archive":    "Archive",
+		archiveDef:   "Archive",
 		"export":     "Export",
 		"templates":  "Templates",
 		"extract":    "Extract",
@@ -80,9 +85,9 @@ var (
 		"fetch":      "Fetch",
 	}
 
-	// Go doc-link syntax: [Name], [*Name], and [pkg.Name]. It cannot match
-	// prose brackets such as [archive-path], which carry characters a Go
-	// identifier never does.
+	// Go doc-link syntax: [Name], [*Name], and [pkg.Name]. A bracketed token
+	// that does not begin with a letter is prose, not a doc link, and is left
+	// alone.
 	docLink = regexp.MustCompile(`\[\*?([A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)?)\]`)
 )
 
@@ -139,8 +144,14 @@ func main() {
 		"or 0 for the zero duration."
 
 	// The tag DSL has no required keyword and no per-item constraints, so the
-	// remote section's mandatory bucket URL and the filter lists' non-empty
-	// names are applied here.
+	// required keys and the filter lists' non-empty names are applied here.
+	// The archive section is the one the file cannot omit: the root requires
+	// the section and the section requires its path, and the nullability the
+	// loop above granted is taken back so a bare "archive:" key is refused
+	// rather than admitted as unset.
+	js.Required = []string{archiveDef}
+	js.Defs[archiveDef].Required = []string{"path"}
+	js.Defs[archiveDef].Types = []string{"object"}
 	js.Defs["remote"].Required = []string{"url"}
 
 	minNameLength := 1

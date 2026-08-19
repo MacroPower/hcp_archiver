@@ -477,7 +477,7 @@ func remoteOrg(
 // organization (its org.json was absent, so the tree is a browse cache from
 // the first byte) or on the cleared-marker consent above. An established
 // local organization that merely lacks a marker is left unmarked: stamping it
-// partial would flip every later flag-less open into merged network mode, a
+// partial would flip every later marker-only open into merged network mode, a
 // mutation a read-only command has no business making. The current session
 // still reads through either way, since the seeded remote is merged
 // regardless of what the marker records.

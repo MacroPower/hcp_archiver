@@ -12,11 +12,11 @@ See the workspace's {{link "readme" "readme.md"}}.
 {{end}}{{end}}{{with .Runs}}
 ## Runs
 
-{{countNoun .Count "archived run" "archived runs"}}. Artifact contents are withheld; the backup holds them in full:
+{{countNoun .Count "archived run" "archived runs"}}. Artifact contents are withheld; the backup holds them in full. The commands below take the archive directory and extract target from the hcp_archiver configuration file:
 
 ```sh
-{{if .Example}}hcp_archiver show <archive-path> {{shellQuote .Example}}
-{{end}}hcp_archiver extract <archive-path> {{shellQuote .Dir}} --extract-path <output-dir>
+{{if .Example}}hcp_archiver show {{shellQuote .Example}}
+{{end}}hcp_archiver extract {{shellQuote .Dir}}
 ```
 
 | ID | Created | Status | Message | Source | Terraform | Destroy | Changes | Archived artifacts |
@@ -25,11 +25,11 @@ See the workspace's {{link "readme" "readme.md"}}.
 {{end}}{{end}}{{with .States}}
 ## State versions
 
-{{countNoun .Count "archived state version" "archived state versions"}}. State contents are withheld; the backup holds them in full:
+{{countNoun .Count "archived state version" "archived state versions"}}. State contents are withheld; the backup holds them in full. The commands below take the archive directory and extract target from the hcp_archiver configuration file:
 
 ```sh
-{{if .Example}}hcp_archiver show <archive-path> {{shellQuote .Example}}
-{{end}}hcp_archiver extract <archive-path> {{shellQuote .Dir}} --extract-path <output-dir>
+{{if .Example}}hcp_archiver show {{shellQuote .Example}}
+{{end}}hcp_archiver extract {{shellQuote .Dir}}
 ```
 
 | ID | Created | Serial | Status | Size | Archived blobs |

@@ -23,7 +23,7 @@ func TestNewRootCmd(t *testing.T) {
 
 	assert.True(t, cmd.Runnable())
 	assert.NotNil(t, cmd.Flags().Lookup("config"))
-	assert.NotNil(t, cmd.Flags().Lookup("archive-path"))
+	assert.Nil(t, cmd.Flags().Lookup("archive-path"), "the archive root comes from the configuration file")
 	assert.NotNil(t, cmd.Flags().Lookup("progress"))
 
 	registered := map[string]bool{}
@@ -37,7 +37,9 @@ func TestNewRootCmd(t *testing.T) {
 }
 
 func TestConfigFromArgs(t *testing.T) {
-	fullConfig := "address: https://tfe.example.com\n" +
+	archiveYAML := "archive:\n  path: /tmp/a\n"
+	fullConfig := archiveYAML +
+		"address: https://tfe.example.com\n" +
 		"rateLimit: 10\n" +
 		"organizations:\n  - acme\n  - globex\n" +
 		"include:\n  stacks: true\n  hyok: true\n  registryDetail: true\n  auditTrail: true\n"
@@ -50,9 +52,9 @@ func TestConfigFromArgs(t *testing.T) {
 		configEnv  bool
 		err        error
 	}{
-		"defaults with output and token": {
-			token: "secret",
-			args:  []string{"--archive-path", "/tmp/archive"},
+		"defaults with archive path and token": {
+			token:      "secret",
+			configYAML: "archive:\n  path: /tmp/archive\n",
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
 				assert.Equal(t, "/tmp/archive", cfg.ArchiveDir)
@@ -64,9 +66,9 @@ func TestConfigFromArgs(t *testing.T) {
 			},
 		},
 		"per-run flags": {
-			token: "secret",
+			token:      "secret",
+			configYAML: archiveYAML,
 			args: []string{
-				"--archive-path", "/tmp/a",
 				"--progress", "json",
 				"--progress-interval", "10s",
 				"--retry-absent",
@@ -80,7 +82,6 @@ func TestConfigFromArgs(t *testing.T) {
 		},
 		"config file via flag drives archive settings": {
 			token:      "secret",
-			args:       []string{"--archive-path", "/tmp/a"},
 			configYAML: fullConfig,
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
@@ -95,7 +96,6 @@ func TestConfigFromArgs(t *testing.T) {
 		},
 		"config file via environment": {
 			token:      "secret",
-			args:       []string{"--archive-path", "/tmp/a"},
 			configYAML: fullConfig,
 			configEnv:  true,
 			want: func(t *testing.T, cfg *config.Config) {
@@ -105,8 +105,7 @@ func TestConfigFromArgs(t *testing.T) {
 		},
 		"remote section maps onto the config": {
 			token:      "secret",
-			args:       []string{"--archive-path", "/tmp/a"},
-			configYAML: "remote:\n  url: s3://my-archive\n  prefix: hcp\n",
+			configYAML: archiveYAML + "remote:\n  url: s3://my-archive\n  prefix: hcp\n",
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
 				require.NotNil(t, cfg.Remote)
@@ -115,54 +114,39 @@ func TestConfigFromArgs(t *testing.T) {
 			},
 		},
 		"no remote section leaves offloading disabled": {
-			token: "secret",
-			args:  []string{"--archive-path", "/tmp/a"},
+			token:      "secret",
+			configYAML: archiveYAML,
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
 				assert.Nil(t, cfg.Remote)
 			},
 		},
-		"config archive.path supplies output": {
+		"config archive.path supplies the archive dir": {
 			token:      "secret",
-			args:       []string{},
 			configYAML: "archive:\n  path: /tmp/from-file\n",
 			want: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
 				assert.Equal(t, "/tmp/from-file", cfg.ArchiveDir)
 			},
 		},
-		"output flag wins over archive.path": {
+		"empty config file is refused": {
 			token:      "secret",
-			args:       []string{"--archive-path", "/tmp/from-flag"},
-			configYAML: "archive:\n  path: /tmp/from-file\n",
-			want: func(t *testing.T, cfg *config.Config) {
-				t.Helper()
-				assert.Equal(t, "/tmp/from-flag", cfg.ArchiveDir)
-			},
-		},
-		"missing output": {
-			token: "secret",
-			args:  []string{},
-			err:   config.ErrMissingArchiveDir,
-		},
-		"config without archive.path still requires output": {
-			token:      "secret",
-			args:       []string{},
-			configYAML: "organizations:\n  - acme\n",
-			err:        config.ErrMissingArchiveDir,
+			configYAML: "# a comment-only document names no archive\n",
+			err:        config.ErrMissingArchivePath,
 		},
 		"missing token": {
-			args: []string{"--archive-path", "/tmp/a"},
-			err:  config.ErrMissingToken,
+			configYAML: archiveYAML,
+			err:        config.ErrMissingToken,
 		},
 		"invalid progress mode": {
-			token: "secret",
-			args:  []string{"--archive-path", "/tmp/a", "--progress", "bogus"},
-			err:   config.ErrInvalidProgressMode,
+			token:      "secret",
+			configYAML: archiveYAML,
+			args:       []string{"--progress", "bogus"},
+			err:        config.ErrInvalidProgressMode,
 		},
 		"unreadable config file": {
 			token: "secret",
-			args:  []string{"--archive-path", "/tmp/a", "--config", "/no/such/config.yaml"},
+			args:  []string{"--config", "/no/such/config.yaml"},
 			err:   config.ErrReadConfig,
 		},
 	}
@@ -205,14 +189,61 @@ func TestConfigFromArgs_ConfigFlagBeatsEnv(t *testing.T) {
 	t.Setenv(config.EnvTokenFallback, "")
 
 	// With both sources set, the --config flag wins over the environment.
-	flagCfg := writeConfigFile(t, "organizations:\n  - from-flag\n")
-	envCfg := writeConfigFile(t, "organizations:\n  - from-env\n")
+	flagCfg := writeConfigFile(t, "archive:\n  path: /tmp/a\norganizations:\n  - from-flag\n")
+	envCfg := writeConfigFile(t, "archive:\n  path: /tmp/a\norganizations:\n  - from-env\n")
 	t.Setenv(config.EnvConfigPath, envCfg)
 
-	cfg, err := cli.ConfigFromArgs([]string{"--archive-path", "/tmp/a", "--config", flagCfg})
+	cfg, err := cli.ConfigFromArgs([]string{"--config", flagCfg})
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	assert.Equal(t, []string{"from-flag"}, cfg.Organizations)
+}
+
+// TestConfigFromArgs_DefaultConfigFile pins the last resolution step: with no
+// flag and no environment, the default file in the working directory is read.
+func TestConfigFromArgs_DefaultConfigFile(t *testing.T) {
+	t.Setenv(config.EnvToken, "secret")
+	t.Setenv(config.EnvTokenTFC, "")
+	t.Setenv(config.EnvTokenFallback, "")
+	t.Setenv(config.EnvConfigPath, "")
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".hcp_archiver.yaml"),
+		[]byte("archive:\n  path: /tmp/from-default\n"), 0o600))
+	t.Chdir(dir)
+
+	cfg, err := cli.ConfigFromArgs(nil)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, "/tmp/from-default", cfg.ArchiveDir)
+}
+
+// TestConfigFromArgs_EnvNamedMissingFile pins the hard error: a file the
+// environment names must exist; only the default file may be absent.
+func TestConfigFromArgs_EnvNamedMissingFile(t *testing.T) {
+	t.Setenv(config.EnvToken, "secret")
+	t.Setenv(config.EnvTokenTFC, "")
+	t.Setenv(config.EnvTokenFallback, "")
+	t.Setenv(config.EnvConfigPath, "/nonexistent/config.yaml")
+
+	cfg, err := cli.ConfigFromArgs(nil)
+	require.ErrorIs(t, err, config.ErrReadConfig)
+	require.NotErrorIs(t, err, cli.ErrNoConfig)
+	assert.Nil(t, cfg)
+}
+
+// TestConfigFromArgs_NoConfigAnywhere pins the refusal: nothing named and no
+// default file present is an error naming every way to supply one.
+func TestConfigFromArgs_NoConfigAnywhere(t *testing.T) {
+	t.Setenv(config.EnvToken, "secret")
+	t.Setenv(config.EnvTokenTFC, "")
+	t.Setenv(config.EnvTokenFallback, "")
+	t.Setenv(config.EnvConfigPath, "")
+	t.Chdir(t.TempDir())
+
+	cfg, err := cli.ConfigFromArgs(nil)
+	require.ErrorIs(t, err, cli.ErrNoConfig)
+	assert.Nil(t, cfg)
 }
 
 // TestConfigFromArgs_RelativeArchiveDir pins the resolution base for a
@@ -253,7 +284,8 @@ func TestRootHelp(t *testing.T) {
 	cmd.SetArgs([]string{"--help"})
 
 	require.NoError(t, cmd.Execute())
-	assert.Contains(t, out.String(), "archive-path")
+	assert.Contains(t, out.String(), ".hcp_archiver.yaml",
+		"the help names the default configuration file")
 }
 
 func TestVersionSubcommand(t *testing.T) {

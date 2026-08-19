@@ -22,7 +22,7 @@ func TestExportCmd(t *testing.T) {
 	root := buildMiniArchive(t)
 	target := filepath.Join(t.TempDir(), "site")
 
-	out, _, err := runCmd(t, "export", root, "--export-path", target)
+	out, _, err := runCmdIn(t, root, sectionYAML("export", target), "export")
 	require.NoError(t, err)
 	assert.Contains(t, out, "exported")
 	assert.Contains(t, out, target)
@@ -40,8 +40,9 @@ func TestExportCmd_RequiresTarget(t *testing.T) {
 
 	root := buildMiniArchive(t)
 
-	_, _, err := runCmd(t, "export", root)
+	_, _, err := runCmdIn(t, root, "", "export")
 	require.ErrorIs(t, err, export.ErrNoTarget)
+	require.ErrorContains(t, err, "export.path", "the error names the configuration key to set")
 }
 
 func TestExportCmd_RefusesTargetInsideArchive(t *testing.T) {
@@ -49,23 +50,23 @@ func TestExportCmd_RefusesTargetInsideArchive(t *testing.T) {
 
 	root := buildMiniArchive(t)
 
-	_, _, err := runCmd(t, "export", root, "--export-path", filepath.Join(root, "site"))
+	_, _, err := runCmdIn(t, root, sectionYAML("export", filepath.Join(root, "site")), "export")
 	require.ErrorIs(t, err, cli.ErrTargetInArchive)
 }
 
-func TestExportCmd_TargetFromConfig(t *testing.T) {
+func TestExportCmd_RelativeTargetFromConfig(t *testing.T) {
 	t.Parallel()
 
 	root := buildMiniArchive(t)
-	target := filepath.Join(t.TempDir(), "site")
-	cfgPath := writeConfigFile(t, "export:\n  path: '"+target+"'\n")
 
-	out, _, err := runCmd(t, "export", root, "--config", cfgPath)
+	// A relative export.path resolves against the configuration file's own
+	// directory, not the working directory.
+	cfgPath := writeConfigFile(t, sectionYAML("archive", root)+sectionYAML("export", "site"))
+
+	_, _, err := runCmd(t, "export", "--config", cfgPath)
 	require.NoError(t, err)
-	assert.Contains(t, out, "exported")
-	assert.Contains(t, out, target)
 
-	_, err = os.Stat(filepath.Join(target, "mini-org", "index.md"))
+	_, err = os.Stat(filepath.Join(filepath.Dir(cfgPath), "site", "mini-org", "index.md"))
 	require.NoError(t, err)
 }
 
@@ -84,9 +85,12 @@ func TestExportCmd_TemplatesFromConfig(t *testing.T) {
 		[]byte("# {{escape .Title}} (custom)"), 0o600))
 
 	cfgPath := filepath.Join(cfgDir, "config.yaml")
-	require.NoError(t, os.WriteFile(cfgPath, []byte("export:\n  templates:\n    path: export-templates\n"), 0o600))
+	require.NoError(t, os.WriteFile(cfgPath, []byte(
+		sectionYAML("archive", root)+
+			sectionYAML("export", target)+
+			"  templates:\n    path: export-templates\n"), 0o600))
 
-	_, _, err := runCmd(t, "export", root, "--export-path", target, "--config", cfgPath)
+	_, _, err := runCmd(t, "export", "--config", cfgPath)
 	require.NoError(t, err)
 
 	page, err := os.ReadFile(filepath.Join(target, "mini-org", filepath.FromSlash(miniWs), "index.md"))
@@ -109,9 +113,12 @@ func TestExportCmd_BadTemplatesPreserveForcedTarget(t *testing.T) {
 		filepath.Join(cfgDir, "tmpl", "workspace.md.tmpl"), []byte("{{escape .Title"), 0o600))
 
 	cfgPath := filepath.Join(cfgDir, "config.yaml")
-	require.NoError(t, os.WriteFile(cfgPath, []byte("export:\n  templates:\n    path: tmpl\n"), 0o600))
+	require.NoError(t, os.WriteFile(cfgPath, []byte(
+		sectionYAML("archive", root)+
+			sectionYAML("export", target)+
+			"  templates:\n    path: tmpl\n"), 0o600))
 
-	_, _, err := runCmd(t, "export", root, "--export-path", target, "--force", "--config", cfgPath)
+	_, _, err := runCmd(t, "export", "--force", "--config", cfgPath)
 	require.ErrorIs(t, err, export.ErrTemplateInvalid)
 
 	assert.FileExists(t, stale, "a template refusal must precede the forced clear")
@@ -124,11 +131,11 @@ func TestExportCmd_NonEmptyTargetHintsForce(t *testing.T) {
 	target := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(target, "stale.md"), []byte("old"), 0o600))
 
-	_, _, err := runCmd(t, "export", root, "--export-path", target)
+	_, _, err := runCmdIn(t, root, sectionYAML("export", target), "export")
 	require.ErrorIs(t, err, export.ErrTargetNotEmpty)
 	require.ErrorContains(t, err, "--force")
 
-	_, _, err = runCmd(t, "export", root, "--export-path", target, "--force")
+	_, _, err = runCmdIn(t, root, sectionYAML("export", target), "export", "--force")
 	require.NoError(t, err)
 	assert.NoFileExists(t, filepath.Join(target, "stale.md"))
 }
@@ -137,9 +144,8 @@ func TestExportCmd_RejectsBadProgressMode(t *testing.T) {
 	t.Parallel()
 
 	root := buildMiniArchive(t)
-	target := filepath.Join(t.TempDir(), "site")
 
-	_, _, err := runCmd(t, "export", root, "--export-path", target, "--progress", "bogus")
+	_, _, err := runCmdIn(t, root, "", "export", "--progress", "bogus")
 	require.ErrorIs(t, err, config.ErrInvalidProgressMode)
 }
 

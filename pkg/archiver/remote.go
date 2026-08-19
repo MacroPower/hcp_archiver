@@ -103,7 +103,7 @@ func (a *Archiver) writeRemoteMarker(ctx context.Context, env *collect.Env, st *
 	// A partial marker stays partial here: this write happens before anything
 	// is collected, so it cannot speak for the tree's completeness. Rewriting
 	// a bootstrapped browse cache's marker complete at this point would hide
-	// every mirror-only object from later flag-less opens the moment the run
+	// every mirror-only object from later marker-only opens the moment the run
 	// is interrupted or filtered. Promotion to complete belongs to the close
 	// (see [Archiver.promoteRemoteMarker]), after the sweep has proven the
 	// local tree accounts for everything the mirror holds.

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -25,13 +24,9 @@ import (
 
 // Flag names shared by the inspect commands.
 const (
-	flagJSON         = "json"
-	flagExtractPath  = "extract-path"
-	flagExportPath   = "export-path"
-	flagDryRun       = "dry-run"
-	flagVerbose      = "verbose"
-	flagRemote       = "remote"
-	flagRemotePrefix = "remote-prefix"
+	flagJSON    = "json"
+	flagDryRun  = "dry-run"
+	flagVerbose = "verbose"
 )
 
 var (
@@ -43,136 +38,36 @@ var (
 	// archive directory being read, where the written files would land in the
 	// archive itself.
 	ErrTargetInArchive = errors.New("target must be outside the archive directory")
-
-	// ErrPrefixNeedsRemote indicates --remote-prefix was given with nothing to
-	// apply it to: no --remote URL and no configuration file naming a remote.
-	ErrPrefixNeedsRemote = errors.New("--remote-prefix needs --remote or a configuration file naming a remote")
 )
 
 // inspectLong is the addressing contract the three read commands share.
 const inspectLong = `Objects are addressed by org-prefixed archive paths ("<org>/<path>"), the
-same layout an extract reproduces beneath its target, whether the archive
-directory is the archive root or a single organization's directory.
-
-Positional arguments bind left to right: with two arguments the first is the
-archive directory and the second the archive path.`
+same layout an extract reproduces beneath its target, whether the configured
+archive directory is the archive root or a single organization's directory.`
 
 // remoteLong is the mirror read-through contract the browse and inspect
 // commands share.
-const remoteLong = `The archive's object-store mirror can stand in for absent local files: name
-it with --remote (and --remote-prefix), or with --config naming a
-configuration file whose remote section records it. Anything read that is not
-on disk is fetched from the mirror and persisted at its local archive path,
-so later reads need no network; a directory holding nothing at all is
+const remoteLong = `The archive's object-store mirror can stand in for absent local files: the
+configuration file's remote section names it. Anything read that is not on
+disk is fetched from the mirror and persisted at its local archive path, so
+later reads need no network; a directory holding nothing at all is
 bootstrapped from the mirror outright, and the recorded marker means the
-flags are only needed once. A supplied remote that disagrees with the mirror
-an organization's marker records is refused. Object-store credentials come
-from the backend provider's default chain.`
+remote section is only needed once. A configured remote that disagrees with
+the mirror an organization's marker records is refused. Object-store
+credentials come from the backend provider's default chain.`
 
-// remoteFlags holds the raw mirror-location flag values bound onto the browse
-// and inspect commands. Its resolve method turns them into the remote
-// configuration [view.OpenArchive] accepts, or nil when none is named.
-type remoteFlags struct {
-	configPath string
-	url        string
-	prefix     string
-}
-
-// registerRemoteFlags binds the mirror-location flags onto cmd and returns
-// the [*remoteFlags] they write into.
-func registerRemoteFlags(cmd *cobra.Command) *remoteFlags {
-	rf := &remoteFlags{}
-	flags := cmd.Flags()
-
-	flags.StringVarP(&rf.configPath, flagConfig, "c", "",
-		fmt.Sprintf("path to the YAML configuration file whose remote section names the mirror (defaults to $%s)",
-			config.EnvConfigPath))
-	flags.StringVar(&rf.url, flagRemote, "",
-		"mirror bucket URL in gocloud.dev form (s3://, azblob://, file://); overrides the configuration file")
-	flags.StringVar(&rf.prefix, flagRemotePrefix, "",
-		"key prefix the archive is mirrored under")
-
-	return rf
-}
-
-// resolve turns the flag values into the remote configuration the archive
-// opens with: an explicit --remote wins, then the configuration file's remote
-// section (the --config flag or the environment), and nil means no remote was
-// named anywhere, leaving the archive to its local tree and markers.
-//
-// The configuration file loads even with --remote set: the file also carries
-// directory defaults, so a named file that will not parse is refused rather
-// than skipped.
-func (rf *remoteFlags) resolve() (*remote.Config, error) {
-	file, _, err := rf.loadFile()
-	if err != nil {
-		return nil, err
-	}
-
-	return rf.remoteFromFile(file)
-}
-
-// loadFile loads the configuration file the --config flag or the environment
-// names, answering a nil file when none is named anywhere. The returned path
-// is the one the file was loaded from, the base a relative path inside it
-// resolves against.
-//
-// An environment-named file that does not exist on this host is treated as
-// unnamed: the variable serves the archiver, and a read-only command over a
-// purely local archive must keep working on a machine without the file. An
-// explicit --config, or a file that exists but will not parse, still refuses
-// loudly.
-func (rf *remoteFlags) loadFile() (*config.File, string, error) {
-	cfgPath := rf.configPath
-	fromEnv := false
-
-	if cfgPath == "" {
-		cfgPath = os.Getenv(config.EnvConfigPath)
-		fromEnv = cfgPath != ""
-	}
-
-	if cfgPath == "" {
-		return nil, "", nil
-	}
-
-	file, err := config.LoadFile(cfgPath)
-
-	switch {
-	case err != nil && fromEnv && errors.Is(err, fs.ErrNotExist):
-		return nil, "", nil
-	case err != nil:
-		return nil, "", err //nolint:wrapcheck // Source-annotated configuration errors render as-is.
-	}
-
-	return file, cfgPath, nil
-}
-
-// remoteFromFile turns the flag values plus a loaded (possibly nil)
-// configuration file into the remote configuration the archive opens with: an
-// explicit --remote wins, then the file's remote section, and nil means no
-// remote was named anywhere. A --remote-prefix with nothing to apply it to is
-// refused with [ErrPrefixNeedsRemote] in every branch.
-func (rf *remoteFlags) remoteFromFile(file *config.File) (*remote.Config, error) {
-	if rf.url != "" {
-		return &remote.Config{URL: rf.url, Prefix: rf.prefix}, nil
-	}
-
-	if file == nil || file.Remote.IsZero() {
-		if rf.prefix != "" {
-			return nil, ErrPrefixNeedsRemote
-		}
-
-		return nil, nil //nolint:nilnil // No remote named anywhere is the local-only default.
+// remoteFromFile turns a loaded configuration file's remote section into the
+// remote configuration the archive opens with; nil means no remote is named,
+// leaving the archive to its local tree and markers.
+func remoteFromFile(file *config.File) *remote.Config {
+	if file.Remote.IsZero() {
+		return nil
 	}
 
 	rc := file.Remote.RemoteConfig()
 	cfg := archiver.RemoteConfig(&rc)
 
-	if rf.prefix != "" {
-		cfg.Prefix = rf.prefix
-	}
-
-	return &cfg, nil
+	return &cfg
 }
 
 // warnDegraded reports each organization whose mirror listing failed, so a
@@ -194,10 +89,11 @@ func newListCmd() *cobra.Command {
 	var jsonOut bool
 
 	cmd := &cobra.Command{
-		Use:   "list [archive-path] [path]",
+		Use:   "list [path]",
 		Short: "List archived objects under a path prefix",
 		Long: `List the archived objects at or beneath an archive path, one line per object
-whichever physical form (loose, roll-up, bundle) holds it.
+whichever physical form (loose, roll-up, bundle) holds it. The archive
+directory comes from the configuration file's archive.path.
 
 The text listing prints size, physical form, and path, with sealed members
 labeled by the form that carries them and anything evicted to the mirror
@@ -209,34 +105,31 @@ shown as "remote" (reading one back needs object-store credentials). With
 
 ` + remoteLong + `
 
-A single argument names the archive directory; pass "." explicitly to address
-a path in the current directory. With no directory argument the configuration
-file's archive.path, when set, is read instead of the current directory.`,
-		Args: cobra.MaximumNArgs(2),
+The optional argument narrows the listing to one archive path's subtree; with
+none the whole archive is listed.`,
+		Args: cobra.MaximumNArgs(1),
 	}
 
-	rf := registerRemoteFlags(cmd)
+	cfgFlag := registerConfigFlag(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, args []string) error {
 		ctx, stop := signalContext(cc.Context())
 		defer stop()
 
-		file, cfgPath, err := rf.loadFile()
+		cfg, err := loadCmdConfig(*cfgFlag)
 		if err != nil {
 			return err
 		}
 
-		rcfg, err := rf.remoteFromFile(file)
-		if err != nil {
-			return err
+		var prefix string
+
+		if len(args) == 1 {
+			prefix = args[0]
 		}
 
-		fallback := defaultArchiveDir(file, cfgPath)
-		dir, prefix := archiveArgs(args, fallback)
-
-		arc, err := openArchive(ctx, dir, rcfg)
+		arc, err := cfg.open(ctx)
 		if err != nil {
-			return hintLoneArg(err, "list", fallback, args)
+			return err
 		}
 
 		entries, err := arc.List(prefix)
@@ -248,7 +141,7 @@ file's archive.path, when set, is read instead of the current directory.`,
 		warnDegraded(cc.ErrOrStderr(), arc)
 
 		if err != nil {
-			return describeNoOrg(err, arc)
+			return hintDirArg(describeNoOrg(err, arc), args)
 		}
 
 		if jsonOut {
@@ -267,10 +160,11 @@ file's archive.path, when set, is read instead of the current directory.`,
 // to stdout, whichever physical form holds it.
 func newShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "show [archive-path] <path>",
+		Use:   "show <path>",
 		Short: "Print one archived object's bytes to stdout",
 		Long: `Print the exact bytes of one archived object to stdout, whichever physical
-form (loose, roll-up, bundle) holds it.
+form (loose, roll-up, bundle) holds it. The archive directory comes from the
+configuration file's archive.path.
 
 The one object show refuses is an evicted configuration-version tarball: it
 holds what it reads whole in memory and a tarball has no bound, so the error
@@ -279,33 +173,24 @@ backing store (extract streams such an object to disk without this limit).
 
 ` + inspectLong + `
 
-` + remoteLong + `
-
-A single argument is the archive path, read from the directory the
-configuration file's archive.path names, or from the current directory when
-none is set.`,
-		Args: cobra.RangeArgs(1, 2),
+` + remoteLong,
+		Args: cobra.ExactArgs(1),
 	}
 
-	rf := registerRemoteFlags(cmd)
+	cfgFlag := registerConfigFlag(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, args []string) error {
 		ctx, stop := signalContext(cc.Context())
 		defer stop()
 
-		file, cfgPath, err := rf.loadFile()
+		cfg, err := loadCmdConfig(*cfgFlag)
 		if err != nil {
 			return err
 		}
 
-		rcfg, err := rf.remoteFromFile(file)
-		if err != nil {
-			return err
-		}
+		archivePath := args[0]
 
-		dir, archivePath := showArgs(args, defaultArchiveDir(file, cfgPath))
-
-		arc, err := openArchive(ctx, dir, rcfg)
+		arc, err := cfg.open(ctx)
 		if err != nil {
 			return err
 		}
@@ -318,10 +203,10 @@ none is set.`,
 
 		if err != nil {
 			if errors.Is(err, view.ErrNotFile) {
-				return fmt.Errorf("%w (try: %s list %s %s)", err, appName, dir, archivePath)
+				return fmt.Errorf("%w (try: %s list %s)", err, appName, archivePath)
 			}
 
-			return describeNoOrg(err, arc)
+			return hintDirArg(describeNoOrg(err, arc), args)
 		}
 
 		_, err = cc.OutOrStdout().Write(data)
@@ -339,19 +224,19 @@ none is set.`,
 // directory tree, expanding sealed forms back into loose files.
 func newExtractCmd() *cobra.Command {
 	var (
-		target  string
 		dryRun  bool
 		verbose bool
 		jsonOut bool
 	)
 
 	cmd := &cobra.Command{
-		Use:   "extract [archive-path] [path]",
+		Use:   "extract [path]",
 		Short: "Extract archived objects into a plain directory tree",
-		Long: `Extract every archived object at or beneath an archive path into a target
-directory, expanding roll-ups and bundles back into loose files. The target
-reproduces the "<org>/<path>" layout, so a listed path names the same file
-after recovery.
+		Long: `Extract every archived object at or beneath an archive path into the target
+directory the configuration file's extract.path names, expanding roll-ups and
+bundles back into loose files. The archive directory comes from the file's
+archive.path, and the target reproduces the "<org>/<path>" layout, so a
+listed path names the same file after recovery.
 
 An object whose bytes were evicted to the archive's mirror is fetched back
 from it, needing object-store credentials from the backend provider's default
@@ -370,70 +255,64 @@ same way. An interrupted run reports its partial totals to stderr and exits
 
 ` + remoteLong + `
 
-A single argument names the archive directory; pass "." explicitly to address
-a path in the current directory. With no directory argument the configuration
-file's archive.path, when set, is read instead of the current directory, and
-the file's extract.path stands in for an omitted --extract-path. With
---dry-run the plan, including how much it would fetch from the mirror, is
-summarized from the listing and nothing is written into the target;
---extract-path is not required.
-Sizing the plan can itself fetch a workspace's absent sealed indexes (roll-ups
-and sidecars) from the mirror, the one egress a dry run may cost.`,
-		Args: cobra.MaximumNArgs(2),
+The optional argument narrows the extract to one archive path's subtree; with
+none the whole archive is extracted. With --dry-run the plan, including how
+much it would fetch from the mirror, is summarized from the listing and
+nothing is written into the target; extract.path is not required. Sizing the
+plan can itself fetch a workspace's absent sealed indexes (roll-ups and
+sidecars) from the mirror, the one egress a dry run may cost.`,
+		Args: cobra.MaximumNArgs(1),
 	}
 
-	rf := registerRemoteFlags(cmd)
+	cfgFlag := registerConfigFlag(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, args []string) error {
 		ctx, stop := signalContext(cc.Context())
 		defer stop()
 
-		file, cfgPath, err := rf.loadFile()
+		cfg, err := loadCmdConfig(*cfgFlag)
 		if err != nil {
 			return err
 		}
 
-		rcfg, err := rf.remoteFromFile(file)
+		var prefix string
+
+		if len(args) == 1 {
+			prefix = args[0]
+		}
+
+		// The target comes from the file alone, so a real run with none is
+		// refused before the archive opens (an open can cost mirror I/O);
+		// only a dry run proceeds without one.
+		target := configDir(cfg.path, cfg.file.Extract.Path)
+		if !dryRun && target == "" {
+			return fmt.Errorf("%w (set extract.path in the configuration file)", view.ErrNoTarget)
+		}
+
+		arc, err := cfg.open(ctx)
 		if err != nil {
 			return err
-		}
-
-		fallback := defaultArchiveDir(file, cfgPath)
-		dir, prefix := archiveArgs(args, fallback)
-
-		if target == "" && file != nil {
-			target = configDir(cfgPath, file.Extract.Path)
-		}
-
-		arc, err := openArchive(ctx, dir, rcfg)
-		if err != nil {
-			return hintLoneArg(err, "extract", fallback, args)
 		}
 
 		// A dry run's job is to predict the real run, so a target the real
 		// run refuses fails the dry run identically; only the target itself
 		// stays optional there.
 		if target != "" {
-			err = checkTargetOutside(dir, target, orgNames(arc))
+			err = checkTargetOutside(cfg.archiveDir, target, orgNames(arc))
 			if err != nil {
 				return err
 			}
 		}
 
 		if dryRun {
-			return extractDryRun(cc.OutOrStdout(), cc.ErrOrStderr(), arc, prefix, target, jsonOut)
+			return hintDirArg(
+				extractDryRun(cc.OutOrStdout(), cc.ErrOrStderr(), arc, prefix, target, jsonOut), args)
 		}
 
-		if target == "" {
-			return view.ErrNoTarget
-		}
-
-		return runExtractCmd(ctx, cc, arc, prefix, target, verbose, jsonOut)
+		return hintDirArg(runExtractCmd(ctx, cc, arc, prefix, target, verbose, jsonOut), args)
 	}
 
 	flags := cmd.Flags()
-	flags.StringVarP(&target, flagExtractPath, "t", "",
-		"directory to write recovered files into (defaults to the configuration file's extract.path)")
 	flags.BoolVar(&dryRun, flagDryRun, false, "summarize what would be extracted without writing")
 	flags.BoolVarP(&verbose, flagVerbose, "v", false, "stream one line per recovered file to stderr")
 	flags.BoolVar(&jsonOut, flagJSON, false, "emit the summary as JSON")
@@ -749,43 +628,6 @@ func configDir(cfgPath, dir string) string {
 	return filepath.Join(filepath.Dir(cfgPath), dir)
 }
 
-// defaultArchiveDir is the directory a read command falls back to when no
-// positional names one: the configuration file's archive.path, else the current
-// directory. A nil file (no configuration named anywhere) yields ".".
-func defaultArchiveDir(file *config.File, cfgPath string) string {
-	if file == nil || file.Archive.Path == "" {
-		return "."
-	}
-
-	return configDir(cfgPath, file.Archive.Path)
-}
-
-// archiveArgs binds the list/extract positionals to (directory, archive path):
-// required arguments first, so a lone argument names the archive directory
-// and the optional archive path stays empty (the whole archive). With no
-// arguments the directory falls back to defaultDir.
-func archiveArgs(args []string, defaultDir string) (string, string) {
-	switch len(args) {
-	case 1:
-		return args[0], ""
-	case 2: //nolint:mnd // Two positionals: dir then path, per the Use line.
-		return args[0], args[1]
-	default:
-		return defaultDir, ""
-	}
-}
-
-// showArgs binds the show positionals to (directory, archive path): the
-// archive path is required, so a lone argument is the path and the directory
-// falls back to defaultDir.
-func showArgs(args []string, defaultDir string) (string, string) {
-	if len(args) == 1 {
-		return defaultDir, args[0]
-	}
-
-	return args[0], args[1]
-}
-
 // openArchive opens the archive at dir under ctx, against the supplied mirror
 // when rcfg is non-nil, and wraps its organizations in a [*view.Archive].
 //
@@ -804,21 +646,23 @@ func openArchive(ctx context.Context, dir string, rcfg *remote.Config) (*view.Ar
 	return view.NewArchive(orgs), nil
 }
 
-// hintLoneArg augments a not-an-archive failure when a lone positional was
-// most likely meant as an archive path: the argument named no archive but the
-// fallback directory holds one.
-func hintLoneArg(err error, cmdName, defaultDir string, args []string) error {
-	if !errors.Is(err, view.ErrNotArchive) || len(args) != 1 {
+// hintDirArg augments an unknown-organization or invalid-path failure whose
+// lone positional names an existing directory: the likely mistake is
+// addressing the archive by directory rather than by the org-prefixed archive
+// path the argument takes.
+func hintDirArg(err error, args []string) error {
+	if (!errors.Is(err, view.ErrNoOrg) && !errors.Is(err, view.ErrInvalidPath)) || len(args) != 1 {
 		return err
 	}
 
-	_, dirErr := view.OpenArchive(defaultDir)
-	if dirErr != nil {
+	info, statErr := os.Stat(args[0])
+	if statErr != nil || !info.IsDir() {
 		return err
 	}
 
-	return fmt.Errorf("%w\na lone argument names the archive directory; to address a path in %s, run: %s %s %s %s",
-		err, defaultDir, appName, cmdName, defaultDir, args[0])
+	return fmt.Errorf("%w\nthe archive directory comes from the configuration file's archive.path; "+
+		"a positional argument addresses an org-prefixed archive path (\"<org>/<path>\") inside it",
+		err)
 }
 
 // describeNoOrg augments an unknown-organization failure with the archive's

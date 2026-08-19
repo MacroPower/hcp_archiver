@@ -553,7 +553,7 @@ func TestWriteRemoteMarkerPreservesPartial(t *testing.T) {
 	// A bootstrapped browse cache carries a partial marker. The run's opening
 	// rewrite happens before anything is collected, so it must not promote the
 	// tree to complete: an interrupted or filtered run would then hide every
-	// mirror-only object from later flag-less opens.
+	// mirror-only object from later marker-only opens.
 	_, err := st.WriteBytes(remote.MarkerName,
 		[]byte(`{"prefix":"hcp","version":1,"partial":true}`+"\n"))
 	require.NoError(t, err)

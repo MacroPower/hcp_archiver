@@ -38,7 +38,7 @@ var (
 	ErrMissingToken = errors.New("api token is required (set HCP_TOKEN, TFC_TOKEN, or TFE_TOKEN)")
 	// ErrMissingArchiveDir indicates that no archive root was supplied.
 	ErrMissingArchiveDir = errors.New(
-		"archive path is required (set --archive-path or archive.path in the configuration file)",
+		"archive path is required (set archive.path in the configuration file)",
 	)
 	// ErrInvalidAddress indicates an API address that is not an absolute
 	// http or https URL.

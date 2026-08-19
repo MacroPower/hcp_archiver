@@ -8,7 +8,6 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/pkg/config"
 	"go.jacobcolvin.com/hcp_archiver/pkg/export"
 	"go.jacobcolvin.com/hcp_archiver/pkg/progress"
-	"go.jacobcolvin.com/hcp_archiver/pkg/remote"
 )
 
 // ExportProgressForTest builds the export command's progress adapter over a
@@ -26,6 +25,10 @@ func ExportProgressForTest(
 	return p, r
 }
 
+// RemoteFromFile exposes the configuration-to-remote mapping for offline
+// tests.
+var RemoteFromFile = remoteFromFile
+
 // ConfigFromArgs registers the archive flags on a fresh command, parses args
 // against them, and resolves the result into a [config.Config]. It exposes the
 // flag-to-config binding for offline tests without executing the archive.
@@ -39,20 +42,4 @@ func ConfigFromArgs(args []string) (*config.Config, error) {
 	}
 
 	return af.config()
-}
-
-// ResolveRemoteFromArgs registers the mirror-location flags on a fresh
-// command, parses args against them, and resolves the result. It exposes the
-// flag-to-remote binding (--remote over the configuration file, prefix
-// override) for offline tests without opening an archive.
-func ResolveRemoteFromArgs(args []string) (*remote.Config, error) {
-	cmd := &cobra.Command{Use: "test"}
-	rf := registerRemoteFlags(cmd)
-
-	err := cmd.Flags().Parse(args)
-	if err != nil {
-		return nil, err
-	}
-
-	return rf.resolve()
 }

@@ -23,14 +23,13 @@ const flagForce = "force"
 // lines scroll above the progress panel while it runs.
 func newExportCmd(sink func() progress.LogSink) *cobra.Command {
 	var (
-		target           string
 		force            bool
 		progressFlag     string
 		progressInterval time.Duration
 	)
 
 	cmd := &cobra.Command{
-		Use:   "export [archive-path]",
+		Use:   "export",
 		Short: "Render an archive's metadata as a browsable markdown tree",
 		Long: `Render an archive's non-sensitive metadata as a tree of markdown files a
 static site generator with directory-based navigation (mkdocs and its kin)
@@ -54,15 +53,14 @@ directory.
 
 ` + remoteLong + `
 
-A single argument names the archive directory, defaulting to the configuration
-file's archive.path or, with none set, the current one. The file's
-export.path stands in for an omitted --export-path.`,
-		Args: cobra.MaximumNArgs(1),
+The archive directory comes from the configuration file's archive.path, and
+the markdown tree is written into the directory its export.path names.`,
+		Args: cobra.NoArgs,
 	}
 
-	rf := registerRemoteFlags(cmd)
+	cfgFlag := registerConfigFlag(cmd)
 
-	cmd.RunE = func(cc *cobra.Command, args []string) error {
+	cmd.RunE = func(cc *cobra.Command, _ []string) error {
 		// The mode parses before any I/O, so a bad value fails without
 		// touching the archive or the target.
 		mode, err := config.ParseProgressMode(progressFlag)
@@ -79,29 +77,14 @@ export.path stands in for an omitted --export-path.`,
 		runCtx, cancelRun := context.WithCancel(ctx)
 		defer cancelRun()
 
-		// The file loads once and unconditionally: its export section and
-		// directory defaults apply even when the mirror comes from the flag.
-		file, cfgPath, err := rf.loadFile()
+		cfg, err := loadCmdConfig(*cfgFlag)
 		if err != nil {
 			return err
 		}
 
-		rcfg, err := rf.remoteFromFile(file)
-		if err != nil {
-			return err
-		}
-
-		dir := defaultArchiveDir(file, cfgPath)
-		if len(args) == 1 {
-			dir = args[0]
-		}
-
-		if target == "" && file != nil {
-			target = configDir(cfgPath, file.Export.Path)
-		}
-
+		target := configDir(cfg.path, cfg.file.Export.Path)
 		if target == "" {
-			return export.ErrNoTarget
+			return fmt.Errorf("%w (set export.path in the configuration file)", export.ErrNoTarget)
 		}
 
 		// The reporter starts before the archive opens: a sealed archive's
@@ -124,7 +107,7 @@ export.path stands in for an omitted --export-path.`,
 		stopReporter := reporter.RunBackground(ctx, nil)
 		defer stopReporter()
 
-		arc, err := openArchive(runCtx, dir, rcfg)
+		arc, err := cfg.open(runCtx)
 		if err != nil {
 			return err
 		}
@@ -132,7 +115,7 @@ export.path stands in for an omitted --export-path.`,
 		// The guard needs the organization names the open discovered, since an
 		// organization's directory under the target can reach back into the
 		// archive even when the target itself sits outside it.
-		err = checkTargetOutside(dir, target, orgNames(arc))
+		err = checkTargetOutside(cfg.archiveDir, target, orgNames(arc))
 		if err != nil {
 			return err
 		}
@@ -143,8 +126,8 @@ export.path stands in for an omitted --export-path.`,
 			opts = append(opts, export.WithForce())
 		}
 
-		if file != nil && file.Export.Templates.Path != "" {
-			opts = append(opts, export.WithTemplatesDir(configDir(cfgPath, file.Export.Templates.Path)))
+		if cfg.file.Export.Templates.Path != "" {
+			opts = append(opts, export.WithTemplatesDir(configDir(cfg.path, cfg.file.Export.Templates.Path)))
 		}
 
 		opts = append(opts, export.WithProgress(prog))
@@ -179,8 +162,6 @@ export.path stands in for an omitted --export-path.`,
 	}
 
 	flags := cmd.Flags()
-	flags.StringVarP(&target, flagExportPath, "t", "",
-		"directory to write the markdown tree into (defaults to the configuration file's export.path)")
 	flags.BoolVar(&force, flagForce, false, "replace a non-empty target directory's contents")
 	registerProgressFlags(flags, &progressFlag, &progressInterval)
 

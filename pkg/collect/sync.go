@@ -1923,7 +1923,7 @@ const pruneGuardFloor = 100
 // from:
 //
 //   - a run whose ledger opened empty against a non-empty inventory is a
-//     fresh or wrong --archive-path pointed at an existing mirror; restore the
+//     fresh or wrong archive.path pointed at an existing mirror; restore the
 //     whole prefix, data files and ledger together, before re-rooting an
 //     archive, or the mirror-only history would be deleted wholesale. This
 //     refuses the whole prune.
@@ -2021,7 +2021,7 @@ func (e *Env) pruneRemote(
 		e.logger.LogAttrs(ctx, slog.LevelError, "sync_prune_refused",
 			slog.Int("keys", len(staleReshaped)+len(staleUnbacked)+len(staleIneligible)),
 			slog.String("detail", "this run opened an empty ledger against a non-empty mirror; "+
-				"a fresh --archive-path must not prune an existing mirror's history. Restore the whole "+
+				"a fresh archive.path must not prune an existing mirror's history. Restore the whole "+
 				"remote prefix locally, data files and ledger together, before re-rooting the "+
 				"archive"),
 		)

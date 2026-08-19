@@ -25,6 +25,9 @@ var (
 	// ErrMultipleDocuments indicates the configuration file holds more than one
 	// YAML document; a configuration is a single document.
 	ErrMultipleDocuments = errors.New("config file must contain a single document")
+	// ErrMissingArchivePath indicates a configuration file that names no
+	// archive root.
+	ErrMissingArchivePath = errors.New("archive.path is required in the configuration file")
 
 	// Schema for [File], generated from the Go type by the schemagen command
 	// and embedded for validation. Editors resolve the same schema through the
@@ -48,8 +51,9 @@ var (
 // never carries a credential; any path it names resolves relative to the file
 // itself so the two travel together.
 //
-// Every field is optional; an absent field takes the package default. Create
-// instances with [LoadFile], or [DefaultFile] for the defaults alone.
+// The archive path is required; every other field is optional, and an absent
+// field takes the package default. Create instances with [LoadFile], or
+// [DefaultFile] for the defaults alone.
 //
 //nolint:govet // Field order sets the generated schema's property order.
 type File struct {
@@ -81,45 +85,42 @@ type File struct {
 	// RunHistory bounds how much of each workspace's run history a run
 	// fetches; unset fetches every run.
 	RunHistory FileRunHistory `json:"runHistory,omitzero" jsonschema:"title=Run History"`
-	// Archive locates the archive on local disk; unset leaves the location to
-	// the --archive-path flag.
+	// Archive locates the archive on local disk. Its path is the one key the
+	// file must carry.
 	Archive FileArchive `json:"archive,omitzero" jsonschema:"title=Archive"`
 	// Remote mirrors the archive to a remote object store, evicting sealed
 	// cold bundles and settled tarballs and syncing everything else; unset
 	// keeps the whole archive on local disk.
 	Remote FileRemote `json:"remote,omitzero" jsonschema:"title=Remote"`
-	// Extract configures where the extract command writes; unset leaves the
-	// location to the --extract-path flag.
+	// Extract configures where the extract command writes; with no path set,
+	// only a dry run can proceed.
 	Extract FileExtract `json:"extract,omitzero" jsonschema:"title=Extract"`
 	// Export configures the export command: where it writes and the page
-	// templates it renders with. Unset leaves the location to the
-	// --export-path flag and keeps the built-in templates.
+	// templates it renders with. Without a path an export run has no target
+	// and is refused; unset templates keep the built-ins.
 	Export FileExport `json:"export,omitzero" jsonschema:"title=Export"`
 }
 
 // FileArchive locates the archive on local disk.
 type FileArchive struct {
-	// Path is the archive root directory: the default for the root command's
-	// --archive-path flag and for the read commands' [archive-path]
-	// positional. A relative path resolves against this file's directory. An
-	// explicit flag or positional always wins.
-	Path string `json:"path,omitempty" jsonschema:"title=Path"`
+	// Path is the archive root directory every command reads or writes, the
+	// one required key in the configuration file. A relative path resolves
+	// against this file's directory.
+	Path string `json:"path,omitempty" jsonschema:"title=Path,minLength=1"`
 }
 
 // FileExtract configures where the extract command writes.
 type FileExtract struct {
-	// Path is the default --extract-path directory the extract command
-	// recovers files into. A relative path resolves against this file's
-	// directory. An explicit --extract-path always wins.
+	// Path is the directory the extract command recovers files into. A
+	// relative path resolves against this file's directory.
 	Path string `json:"path,omitempty" jsonschema:"title=Path"`
 }
 
 // FileExport configures the export command: the directory it writes into and
 // the page templates it renders with.
 type FileExport struct {
-	// Path is the default --export-path directory the export command writes
-	// its markdown tree into. A relative path resolves against this file's
-	// directory. An explicit --export-path always wins.
+	// Path is the directory the export command writes its markdown tree
+	// into. A relative path resolves against this file's directory.
 	Path string `json:"path,omitempty" jsonschema:"title=Path"`
 	// Templates locates the page templates the export renders with; unset
 	// keeps the built-in templates.
@@ -234,8 +235,8 @@ func (fr FileRemote) RemoteConfig() RemoteConfig {
 	}
 }
 
-// DefaultFile returns a [*File] populated with the package defaults, used when
-// no configuration file is supplied.
+// DefaultFile returns a [*File] populated with the package defaults, the base
+// [LoadFile] seeds so any field a document omits keeps its default.
 func DefaultFile() *File {
 	return &File{
 		Address: DefaultAddress,
@@ -248,8 +249,9 @@ func DefaultFile() *File {
 // default, validates the document against the embedded JSON schema, decodes it,
 // then runs [File.Validate]. A schema or validation failure is returned as a
 // source-annotated error pointing at the offending line. LoadFile reports
-// [ErrReadConfig] when the file cannot be read and [ErrMultipleDocuments] when
-// it holds more than one document.
+// [ErrReadConfig] when the file cannot be read, [ErrMultipleDocuments] when it
+// holds more than one document, and [ErrMissingArchivePath] when no document
+// names the required archive root.
 func LoadFile(path string) (*File, error) {
 	source, err := niceyaml.NewSourceFromFile(path,
 		niceyaml.WithErrorOptions(niceyaml.WithSourceLines(3)),
@@ -300,6 +302,14 @@ func LoadFile(path string) (*File, error) {
 			//nolint:wrapcheck // WrapError returns a source-annotated niceyaml.Error.
 			return nil, source.WrapError(err)
 		}
+	}
+
+	// An empty or comment-only file never reaches schema validation (the
+	// document loop skips it), so the required archive path is enforced here;
+	// a real document missing the key gets the schema's source-annotated
+	// error first.
+	if file.Archive.Path == "" {
+		return nil, ErrMissingArchivePath
 	}
 
 	return file, nil

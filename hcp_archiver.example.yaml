@@ -1,8 +1,9 @@
 # yaml-language-server: $schema=https://jacobcolvin.com/hcp_archiver/config.schema.json
 #
-# hcp_archiver configuration. Copy to hcp_archiver.yaml and edit, then point the
-# tool at it with --config (or set HCP_ARCHIVER_CONFIG). Every key is optional
-# and defaults as shown; the API token is supplied by the environment, never
+# hcp_archiver configuration. Copy to .hcp_archiver.yaml in the directory you
+# run the tool from (the default it looks for), or name a copy with --config or
+# HCP_ARCHIVER_CONFIG. archive.path is required; every other key is optional
+# and defaults as shown. The API token is supplied by the environment, never
 # here.
 
 # HCP Terraform API address.
@@ -49,11 +50,10 @@ include:
 #     count: 500
 #     age: 90d
 
-# Archive root directory: default for --archive-path and for the read
-# commands' [archive-path] positional. A relative path resolves against this
-# file's directory. An explicit flag or positional wins.
-# archive:
-#   path: ./archive
+# Archive root directory every command reads or writes (required). A relative
+# path resolves against this file's directory.
+archive:
+  path: ./archive
 
 # Mirror the archive to a remote object store: sealed cold bundles and
 # settled configuration tarballs are evicted there (uploaded, verified, then
@@ -73,17 +73,17 @@ include:
 #     partSize: 64MiB # integer bytes, or a KB/MB/GB/TB or KiB/MiB/GiB/TiB suffix
 #     concurrency: 4 # parts in flight per bundle, at least 1
 
-# Default --extract-path for the extract command; a relative path resolves
+# Directory the extract command recovers files into; a relative path resolves
 # against this file's directory.
 # extract:
 #   path: ./restore
 
-# Export subcommand: path is the default --export-path directory the markdown
-# tree is written into, and templates.path names a directory of *.md.tmpl files
-# overriding the export's built-in page templates by filename (archive, org,
-# teams, variable-sets, policy-sets, projects, project, workspace, stack, each
-# with the .md.tmpl suffix); pages without an override keep their default.
-# Relative paths resolve against this file's directory.
+# Export subcommand: path is the directory the markdown tree is written into,
+# and templates.path names a directory of *.md.tmpl files overriding the
+# export's built-in page templates by filename (archive, org, teams,
+# variable-sets, policy-sets, projects, project, workspace, stack, each with
+# the .md.tmpl suffix); pages without an override keep their default. Relative
+# paths resolve against this file's directory.
 # export:
 #   path: ./site
 #   templates:
