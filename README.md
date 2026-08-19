@@ -33,6 +33,43 @@ cask "hcp_archiver"
 </details>
 
 <details>
+<summary><strong>Nix</strong></summary>
+
+`hcp_archiver` is published as a package in my
+[NUR](https://nur.jacobcolvin.com), for macOS and Linux.
+
+With `nix-env`:
+
+```bash
+nix-env -iA hcp_archiver -f https://nur.jacobcolvin.com/archive/main.tar.gz
+```
+
+With `nix-shell`:
+
+```bash
+nix-shell -A hcp_archiver https://nur.jacobcolvin.com/archive/main.tar.gz
+```
+
+With your `flake.nix`:
+
+```nix
+{
+  inputs = {
+    macropower.url = "git+https://nur.jacobcolvin.com";
+  };
+  # Reference the package as `inputs.macropower.packages.<system>.hcp_archiver`
+}
+```
+
+With [`devbox`](https://www.jetify.com/docs/devbox/):
+
+```bash
+devbox add git+https://nur.jacobcolvin.com#hcp_archiver
+```
+
+</details>
+
+<details>
 <summary><strong>Go</strong></summary>
 
 ```bash
