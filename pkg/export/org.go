@@ -205,8 +205,11 @@ type projectListing struct {
 	stacks     []string
 }
 
-// projectListings gathers each project's workspace and stack names.
-func projectListings(org *view.Org, projects []string) ([]projectListing, error) {
+// projectListings gathers each project's workspace and stack names, reporting
+// one advance per project listed. The scan reads two directories per project,
+// so on a large organization it runs long enough to watch and is sized by the
+// project count the caller has already seeded.
+func (e *Exporter) projectListings(org *view.Org, projects []string) ([]projectListing, error) {
 	listings := make([]projectListing, 0, len(projects))
 
 	for _, project := range projects {
@@ -221,6 +224,8 @@ func projectListings(org *view.Org, projects []string) ([]projectListing, error)
 		}
 
 		listings = append(listings, projectListing{name: project, workspaces: workspaces, stacks: stacks})
+
+		e.progress.Advance(1)
 	}
 
 	return listings, nil
@@ -232,12 +237,20 @@ func projectListings(org *view.Org, projects []string) ([]projectListing, error)
 //
 //nolint:contextcheck // Mirror read-throughs run under the archive's stored browse context (see view.WithContext).
 func (e *Exporter) renderOrg(ctx context.Context, org *view.Org) error {
+	// The scan is its own phase: it must finish before any unit count exists,
+	// so without one the whole listing of a large organization would sit under
+	// an unnamed, unsized view.
+	e.progress.SetPhase(PhaseScan)
+	e.progress.SetTarget(org.Name)
+
 	projects, err := org.Projects()
 	if err != nil {
 		return fmt.Errorf("list projects of %q: %w", org.Name, err)
 	}
 
-	listings, err := projectListings(org, projects)
+	e.progress.SetTotal(len(projects))
+
+	listings, err := e.projectListings(org, projects)
 	if err != nil {
 		return err
 	}
@@ -250,6 +263,7 @@ func (e *Exporter) renderOrg(ctx context.Context, org *view.Org) error {
 		total += 1 + len(listing.workspaces) + len(listing.stacks)
 	}
 
+	e.progress.SetPhase(PhaseExport)
 	e.progress.SetTarget(org.Name)
 	e.progress.SetTotal(total)
 
@@ -464,11 +478,16 @@ func (e *Exporter) renderProject(ctx context.Context, org *view.Org, listing pro
 
 	e.progress.Advance(1)
 
+	// The target names each item as it renders: on a project holding thousands
+	// of workspaces the bar's own movement is slow enough that the changing
+	// name is what shows the export is working rather than wedged.
 	for _, name := range listing.workspaces {
 		err = stopOnCancel(ctx)
 		if err != nil {
 			return err
 		}
+
+		e.progress.SetTarget(path.Join(org.Name, listing.name, name))
 
 		err = e.renderWorkspace(org.Workspace(listing.name, name), org.Name)
 		if err != nil {
@@ -483,6 +502,8 @@ func (e *Exporter) renderProject(ctx context.Context, org *view.Org, listing pro
 		if err != nil {
 			return err
 		}
+
+		e.progress.SetTarget(path.Join(org.Name, listing.name, name))
 
 		err = e.renderStack(org, listing.name, name)
 		if err != nil {

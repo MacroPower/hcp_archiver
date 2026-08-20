@@ -157,10 +157,7 @@ func TestExportCmd_ProgressAdapter(t *testing.T) {
 	adapter, reporter := cli.ExportProgressForTest(buf, config.ProgressModeHuman,
 		progress.WithClock(func() time.Time { return base }))
 
-	// The command's RunE owns the phase; the adapter carries only the
-	// target, total, and advances.
-	reporter.SetPhase("export")
-
+	adapter.SetPhase(export.PhaseExport)
 	adapter.SetTarget("my-org")
 	adapter.SetTotal(5)
 	adapter.Advance(2)
@@ -173,9 +170,10 @@ func TestExportCmd_ProgressAdapter(t *testing.T) {
 	assert.Contains(t, line, "done=2")
 	assert.Contains(t, line, "completed=2/5")
 
-	// A new organization's total resets both counters, so done= and
-	// completed= keep reading per-organization.
+	// A new phase's total resets both counters, so done= and completed= keep
+	// reading against the phase in view, and the phase name follows.
 	buf.Reset()
+	adapter.SetPhase(export.PhaseScan)
 	adapter.SetTarget("next-org")
 	adapter.SetTotal(7)
 	adapter.Advance(3)
@@ -183,6 +181,7 @@ func TestExportCmd_ProgressAdapter(t *testing.T) {
 	require.NoError(t, reporter.Report())
 
 	line = buf.String()
+	assert.Contains(t, line, "phase="+export.PhaseScan)
 	assert.Contains(t, line, "target=next-org")
 	assert.Contains(t, line, "done=3")
 	assert.Contains(t, line, "completed=3/7")

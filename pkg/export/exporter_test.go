@@ -521,16 +521,31 @@ func TestExportStopsOnCancelBetweenStacks(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-// recordingProgress records every hook call the export makes.
+// recordingProgress records every hook call the export makes, keeping each
+// phase's totals and advances under the phase that was current when they
+// landed.
 type recordingProgress struct {
+	phases   []string
 	targets  []string
-	totals   []int
-	advanced int
+	totals   map[string][]int
+	advanced map[string]int
+	current  string
+}
+
+func newRecordingProgress() *recordingProgress {
+	return &recordingProgress{totals: map[string][]int{}, advanced: map[string]int{}}
+}
+
+func (r *recordingProgress) SetPhase(phase string) {
+	r.current = phase
+	r.phases = append(r.phases, phase)
 }
 
 func (r *recordingProgress) SetTarget(name string) { r.targets = append(r.targets, name) }
-func (r *recordingProgress) SetTotal(total int)    { r.totals = append(r.totals, total) }
-func (r *recordingProgress) Advance(n int)         { r.advanced += n }
+func (r *recordingProgress) SetTotal(total int) {
+	r.totals[r.current] = append(r.totals[r.current], total)
+}
+func (r *recordingProgress) Advance(n int) { r.advanced[r.current] += n }
 
 func TestExportReportsProgress(t *testing.T) {
 	t.Parallel()
@@ -538,16 +553,52 @@ func TestExportReportsProgress(t *testing.T) {
 	root := buildArchive(t)
 	target := filepath.Join(t.TempDir(), "site")
 
-	rec := &recordingProgress{}
+	rec := newRecordingProgress()
 
 	_, err := export.New(openFixture(t, root), target, export.WithProgress(rec)).Run(t.Context())
 	require.NoError(t, err)
 
-	// The fixture org holds one project with one workspace and one stack:
-	// three units seeded up front, all advanced by the end of the run.
-	assert.Equal(t, []string{"my-org"}, rec.targets)
-	assert.Equal(t, []int{3}, rec.totals)
-	assert.Equal(t, 3, rec.advanced)
+	// An empty target skips the clear, so the run scans then exports.
+	assert.Equal(t, []string{export.PhaseScan, export.PhaseExport}, rec.phases)
+
+	// The fixture org holds one project, so the scan is sized by that one
+	// project and advances once for it.
+	assert.Equal(t, []int{1}, rec.totals[export.PhaseScan])
+	assert.Equal(t, 1, rec.advanced[export.PhaseScan])
+
+	// That project holds one workspace and one stack: three units with its
+	// own index, all advanced by the end of the run.
+	assert.Equal(t, []int{3}, rec.totals[export.PhaseExport])
+	assert.Equal(t, 3, rec.advanced[export.PhaseExport])
+
+	// The target names the organization, then each item as it renders, so a
+	// long export always shows what it is working on.
+	assert.Equal(t, []string{
+		"my-org",
+		"my-org",
+		"my-org/default/app",
+		"my-org/default/net",
+	}, rec.targets)
+}
+
+func TestExportReportsClearPhase(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+	target := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(target, "stale.md"), []byte("old"), 0o600))
+
+	rec := newRecordingProgress()
+
+	_, err := export.New(openFixture(t, root), target,
+		export.WithForce(), export.WithProgress(rec)).Run(t.Context())
+	require.NoError(t, err)
+
+	// Emptying a non-empty target walks the previous site, so it is named
+	// ahead of the scan rather than running unlabeled.
+	assert.Equal(t, []string{export.PhaseClear, export.PhaseScan, export.PhaseExport}, rec.phases)
+	assert.Empty(t, rec.totals[export.PhaseClear], "the old site's size is uncounted, so the clear carries no total")
 }
 
 func TestExportNilProgress(t *testing.T) {

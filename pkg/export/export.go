@@ -189,6 +189,13 @@ func (e *Exporter) prepareTarget() error {
 		return fmt.Errorf("%w: %s", ErrTargetNotEmpty, e.target)
 	}
 
+	// Clearing a previous export walks that whole tree, so it is worth naming:
+	// its cost tracks the old site's size, which nothing here has counted, so
+	// the phase runs without a total rather than paying for a walk to size a
+	// bar with.
+	e.progress.SetPhase(PhaseClear)
+	e.progress.SetTarget(e.target)
+
 	for _, entry := range entries {
 		err = os.RemoveAll(filepath.Join(e.target, entry.Name()))
 		if err != nil {

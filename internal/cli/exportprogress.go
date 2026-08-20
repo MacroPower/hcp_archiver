@@ -39,7 +39,12 @@ func (p *exportProgress) Tally() manifest.Tally {
 	return manifest.Tally{Target: target, Done: int(p.done.Load())}
 }
 
-// SetTarget records the organization being rendered.
+// SetPhase names the export stage the reporter's views label.
+func (p *exportProgress) SetPhase(phase string) {
+	p.reporter.SetPhase(phase)
+}
+
+// SetTarget records what the phase is working through.
 func (p *exportProgress) SetTarget(name string) {
 	p.target.Store(&name)
 }

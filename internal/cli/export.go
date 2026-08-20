@@ -17,6 +17,11 @@ import (
 // flagForce names the export command's overwrite flag.
 const flagForce = "force"
 
+// phaseOpen names the phase covering the archive open, the one stage that runs
+// before the exporter names its own; a sealed archive fetches its offloaded
+// roll-ups back here, so it is worth labeling.
+const phaseOpen = "open"
+
 // newExportCmd returns a command that renders an archive's metadata as a
 // markdown tree a static site generator can build. The sink resolves the
 // shared log writer the root command builds in PersistentPreRunE, so log
@@ -89,9 +94,9 @@ the markdown tree is written into the directory its export.path names.`,
 
 		// The reporter starts before the archive opens: a sealed archive's
 		// roll-up fetch-back from the mirror can be the slow part of the
-		// command, and the open runs under the spinner (the phase stays
-		// indeterminate until the first organization's total is known) with
-		// the interrupt path already live.
+		// command, so the open runs under its own named phase, with the
+		// interrupt path already live. Nothing has counted the archive yet, so
+		// the phase carries no total; the export names its own from here on.
 		prog := &exportProgress{}
 		reporter := progress.New(cc.ErrOrStderr(), mode, prog,
 			progress.WithInterval(progressInterval),
@@ -99,7 +104,7 @@ the markdown tree is written into the directory its export.path names.`,
 			progress.WithLogSink(sink()),
 		)
 		prog.reporter = reporter
-		reporter.SetPhase("export")
+		reporter.SetPhase(phaseOpen)
 
 		// Every exit past this point erases the panel first, so an error
 		// prints on a restored terminal; the success path stops it inline
