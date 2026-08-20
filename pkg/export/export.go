@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"text/template"
 
 	"go.jacobcolvin.com/hcp_archiver/pkg/atomicfile"
@@ -46,6 +47,13 @@ const (
 // directory-based site generators treat as a section index.
 const indexFile = "index.md"
 
+// renderConcurrency bounds how many workspaces and stacks render at once.
+// Rendering one is a long series of small reads whose cost is latency rather
+// than computation, so the bound sits well above the core count: it exists to
+// cap open files and in-flight pages, not to match the CPU. It matches the
+// archiver's own fixed bound, and like it is deliberately not configurable.
+const renderConcurrency = 16
+
 // Summary reports what one export run produced.
 type Summary struct {
 	// Pages counts the markdown files written, the copied workspace readmes
@@ -65,7 +73,7 @@ type Exporter struct {
 	progress     Progress
 	target       string
 	templatesDir string
-	pages        int
+	pages        atomic.Int64
 	force        bool
 }
 
@@ -109,10 +117,11 @@ func New(arc *view.Archive, target string, opts ...Option) *Exporter {
 // Run renders the archive and returns what it produced. The target directory
 // is created when absent; see [ErrNoTarget], [ErrTargetNotDir],
 // [ErrTargetNotEmpty], and [ErrTargetOverlapsArchive] for the shapes it
-// refuses. Cancellation stops the run between workspaces and stacks,
+// refuses. Organizations render in turn, the workspaces and stacks within a
+// project concurrently. Cancellation stops the run between those items,
 // returning the context's error with the partial totals.
 func (e *Exporter) Run(ctx context.Context) (Summary, error) {
-	e.pages = 0
+	e.pages.Store(0)
 
 	if e.target == "" {
 		return Summary{}, ErrNoTarget
@@ -142,11 +151,11 @@ func (e *Exporter) Run(ctx context.Context) (Summary, error) {
 	for rendered, org := range orgs {
 		err = e.renderOrg(ctx, org)
 		if err != nil {
-			return Summary{Pages: e.pages, Orgs: rendered}, err
+			return Summary{Pages: int(e.pages.Load()), Orgs: rendered}, err
 		}
 	}
 
-	return Summary{Pages: e.pages, Orgs: len(orgs)}, nil
+	return Summary{Pages: int(e.pages.Load()), Orgs: len(orgs)}, nil
 }
 
 // prepareTarget brings the target directory to an empty, writable state:
@@ -238,7 +247,7 @@ func (e *Exporter) write(rel string, data []byte) error {
 		return fmt.Errorf("write %q: %w", rel, err)
 	}
 
-	e.pages++
+	e.pages.Add(1)
 
 	return nil
 }

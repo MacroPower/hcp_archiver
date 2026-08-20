@@ -2,9 +2,11 @@ package export_test
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/charmbracelet/x/exp/golden"
@@ -523,8 +525,10 @@ func TestExportStopsOnCancelBetweenStacks(t *testing.T) {
 
 // recordingProgress records every hook call the export makes, keeping each
 // phase's totals and advances under the phase that was current when they
-// landed.
+// landed. Items render concurrently, so it guards itself and its callers
+// treat the per-item order as unspecified.
 type recordingProgress struct {
+	mu       sync.Mutex
 	phases   []string
 	targets  []string
 	totals   map[string][]int
@@ -537,15 +541,33 @@ func newRecordingProgress() *recordingProgress {
 }
 
 func (r *recordingProgress) SetPhase(phase string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	r.current = phase
 	r.phases = append(r.phases, phase)
 }
 
-func (r *recordingProgress) SetTarget(name string) { r.targets = append(r.targets, name) }
+func (r *recordingProgress) SetTarget(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.targets = append(r.targets, name)
+}
+
 func (r *recordingProgress) SetTotal(total int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	r.totals[r.current] = append(r.totals[r.current], total)
 }
-func (r *recordingProgress) Advance(n int) { r.advanced[r.current] += n }
+
+func (r *recordingProgress) Advance(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.advanced[r.current] += n
+}
 
 func TestExportReportsProgress(t *testing.T) {
 	t.Parallel()
@@ -572,13 +594,79 @@ func TestExportReportsProgress(t *testing.T) {
 	assert.Equal(t, 3, rec.advanced[export.PhaseExport])
 
 	// The target names the organization, then each item as it renders, so a
-	// long export always shows what it is working on.
-	assert.Equal(t, []string{
+	// long export always shows what it is working on. Items render
+	// concurrently, so they are named in no particular order.
+	assert.ElementsMatch(t, []string{
 		"my-org",
 		"my-org",
 		"my-org/default/app",
 		"my-org/default/net",
 	}, rec.targets)
+}
+
+func TestExportRendersItemsConcurrently(t *testing.T) {
+	t.Parallel()
+
+	// Comfortably more workspaces than the export's render bound, so every
+	// slot runs at once and the counters and the pages they stand for are
+	// exercised under real contention (the race detector watches the rest).
+	const workspaces = 50
+
+	root := t.TempDir()
+	org := filepath.Join(root, "many-org")
+
+	writeFile(t, org, "org.json",
+		`{"data":{"id":"org-3","type":"organizations","attributes":{"name":"many-org"}}}`)
+	writeFile(t, org, "projects/default/project.json",
+		`{"data":{"id":"prj-3","type":"projects","attributes":{"name":"default"}}}`)
+
+	for i := range workspaces {
+		name := fmt.Sprintf("ws-%02d", i)
+		writeFile(t, org, "projects/default/workspaces/"+name+"/workspace.json",
+			fmt.Sprintf(`{"data":{"id":"ws-%d","type":"workspaces","attributes":{"name":%q}}}`, i, name))
+	}
+
+	target := filepath.Join(t.TempDir(), "site")
+	rec := newRecordingProgress()
+
+	sum, err := export.New(openFixture(t, root), target, export.WithProgress(rec)).Run(t.Context())
+	require.NoError(t, err)
+
+	// Every workspace lands its own page, and the project index plus the two
+	// pages above it (the archive home and the organization's own index) are
+	// counted alongside the per-workspace ones.
+	assert.Equal(t, workspaces+1, rec.advanced[export.PhaseExport])
+	assert.Equal(t, []int{workspaces + 1}, rec.totals[export.PhaseExport])
+
+	for i := range workspaces {
+		assert.FileExists(t, filepath.Join(target, "many-org", "projects", "default",
+			"workspaces", fmt.Sprintf("ws-%02d", i), "index.md"))
+	}
+
+	// The page count is accumulated from every render slot, so it must still
+	// total exactly what landed on disk.
+	assert.Equal(t, countFiles(t, target), sum.Pages)
+}
+
+// countFiles counts the files written beneath dir.
+func countFiles(t *testing.T, dir string) int {
+	t.Helper()
+
+	count := 0
+
+	require.NoError(t, filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !d.IsDir() {
+			count++
+		}
+
+		return nil
+	}))
+
+	return count
 }
 
 func TestExportReportsClearPhase(t *testing.T) {

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"go.jacobcolvin.com/hcp_archiver/pkg/theme"
 	"go.jacobcolvin.com/hcp_archiver/pkg/view"
 )
@@ -466,8 +468,8 @@ func (e *Exporter) writeProjectsIndex(org *view.Org, listings []projectListing) 
 	return e.write(path.Join(org.Name, "projects", indexFile), data)
 }
 
-// renderProject writes one project's subtree: its index, its workspace pages,
-// and its stack pages.
+// renderProject writes one project's subtree: its index, then its workspace
+// and stack pages, which render concurrently.
 //
 //nolint:contextcheck // Mirror read-throughs run under the archive's stored browse context (see view.WithContext).
 func (e *Exporter) renderProject(ctx context.Context, org *view.Org, listing projectListing) error {
@@ -478,42 +480,53 @@ func (e *Exporter) renderProject(ctx context.Context, org *view.Org, listing pro
 
 	e.progress.Advance(1)
 
-	// The target names each item as it renders: on a project holding thousands
-	// of workspaces the bar's own movement is slow enough that the changing
-	// name is what shows the export is working rather than wedged.
+	// Items render concurrently. Each one reads its own subtree and writes its
+	// own page, so the work is independent, and it is dominated by the latency
+	// of many small reads rather than by any computation: an archive on
+	// network-backed storage spends nearly all of a sequential export waiting,
+	// which overlapping the items recovers. The first failure cancels the rest
+	// through the group's context, matching the sequential stop.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(renderConcurrency)
+
+	render := func(name string, one func() error) {
+		g.Go(func() error {
+			canceled := stopOnCancel(gctx)
+			if canceled != nil {
+				return canceled
+			}
+
+			// The target names each item as it renders: on a project holding
+			// thousands of workspaces the bar's own movement is slow enough
+			// that the changing name is what shows the export working rather
+			// than wedged. Concurrent renders overwrite each other's name, so
+			// it reads as a sample of what is in flight, not a sequence.
+			e.progress.SetTarget(path.Join(org.Name, listing.name, name))
+
+			rerr := one()
+			if rerr != nil {
+				return rerr
+			}
+
+			e.progress.Advance(1)
+
+			return nil
+		})
+	}
+
 	for _, name := range listing.workspaces {
-		err = stopOnCancel(ctx)
-		if err != nil {
-			return err
-		}
-
-		e.progress.SetTarget(path.Join(org.Name, listing.name, name))
-
-		err = e.renderWorkspace(org.Workspace(listing.name, name), org.Name)
-		if err != nil {
-			return err
-		}
-
-		e.progress.Advance(1)
+		render(name, func() error {
+			return e.renderWorkspace(org.Workspace(listing.name, name), org.Name)
+		})
 	}
 
 	for _, name := range listing.stacks {
-		err = stopOnCancel(ctx)
-		if err != nil {
-			return err
-		}
-
-		e.progress.SetTarget(path.Join(org.Name, listing.name, name))
-
-		err = e.renderStack(org, listing.name, name)
-		if err != nil {
-			return err
-		}
-
-		e.progress.Advance(1)
+		render(name, func() error {
+			return e.renderStack(org, listing.name, name)
+		})
 	}
 
-	return nil
+	return g.Wait() //nolint:wrapcheck // Render errors already carry their context.
 }
 
 // stopOnCancel surfaces ctx's cancellation as the export's stop error, the
