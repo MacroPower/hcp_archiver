@@ -478,6 +478,31 @@ func mustProjects(t *testing.T, org *view.Org) []string {
 	return projects
 }
 
+func TestAllRunArtifactsFromEmptyDir(t *testing.T) {
+	t.Parallel()
+
+	fake := buildMirroredArchive(t)
+	orgs, _ := openBootstrap(t, fake)
+
+	// The batched listing is asked first, before any read has pulled a file
+	// down and recreated a run directory locally. Its run enumeration must
+	// therefore thread the merged set: a listing has no read-through behind it
+	// the way a read does, so a local-only set would empty every mirror-only
+	// run's artifacts outright rather than degrade to fetching them.
+	//
+	// Asking first is the whole test. Folded into a neighboring case that
+	// reads a run summary first, this assertion passes either way: that read
+	// persists run.json at its archive path, recreating the directory, so a
+	// local-only enumeration finds it too. Keep this call ahead of every read.
+	all, err := orgs[0].Workspace("default", "app").AllRunArtifacts()
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		wsDir + "/runs/run-old/comments.json",
+		wsDir + "/runs/run-old/run.history.ndjson",
+	}, all["run-old"])
+	assert.NotEmpty(t, all["run-new"], "the sealed run's leaves list beside it")
+}
+
 func TestExists_MirrorOnlyLooseFileWithoutFetching(t *testing.T) {
 	t.Parallel()
 

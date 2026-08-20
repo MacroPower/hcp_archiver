@@ -114,6 +114,81 @@ func TestWorkspaceRunsDuplicateRollupLinesNewestWins(t *testing.T) {
 	assert.Equal(t, "force_canceled", runs[0].Status, "the newest line is canonical")
 }
 
+func TestWorkspaceRunsLooseDirWithoutRunJSON(t *testing.T) {
+	t.Parallel()
+
+	// A run directory the collector created before it wrote run.json, or one
+	// whose summary a crash left unwritten: the listing names the run, the
+	// loose read misses, and nothing sealed answers either.
+	ws := buildRunsArchive(t,
+		runsLine(t, "run-sealed", "applied", "2024-01-01T10:00:00Z"),
+		map[string]string{wsDir + "/runs/run-bare/plan.log": "plan output\n"})
+
+	runs, err := ws.Runs()
+	require.NoError(t, err)
+	require.Len(t, runs, 2)
+
+	assert.Equal(t, "run-sealed", runs[0].ID)
+	assert.Equal(t, "run-bare", runs[1].ID, "a run with no summary still lists, its fields zero")
+	assert.Empty(t, runs[1].Status)
+
+	artifacts, err := ws.RunArtifacts("run-bare")
+	require.NoError(t, err)
+	assert.Equal(t, []string{wsDir + "/runs/run-bare/plan.log"}, artifacts)
+}
+
+func TestAllRunArtifactsMatchesPerRun(t *testing.T) {
+	t.Parallel()
+
+	// The batched listing and the per-run one must not drift: same leaves, same
+	// reading order, same run.json exclusion, across every form a run's
+	// artifacts can be in.
+	root := buildArchive(t)
+	org := filepath.Join(root, "my-org")
+
+	writeFile(t, org, wsDir+"/runs/run-bare/apply.log", "apply output\n")
+	writeFile(t, org, wsDir+"/runs/run-new/.atomicfile-1234.tmp", "half-written")
+
+	// Run-swept is the shape the batched listing exists for and the only one
+	// that exercises its sealed-only branch: the sealer emptied its directory
+	// and removed it, so the runs listing never names the id and the leaves
+	// come from the sealed range alone. A nested key rides along, since the
+	// two sides derive its leaf name by different routes.
+	//
+	// Both flatten that nested key onto its base name, so the artifact asserted
+	// for it ("deep.json") names no object a read can open. The flattening is
+	// what is under test here, not the path: run keys the collector writes are
+	// flat, so only a hand-built or corrupt roll-up record nests one, and the
+	// two routes agreeing matters more than either being right about a record
+	// that should not exist. Anyone who makes the leaf names carry the nesting
+	// should expect this assertion to fail and update it.
+	appendRollupLine(t, root, rollupRecord(t, wsDir+"/runs/run-swept/plan.json", `{"planned":true}`))
+	appendRollupLine(t, root, rollupRecord(t, wsDir+"/runs/run-swept/run.json",
+		runJSON("run-swept", "applied", "2024-01-03T10:00:00Z")))
+	appendRollupLine(t, root, rollupRecord(t, wsDir+"/runs/run-swept/policies/deep.json", `{"deep":true}`))
+
+	ws := openOrg(t, root).Workspace("default", "app")
+
+	runs, err := ws.Runs()
+	require.NoError(t, err)
+	require.NotEmpty(t, runs)
+
+	all, err := ws.AllRunArtifacts()
+	require.NoError(t, err)
+	require.Len(t, all, len(runs), "every listed run is keyed")
+
+	assert.Equal(t, []string{
+		wsDir + "/runs/run-swept/plan.json",
+		wsDir + "/runs/run-swept/deep.json",
+	}, all["run-swept"], "a run surviving only as sealed keys keeps its leaves")
+
+	for _, run := range runs {
+		want, artErr := ws.RunArtifacts(run.ID)
+		require.NoError(t, artErr)
+		assert.Equal(t, want, all[run.ID], "run %s", run.ID)
+	}
+}
+
 func TestWorkspaceRunsCorruptRollupLineStillListsViaChildren(t *testing.T) {
 	t.Parallel()
 

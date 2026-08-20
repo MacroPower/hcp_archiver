@@ -111,6 +111,17 @@ func workspaceRuns(ws *view.Workspace, orgName string) (*RunsSection, error) {
 		return nil, nil //nolint:nilnil // No runs means no section, not an error.
 	}
 
+	// One listing for the whole history: a per-run call re-lists the runs
+	// directory for every run, and asks the filesystem about the runs sealing
+	// has already emptied. The trades are the error message, which names the
+	// workspace rather than the run whose listing failed, and a run that
+	// appears between this listing and the one above, which renders with no
+	// artifacts until the next export.
+	byRun, err := ws.AllRunArtifacts()
+	if err != nil {
+		return nil, fmt.Errorf("list run artifacts of %q: %w", ws.Name, err)
+	}
+
 	section := &RunsSection{
 		Count: len(runs),
 		Dir:   path.Join(orgName, ws.Dir(), "runs"),
@@ -118,10 +129,7 @@ func workspaceRuns(ws *view.Workspace, orgName string) (*RunsSection, error) {
 	}
 
 	for _, run := range runs {
-		artifacts, artErr := ws.RunArtifacts(run.ID)
-		if artErr != nil {
-			return nil, fmt.Errorf("list artifacts of run %q: %w", run.ID, artErr)
-		}
+		artifacts := byRun[run.ID]
 
 		if section.Example == "" && len(artifacts) > 0 {
 			section.Example = path.Join(orgName, artifacts[0])

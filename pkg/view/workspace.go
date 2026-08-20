@@ -10,13 +10,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
-	"go.jacobcolvin.com/hcp_archiver/pkg/pathkit"
 	"go.jacobcolvin.com/hcp_archiver/pkg/store"
 )
 
@@ -44,7 +45,7 @@ var (
 // bundle. Instances are produced by [*Org.Workspace].
 type Workspace struct {
 	org     *Org
-	idx     map[string]sealedRef
+	idx     *sealedIndex
 	Project string
 	Name    string
 	dir     string
@@ -108,6 +109,29 @@ func (w *Workspace) File(name string) string {
 // key joins the path under the organization's prefix, so a path that could
 // climb must never reach the read-through.
 func (w *Workspace) Open(relPath string) ([]byte, error) {
+	return w.openListed(relPath, true)
+}
+
+// openListed is [Workspace.Open] with the loose probe made conditional: a
+// caller that has just listed the object's directory passes mayBeLoose from
+// that listing, so the probe is skipped for a path the listing did not name
+// rather than spent on a miss. A workspace whose runs and state versions are
+// sealed is nearly all such paths, and on a network mount the misses are the
+// dominant cost of an export.
+//
+// Everything after the probe is Open's, so precedence, path cleaning, and the
+// read-through tail stay in one place and cannot fork. Two narrow divergences
+// follow from the skip, both bounded by "the file is there but the listing did
+// not name it":
+//
+//   - A loose file created between the listing and the read resolves from its
+//     sealed copy. Sealing writes the sealed copy before removing the loose
+//     source and a collector creates a run's directory before its run.json, so
+//     the window is narrow and what it serves is the same bytes.
+//   - A loose file that is present but unreadable resolves from its sealed
+//     copy too, whereas [Workspace.Open] reports the fault: the probe is also
+//     what surfaces a read error, so skipping it skips that too.
+func (w *Workspace) openListed(relPath string, mayBeLoose bool) ([]byte, error) {
 	rel, err := cleanRel(relPath)
 
 	switch {
@@ -117,13 +141,15 @@ func (w *Workspace) Open(relPath string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %q", ErrNotFile, relPath)
 	}
 
-	data, err := os.ReadFile(w.org.AbsPath(rel))
+	if mayBeLoose {
+		data, readErr := os.ReadFile(w.org.AbsPath(rel))
 
-	switch {
-	case err == nil:
-		return data, nil
-	case !errors.Is(err, fs.ErrNotExist):
-		return nil, fmt.Errorf("read %q: %w", rel, err)
+		switch {
+		case readErr == nil:
+			return data, nil
+		case !errors.Is(readErr, fs.ErrNotExist):
+			return nil, fmt.Errorf("read %q: %w", rel, readErr)
+		}
 	}
 
 	data, sealedErr := w.openSealed(rel)
@@ -144,7 +170,7 @@ func (w *Workspace) openSealed(relPath string) ([]byte, error) {
 		return nil, err
 	}
 
-	ref, ok := idx[relPath]
+	ref, ok := idx.byPath[relPath]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrObjectNotFound, relPath)
 	}
@@ -206,7 +232,7 @@ func (w *Workspace) Exists(relPath string) (bool, error) {
 		return false, err
 	}
 
-	if _, ok := idx[relPath]; ok {
+	if _, ok := idx.byPath[relPath]; ok {
 		return true, nil
 	}
 
@@ -223,24 +249,21 @@ func (w *Workspace) Exists(relPath string) (bool, error) {
 }
 
 // sealedNames returns the archive-relative paths of the workspace's sealed
-// objects strictly beneath an archive-relative directory prefix. A key equal
-// to the prefix itself (a corrupt record naming a directory) is dropped: the
-// callers derive child names from what follows the prefix.
+// objects strictly beneath an archive-relative directory prefix, sorted. A key
+// equal to the prefix itself (a corrupt record naming a directory) is dropped:
+// the callers derive child names from what follows the prefix.
+//
+// The slice is a window onto the index's own storage, which every goroutine
+// holding the workspace shares: read it, copy from it, but never sort,
+// compact, or otherwise write through it. [dedupe] in particular sorts in
+// place and is the obvious thing to reach for on a slice of names.
 func (w *Workspace) sealedNames(dirPrefix string) ([]string, error) {
-	sealed, err := w.sealedUnder(dirPrefix)
+	idx, err := w.index()
 	if err != nil {
 		return nil, err
 	}
 
-	names := make([]string, 0, len(sealed))
-
-	for _, se := range sealed {
-		if se.rel != dirPrefix {
-			names = append(names, se.rel)
-		}
-	}
-
-	return names, nil
+	return idx.relsUnder(dirPrefix), nil
 }
 
 // sealedEntry pairs one sealed object's archive-relative path with the
@@ -251,28 +274,96 @@ type sealedEntry struct {
 }
 
 // sealedUnder returns the workspace's sealed objects at or beneath an
-// archive-relative path prefix. An empty prefix returns every sealed object.
+// archive-relative path prefix, sorted by path. An empty prefix returns every
+// sealed object.
 func (w *Workspace) sealedUnder(prefix string) ([]sealedEntry, error) {
 	idx, err := w.index()
 	if err != nil {
 		return nil, err
 	}
 
-	var entries []sealedEntry
+	return idx.under(prefix), nil
+}
 
-	for rel, ref := range idx {
-		if pathkit.UnderPrefix(rel, prefix) {
-			entries = append(entries, sealedEntry{rel: rel, ref: ref})
-		}
+// sealedIndex is one workspace's sealed objects: every object keyed by its
+// archive-relative path, and the same keys sorted, so the prefix scans behind
+// every listing binary-search a contiguous window rather than walking the
+// whole index. An index is built once and read from many goroutines, so
+// nothing here mutates after [Workspace.index] returns it.
+//
+// Create instances with [newSealedIndex].
+type sealedIndex struct {
+	byPath map[string]sealedRef
+	rels   []string
+}
+
+// newSealedIndex creates a new [sealedIndex] over a built key set, sorting the
+// keys into the form the prefix scans need.
+func newSealedIndex(byPath map[string]sealedRef) *sealedIndex {
+	return &sealedIndex{byPath: byPath, rels: slices.Sorted(maps.Keys(byPath))}
+}
+
+// relsUnder returns the sorted archive-relative paths strictly beneath a
+// directory prefix, the contiguous window every key sharing the prefix
+// occupies. An empty prefix names the whole index: whole-organization listings
+// ask for it, and the seek below cannot answer it, since no key begins with a
+// bare separator.
+//
+// The window is found by seeking to prefix+"/" rather than to the bare prefix,
+// because a separator is not the lowest byte a name can carry: "runs!x" and
+// "runs-x" both sort between "runs" and "runs/a", so a seek to "runs" lands
+// before siblings that are not under it at all and a scan from there stops on
+// the first of them, dropping the subtree. A key equal to the prefix sorts
+// before the window and is excluded with the siblings: callers derive child
+// names from what follows the prefix, and a key naming the directory itself
+// has no child name to give. A sibling sorting above the separator ("runsz")
+// falls outside the window on the other side, where the prefix test drops it.
+//
+// Every window is returned with its capacity clipped to its length: the index
+// is shared across goroutines, so a caller appending to a window must allocate
+// rather than write into keys beyond it.
+func (s *sealedIndex) relsUnder(dirPrefix string) []string {
+	if dirPrefix == "" {
+		return s.rels[:len(s.rels):len(s.rels)]
 	}
 
-	return entries, nil
+	scoped := dirPrefix + "/"
+
+	start, _ := slices.BinarySearch(s.rels, scoped)
+
+	end := start
+	// The scan is bounded by the window it returns, which the caller walks
+	// anyway; only the seek has to be sublinear in the whole index.
+	for end < len(s.rels) && strings.HasPrefix(s.rels[end], scoped) {
+		end++
+	}
+
+	return s.rels[start:end:end]
+}
+
+// under returns the sealed objects at or beneath a path prefix, sorted by
+// path. It is [sealedIndex.relsUnder] plus the exact key, which sorts before
+// everything beneath it and so leads the result.
+func (s *sealedIndex) under(prefix string) []sealedEntry {
+	window := s.relsUnder(prefix)
+
+	entries := make([]sealedEntry, 0, len(window)+1)
+
+	if ref, ok := s.byPath[prefix]; ok {
+		entries = append(entries, sealedEntry{rel: prefix, ref: ref})
+	}
+
+	for _, rel := range window {
+		entries = append(entries, sealedEntry{rel: rel, ref: s.byPath[rel]})
+	}
+
+	return entries
 }
 
 // index returns the workspace's sealed-object index, building it on first use
 // from the roll-ups and bundle sidecars. Keys are archive-relative paths, the
 // same keys the ledger records, so a lookup is exact.
-func (w *Workspace) index() (map[string]sealedRef, error) {
+func (w *Workspace) index() (*sealedIndex, error) {
 	// Bubble Tea runs its commands on separate goroutines, so two descents into
 	// the same workspace can build the index at once. Serialize the whole
 	// check-build-store so the lazy field is written under the lock rather than
@@ -289,21 +380,21 @@ func (w *Workspace) index() (map[string]sealedRef, error) {
 		return nil, err
 	}
 
-	idx := make(map[string]sealedRef)
+	byPath := make(map[string]sealedRef)
 
-	err = w.indexRollups(idx)
+	err = w.indexRollups(byPath)
 	if err != nil {
 		return nil, err
 	}
 
-	err = w.indexBundles(idx)
+	err = w.indexBundles(byPath)
 	if err != nil {
 		return nil, err
 	}
 
-	w.idx = idx
+	w.idx = newSealedIndex(byPath)
 
-	return idx, nil
+	return w.idx, nil
 }
 
 // materializeSealedIndex fetches the workspace's absent sealed-form machinery
