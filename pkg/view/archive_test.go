@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -270,6 +271,59 @@ func TestOrgListings(t *testing.T) {
 	stacks, err := org.Stacks("default")
 	require.NoError(t, err)
 	require.Empty(t, stacks)
+}
+
+// TestOrgListingsFollowRelocatedSubtree pins the two halves of a listing
+// against each other over a relocation link. The archive supports an operator
+// moving a subtree to another volume and leaving a link in its place, and the
+// loose half already walks through one; classifying the link from its directory
+// entry read it as a plain file, so the sealed half saw no workspace to ask and
+// a whole-organization listing lost every bundled and rolled-up object beneath
+// it while still showing its loose files.
+func TestOrgListingsFollowRelocatedSubtree(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+	wsAbs := filepath.Join(root, "my-org", filepath.FromSlash(wsDir))
+
+	moved := filepath.Join(root, "relocated-app")
+	require.NoError(t, os.Rename(wsAbs, moved))
+	require.NoError(t, os.Symlink(moved, wsAbs))
+
+	orgs, err := view.OpenArchive(root)
+	require.NoError(t, err)
+
+	org := orgs[0]
+
+	workspaces, err := org.Workspaces("default")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"app"}, workspaces, "the link stands in for the workspace it replaced")
+
+	entries, err := org.Entries(path.Dir(wsDir))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.True(t, entries[0].Dir, "the link enumerates as the directory it resolves to")
+
+	// The org-wide listing and the workspace-scoped one reach the same objects:
+	// the scoped one addresses the workspace by path and never consulted the
+	// subdirectory enumeration, so it was already whole while the org-wide one
+	// was short.
+	fromRoot, err := org.List("")
+	require.NoError(t, err)
+
+	fromWorkspace, err := org.List(wsDir)
+	require.NoError(t, err)
+
+	rootPaths := make(map[string]view.Form, len(fromRoot))
+	for _, e := range fromRoot {
+		rootPaths[e.Path] = e.Form
+	}
+
+	for _, e := range fromWorkspace {
+		form, ok := rootPaths[e.Path]
+		assert.Truef(t, ok, "%s is missing from the organization-wide listing", e.Path)
+		assert.Equalf(t, e.Form, form, "%s lists in a different form from each side", e.Path)
+	}
 }
 
 func TestWorkspaceOpen(t *testing.T) {

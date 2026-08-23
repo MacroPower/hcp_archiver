@@ -781,15 +781,20 @@ func (o *Org) mergedChildren(relDir string) ([]TreeEntry, error) {
 	for _, e := range local {
 		rel := path.Join(relDir, e.Name())
 
+		kind, present := o.localChild(rel, e)
+		if !present {
+			continue
+		}
+
 		// An eviction stub diverts before the machinery filter, the way
 		// stubEntries diverts it in the recursive listing, and folds onto its
 		// target below; a stub that [*Org.readRemoteStub] refuses is dropped,
 		// leaving the listing short by the object, exactly as if no stub
 		// existed.
-		if _, isStub := store.RemoteStubTarget(rel); isStub && !e.IsDir() {
-			if target, size, ok := o.evictedObject(rel); ok {
+		if _, isStub := store.RemoteStubTarget(rel); isStub && !kind.dir {
+			if target, stubSize, ok := o.evictedObject(rel); ok {
 				leaf := path.Base(target)
-				stubbed[leaf] = TreeEntry{Name: leaf, Size: size, Remote: true}
+				stubbed[leaf] = TreeEntry{Name: leaf, Size: stubSize, Remote: true}
 			}
 
 			continue
@@ -799,20 +804,13 @@ func (o *Org) mergedChildren(relDir string) ([]TreeEntry, error) {
 			continue
 		}
 
-		if e.IsDir() {
+		if kind.dir {
 			dirSet[e.Name()] = struct{}{}
 
 			continue
 		}
 
-		entry := TreeEntry{Name: e.Name()}
-
-		info, infoErr := e.Info()
-		if infoErr == nil {
-			entry.Size = info.Size()
-		}
-
-		files[e.Name()] = entry
+		files[e.Name()] = TreeEntry{Name: e.Name(), Size: kind.size}
 	}
 
 	// A stub's target folds in only when nothing local claims the name: the
@@ -878,6 +876,50 @@ func (o *Org) mergedChildren(relDir string) ([]TreeEntry, error) {
 	}
 
 	return entries, nil
+}
+
+// childKind is what one local directory entry resolves to: a subdirectory, or
+// a file of a given size.
+type childKind struct {
+	size int64
+	dir  bool
+}
+
+// localChild classifies one local directory entry, reporting false for an entry
+// no listing accounts for.
+//
+// A symlink is resolved with [os.Stat] rather than classified from the
+// [io/fs.DirEntry], whose type is the link's own. The archive supports a
+// relocation link standing in for a subtree, and the walk behind
+// [*Org.looseFiles] already goes through one to report the files beneath it at
+// their logical location; reading the link here as a plain file would hide the
+// subtree from every enumeration this merge feeds, leaving the sealed pass with
+// no workspace to ask and a whole-organization extract reporting success while
+// dropping every sealed object under it. A link to a regular file reads like
+// the file and a dangling one reads as absent, the same three answers the walk
+// gives.
+func (o *Org) localChild(rel string, e fs.DirEntry) (childKind, bool) {
+	if e.Type()&fs.ModeSymlink == 0 {
+		if e.IsDir() {
+			return childKind{dir: true}, true
+		}
+
+		// An entry whose info the directory no longer answers for still lists,
+		// sized zero, the way it did before symlinks were resolved here.
+		info, err := e.Info()
+		if err != nil {
+			return childKind{}, true
+		}
+
+		return childKind{size: info.Size()}, true
+	}
+
+	info, err := os.Stat(o.AbsPath(rel))
+	if err != nil {
+		return childKind{}, false
+	}
+
+	return childKind{size: info.Size(), dir: info.IsDir()}, true
 }
 
 // Archive is a read handle on every organization under one archive directory.
