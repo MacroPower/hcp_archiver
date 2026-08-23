@@ -86,27 +86,66 @@ func templateFuncs() template.FuncMap {
 // default. An override whose name matches no page template is refused with
 // [ErrUnknownTemplate]; one that does not parse is refused with
 // [ErrTemplateInvalid]. Other files and subdirectories are ignored.
+//
+// A default an override replaces is never parsed at all, because a template
+// set keeps the definition it already holds when the replacement parses to an
+// empty tree, and counts a body of comments or whitespace as empty. Parsing
+// both would leave a deliberately blank override rendering the default it was
+// written to suppress.
 func loadTemplates(dir string) (*template.Template, error) {
-	t, err := template.New("export").
-		Option("missingkey=error").
-		Funcs(templateFuncs()).
-		ParseFS(defaultTemplateFS, "*"+templateSuffix)
+	known := templateNames()
+
+	overrides, err := overrideNames(dir, known)
 	if err != nil {
-		return nil, fmt.Errorf("parse embedded templates: %w", err)
+		return nil, err
 	}
 
+	defaults := make([]string, 0, len(known))
+
+	for _, name := range known {
+		if !slices.Contains(overrides, name) {
+			defaults = append(defaults, name)
+		}
+	}
+
+	t := template.New("export").
+		Option("missingkey=error").
+		Funcs(templateFuncs())
+
+	// ParseFS refuses an empty file list, and overriding every page leaves no
+	// default to parse.
+	if len(defaults) > 0 {
+		t, err = t.ParseFS(defaultTemplateFS, defaults...)
+		if err != nil {
+			return nil, fmt.Errorf("parse embedded templates: %w", err)
+		}
+	}
+
+	// The override names all come from the known set, so none carries glob
+	// metacharacters.
+	if len(overrides) > 0 {
+		t, err = t.ParseFS(os.DirFS(dir), overrides...)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrTemplateInvalid, err)
+		}
+	}
+
+	return t, nil
+}
+
+// overrideNames returns the page templates dir overrides, in the order the
+// directory lists them. An empty dir names none. A *.md.tmpl file whose name
+// is not in known is refused with [ErrUnknownTemplate]; other files and
+// subdirectories are ignored.
+func overrideNames(dir string, known []string) ([]string, error) {
 	if dir == "" {
-		return t, nil
+		return nil, nil
 	}
 
-	fsys := os.DirFS(dir)
-
-	entries, err := fs.ReadDir(fsys, ".")
+	entries, err := fs.ReadDir(os.DirFS(dir), ".")
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrTemplatesUnreadable, err)
 	}
-
-	known := templateNames()
 
 	var overrides []string
 
@@ -124,20 +163,7 @@ func loadTemplates(dir string) (*template.Template, error) {
 		overrides = append(overrides, name)
 	}
 
-	// ParseFS refuses a pattern that matches nothing, and a directory holding
-	// no overrides is validly defaults-only.
-	if len(overrides) == 0 {
-		return t, nil
-	}
-
-	// The override names all come from the known set, so none carries glob
-	// metacharacters.
-	t, err = t.ParseFS(fsys, overrides...)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrTemplateInvalid, err)
-	}
-
-	return t, nil
+	return overrides, nil
 }
 
 // renderPage executes the named page template over data, buffering the whole

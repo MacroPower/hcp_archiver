@@ -1,8 +1,10 @@
 package export_test
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,6 +27,21 @@ func writeTemplates(t *testing.T, templates map[string]string) string {
 	}
 
 	return dir
+}
+
+// readDirNames returns the names of the top-level entries fsys holds.
+func readDirNames(t *testing.T, fsys fs.FS) []string {
+	t.Helper()
+
+	entries, err := fs.ReadDir(fsys, ".")
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+
+	return names
 }
 
 // runExportWithTemplates exports the fixture archive with an override
@@ -76,6 +93,48 @@ func TestExportTemplateFuncsAvailable(t *testing.T) {
 	})
 
 	assert.Equal(t, "1 team: [owners](teams/team-1) owners", files["my-org/teams/index.md"])
+}
+
+// TestExportTemplateOverrideCanBlankAPage pins that an override suppressing a
+// page wins over the default it replaces. A template set keeps the definition
+// it already holds when a replacement parses to an empty tree, and counts a
+// body of comments or whitespace as empty, so a blank override is exactly the
+// case that silently renders the default instead.
+func TestExportTemplateOverrideCanBlankAPage(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"a comment-only override":    `{{/* workspaces intentionally omitted */}}`,
+		"a whitespace-only override": "  \n\t\n",
+		"an empty override":          "",
+	}
+
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			files := runExportWithTemplates(t, map[string]string{"workspace.md.tmpl": body})
+
+			assert.Empty(t, strings.TrimSpace(files[wsPage]),
+				"the page renders through the override, not the default")
+		})
+	}
+}
+
+// TestExportTemplateOverridesEveryPage covers the boundary where an override
+// replaces every page and no embedded default is left to parse.
+func TestExportTemplateOverridesEveryPage(t *testing.T) {
+	t.Parallel()
+
+	templates := map[string]string{}
+	for _, name := range readDirNames(t, export.DefaultTemplates()) {
+		templates[name] = "# every page overridden"
+	}
+
+	files := runExportWithTemplates(t, templates)
+
+	assert.Equal(t, "# every page overridden", files[wsPage],
+		"the export loads with no default left to parse")
 }
 
 func TestExportTemplateRefusals(t *testing.T) {
