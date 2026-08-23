@@ -446,6 +446,44 @@ func TestExtract_MultiOrgRefusalWritesNothing(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "no earlier organization extracted before the refusal")
 }
 
+// TestExtract_ScopedRefusesSiblingOrgRoot pins that scoping an extract to one
+// organization does not narrow the guard to that organization. Sibling roots are
+// siblings of each other, so neither of the guard's clauses fires against the
+// scoped organization, and a target inside org-b was accepted for as long as the
+// check saw only org-a -- writing org-a's archived objects into org-b's archive
+// root, where a later browse reads them back as org-b's own.
+func TestExtract_ScopedRefusesSiblingOrgRoot(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "org-a"), "org.json",
+		`{"data":{"id":"org-a","type":"organizations","attributes":{"name":"org-a"}}}`)
+	writeFile(t, filepath.Join(root, "org-b"), "org.json",
+		`{"data":{"id":"org-b","type":"organizations","attributes":{"name":"org-b"}}}`)
+
+	orgs, err := view.OpenArchive(root)
+	require.NoError(t, err)
+
+	arc := view.NewArchive(orgs)
+
+	for name, target := range map[string]string{
+		"the sibling's root":         filepath.Join(root, "org-b"),
+		"a directory inside it":      filepath.Join(root, "org-b", "projects"),
+		"the sibling's own org join": filepath.Join(root, "org-b", "nested"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			sum, extractErr := arc.Extract(t.Context(), target, "org-a", nil)
+			require.ErrorIs(t, extractErr, view.ErrTargetOverlapsArchive)
+			assert.Zero(t, sum.Files, "a refused extract writes nothing")
+
+			_, statErr := os.Stat(filepath.Join(target, "org-a"))
+			assert.True(t, os.IsNotExist(statErr), "nothing landed in the sibling's tree")
+		})
+	}
+}
+
 func TestExtract_PathTraversalRejected(t *testing.T) {
 	t.Parallel()
 

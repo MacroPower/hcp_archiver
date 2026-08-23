@@ -194,7 +194,7 @@ type model struct {
 func newModel(orgs []*Org) *model {
 	root := newOrgsScreen(orgs)
 	if len(orgs) == 1 {
-		root = newOrgScreen(orgs[0])
+		root = newOrgScreen(orgs[0], orgs)
 	}
 
 	spin := spinner.New(spinner.WithSpinner(spinner.Dot))

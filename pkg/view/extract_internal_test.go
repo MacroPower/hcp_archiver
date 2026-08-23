@@ -161,6 +161,22 @@ func TestCheckExtractTarget(t *testing.T) {
 
 		require.NoError(t, checkExtractTarget([]*Org{nested}, root))
 	})
+
+	t.Run("a sibling organization's root refuses", func(t *testing.T) {
+		t.Parallel()
+
+		// Sibling roots are siblings of each other, so neither clause fires
+		// against the organization being extracted; only validating every
+		// organization the archive holds catches a target inside another one.
+		beta := &Org{Name: "beta", root: filepath.Join(root, "beta")}
+
+		require.NoError(t, checkExtractTarget([]*Org{org}, beta.root),
+			"the scoped organization alone cannot see the sibling")
+		require.ErrorIs(t, checkExtractTarget([]*Org{org, beta}, beta.root),
+			ErrTargetOverlapsArchive)
+		require.ErrorIs(t, checkExtractTarget([]*Org{org, beta}, filepath.Join(beta.root, "projects")),
+			ErrTargetOverlapsArchive)
+	})
 }
 
 func TestExtractPromptRefusesTargetInsideArchive(t *testing.T) {
@@ -171,29 +187,45 @@ func TestExtractPromptRefusesTargetInsideArchive(t *testing.T) {
 	// nothing starts.
 	root := t.TempDir()
 	org := &Org{Name: "my-org", root: filepath.Join(root, "my-org")}
+	sibling := &Org{Name: "other-org", root: filepath.Join(root, "other-org")}
 
-	planned := false
-	build := extractPrompt(org, "workspace app", func() ([]extractJob, error) {
-		planned = true
+	// A prompt opened under one organization still carries the whole archive,
+	// so a target inside a sibling's root is refused the same as one inside
+	// the organization being extracted.
+	targets := map[string]string{
+		"the organization's own root": org.root,
+		"a sibling organization root": sibling.root,
+	}
 
-		return nil, nil
-	})
+	for name, target := range targets {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	s, err := build()
-	require.NoError(t, err)
+			planned := false
+			build := extractPrompt(org, []*Org{org, sibling}, "workspace app",
+				func() ([]extractJob, error) {
+					planned = true
 
-	prompt, ok := s.(*extractPromptScreen)
-	require.True(t, ok)
+					return nil, nil
+				})
 
-	prompt.input.SetValue(filepath.Join(root, "my-org"))
+			s, err := build()
+			require.NoError(t, err)
 
-	cmd := pressOn(prompt, tea.Key{Code: tea.KeyEnter})
-	require.NotNil(t, cmd)
+			prompt, ok := s.(*extractPromptScreen)
+			require.True(t, ok)
 
-	msg, ok := execPush(t, cmd).(statusMsg)
-	require.True(t, ok, "the refusal settles as a status error, not a pushed screen")
-	require.ErrorIs(t, msg.err, ErrTargetOverlapsArchive)
-	assert.False(t, planned, "the guard runs before the plan")
+			prompt.input.SetValue(target)
+
+			cmd := pressOn(prompt, tea.Key{Code: tea.KeyEnter})
+			require.NotNil(t, cmd)
+
+			msg, ok := execPush(t, cmd).(statusMsg)
+			require.True(t, ok, "the refusal settles as a status error, not a pushed screen")
+			require.ErrorIs(t, msg.err, ErrTargetOverlapsArchive)
+			assert.False(t, planned, "the guard runs before the plan")
+		})
+	}
 }
 
 func TestExtractPromptScreen(t *testing.T) {

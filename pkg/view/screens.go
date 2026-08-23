@@ -145,7 +145,7 @@ func newOrgsScreen(orgs []*Org) screen {
 			title: org.Name,
 			desc:  "organization",
 			open: func() (screen, error) {
-				return newOrgScreen(org), nil
+				return newOrgScreen(org, orgs), nil
 			},
 		})
 	}
@@ -154,21 +154,23 @@ func newOrgsScreen(orgs []*Org) screen {
 }
 
 // newOrgScreen is one organization's home: its sections, mirroring the HCP
-// sidebar.
-func newOrgScreen(org *Org) screen {
+// sidebar. The archive's full organization list travels with it so an extract
+// started from any depth is validated against every archive root, not just this
+// organization's (see [checkExtractTarget]).
+func newOrgScreen(org *Org, orgs []*Org) screen {
 	rows := []item{
 		{
 			title: "Projects",
 			desc:  "projects and the workspaces they own",
 			open: func() (screen, error) {
-				return newProjectsScreen(org)
+				return newProjectsScreen(org, orgs)
 			},
 		},
 		{
 			title: "Workspaces",
 			desc:  "every workspace across all projects",
 			open: func() (screen, error) {
-				return newAllWorkspacesScreen(org)
+				return newAllWorkspacesScreen(org, orgs)
 			},
 		},
 		{
@@ -191,7 +193,7 @@ func newOrgScreen(org *Org) screen {
 }
 
 // newProjectsScreen lists an organization's projects.
-func newProjectsScreen(org *Org) (screen, error) {
+func newProjectsScreen(org *Org, orgs []*Org) (screen, error) {
 	projects, err := org.Projects()
 	if err != nil {
 		return nil, err
@@ -209,9 +211,9 @@ func newProjectsScreen(org *Org) (screen, error) {
 			title: project,
 			desc:  theme.CountNoun(len(workspaces), "workspace", "workspaces"),
 			open: func() (screen, error) {
-				return newWorkspacesScreen(org, project, workspaces)
+				return newWorkspacesScreen(org, orgs, project, workspaces)
 			},
-			extract: projectExtractPrompt(org, project),
+			extract: projectExtractPrompt(org, orgs, project),
 		})
 	}
 
@@ -221,7 +223,12 @@ func newProjectsScreen(org *Org) (screen, error) {
 // extractPrompt builds the extract-prompt constructor a project or workspace
 // row carries: confirming the target runs plan and pushes the progress screen
 // over the planned jobs.
-func extractPrompt(org *Org, label string, plan func() ([]extractJob, error)) func() (screen, error) {
+func extractPrompt(
+	org *Org,
+	orgs []*Org,
+	label string,
+	plan func() ([]extractJob, error),
+) func() (screen, error) {
 	return func() (screen, error) {
 		return newExtractPromptScreen(label, org.remote != nil, defaultTarget(),
 			func(target string) (screen, error) {
@@ -229,7 +236,7 @@ func extractPrompt(org *Org, label string, plan func() ([]extractJob, error)) fu
 				// extract goroutine exists, so a target inside the archive
 				// surfaces as the prompt's error rather than a run that
 				// writes into the archive.
-				err := checkExtractTarget([]*Org{org}, target)
+				err := checkExtractTarget(orgs, target)
 				if err != nil {
 					return nil, err
 				}
@@ -245,15 +252,15 @@ func extractPrompt(org *Org, label string, plan func() ([]extractJob, error)) fu
 }
 
 // projectExtractPrompt is [extractPrompt] planning a whole project.
-func projectExtractPrompt(org *Org, project string) func() (screen, error) {
-	return extractPrompt(org, "project "+project, func() ([]extractJob, error) {
+func projectExtractPrompt(org *Org, orgs []*Org, project string) func() (screen, error) {
+	return extractPrompt(org, orgs, "project "+project, func() ([]extractJob, error) {
 		return org.planProjectExtract(project)
 	})
 }
 
 // workspaceExtractPrompt is [extractPrompt] planning one workspace.
-func workspaceExtractPrompt(org *Org, ws *Workspace) func() (screen, error) {
-	return extractPrompt(org, "workspace "+ws.Name, func() ([]extractJob, error) {
+func workspaceExtractPrompt(org *Org, orgs []*Org, ws *Workspace) func() (screen, error) {
+	return extractPrompt(org, orgs, "workspace "+ws.Name, func() ([]extractJob, error) {
 		return org.planWorkspaceExtract(ws)
 	})
 }
@@ -273,7 +280,7 @@ func defaultTarget() string {
 // has any. When workspaces is non-nil the caller has already listed them (the
 // projects screen reads them to size its count label); a nil listing is read
 // here so the screen also stands alone.
-func newWorkspacesScreen(org *Org, project string, workspaces []string) (screen, error) {
+func newWorkspacesScreen(org *Org, orgs []*Org, project string, workspaces []string) (screen, error) {
 	if workspaces == nil {
 		var err error
 
@@ -299,7 +306,7 @@ func newWorkspacesScreen(org *Org, project string, workspaces []string) (screen,
 			open: func() (screen, error) {
 				return newWorkspaceScreen(ws)
 			},
-			extract: workspaceExtractPrompt(org, ws),
+			extract: workspaceExtractPrompt(org, orgs, ws),
 		})
 	}
 
@@ -320,7 +327,7 @@ func newWorkspacesScreen(org *Org, project string, workspaces []string) (screen,
 
 // newAllWorkspacesScreen lists every workspace in the organization, each
 // described by its owning project.
-func newAllWorkspacesScreen(org *Org) (screen, error) {
+func newAllWorkspacesScreen(org *Org, orgs []*Org) (screen, error) {
 	projects, err := org.Projects()
 	if err != nil {
 		return nil, err
@@ -343,7 +350,7 @@ func newAllWorkspacesScreen(org *Org) (screen, error) {
 				open: func() (screen, error) {
 					return newWorkspaceScreen(ws)
 				},
-				extract: workspaceExtractPrompt(org, ws),
+				extract: workspaceExtractPrompt(org, orgs, ws),
 			})
 		}
 	}
