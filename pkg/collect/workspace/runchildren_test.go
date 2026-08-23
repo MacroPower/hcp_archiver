@@ -1,14 +1,17 @@
 package workspace_test
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/hashicorp/go-tfe"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 
 	"go.jacobcolvin.com/hcp_archiver/pkg/manifest"
 )
@@ -47,6 +50,74 @@ func TestArchiveConfigurationVersionWithIngress(t *testing.T) {
 	ing := f.attrs(t, ingPath, "ingress-attributes", "ia-1")
 	assert.Equal(t, "abc123", ing["commit-sha"])
 	assert.Equal(t, "main", ing["branch"])
+}
+
+// TestArchiveConfigurationVersionTarballClaimsOneDownload pins the claim over
+// the org-wide deduplicated tarball. A retried run reuses its predecessor's
+// configuration version and the two sit on the same newest-first page, so the
+// walk's distinct-path assumption does not hold here: without the claim every
+// run built from one configuration version streams its own duplicate copy and
+// they race to record an outcome over the single ledger entry, letting a slower
+// failure land on top of a completed download.
+func TestArchiveConfigurationVersionTarballClaimsOneDownload(t *testing.T) {
+	t.Parallel()
+
+	const tarball = "\x1f\x8b\x08 fake tar.gz bytes \x00\x01\x02"
+
+	cv := &tfe.ConfigurationVersion{ID: "cv-1", Status: tfe.ConfigurationUploaded}
+
+	var downloads atomic.Int64
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/configuration-versions/cv-1", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONAPI(t, w, marshalJSONAPI(t, cv))
+	})
+	mux.HandleFunc("/api/v2/configuration-versions/cv-1/download", func(w http.ResponseWriter, _ *http.Request) {
+		downloads.Add(1)
+
+		_, werr := io.WriteString(w, tarball)
+		if werr != nil {
+			return
+		}
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+	tarballPath := st.ConfigVersionTarball("cv-1")
+
+	var g errgroup.Group
+
+	settled := make([]bool, 16)
+
+	for i := range settled {
+		g.Go(func() error {
+			run := &tfe.Run{
+				ID:                   fmt.Sprintf("run-%d", i),
+				ConfigurationVersion: &tfe.ConfigurationVersion{ID: "cv-1"},
+			}
+
+			err := f.collector.ArchiveConfigurationVersion(t.Context(), "proj", "ws", run)
+			if err != nil {
+				return fmt.Errorf("archive configuration version: %w", err)
+			}
+
+			settled[i] = f.status(tarballPath) == manifest.StatusDone
+
+			return nil
+		})
+	}
+
+	require.NoError(t, g.Wait())
+
+	for i, ok := range settled {
+		assert.Truef(t, ok, "caller %d returned before the tarball settled", i)
+	}
+
+	assert.Equal(t, int64(1), downloads.Load(), "one claimant streams the tarball for every run")
+
+	got, err := os.ReadFile(st.AbsPath(tarballPath))
+	require.NoError(t, err)
+	assert.Equal(t, tarball, string(got), "the single stream lands byte-identical")
 }
 
 func TestArchiveConfigurationVersionVCSLess(t *testing.T) {

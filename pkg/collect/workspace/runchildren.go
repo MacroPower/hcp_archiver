@@ -80,9 +80,7 @@ func (c *Collector) archiveConfigurationVersion(ctx context.Context, project, ws
 
 	tarballPath := st.ConfigVersionTarball(cvID)
 
-	err = c.blob(ctx, tarballPath, func(ctx context.Context) (io.ReadCloser, error) {
-		return c.env.Client().OpenConfigurationVersion(ctx, cvID)
-	})
+	err = c.archiveConfigVersionTarball(ctx, tarballPath, cvID)
 	if err != nil {
 		return err
 	}
@@ -94,6 +92,29 @@ func (c *Collector) archiveConfigurationVersion(ctx context.Context, project, ws
 	c.env.Reference(st.RunFile(project, ws, run.ID, "config-version-tarball.ref"), tarballPath)
 
 	return nil
+}
+
+// archiveConfigVersionTarball streams the configuration version's tarball to
+// its org-wide deduplicated path.
+//
+// One tarball is addressed by every run built from this configuration version,
+// and a page of runs archives concurrently, so this is one of the few paths the
+// runs walk's distinct-path assumption does not cover: a retried run reuses its
+// predecessor's configuration version, and the two sit on the same newest-first
+// page. Every caller would pass ShouldFetch before any of them recorded, so each
+// would stream its own duplicate copy and they would race to record an outcome
+// over the one ledger entry, letting a slower duplicate's failure land on top of
+// a completed download. The write therefore goes through the run's claim
+// ([collect.Env.ArchiveShared]), which reduces that crowd to a single writer the
+// rest wait on.
+//
+//nolint:wrapcheck // The claim is transparent; blob wraps with the path context.
+func (c *Collector) archiveConfigVersionTarball(ctx context.Context, tarballPath, cvID string) error {
+	return c.env.ArchiveShared(ctx, tarballPath, func(ctx context.Context) error {
+		return c.blob(ctx, tarballPath, func(ctx context.Context) (io.ReadCloser, error) {
+			return c.env.Client().OpenConfigurationVersion(ctx, cvID)
+		})
+	})
 }
 
 // archiveConfigVersionRecord reads the configuration version once, only while
