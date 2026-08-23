@@ -523,6 +523,44 @@ func TestExportStopsOnCancelBetweenStacks(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+// TestExportStopsOnCancelWithNoItems covers the organizations that launch no
+// per-item goroutine at all. The guard inside those goroutines is the only one
+// the render path used to carry, so with nothing to render there was nothing to
+// stop between and a canceled run reported a complete export.
+func TestExportStopsOnCancelWithNoItems(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]bool{
+		"an organization whose project holds no workspace and no stack": true,
+		"an organization holding no project at all":                     false,
+	}
+
+	for name, withProject := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			root := t.TempDir()
+			org := filepath.Join(root, "empty-org")
+
+			writeFile(t, org, "org.json",
+				`{"data":{"id":"org-3","type":"organizations","attributes":{"name":"empty-org"}}}`)
+
+			if withProject {
+				writeFile(t, org, "projects/default/project.json",
+					`{"data":{"id":"prj-3","type":"projects","attributes":{"name":"default"}}}`)
+			}
+
+			target := filepath.Join(t.TempDir(), "site")
+
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+
+			_, err := export.New(openFixture(t, root), target).Run(ctx)
+			require.ErrorIs(t, err, context.Canceled)
+		})
+	}
+}
+
 // recordingProgress records every hook call the export makes, keeping each
 // phase's totals and advances under the phase that was current when they
 // landed. Items render concurrently, so it guards itself and its callers

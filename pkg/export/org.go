@@ -239,6 +239,14 @@ func (e *Exporter) projectListings(org *view.Org, projects []string) ([]projectL
 //
 //nolint:contextcheck // Mirror read-throughs run under the archive's stored browse context (see view.WithContext).
 func (e *Exporter) renderOrg(ctx context.Context, org *view.Org) error {
+	// The per-item goroutines below carry the only other cancellation check, and
+	// an organization with no workspaces and no stacks never launches one, so
+	// without this the run would ignore a cancellation and report success.
+	err := stopOnCancel(ctx)
+	if err != nil {
+		return err
+	}
+
 	// The scan is its own phase: it must finish before any unit count exists,
 	// so without one the whole listing of a large organization would sit under
 	// an unnamed, unsized view.
@@ -473,7 +481,14 @@ func (e *Exporter) writeProjectsIndex(org *view.Org, listings []projectListing) 
 //
 //nolint:contextcheck // Mirror read-throughs run under the archive's stored browse context (see view.WithContext).
 func (e *Exporter) renderProject(ctx context.Context, org *view.Org, listing projectListing) error {
-	err := e.writeProjectIndex(org, listing)
+	// A project holding neither a workspace nor a stack launches no goroutine
+	// below, so this is the only place its cancellation is observed.
+	err := stopOnCancel(ctx)
+	if err != nil {
+		return err
+	}
+
+	err = e.writeProjectIndex(org, listing)
 	if err != nil {
 		return err
 	}
