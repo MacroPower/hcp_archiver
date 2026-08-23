@@ -29,11 +29,14 @@ rules:
       - collect
       - config
       - deps
+      - export
       - fsid
       - history
       - logtest
       - manifest
+      - namefilter
       - orgscope
+      - pathkit
       - progress
       - registry
       - remote
@@ -43,6 +46,7 @@ rules:
       - store
       - tfeclient
       - theme
+      - view
       - workspace
   header-max-length:
     - 2
