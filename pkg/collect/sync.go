@@ -900,8 +900,15 @@ func (e *Env) aliasedInventoryLookup(
 // breadth-first order, excluding relPath itself. The rewrites compose:
 // stacked renames (a project rename above a workspace rename) minted keys
 // only the combination of both old names spells, which no single
-// substitution reaches. The seen set bounds the walk, so composition
-// terminates on any alias topology.
+// substitution reaches.
+//
+// One round per alias bounds the walk, which is the semantic bound as much as
+// the safe one: no genuine historical key spells the same rename alias twice,
+// so a rename stacked over N aliases is reachable within N rounds. The seen set
+// cannot do it alone. An alias nested beneath its own owner ([fsid.WalkFiles]
+// records that pair for a link to its own ancestor, a shape its contract
+// supports) re-exposes the owner prefix in every substitution's result, minting
+// a strictly longer, never-before-seen candidate each pass and never repeating.
 func aliasRewrites(aliases map[string]string, relPath string) []string {
 	sortedAliases := slices.Sorted(maps.Keys(aliases))
 	seen := map[string]struct{}{relPath: {}}
@@ -909,24 +916,26 @@ func aliasRewrites(aliases map[string]string, relPath string) []string {
 
 	var out []string
 
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
+	for round := 0; round < len(sortedAliases) && len(queue) > 0; round++ {
+		level := queue
+		queue = nil
 
-		for _, alias := range sortedAliases {
-			rest, ok := strings.CutPrefix(cur, aliases[alias]+"/")
-			if !ok {
-				continue
+		for _, cur := range level {
+			for _, alias := range sortedAliases {
+				rest, ok := strings.CutPrefix(cur, aliases[alias]+"/")
+				if !ok {
+					continue
+				}
+
+				candidate := alias + "/" + rest
+				if _, dup := seen[candidate]; dup {
+					continue
+				}
+
+				seen[candidate] = struct{}{}
+				out = append(out, candidate)
+				queue = append(queue, candidate)
 			}
-
-			candidate := alias + "/" + rest
-			if _, dup := seen[candidate]; dup {
-				continue
-			}
-
-			seen[candidate] = struct{}{}
-			out = append(out, candidate)
-			queue = append(queue, candidate)
 		}
 	}
 
