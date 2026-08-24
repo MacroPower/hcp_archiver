@@ -241,7 +241,7 @@ func TestCountEntriesFoldsEvictionStubs(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, orgs, 1)
 
-	assert.Equal(t, 1, export.CountEntries(orgs[0], "config-versions"),
+	assert.Equal(t, 1, export.CountEntries(orgs[0], "config-versions", 0),
 		"the stub folds onto the object it stands in for")
 }
 
@@ -264,7 +264,65 @@ func TestCountEntriesExcludesMachinery(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, orgs, 1)
 
-	assert.Equal(t, 1, export.CountEntries(orgs[0], "users"))
+	assert.Equal(t, 1, export.CountEntries(orgs[0], "users", 0))
+}
+
+// TestExportOrgIndexCountsNestedRegistryObjects pins the inventory counts for
+// the registry categories. Their objects sit several directory levels below
+// the category, because the store gives each identity segment its own level,
+// so counting the category's own children reports registry names and
+// namespaces instead of objects.
+func TestExportOrgIndexCountsNestedRegistryObjects(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	org := filepath.Join(root, "my-org")
+
+	writeFile(t, org, "org.json",
+		`{"data":{"id":"org-1","type":"organizations","attributes":{"name":"my-org"}}}`)
+
+	for _, rel := range []string{
+		// Four modules: two providers under one name, a second name beside
+		// them, and a curated public module. The commits and per-version files
+		// belong to the module whose directory holds them and are not objects
+		// of their own.
+		"registry/modules/private/acme/net/aws/module.json",
+		"registry/modules/private/acme/net/aws/commits.json",
+		"registry/modules/private/acme/net/aws/version-1.0.0.json",
+		"registry/modules/private/acme/net/google/module.json",
+		"registry/modules/private/acme/db/aws/module.json",
+		"registry/modules/public/hashicorp/consul/aws/module.json",
+
+		// Three providers, one of them curated from the public registry.
+		"registry/providers/private/acme/mycloud/provider.json",
+		"registry/providers/private/acme/mycloud/version-2.0.0.json",
+		"registry/providers/private/acme/other/provider.json",
+		"registry/providers/public/hashicorp/aws/provider.json",
+
+		// Three signing keys across two namespaces.
+		"registry/gpg-keys/acme/key-1.json",
+		"registry/gpg-keys/acme/key-2.json",
+		"registry/gpg-keys/other/key-3.json",
+
+		// A flat registry category beside the nested ones, counted by its own
+		// children.
+		"registry/no-code-modules/nocode-1.json",
+	} {
+		writeFile(t, org, rel, `{}`)
+	}
+
+	target := filepath.Join(t.TempDir(), "site")
+
+	_, err := export.New(openFixture(t, root), target).Run(t.Context())
+	require.NoError(t, err)
+
+	index := readTree(t, target)["my-org/index.md"]
+	require.NotEmpty(t, index)
+
+	assert.Contains(t, index, "| Registry modules | 4 |")
+	assert.Contains(t, index, "| Registry providers | 3 |")
+	assert.Contains(t, index, "| Registry GPG keys | 3 |")
+	assert.Contains(t, index, "| Registry no-code modules | 1 |")
 }
 
 func TestExportTree(t *testing.T) {

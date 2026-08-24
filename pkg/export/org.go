@@ -73,16 +73,35 @@ func subdirNames(org *view.Org, rel string) []string {
 }
 
 // countEntries counts the archived objects under an org-relative directory,
-// answering zero when it is absent. [*view.Org.Entries] already hides the
-// archive's bookkeeping and folds each eviction stub onto the object it
-// stands in for, so every child counts once.
-func countEntries(org *view.Org, rel string) int {
+// answering zero when it is absent.
+//
+// A category whose objects sit at a fixed nesting below that directory (a
+// registry module is keyed by registry name, namespace, name, and provider,
+// each its own path level) passes the number of levels to descend first;
+// depth zero counts the directory's own children. Descending only through
+// directories keeps a stray file at an intermediate level from counting as an
+// object. [*view.Org.Entries] already hides the archive's bookkeeping and
+// folds each eviction stub onto the object it stands in for, so every object
+// counts once.
+func countEntries(org *view.Org, rel string, depth int) int {
 	entries, err := org.Entries(rel)
 	if err != nil {
 		return 0
 	}
 
-	return len(entries)
+	if depth == 0 {
+		return len(entries)
+	}
+
+	total := 0
+
+	for _, e := range entries {
+		if e.Dir {
+			total += countEntries(org, path.Join(rel, e.Name), depth-1)
+		}
+	}
+
+	return total
 }
 
 // fmtTime renders a timestamp in the archive's shared layout, empty when
@@ -182,15 +201,25 @@ var (
 	// directories counted by entry, then the single-list files counted by
 	// decoded resource. Audit trails (configuration plus page files) carry no
 	// meaningful entry count and are omitted.
-	orgInventoryDirs = []struct{ label, dir string }{
-		{"Users", "users"},
-		{"Agent pools", "agent-pools"},
-		{"OAuth clients", "oauth-clients"},
-		{"Configuration versions", "config-versions"},
-		{"Registry modules", "registry/modules"},
-		{"Registry no-code modules", "registry/no-code-modules"},
-		{"Registry providers", "registry/providers"},
-		{"Registry GPG keys", "registry/gpg-keys"},
+	//
+	// Each depth is how many directory levels separate the category from its
+	// objects, zero where the objects are the directory's own children. The
+	// registry categories nest because the API keys their identity on several
+	// segments that may each contain hyphens, so [*store.Store] gives every
+	// segment its own level (see [*store.Store.RegistryModuleFile]).
+	orgInventoryDirs = []struct {
+		label string
+		dir   string
+		depth int
+	}{
+		{label: "Users", dir: "users"},
+		{label: "Agent pools", dir: "agent-pools"},
+		{label: "OAuth clients", dir: "oauth-clients"},
+		{label: "Configuration versions", dir: "config-versions"},
+		{label: "Registry modules", dir: "registry/modules", depth: 3},
+		{label: "Registry no-code modules", dir: "registry/no-code-modules"},
+		{label: "Registry providers", dir: "registry/providers", depth: 2},
+		{label: "Registry GPG keys", dir: "registry/gpg-keys", depth: 1},
 	}
 
 	orgInventoryFiles = []struct{ label, file string }{
@@ -349,7 +378,7 @@ func (e *Exporter) writeOrgIndex(org *view.Org, projectCount int, sectionIDs [][
 	}
 
 	for _, cat := range orgInventoryDirs {
-		if n := countEntries(org, cat.dir); n > 0 {
+		if n := countEntries(org, cat.dir, cat.depth); n > 0 {
 			pageCtx.Inventory = append(pageCtx.Inventory, InventoryEntry{Label: cat.label, Count: n})
 		}
 	}
