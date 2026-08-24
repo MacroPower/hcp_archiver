@@ -157,6 +157,17 @@ func (c *Client) Download(ctx context.Context, key string, size int64, w io.Writ
 				return nil
 			}
 
+			// The same holds against the pinned version's own length when the
+			// caller-passed size overshoots it (a stale size cached across a
+			// foreign overwrite): the transfer has delivered every byte the
+			// version holds, and the range past its end would 416 through the
+			// whole retry budget. Ending here serves the short-object contract:
+			// the delivered count returns with a nil error, and the caller's
+			// length or digest check is the judge of the shortfall.
+			if n > 0 && n >= served.size {
+				return nil
+			}
+
 			r, err := c.bucket.NewRangeReader(ctx, key, n, size-n, nil)
 			if err != nil {
 				return err //nolint:wrapcheck // Wrapped uniformly below.

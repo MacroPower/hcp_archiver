@@ -88,6 +88,31 @@ func TestDownloadBodyFailsAfterLastByte(t *testing.T) {
 	assert.Len(t, fake.Ranges(), 1, "nothing is left to re-request")
 }
 
+func TestDownloadStaleSizeBodyFailsAfterTrueEnd(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newRetryClient(t, 3)
+	fake.SetObject("cv-1.tar.gz", remotetest.Object{Data: tarball})
+
+	// The caller holds a stale size for an object a foreign overwrite has since
+	// shortened, and the body dies after delivering every byte the object
+	// actually holds. Resuming against the caller's size would ask for a range
+	// past the true end, a 416 that would burn the whole retry budget; the
+	// pinned version's own length says the transfer is complete, and the
+	// short-serve contract hands the caller the count to judge.
+	fake.RangeBodyErr = errors.New("connection reset")
+	fake.RangeBodyErrAfter = int64(len(tarball))
+	fake.RangeBodyErrN = 1
+
+	var got bytes.Buffer
+
+	n, err := client.Download(t.Context(), "cv-1.tar.gz", int64(len(tarball))+200, &got)
+	require.NoError(t, err)
+	assert.EqualValues(t, len(tarball), n)
+	assert.Equal(t, tarball, got.Bytes())
+	assert.Len(t, fake.Ranges(), 1, "nothing is left to re-request")
+}
+
 func TestDownloadResumesMidBodyFailure(t *testing.T) {
 	t.Parallel()
 
