@@ -366,6 +366,51 @@ func TestSeal_BestEffortRemovalToleratesUnremovableSource(t *testing.T) {
 	require.NoError(t, statErr, "the source that could not be removed is kept")
 }
 
+func TestSeal_SidecarRefusalDiscardsBundle(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles", "logs.gen0001.zip")
+
+	// A directory squatting on the sidecar path refuses the sidecar's commit
+	// after the bundle itself has landed, the soft-failure half of what leaves a
+	// sidecar-less orphan.
+	require.NoError(t, os.MkdirAll(bundlePath+seal.SidecarSuffix, 0o700))
+
+	src := writeSource(t, dir, "plan.log", []byte("plan output"))
+
+	_, err := seal.Seal(bundlePath, []seal.Member{{Name: "runs/r1/plan.log", Source: src, Compress: true}})
+	require.Error(t, err)
+
+	// The committed zip is discarded with the seal unfinished, so a soft
+	// failure strands no orphan; only a hard crash can.
+	_, statErr := os.Stat(bundlePath)
+	assert.True(t, os.IsNotExist(statErr), "a seal that could not commit its sidecar leaves no orphan zip")
+
+	_, srcErr := os.Stat(src)
+	require.NoError(t, srcErr, "the loose source stays canonical")
+}
+
+func TestMemberNames(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "logs.gen0001.zip")
+
+	a := writeSource(t, dir, "a.log", []byte("aa"))
+	b := writeSource(t, dir, "b.log", []byte("bb"))
+
+	_, err := seal.Seal(bundlePath, []seal.Member{
+		{Name: "runs/r1/a.log", Source: a, Compress: true},
+		{Name: "runs/r1/b.log", Source: b, Compress: true},
+	})
+	require.NoError(t, err)
+
+	names, err := seal.MemberNames(bundlePath)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"runs/r1/a.log", "runs/r1/b.log"}, names)
+}
+
 // removeRefusal captures one refused source removal handed to the
 // [seal.WithRemoveFailureHandler] under test.
 type removeRefusal struct {

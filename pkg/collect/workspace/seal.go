@@ -121,6 +121,11 @@ func (c *Collector) SealWorkspace(ctx context.Context, project, ws string) error
 		return err
 	}
 
+	err = c.sweepOrphanBundles(ctx, project, ws)
+	if err != nil {
+		return err
+	}
+
 	err = c.coalesce(ctx, project, ws, metadata)
 	if err != nil {
 		return err
@@ -582,6 +587,135 @@ func (c *Collector) sealedDigests(bundlesDir, prefix string) (map[string]string,
 	}
 
 	return out, nil
+}
+
+// sweepOrphanBundles reclaims the workspace's sidecar-less zips whose bytes
+// are proven to live elsewhere, under each bundle prefix in turn.
+//
+// A zip without its sidecar is either the residue of a seal that did not
+// finish (its loose sources re-sealed into a later generation, so its bytes
+// are held twice) or a verified bundle whose sidecar was lost (its bytes may
+// be held nowhere else). Left alone, the first kind occupies disk permanently
+// and raises nextGeneration forever; deleted blindly, the second kind is a
+// loss. [Collector.reclaimOrphan] tells them apart by proof, so the sweep
+// only ever removes the first kind.
+func (c *Collector) sweepOrphanBundles(ctx context.Context, project, ws string) error {
+	st := c.env.Store()
+	bundlesRel := st.BundleDir(project, ws)
+	bundlesDir := st.AbsPath(bundlesRel)
+
+	for _, prefix := range []string{"logs", "state"} {
+		err := c.sweepOrphanPrefix(ctx, bundlesDir, bundlesRel, prefix)
+		if err != nil {
+			return fmt.Errorf("sweep orphan %s bundles: %w", prefix, err)
+		}
+	}
+
+	return nil
+}
+
+// sweepOrphanPrefix finds the sidecar-less zips under one bundle prefix and
+// hands each to [Collector.reclaimOrphan] against the prefix's surviving
+// sidecar digests.
+func (c *Collector) sweepOrphanPrefix(ctx context.Context, bundlesDir, bundlesRel, prefix string) error {
+	zips, err := listNames(bundlesDir, func(e fs.DirEntry) bool {
+		return !e.IsDir() && strings.HasSuffix(e.Name(), ".zip") && parseGeneration(e.Name(), prefix) > 0
+	})
+	if err != nil {
+		return fmt.Errorf("list %s bundles: %w", prefix, err)
+	}
+
+	var orphans []string
+
+	for _, name := range zips {
+		_, statErr := os.Stat(filepath.Join(bundlesDir, name+seal.SidecarSuffix))
+
+		switch {
+		case errors.Is(statErr, fs.ErrNotExist):
+			orphans = append(orphans, name)
+		case statErr != nil:
+			return fmt.Errorf("stat sidecar for %q: %w", name, statErr)
+		}
+	}
+
+	if len(orphans) == 0 {
+		return nil
+	}
+
+	sealed, err := c.sealedDigests(bundlesDir, prefix)
+	if err != nil {
+		return err
+	}
+
+	slices.Sort(orphans)
+
+	for _, name := range orphans {
+		c.reclaimOrphan(ctx, filepath.Join(bundlesDir, name), c.env.Store().Join(bundlesRel, name), sealed)
+	}
+
+	return nil
+}
+
+// reclaimOrphan removes one sidecar-less zip once every member it holds is
+// proven redundant: recorded by a surviving sidecar and hashing to the
+// recorded digest, so a verified, sidecar-backed generation holds the same
+// bytes. Everything else is kept and reported: a zip that cannot be read, a
+// member no sidecar records (the partially restored verified bundle the
+// nextGeneration doc protects, whose bytes may exist nowhere else), and a
+// member whose bytes diverge from the record. A keep or a refused removal is
+// a warning, never a seal failure, so a strange zip parks harmlessly exactly
+// as it always has, but no longer silently.
+func (c *Collector) reclaimOrphan(ctx context.Context, orphanPath, relPath string, sealed map[string]string) {
+	keep := func(reason string) {
+		c.env.Log().LogAttrs(ctx, slog.LevelWarn, "seal_orphan_bundle_kept",
+			slog.String("path", relPath),
+			slog.String("reason", reason),
+		)
+	}
+
+	names, err := seal.MemberNames(orphanPath)
+	if err != nil {
+		keep("the zip cannot be read: " + err.Error())
+
+		return
+	}
+
+	if len(names) == 0 {
+		keep("the zip holds no members a sidecar could prove")
+
+		return
+	}
+
+	entries := make([]seal.Entry, 0, len(names))
+
+	for _, name := range names {
+		digest, recorded := sealed[name]
+		if !recorded {
+			keep("member " + name + " is recorded by no surviving sidecar")
+
+			return
+		}
+
+		entries = append(entries, seal.Entry{Name: name, SHA256: digest})
+	}
+
+	err = seal.Verify(orphanPath, entries)
+	if err != nil {
+		keep("a member diverges from the recorded digest: " + err.Error())
+
+		return
+	}
+
+	err = os.Remove(orphanPath)
+	if err != nil {
+		keep("the removal was refused: " + err.Error())
+
+		return
+	}
+
+	c.env.Log().LogAttrs(ctx, slog.LevelInfo, "seal_orphan_bundle_swept",
+		slog.String("path", relPath),
+	)
 }
 
 // coalesce folds each roll-up's frozen members into its NDJSON file, a no-op when

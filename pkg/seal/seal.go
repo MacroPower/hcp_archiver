@@ -231,17 +231,32 @@ func Seal(bundlePath string, members []Member, opts ...Option) ([]Entry, error) 
 
 	err = Verify(bundlePath, entries)
 	if err != nil {
+		discardBundle(bundlePath)
+
 		return nil, err
 	}
 
 	err = writeSidecar(bundlePath+SidecarSuffix, entries)
 	if err != nil {
+		discardBundle(bundlePath)
+
 		return nil, err
 	}
 
 	removeSources(members, resolveConfig(opts...))
 
 	return entries, nil
+}
+
+// discardBundle removes a committed bundle whose seal did not finish (a
+// read-back that would not verify, a sidecar that would not commit), so a soft
+// failure leaves no sidecar-less orphan behind; the loose sources are still
+// canonical either way and the next run re-seals them. Removal is best-effort:
+// a survivor is indistinguishable from the orphan a hard crash leaves, and the
+// caller's orphan sweep reclaims either once its content is sealed durably.
+func discardBundle(bundlePath string) {
+	//nolint:errcheck // Best-effort; a survivor is reclaimed by the orphan sweep.
+	_ = os.Remove(bundlePath)
 }
 
 // removeSources removes each member's loose source best-effort, the shared
@@ -390,6 +405,30 @@ func writeSidecar(path string, entries []Entry) error {
 	}
 
 	return nil
+}
+
+// MemberNames lists the member paths packed in the bundle at bundlePath, in
+// the zip's own order. It answers the question an orphan sweep asks of a
+// sidecar-less zip: which names must a surviving sidecar record, digest
+// verified through [Verify], before every byte the zip holds is proven to
+// live in a sealed generation and the zip is safe to reclaim.
+func MemberNames(bundlePath string) ([]string, error) {
+	zr, err := zip.OpenReader(bundlePath)
+	if err != nil {
+		return nil, fmt.Errorf("open bundle %q: %w", bundlePath, err)
+	}
+
+	defer func() {
+		//nolint:errcheck // Read-only handle; a close failure cannot lose data.
+		_ = zr.Close()
+	}()
+
+	names := make([]string, 0, len(zr.File))
+	for _, f := range zr.File {
+		names = append(names, f.Name)
+	}
+
+	return names, nil
 }
 
 // Verify re-opens the bundle at bundlePath and confirms every member reads

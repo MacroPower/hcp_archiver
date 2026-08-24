@@ -1,6 +1,7 @@
 package workspace_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -691,6 +692,121 @@ func TestSealWorkspace_RunJSONResealAppendsNewerLine(t *testing.T) {
 	assert.Equal(t, string(runJSON("force_canceled")), lines[1],
 		"the newest line carries the updated content")
 	assert.False(t, f.exists(relPath))
+}
+
+// writeOrphanZip crafts a valid zip holding members (name to content) at an
+// archive-relative path with no sidecar beside it, modeling the residue of a
+// seal a crash cut short.
+func writeOrphanZip(t *testing.T, st *store.Store, relPath string, members map[string]string) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	zw := zip.NewWriter(&buf)
+
+	for name, content := range members {
+		w, err := zw.Create(name)
+		require.NoError(t, err)
+
+		_, err = w.Write([]byte(content))
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, zw.Close())
+
+	_, err := st.WriteBytes(relPath, buf.Bytes())
+	require.NoError(t, err)
+}
+
+func TestSealWorkspace_SweepsOrphanCoveredBySidecars(t *testing.T) {
+	t.Parallel()
+
+	rec := logtest.NewRecorder()
+	f := newSealFixtureLogged(t, rec)
+	st := f.store
+	project, ws := "prod", "api"
+
+	f.writeDone(t, st.RunFile(project, ws, "run-1", "plan.log"), []byte("plan output"))
+	f.markComplete(project, ws)
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	// A crash orphan whose loose sources later re-sealed: its every member is
+	// recorded, digest for digest, by the surviving gen0001 sidecar, so its
+	// bytes are held twice and the zip is safe to reclaim. Model it by copying
+	// the sealed zip to a sidecar-less generation.
+	sealedZip := st.Join(st.BundleDir(project, ws), "logs.gen0001.zip")
+	orphanZip := st.Join(st.BundleDir(project, ws), "logs.gen0002.zip")
+
+	data, err := os.ReadFile(st.AbsPath(sealedZip))
+	require.NoError(t, err)
+
+	_, err = st.WriteBytes(orphanZip, data)
+	require.NoError(t, err)
+
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	assert.False(t, f.exists(orphanZip), "an orphan proven redundant is reclaimed")
+	assert.True(t, f.exists(sealedZip), "the sidecar-backed generation is untouched")
+	assert.True(t, f.exists(sealedZip+seal.SidecarSuffix))
+
+	events := rec.Events("seal_orphan_bundle_swept")
+	require.Len(t, events, 1)
+	assert.Equal(t, orphanZip, events[0].Attrs["path"])
+}
+
+func TestSealWorkspace_KeepsOrphanItCannotProve(t *testing.T) {
+	t.Parallel()
+
+	planLog := "projects/prod/workspaces/api/runs/run-1/plan.log"
+
+	tests := map[string]struct {
+		sealFirst bool              // seal a settled plan.log before planting the orphan
+		members   map[string]string // the orphan zip's contents
+		reason    string
+	}{
+		"a member no surviving sidecar records": {
+			sealFirst: false,
+			members:   map[string]string{planLog: "plan output"},
+			reason:    "recorded by no surviving sidecar",
+		},
+		"a member diverging from the recorded digest": {
+			sealFirst: true,
+			members:   map[string]string{planLog: "different bytes"},
+			reason:    "diverges from the recorded digest",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := logtest.NewRecorder()
+			f := newSealFixtureLogged(t, rec)
+			st := f.store
+			project, ws := "prod", "api"
+
+			if tc.sealFirst {
+				f.writeDone(t, planLog, []byte("plan output"))
+				f.markComplete(project, ws)
+				require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+			}
+
+			// A sidecar-less zip whose bytes are not proven to live in any
+			// sealed generation may be the archive's only copy (a verified
+			// bundle whose sidecar was lost): it must survive the sweep.
+			orphanZip := st.Join(st.BundleDir(project, ws), "logs.gen0009.zip")
+			writeOrphanZip(t, st, orphanZip, tc.members)
+
+			require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+			assert.True(t, f.exists(orphanZip), "an unproven orphan is never removed")
+
+			events := rec.Events("seal_orphan_bundle_kept")
+			require.Len(t, events, 1, "the kept orphan is reported")
+			assert.Equal(t, orphanZip, events[0].Attrs["path"])
+			assert.Contains(t, events[0].Attrs["reason"], tc.reason)
+		})
+	}
 }
 
 // writeSidecar commits the sidecar index of one sealed generation of prefix,
