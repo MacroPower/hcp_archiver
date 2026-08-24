@@ -760,13 +760,16 @@ func (o *Org) AbsPath(relPath string) string {
 	return pathkit.ConfineJoin(o.root, relPath)
 }
 
-// ReadFile reads a loose file at an archive-relative path. A file absent
-// locally is fetched from the organization's mirror when it has one,
-// persisting at the same path, so the next read is local.
+// ReadFile reads the file at an archive-relative path. A file absent locally
+// is fetched from the organization's mirror when it has one, persisting at
+// the same path, so the next read is local.
 //
-// It suits the organization- and project-level objects, which are never
-// sealed; workspace-scoped objects go through [*Workspace.Open], which also
-// searches the sealed forms.
+// A workspace-scoped path is routed through its workspace's [*Workspace.Open]
+// rather than read loose, so the sealed forms answer before the mirror does.
+// Reading such a path loose would re-materialize, from a stale mirror key, an
+// artifact the seal deleted (the seal removes the loose source while the
+// close sweep has not yet pruned its mirror copy), stranding a loose file in
+// the live archive tree for the next run's seal to reconcile and warn about.
 //
 // The path is validated exactly as [*Org.Read] validates it: one carrying
 // ".." or absolute segments is refused with [ErrInvalidPath] rather than
@@ -776,6 +779,10 @@ func (o *Org) ReadFile(relPath string) ([]byte, error) {
 	rel, err := cleanRel(relPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if ws := o.workspaceFor(rel); ws != nil {
+		return ws.Open(rel)
 	}
 
 	data, err := os.ReadFile(o.AbsPath(rel))

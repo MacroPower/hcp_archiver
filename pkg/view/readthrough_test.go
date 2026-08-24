@@ -344,6 +344,37 @@ func TestReadFile_ReadThroughPersistsAndStaysLocal(t *testing.T) {
 	assert.Equal(t, heads, fake.HeadCalls(), "the second read is served from disk")
 }
 
+func TestReadFile_SealedArtifactServedFromBundleNotMirror(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+	fake := remotetest.New()
+	mirrorArchive(t, root, fake)
+
+	// The stale loose key an interrupted run leaves behind: the seal removed
+	// the loose plan.log locally, but the mirror still holds the pre-seal copy
+	// until a later run's close sweep prunes it.
+	fake.SetObject(viewPrefix+"/my-org/"+wsDir+"/runs/run-new/plan.log", remotetest.Object{
+		Data: []byte("stale loose copy"),
+	})
+
+	orgs := openSupplied(t, root, fake)
+
+	// The generic file browser reads through Org.ReadFile with no workspace in
+	// hand. The sealed bundle must answer before the mirror, and nothing may
+	// be written into the live archive tree: a re-materialized loose file
+	// would be a stranded source for the next run's seal to reconcile and
+	// warn about, on every incremental backup an active viewer touches.
+	data, err := orgs[0].ReadFile(wsDir + "/runs/run-new/plan.log")
+	require.NoError(t, err)
+	assert.Equal(t, "plan output line\n", string(data),
+		"the sealed bundle answers, not the stale mirror key")
+
+	assert.NoFileExists(t,
+		filepath.Join(root, "my-org", filepath.FromSlash(wsDir), "runs", "run-new", "plan.log"),
+		"nothing is re-materialized into the live archive tree")
+}
+
 func TestReadFile_TraversalRefused(t *testing.T) {
 	t.Parallel()
 
