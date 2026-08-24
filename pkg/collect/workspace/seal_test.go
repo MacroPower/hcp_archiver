@@ -432,6 +432,46 @@ func TestSealWorkspace_RefusedSourceRemovalIsReported(t *testing.T) {
 	assert.True(t, f.exists(planLog), "the refused removal leaves the source for the next run")
 }
 
+func TestSealWorkspace_OtherSealsRunWhenLogsBundleFails(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a 0o000 source, so the logs seal cannot be made to fail")
+	}
+
+	f := newSealFixture(t)
+	st := f.store
+	project, ws := "prod", "api"
+
+	planLog := st.RunFile(project, ws, "run-1", "plan.log")
+	summaryPath := st.RunFile(project, ws, "run-1", "plan-summary.json")
+	stateBlob := st.Join(st.StateVersionDir(project, ws), "20260101T000000Z-sv-1.tfstate.json")
+
+	f.writeDone(t, planLog, []byte("plan output"))
+	f.writeDone(t, summaryPath, []byte(`{"plan":"plan-1"}`))
+	f.writeDone(t, stateBlob, []byte(`{"serial":1}`))
+	f.markComplete(project, ws)
+
+	// An unreadable heavy source fails the logs bundle; the state bundle and
+	// the coalesce are independent and must still run rather than have their
+	// own outcomes (a sealed blob, a stranded-source warning) silenced.
+	require.NoError(t, os.Chmod(st.AbsPath(planLog), 0o000))
+
+	t.Cleanup(func() {
+		//nolint:errcheck // Restores the mode so the temp dir can be torn down.
+		_ = os.Chmod(st.AbsPath(planLog), 0o600)
+	})
+
+	err := f.collector.SealWorkspace(t.Context(), project, ws)
+	require.ErrorContains(t, err, "seal logs bundle")
+
+	assert.True(t, f.exists(st.Join(st.BundleDir(project, ws), "state.gen0001.zip")),
+		"the state bundle seals despite the logs failure")
+	assert.False(t, f.exists(stateBlob), "the sealed state source is removed")
+	assert.Len(t, rollupLines(t, f.store, project, ws, "plan-summaries.ndjson", summaryPath), 1,
+		"the metadata coalesce runs despite the logs failure")
+}
+
 func TestSealWorkspace_ResealWithChangedContentSealsNewGeneration(t *testing.T) {
 	t.Parallel()
 

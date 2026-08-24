@@ -111,22 +111,22 @@ func (c *Collector) SealWorkspace(ctx context.Context, project, ws string) error
 		return fmt.Errorf("gather frozen metadata: %w", err)
 	}
 
-	err = c.sealBundle(ctx, project, ws, "logs", logs)
-	if err != nil {
-		return err
-	}
-
-	err = c.sealBundle(ctx, project, ws, "state", states)
+	// The three sealing motions are independent: each reads its own frozen set
+	// and commits its own form, and each is safe to interrupt on its own. So
+	// one failure must not short-circuit the others, which would silence their
+	// reports run after run: a failing logs bundle would hide a stranded state
+	// blob that meets every warning condition. Run all three and join what
+	// refused; the sweeps below still require every seal to have landed.
+	err = errors.Join(
+		c.sealBundle(ctx, project, ws, "logs", logs),
+		c.sealBundle(ctx, project, ws, "state", states),
+		c.coalesce(ctx, project, ws, metadata),
+	)
 	if err != nil {
 		return err
 	}
 
 	err = c.sweepOrphanBundles(ctx, project, ws)
-	if err != nil {
-		return err
-	}
-
-	err = c.coalesce(ctx, project, ws, metadata)
 	if err != nil {
 		return err
 	}
