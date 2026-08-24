@@ -1,11 +1,15 @@
 package restore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -16,11 +20,18 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/pkg/collect"
 	"go.jacobcolvin.com/hcp_archiver/pkg/pathkit"
 	"go.jacobcolvin.com/hcp_archiver/pkg/remote"
+	"go.jacobcolvin.com/hcp_archiver/pkg/serialize"
+	"go.jacobcolvin.com/hcp_archiver/pkg/store"
 )
 
 // progressInterval is how many settled entries pass between pull_progress
 // events, matching the sweep's own cadence.
 const progressInterval = 1000
+
+// errStubConflict reports a valid local stub contradicting the mirrored
+// object it records; the conflict emits its own event, so the stub tally
+// counts it without a second generic warning.
+var errStubConflict = errors.New("the recorded stub contradicts the mirrored object")
 
 // Restorer restores one organization's warm layer from its mirror. Create
 // instances with [NewRestorer].
@@ -99,6 +110,10 @@ type Failure struct {
 type Summary struct {
 	// Failures names each path that failed, in the order the failures landed.
 	Failures []Failure
+	// Leftovers names the mirrored keys nothing in the restored tree
+	// accounts for; while any stand, a marker not already complete settles
+	// partial.
+	Leftovers []string
 	// Restored counts the files written and verified.
 	Restored int
 	// Skipped counts the files already verified identical locally.
@@ -107,8 +122,18 @@ type Summary struct {
 	Failed int
 	// Refused counts the conflicts the restore declined to touch.
 	Refused int
+	// Stubs counts the eviction stubs written or verified against the
+	// mirror.
+	Stubs int
+	// StubsFailed counts the stubs that could not be ensured; they hold a
+	// marker not already complete at partial but never fail the restore.
+	StubsFailed int
 	// Bytes totals the restored files' sizes.
 	Bytes int64
+	// Complete reports that the settled marker records the tree as
+	// complete, whether this run proved the accounting or an earlier one
+	// did.
+	Complete bool
 }
 
 // incomplete reports whether the restored set is not fully on disk: any
@@ -127,11 +152,19 @@ func (s Summary) incomplete() bool {
 // before the first byte (while it stands, no run prunes the mirror and no
 // archiver opens the tree), every data file lands and verifies before any
 // ledger snapshot does (so the tree never holds ledger entries describing
-// absent files), and the marker is rewritten to its final form only when
-// every entry in the set is present and verified. A plan that changes
-// nothing writes nothing, except that a leftover restoring marker from an
-// interrupted run is still finalized, since the tree it guards is proven
-// whole.
+// absent files), the eviction stubs for the mirror's tarballs land after
+// both, and the marker settles last. It settles complete when the run
+// accounts for every mirrored key (each restorable object restored or
+// verified, each evicted tarball's stub ensured, each bundle zip's sidecar
+// present, no foreign keys), else partial with the unaccounted keys named;
+// a marker already recording complete is never demoted, though a run
+// interrupted after it stamped the restoring marker settles by proof alone
+// and may land partial, which only re-enables the mirror fallback. The
+// stub repair under a complete marker is best-effort: a failure is counted
+// and retried by the next run. A plan that changes nothing writes nothing,
+// except that a leftover restoring or partial marker is still settled,
+// which is also what promotes a restored tree whose stubs were never
+// backfilled.
 //
 // A per-file failure never aborts the run; it is counted, named in the
 // summary and the log, and leaves the marker standing for a re-run to
@@ -152,18 +185,18 @@ func (r *Restorer) Pull(ctx context.Context, orgRoot, org string, plan Plan) (Su
 
 	sum.Skipped = plan.Skipped
 
-	if plan.RestoreFiles == 0 {
-		err := r.finalizeLeftoverMarker(ctx, orgRoot, org, sum)
-		if err != nil {
-			return sum, err
-		}
-
-		r.logComplete(ctx, org, sum)
-
-		return sum, nil
+	// The pre-run marker is read before the restoring stamp overwrites it:
+	// it is the never-demote evidence, and the only record of it.
+	pre, hadPre, err := remote.ReadMarker(orgRoot)
+	if err != nil {
+		return sum, err //nolint:wrapcheck // The marker reader names the file and the fault.
 	}
 
-	err := r.writeMarker(orgRoot, r.cfg.RestoringMarker())
+	if plan.RestoreFiles == 0 {
+		return r.settleOnly(ctx, orgRoot, org, plan, sum, pre, hadPre)
+	}
+
+	err = r.writeMarker(orgRoot, r.cfg.RestoringMarker())
 	if err != nil {
 		return sum, fmt.Errorf("record restoring marker: %w", err)
 	}
@@ -189,10 +222,12 @@ func (r *Restorer) Pull(ctx context.Context, orgRoot, org string, plan Plan) (Su
 	}
 
 	if !sum.incomplete() && ctx.Err() == nil {
-		err = r.finalizeMarker(orgRoot)
-		if err != nil {
-			return sum, fmt.Errorf("finalize marker: %w", err)
-		}
+		r.ensureStubs(ctx, orgRoot, org, plan.Stubs, &sum)
+	}
+
+	err = r.settleMarker(ctx, orgRoot, org, plan, &sum, pre, hadPre)
+	if err != nil {
+		return sum, fmt.Errorf("settle marker: %w", err)
 	}
 
 	r.logComplete(ctx, org, sum)
@@ -332,56 +367,356 @@ func (r *Restorer) fetchVerified(ctx context.Context, orgRoot, org string, e Pla
 	return n, nil
 }
 
-// finalizeLeftoverMarker finalizes a restoring marker left by an interrupted
-// run whose work a re-run then found complete: the plan changed nothing, so
-// the tree is proven whole, and only the marker still says otherwise.
-// Leaving it would strand the archive behind the restore-in-progress
-// refusals forever. A tree with no marker, or a settled one, is left
-// untouched, which is what makes a re-run against a restored archive change
-// nothing at all.
-func (r *Restorer) finalizeLeftoverMarker(ctx context.Context, orgRoot, org string, sum Summary) error {
-	if sum.incomplete() {
+// settleOnly settles a run whose plan transfers nothing: the tree already
+// holds the restorable set, but stub backfill and marker promotion may
+// still be owed, especially on a restored tree whose marker records partial
+// and whose stubs are absent. A tree whose marker already records complete
+// needs only its missing stubs repaired (a complete marker's reads have no
+// mirror fallback, so a locally lost stub would strand its tarball; in the
+// steady state every stub is present and nothing is probed or written), and
+// a tree with no marker at all is left untouched, which is what makes a
+// re-run against a restored archive change nothing.
+func (r *Restorer) settleOnly(
+	ctx context.Context, orgRoot, org string, plan Plan, sum Summary,
+	pre remote.Marker, hadPre bool,
+) (Summary, error) {
+	switch {
+	case sum.incomplete() || ctx.Err() != nil || !hadPre:
+		// A refused plan leaves the marker carrying the incompleteness; an
+		// absent marker means nothing claimed the mirror stands in, and a
+		// settlement would invent that claim.
+
+	case preComplete(pre, hadPre):
+		if missing := missingStubs(plan.Stubs); len(missing) > 0 {
+			r.ensureStubs(ctx, orgRoot, org, missing, &sum)
+		}
+
+		sum.Complete = true
+		sum.Leftovers = plan.Leftovers
+
+		if len(plan.Leftovers) > 0 || sum.StubsFailed > 0 {
+			r.logMarkerLeftovers(ctx, org, plan, sum)
+		}
+
+	default:
+		r.ensureStubs(ctx, orgRoot, org, plan.Stubs, &sum)
+
+		err := r.settleMarker(ctx, orgRoot, org, plan, &sum, pre, hadPre)
+		if err != nil {
+			return sum, fmt.Errorf("settle marker: %w", err)
+		}
+	}
+
+	r.logComplete(ctx, org, sum)
+
+	//nolint:nilerr // An interrupt settles nothing and reports the tally, not an error.
+	return sum, nil
+}
+
+// logMarkerLeftovers warns that unaccounted keys or unensured stubs stand
+// under a marker that already records complete: the never-demote override
+// keeps the marker, and the next archiver run reconciles what the event
+// names.
+func (r *Restorer) logMarkerLeftovers(ctx context.Context, org string, plan Plan, sum Summary) {
+	r.logger.LogAttrs(ctx, slog.LevelWarn, "pull_marker_leftovers",
+		slog.String("org", org),
+		slog.Any("leftovers", plan.Leftovers),
+		slog.Int("stubs_failed", sum.StubsFailed),
+		slog.String("detail", "the marker already records complete; the next archiver run reconciles"),
+	)
+}
+
+// missingStubs filters a plan's stub work to the entries with no local stub
+// file, the only repair a complete marker still owes.
+func missingStubs(stubs []StubEntry) []StubEntry {
+	var missing []StubEntry
+
+	for _, e := range stubs {
+		if !e.Existing {
+			missing = append(missing, e)
+		}
+	}
+
+	return missing
+}
+
+// preComplete reports whether the pre-run marker already recorded the tree
+// as complete, the state settlement never demotes.
+func preComplete(pre remote.Marker, hadPre bool) bool {
+	return hadPre && !pre.Restoring && !pre.Partial && pre.URL != ""
+}
+
+// settleMarker rewrites the marker in its settled form once the restored set
+// is proven on disk: complete when the run accounts for every mirrored key
+// (each restorable object restored or verified, each evicted tarball's stub
+// ensured, each bundle zip's sidecar present, no foreign keys), else partial
+// with the unaccounted keys named in the log. A marker that already recorded
+// complete is never demoted; leftovers under one are the next archiver run's
+// business. An incomplete or interrupted run leaves the restoring marker
+// standing, exactly as an interrupted transfer does.
+func (r *Restorer) settleMarker(
+	ctx context.Context, orgRoot, org string, plan Plan, sum *Summary,
+	pre remote.Marker, hadPre bool,
+) error {
+	if sum.incomplete() || ctx.Err() != nil {
+		//nolint:nilerr // The restoring marker carries the incompleteness; nothing settles.
 		return nil
 	}
 
-	existing, ok, err := remote.ReadMarker(orgRoot)
-	if err != nil || !ok || !existing.Restoring {
-		return err //nolint:wrapcheck // The marker reader names the file and the fault.
+	sum.Leftovers = plan.Leftovers
+
+	proven := sum.StubsFailed == 0 && len(plan.Leftovers) == 0
+	wasComplete := preComplete(pre, hadPre)
+
+	marker := r.cfg.Marker()
+	marker.Partial = !proven && !wasComplete
+	sum.Complete = !marker.Partial
+
+	switch {
+	case proven:
+	case wasComplete:
+		r.logMarkerLeftovers(ctx, org, plan, *sum)
+
+	default:
+		r.logger.LogAttrs(ctx, slog.LevelWarn, "pull_marker_partial",
+			slog.String("org", org),
+			slog.Any("leftovers", plan.Leftovers),
+			slog.Int("stubs_failed", sum.StubsFailed),
+		)
 	}
 
-	err = r.finalizeMarker(orgRoot)
+	wrote, err := r.writeMarkerChanged(orgRoot, marker)
 	if err != nil {
-		return fmt.Errorf("finalize marker: %w", err)
+		return err
 	}
 
-	r.logger.LogAttrs(ctx, slog.LevelInfo, "pull_marker_finalized",
-		slog.String("org", org),
-		slog.String("detail", "an interrupted restore had already landed every file; its marker is settled"),
-	)
+	if wrote && sum.Complete {
+		r.logger.LogAttrs(ctx, slog.LevelInfo, "pull_marker_promoted",
+			slog.String("org", org),
+		)
+	}
 
 	return nil
 }
 
-// finalizeMarker rewrites the marker in its settled form: the steady-state
-// version with the partial flag, since the restored warm layer does not by
-// itself account for the mirror's evicted tarballs (their local stubs are
-// never mirrored); the next clean archive run backfills the stubs and
-// promotes the marker complete.
-func (r *Restorer) finalizeMarker(orgRoot string) error {
-	marker := r.cfg.Marker()
-	marker.Partial = true
+// ensureStubs materializes or verifies the eviction stub beside every
+// mirrored configuration-version tarball, from the mirror's own record of
+// it: one Head resolves the size and, when the upload recorded one, the
+// digest, the same synthesis the viewer's merged fallback performs. A stub
+// that cannot be ensured is a read-model gap, not a custody one: the run
+// warns, counts it, holds a marker not already complete at partial, and
+// never fails.
+func (r *Restorer) ensureStubs(ctx context.Context, orgRoot, org string, stubs []StubEntry, sum *Summary) {
+	var (
+		mu sync.Mutex
+		g  errgroup.Group
+	)
 
-	return r.writeMarker(orgRoot, marker)
+	g.SetLimit(r.concurrency)
+
+	for _, e := range stubs {
+		if ctx.Err() != nil {
+			break
+		}
+
+		g.Go(func() error {
+			wrote, err := r.ensureStub(ctx, orgRoot, org, e)
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			if err != nil {
+				sum.StubsFailed++
+
+				// A conflict already emitted its own richer event, with the
+				// recorded and mirrored values side by side.
+				if !errors.Is(err, errStubConflict) {
+					r.logger.LogAttrs(ctx, slog.LevelWarn, "pull_stub_error",
+						slog.String("org", org),
+						slog.String("path", store.RemoteStubPath(e.Rel)),
+						slog.String("error", err.Error()),
+					)
+				}
+
+				return nil
+			}
+
+			sum.Stubs++
+
+			if wrote {
+				r.logger.LogAttrs(ctx, slog.LevelInfo, "pull_stub_written",
+					slog.String("org", org),
+					slog.String("path", store.RemoteStubPath(e.Rel)),
+					slog.Bool("repaired", e.Existing),
+				)
+			}
+
+			return nil
+		})
+	}
+
+	//nolint:errcheck // Workers report through the tally, never an error.
+	_ = g.Wait()
+}
+
+// ensureStub settles one tarball's stub against the mirror, reporting
+// whether it wrote. An absent, corrupt, or invalid stub is written from the
+// Head (the write is the repair), and a valid digestless stub whose size
+// matches a digest-bearing Head is upgraded with the digest, a
+// strengthening, never a weakening. A valid stub that contradicts the Head
+// (a size mismatch, or two nonempty digests that differ) is left standing and
+// reported: the stub is the only independent record of a mirror-side change,
+// and under it a fetch fails verification loudly, while a replacement would
+// serve the changed bytes silently; the partial marker the conflict forces
+// keeps the viewer's mirror fallback reachable. One-sided digest absence at
+// an equal size is never a conflict, the same trust the classification
+// extends to digestless objects. A stub recording a schema version newer
+// than this build's is never touched: a newer build wrote it, and this one
+// cannot judge its fields.
+func (r *Restorer) ensureStub(ctx context.Context, orgRoot, org string, e StubEntry) (bool, error) {
+	info, err := r.client.Head(ctx, r.cfg.Key(org, e.Rel))
+	if err != nil {
+		return false, fmt.Errorf("resolve mirrored tarball: %w", err)
+	}
+
+	want := store.RemoteStub{
+		Version: store.RemoteStubVersion,
+		Size:    info.Size,
+		SHA256:  info.SHA256,
+	}
+
+	abs := pathkit.ConfineJoin(orgRoot, store.RemoteStubPath(e.Rel))
+
+	existing, state := readStubFile(abs)
+
+	switch state {
+	case stubReadError:
+		return false, fmt.Errorf("read existing stub %q: %w", abs, existing.err)
+	case stubNewer:
+		return false, fmt.Errorf("stub at %q records schema version %d, newer than this build's %d",
+			abs, existing.stub.Version, store.RemoteStubVersion)
+
+	case stubValid:
+		switch {
+		case existing.stub.Size != want.Size,
+			existing.stub.SHA256 != "" && want.SHA256 != "" && existing.stub.SHA256 != want.SHA256:
+			r.logger.LogAttrs(ctx, slog.LevelWarn, "pull_stub_conflict",
+				slog.String("org", org),
+				slog.String("path", store.RemoteStubPath(e.Rel)),
+				slog.Int64("recorded_bytes", existing.stub.Size),
+				slog.Int64("mirror_bytes", want.Size),
+				slog.String("recorded_sha256", existing.stub.SHA256),
+				slog.String("mirror_sha256", want.SHA256),
+			)
+
+			return false, errStubConflict
+
+		case existing.stub.SHA256 == want.SHA256 || want.SHA256 == "":
+			// Identical, or the mirror records no digest to add: the stub in
+			// place, digest-bearing or not, is already the stronger record.
+			return false, nil
+		}
+
+		// A digestless stub against a digest-bearing Head at the same size
+		// falls through: the rewrite adds the digest it lacked.
+
+	case stubAbsent, stubInvalid:
+	}
+
+	data, err := serialize.Marshal(want)
+	if err != nil {
+		return false, fmt.Errorf("marshal eviction stub: %w", err)
+	}
+
+	err = atomicfile.WriteFile(abs, data)
+	if err != nil {
+		return false, fmt.Errorf("write eviction stub: %w", err)
+	}
+
+	return true, nil
+}
+
+// stubState classifies what stands at a stub's path for
+// [Restorer.ensureStub].
+type stubState int
+
+const (
+	// No stub file on disk.
+	stubAbsent stubState = iota
+	// A well-formed stub this build understands.
+	stubValid
+	// A stub that does not parse or records an impossible shape; the
+	// rewrite is the repair.
+	stubInvalid
+	// A stub recording a schema version newer than this build writes; it
+	// is never touched.
+	stubNewer
+	// A stub whose bytes could not be read at all.
+	stubReadError
+)
+
+// readStub carries the parsed stub or the fault that kept it from being
+// read; which field is meaningful follows from the [stubState].
+type readStub struct {
+	err  error
+	stub store.RemoteStub
+}
+
+// readStubFile reads and classifies the stub file at abs.
+func readStubFile(abs string) (readStub, stubState) {
+	//nolint:gosec // The path is confined under the org root being restored.
+	data, err := os.ReadFile(abs)
+
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return readStub{}, stubAbsent
+	case err != nil:
+		return readStub{err: err}, stubReadError
+	}
+
+	var stub store.RemoteStub
+
+	err = json.Unmarshal(data, &stub)
+
+	switch {
+	case err != nil, stub.Version < 1, stub.Size < 0:
+		return readStub{}, stubInvalid
+	case stub.Version > store.RemoteStubVersion:
+		return readStub{stub: stub}, stubNewer
+	}
+
+	return readStub{stub: stub}, stubValid
+}
+
+// writeMarkerChanged durably records marker at the org root, skipping the
+// write when the file already holds exactly those bytes, and reports whether
+// it wrote.
+func (r *Restorer) writeMarkerChanged(orgRoot string, marker remote.Marker) (bool, error) {
+	data, err := markerBytes(marker)
+	if err != nil {
+		return false, err
+	}
+
+	//nolint:gosec // The path is composed from the org root being restored.
+	current, rerr := os.ReadFile(filepath.Join(orgRoot, remote.MarkerName))
+	if rerr == nil && bytes.Equal(current, data) {
+		return false, nil
+	}
+
+	err = atomicfile.WriteFile(filepath.Join(orgRoot, remote.MarkerName), data)
+	if err != nil {
+		return false, fmt.Errorf("write remote marker: %w", err)
+	}
+
+	return true, nil
 }
 
 // writeMarker durably records marker at the org root.
 func (r *Restorer) writeMarker(orgRoot string, marker remote.Marker) error {
-	data, err := json.MarshalIndent(marker, "", "  ")
+	data, err := markerBytes(marker)
 	if err != nil {
-		return fmt.Errorf("marshal remote marker: %w", err)
+		return err
 	}
-
-	data = append(data, '\n')
 
 	err = atomicfile.WriteFile(filepath.Join(orgRoot, remote.MarkerName), data)
 	if err != nil {
@@ -389,6 +724,17 @@ func (r *Restorer) writeMarker(orgRoot string, marker remote.Marker) error {
 	}
 
 	return nil
+}
+
+// markerBytes renders a marker exactly as every writer of the file does, so
+// a byte comparison against the file on disk is meaningful.
+func markerBytes(marker remote.Marker) ([]byte, error) {
+	data, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal remote marker: %w", err)
+	}
+
+	return append(data, '\n'), nil
 }
 
 // logComplete emits the run's closing tally.
@@ -404,6 +750,9 @@ func (r *Restorer) logComplete(ctx context.Context, org string, sum Summary) {
 		slog.Int("skipped", sum.Skipped),
 		slog.Int("failed", sum.Failed),
 		slog.Int("refused", sum.Refused),
+		slog.Int("stubs", sum.Stubs),
+		slog.Int("stubs_failed", sum.StubsFailed),
 		slog.Int64("bytes", sum.Bytes),
+		slog.Bool("complete", sum.Complete),
 	)
 }

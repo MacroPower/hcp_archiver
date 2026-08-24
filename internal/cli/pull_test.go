@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,15 +16,18 @@ import (
 )
 
 const (
-	pullOrgName    = "pull-org"
-	pullOrgContent = `{"data":{"id":"org-1","type":"organizations","attributes":{"name":"pull-org"}}}`
-	pullRollup     = "projects/p1/workspaces/w1/runs.ndjson"
+	pullOrgName     = "pull-org"
+	pullOrgContent  = `{"data":{"id":"org-1","type":"organizations","attributes":{"name":"pull-org"}}}`
+	pullRollup      = "projects/p1/workspaces/w1/runs.ndjson"
+	pullTarball     = "config-versions/cv-9.tar.gz"
+	pullTarballStub = pullTarball + ".remote.json"
 )
 
 // seedPullMirror builds a file:// mirror holding one organization's warm
-// layer plus a replay log the restore must leave behind, returning the
-// remote configuration section for it.
-func seedPullMirror(t *testing.T) string {
+// layer plus an evicted tarball, seeding the extra keys too (the junk seed
+// adds a replay log the restore must leave behind and account as a
+// leftover), returning the remote configuration section for it.
+func seedPullMirror(t *testing.T, extra map[string]string) string {
 	t.Helper()
 
 	const prefix = "hcp"
@@ -38,12 +42,15 @@ func seedPullMirror(t *testing.T) string {
 		require.NoError(t, client.Close())
 	}()
 
-	for rel, content := range map[string]string{
+	seed := map[string]string{
 		"org.json":              pullOrgContent,
 		pullRollup:              "{\"id\":\"r1\"}\n",
 		".ledger/snapshot.json": `{"version":2,"lastRunAt":"2026-08-24T10:00:00Z","runCount":1}`,
-		".ledger/log.ndjson":    "{\"stale\":true}\n",
-	} {
+		pullTarball:             "tarball bytes",
+	}
+	maps.Copy(seed, extra)
+
+	for rel, content := range seed {
 		require.NoError(t, client.Put(t.Context(),
 			prefix+"/"+pullOrgName+"/"+rel, []byte(content)))
 	}
@@ -51,16 +58,23 @@ func seedPullMirror(t *testing.T) string {
 	return "remote:\n  url: '" + bucket + "'\n  prefix: '" + prefix + "'\n"
 }
 
+// junkSeed is the extra mirror key that keeps a restored tree's marker
+// partial: a replay log a healthy sweep would never upload.
+func junkSeed() map[string]string {
+	return map[string]string{".ledger/log.ndjson": "{\"stale\":true}\n"}
+}
+
 func TestPullCmd_DryRunWritesNothing(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	remoteYAML := seedPullMirror(t)
+	remoteYAML := seedPullMirror(t, junkSeed())
 
 	out, _, err := runCmdIn(t, root, remoteYAML, "pull", pullOrgName, "--dry-run")
 	require.NoError(t, err)
 
 	assert.Contains(t, out, "would restore")
+	assert.Contains(t, out, "would settle the marker partial")
 
 	dirents, err := os.ReadDir(root)
 	require.NoError(t, err)
@@ -71,14 +85,17 @@ func TestPullCmd_RestoresAndConverges(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	remoteYAML := seedPullMirror(t)
+	remoteYAML := seedPullMirror(t, junkSeed())
 	orgRoot := filepath.Join(root, pullOrgName)
 
 	// The organization comes from the mirror's own listing: no argument
 	// names it.
-	out, _, err := runCmdIn(t, root, remoteYAML, "pull")
+	out, errOut, err := runCmdIn(t, root, remoteYAML, "pull")
 	require.NoError(t, err)
 	assert.Contains(t, out, "restored")
+	assert.Contains(t, out, "marker partial")
+	assert.Contains(t, errOut, ".ledger/log.ndjson",
+		"the unaccounted replay log is named on stderr")
 
 	data, err := os.ReadFile(filepath.Join(orgRoot, "org.json"))
 	require.NoError(t, err)
@@ -93,7 +110,8 @@ func TestPullCmd_RestoresAndConverges(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.False(t, marker.Restoring)
-	assert.True(t, marker.Partial)
+	assert.True(t, marker.Partial,
+		"the mirrored replay log is unaccounted for, so the marker stays partial")
 
 	// A second run converges: nothing to restore, nothing rewritten.
 	out, _, err = runCmdIn(t, root, remoteYAML, "pull", pullOrgName)
@@ -101,11 +119,43 @@ func TestPullCmd_RestoresAndConverges(t *testing.T) {
 	assert.Contains(t, out, "nothing to restore")
 }
 
+func TestPullCmd_PromotesCleanMirror(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	remoteYAML := seedPullMirror(t, nil)
+	orgRoot := filepath.Join(root, pullOrgName)
+
+	out, _, err := runCmdIn(t, root, remoteYAML, "pull", pullOrgName)
+	require.NoError(t, err)
+	assert.Contains(t, out, "marker complete")
+
+	assert.FileExists(t, filepath.Join(orgRoot, filepath.FromSlash(pullTarballStub)),
+		"the evicted tarball's stub is backfilled from the mirror's metadata")
+
+	marker, ok, err := remote.ReadMarker(orgRoot)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.False(t, marker.Partial)
+
+	markerBytes, err := os.ReadFile(filepath.Join(orgRoot, remote.MarkerName))
+	require.NoError(t, err)
+
+	out, _, err = runCmdIn(t, root, remoteYAML, "pull", pullOrgName)
+	require.NoError(t, err)
+	assert.Contains(t, out, "nothing to restore")
+	assert.Contains(t, out, "marker complete")
+
+	after, err := os.ReadFile(filepath.Join(orgRoot, remote.MarkerName))
+	require.NoError(t, err)
+	assert.Equal(t, markerBytes, after, "a converged re-run leaves the marker bytes untouched")
+}
+
 func TestPullCmd_RefusesHeldLock(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	remoteYAML := seedPullMirror(t)
+	remoteYAML := seedPullMirror(t, junkSeed())
 
 	lock, err := manifest.LockArchive(filepath.Join(root, pullOrgName))
 	require.NoError(t, err)
@@ -123,7 +173,7 @@ func TestPullCmd_RefusesMismatchedMarker(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	remoteYAML := seedPullMirror(t)
+	remoteYAML := seedPullMirror(t, junkSeed())
 	orgRoot := filepath.Join(root, pullOrgName)
 
 	require.NoError(t, os.MkdirAll(orgRoot, 0o700))

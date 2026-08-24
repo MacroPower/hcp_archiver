@@ -282,7 +282,10 @@ layer, the metadata, and the ledger while leaving the evicted bundles and
 tarballs in the bucket. It contacts no HCP API, verifies every file against
 the digest the mirror records, is safe to interrupt and re-run, and
 `--dry-run` reports the files and bytes it would transfer; `pull --help`
-documents the full contract.
+documents the full contract. A restore that accounts for everything the
+mirror holds finishes with a complete marker, so the recovered archive
+browses without touching the network again; anything unaccounted for keeps
+it partial, with each blocking key named.
 
 ```bash
 hcp_archiver pull                    # restore every mirrored org locally

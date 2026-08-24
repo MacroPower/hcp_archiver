@@ -27,6 +27,7 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/pkg/pathkit"
 	"go.jacobcolvin.com/hcp_archiver/pkg/remote"
 	"go.jacobcolvin.com/hcp_archiver/pkg/seal"
+	"go.jacobcolvin.com/hcp_archiver/pkg/store"
 )
 
 var (
@@ -98,11 +99,30 @@ type PlanEntry struct {
 	Snapshot bool
 }
 
+// StubEntry is one mirrored configuration-version tarball whose local
+// eviction stub the restore ensures (see [store.RemoteStubPath]): the trace
+// that lets a reader list and fetch the evicted object without the mirror's
+// inventory.
+type StubEntry struct {
+	// Rel is the tarball's archive-relative path.
+	Rel string
+	// Existing reports a stub file already standing at plan time; the
+	// execute step verifies it against the mirror instead of creating it.
+	Existing bool
+}
+
 // Plan is the classified work one restore would perform. Create instances
 // with [Restorer.Plan].
 type Plan struct {
-	Entries      []PlanEntry
-	Refusals     []PlanEntry
+	Entries  []PlanEntry
+	Refusals []PlanEntry
+	// Stubs lists the mirrored configuration-version tarballs whose local
+	// eviction stubs the restore ensures, sorted by path.
+	Stubs []StubEntry
+	// Leftovers names the mirrored keys nothing in the restored tree
+	// accounts for, sorted; while any stand, a marker not already complete
+	// settles partial.
+	Leftovers    []string
 	RestoreFiles int
 	RestoreBytes int64
 	Skipped      int
@@ -128,17 +148,17 @@ func (r *Restorer) Plan(ctx context.Context, orgRoot, org string) (Plan, error) 
 		return Plan{}, err
 	}
 
-	listing, err := r.inventory(ctx, org)
+	inv, err := r.inventory(ctx, orgRoot, org)
 	if err != nil {
 		return Plan{}, err
 	}
 
-	entries, err := r.classify(ctx, orgRoot, org, listing)
+	entries, err := r.classify(ctx, orgRoot, org, inv.restorable)
 	if err != nil {
 		return Plan{}, err
 	}
 
-	plan := Plan{Entries: entries}
+	plan := Plan{Entries: entries, Leftovers: inv.leftovers}
 
 	for _, e := range entries {
 		switch e.Action {
@@ -153,6 +173,11 @@ func (r *Restorer) Plan(ctx context.Context, orgRoot, org string) (Plan, error) 
 		}
 	}
 
+	plan.Stubs, err = planStubs(orgRoot, inv.tarballs)
+	if err != nil {
+		return Plan{}, err
+	}
+
 	err = checkReplayLog(orgRoot, plan)
 	if err != nil {
 		return Plan{}, err
@@ -161,32 +186,129 @@ func (r *Restorer) Plan(ctx context.Context, orgRoot, org string) (Plan, error) 
 	return plan, nil
 }
 
-// inventory lists the organization's mirror prefix and relativizes it to the
-// restorable set: keys outside the prefix, keys spelling no honest archive
-// path, the evicted surfaces and the never-mirrored shapes (see
-// [collect.Restorable]), and the organization marker (whose lifecycle the
-// restore owns, see [Restorer.Pull]) all drop here, so every later step sees
-// only paths it may write.
-func (r *Restorer) inventory(ctx context.Context, org string) (map[string]remote.ObjectInfo, error) {
+// planStubs classifies each mirrored tarball's local eviction stub with a
+// stat, so a dry run prices the stub work without a request. A tarball whose
+// own bytes sit locally needs no stub at all: the file itself accounts for
+// the key, and a stub beside a live tarball is the eviction's crash shape,
+// not a state to create deliberately.
+func planStubs(orgRoot string, tarballs []string) ([]StubEntry, error) {
+	var stubs []StubEntry
+
+	for _, rel := range tarballs {
+		local, err := fileExists(pathkit.ConfineJoin(orgRoot, rel))
+		if err != nil {
+			return nil, err
+		}
+
+		if local {
+			continue
+		}
+
+		existing, err := fileExists(pathkit.ConfineJoin(orgRoot, store.RemoteStubPath(rel)))
+		if err != nil {
+			return nil, err
+		}
+
+		stubs = append(stubs, StubEntry{Rel: rel, Existing: existing})
+	}
+
+	return stubs, nil
+}
+
+// fileExists reports whether a regular file stands at abs, returning any
+// stat fault other than absence: a plan cannot classify a path it could not
+// probe.
+func fileExists(abs string) (bool, error) {
+	st, err := os.Stat(abs)
+
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("stat %q: %w", abs, err)
+	}
+
+	return st.Mode().IsRegular(), nil
+}
+
+// rawInventory is the relativized mirror listing split by what the restore
+// does with each key: the restorable set it materializes, the evicted
+// tarballs whose local stubs it ensures, and the leftovers nothing in the
+// restored tree accounts for.
+type rawInventory struct {
+	restorable map[string]remote.ObjectInfo
+	tarballs   []string
+	leftovers  []string
+}
+
+// inventory lists the organization's mirror prefix and classifies every key
+// into the restore's accounting. The restorable set (see [collect.Restorable])
+// is what the plan materializes; an evicted configuration-version tarball is
+// accounted for by the local stub the restore ensures; an evicted bundle zip
+// is accounted for by its seal sidecar, which is itself restorable, or by one
+// already on disk; and the organization marker's lifecycle belongs to the
+// restore. Every other key is a leftover: a key spelling no honest archive
+// path (recorded raw, since it has no relative form), a shape the mirror must
+// never hold (a replay log, a lock, a staging temp, a mirrored stub copy), or
+// foreign junk. Leftovers restore nothing and hold a marker not already
+// complete at partial, so a reader never trusts a "complete" tree that
+// cannot account for what the mirror holds.
+func (r *Restorer) inventory(ctx context.Context, orgRoot, org string) (rawInventory, error) {
 	prefix := r.cfg.Key(org, "") + "/"
 
 	raw, err := r.client.List(ctx, prefix)
 	if err != nil {
-		return nil, fmt.Errorf("list mirror inventory: %w", err)
+		return rawInventory{}, fmt.Errorf("list mirror inventory: %w", err)
 	}
 
-	listing := make(map[string]remote.ObjectInfo, len(raw))
+	inv := rawInventory{restorable: make(map[string]remote.ObjectInfo, len(raw))}
+
+	var zips []string
 
 	for key, info := range raw {
 		rel, ok := relFromKey(key, prefix)
-		if !ok || rel == remote.MarkerName || !collect.Restorable(rel) {
+
+		switch {
+		case !ok:
+			inv.leftovers = append(inv.leftovers, key)
+		case rel == remote.MarkerName:
+			// Accounted: the restore owns the marker's lifecycle.
+		case collect.Restorable(rel):
+			inv.restorable[rel] = info
+		case store.IsConfigTarball(rel):
+			inv.tarballs = append(inv.tarballs, rel)
+		case store.IsBundleZip(rel):
+			zips = append(zips, rel)
+		default:
+			inv.leftovers = append(inv.leftovers, rel)
+		}
+	}
+
+	// The zips resolve after the walk, since a zip's sidecar key may list
+	// after the zip itself. A zip whose sidecar the mirror holds is accounted
+	// for once the sidecar restores; one whose sidecar is only local is
+	// accounted for by that file; one with no sidecar anywhere is a leftover,
+	// because nothing local can ever list its members.
+	for _, zip := range slices.Sorted(slices.Values(zips)) {
+		sidecar := zip + seal.SidecarSuffix
+		if _, ok := inv.restorable[sidecar]; ok {
 			continue
 		}
 
-		listing[rel] = info
+		present, perr := fileExists(pathkit.ConfineJoin(orgRoot, sidecar))
+		if perr != nil {
+			return rawInventory{}, perr
+		}
+
+		if !present {
+			inv.leftovers = append(inv.leftovers, zip)
+		}
 	}
 
-	return listing, nil
+	slices.Sort(inv.tarballs)
+	slices.Sort(inv.leftovers)
+
+	return inv, nil
 }
 
 // relFromKey strips the organization prefix from one listed key, reporting

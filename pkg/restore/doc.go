@@ -22,7 +22,9 @@
 // no archiver opens the tree), then every data file, each digest-verified
 // and atomically renamed into place, and only after all of them the ledger
 // snapshots, so the tree never holds ledger entries describing files that
-// are not on disk. The marker is rewritten to its final form only once every
-// file in the set is present and verified; an interrupted restore keeps it,
-// and a re-run resumes by digest, downloading only what is missing.
+// are not on disk. After the snapshots, the eviction stubs for the mirror's
+// evicted tarballs are backfilled from the mirror's own metadata, and the
+// marker settles last, complete only when the run accounts for every
+// mirrored key; an interrupted restore keeps the restoring marker, and a
+// re-run resumes by digest, downloading only what is missing.
 package restore

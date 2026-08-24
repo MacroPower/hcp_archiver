@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,6 +16,7 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/pkg/remote"
 	"go.jacobcolvin.com/hcp_archiver/pkg/remote/remotetest"
 	"go.jacobcolvin.com/hcp_archiver/pkg/restore"
+	"go.jacobcolvin.com/hcp_archiver/pkg/store"
 )
 
 const (
@@ -25,6 +28,11 @@ const (
 
 	orgSnapshotOld = `{"version":2,"lastRunAt":"2026-08-20T10:00:00Z","runCount":3}`
 	orgSnapshotNew = `{"version":2,"lastRunAt":"2026-08-24T10:00:00Z","runCount":4}`
+
+	tarballRel     = "config-versions/cv-1.tar.gz"
+	tarballContent = "tarball bytes"
+	zipRel         = pullWs + "/bundles/logs.gen0001.zip"
+	stubRel        = tarballRel + ".remote.json"
 )
 
 // warmSet is the restorable fixture content, keyed by archive-relative path.
@@ -42,15 +50,28 @@ func warmSet() map[string]string {
 }
 
 // excludedSet is mirror content a restore must never materialize, keyed by
-// archive-relative path.
+// archive-relative path: the evicted surfaces, which stay remote, plus junk
+// keys a healthy sweep would never upload.
 func excludedSet() map[string]string {
 	return map[string]string{
-		".ledger/log.ndjson":                 "{\"resurrected\":true}\n",
-		".ledger/lock":                       "",
-		pullWs + "/bundles/logs.gen0001.zip": "zip bytes",
-		"config-versions/cv-1.tar.gz":        "tarball bytes",
-		pullWs + "/.atomicfile-999.tmp":      "partial",
-		".remote.json":                       `{"url":"s3://elsewhere","version":1}`,
+		".ledger/log.ndjson":            "{\"resurrected\":true}\n",
+		".ledger/lock":                  "",
+		zipRel:                          "zip bytes",
+		tarballRel:                      tarballContent,
+		pullWs + "/.atomicfile-999.tmp": "partial",
+		".remote.json":                  `{"url":"s3://elsewhere","version":1}`,
+	}
+}
+
+// junkLeftovers is the accounting the junk fixture's mirror forces: the keys
+// nothing in a restored tree accounts for, sorted the way a plan reports
+// them (the hostile key stays raw, having no relative form).
+func junkLeftovers() []string {
+	return []string{
+		".ledger/lock",
+		".ledger/log.ndjson",
+		pullPrefix + "/" + pullOrg + "/../evil",
+		pullWs + "/.atomicfile-999.tmp",
 	}
 }
 
@@ -63,12 +84,13 @@ type pullFixture struct {
 	orgRoot string
 }
 
-// newPullFixture builds a [pullFixture] whose mirror holds the warm set, the
-// excluded set, and one hostile key.
-func newPullFixture(t *testing.T) pullFixture {
+// newBareFixture builds a [pullFixture] over an empty in-memory mirror. The
+// URL is nominal (the injected bucket serves the bytes) but the markers the
+// restore writes record it, as every real configuration's would.
+func newBareFixture(t *testing.T) pullFixture {
 	t.Helper()
 
-	cfg := remote.Config{Prefix: pullPrefix}
+	cfg := remote.Config{URL: "mem://archive", Prefix: pullPrefix}
 	fake := remotetest.New()
 
 	client, err := remote.New(t.Context(), cfg,
@@ -79,13 +101,22 @@ func newPullFixture(t *testing.T) pullFixture {
 		require.NoError(t, client.Close())
 	})
 
-	f := pullFixture{
+	return pullFixture{
 		r:       restore.NewRestorer(client, cfg),
 		client:  client,
 		fake:    fake,
 		cfg:     cfg,
 		orgRoot: filepath.Join(t.TempDir(), pullOrg),
 	}
+}
+
+// newPullFixture builds the junk fixture: the warm set, the excluded set
+// (junk keys included), and one hostile key. Its mirror can never settle a
+// complete marker.
+func newPullFixture(t *testing.T) pullFixture {
+	t.Helper()
+
+	f := newBareFixture(t)
 
 	for rel, content := range warmSet() {
 		f.put(t, rel, content)
@@ -97,7 +128,25 @@ func newPullFixture(t *testing.T) pullFixture {
 
 	// A bucket key spelling a traversal must drop from the plan, never join
 	// under the root.
-	fake.SetObject(pullPrefix+"/"+pullOrg+"/../evil", remotetest.Object{Data: []byte("escape")})
+	f.fake.SetObject(pullPrefix+"/"+pullOrg+"/../evil", remotetest.Object{Data: []byte("escape")})
+
+	return f
+}
+
+// newCleanPullFixture builds the healthy fixture: the warm set plus only the
+// two evicted surfaces, the mirror a clean archiver run leaves behind, whose
+// restore settles a complete marker.
+func newCleanPullFixture(t *testing.T) pullFixture {
+	t.Helper()
+
+	f := newBareFixture(t)
+
+	for rel, content := range warmSet() {
+		f.put(t, rel, content)
+	}
+
+	f.put(t, zipRel, "zip bytes")
+	f.put(t, tarballRel, tarballContent)
 
 	return f
 }
@@ -167,10 +216,36 @@ func (f pullFixture) marker(t *testing.T) remote.Marker {
 	return marker
 }
 
+// readStub reads and parses the tarball's local eviction stub.
+func (f pullFixture) readStub(t *testing.T) store.RemoteStub {
+	t.Helper()
+
+	var stub store.RemoteStub
+
+	require.NoError(t, json.Unmarshal([]byte(f.content(t, stubRel)), &stub))
+
+	return stub
+}
+
+// requireCanonicalStub asserts the tarball's stub records exactly what the
+// mirror holds.
+func (f pullFixture) requireCanonicalStub(t *testing.T) {
+	t.Helper()
+
+	stub := f.readStub(t)
+
+	sum := sha256.Sum256([]byte(tarballContent))
+	assert.Equal(t, store.RemoteStub{
+		Version: store.RemoteStubVersion,
+		Size:    int64(len(tarballContent)),
+		SHA256:  hex.EncodeToString(sum[:]),
+	}, stub)
+}
+
 func TestPullRestoresWarmLayerIntoEmptyRoot(t *testing.T) {
 	t.Parallel()
 
-	f := newPullFixture(t)
+	f := newCleanPullFixture(t)
 
 	plan, err := f.r.Plan(t.Context(), f.orgRoot, pullOrg)
 	require.NoError(t, err)
@@ -178,6 +253,8 @@ func TestPullRestoresWarmLayerIntoEmptyRoot(t *testing.T) {
 	assert.Equal(t, len(warmSet()), plan.RestoreFiles)
 	assert.Zero(t, plan.Skipped)
 	assert.Empty(t, plan.Refusals)
+	assert.Empty(t, plan.Leftovers)
+	assert.Equal(t, []restore.StubEntry{{Rel: tarballRel}}, plan.Stubs)
 
 	sum, err := f.r.Pull(t.Context(), f.orgRoot, pullOrg, plan)
 	require.NoError(t, err)
@@ -185,15 +262,21 @@ func TestPullRestoresWarmLayerIntoEmptyRoot(t *testing.T) {
 	assert.Equal(t, len(warmSet()), sum.Restored)
 	assert.Zero(t, sum.Failed)
 	assert.Zero(t, sum.Refused)
+	assert.Equal(t, 1, sum.Stubs)
+	assert.Zero(t, sum.StubsFailed)
+	assert.True(t, sum.Complete)
+	assert.Empty(t, sum.Leftovers)
 
 	for rel, content := range warmSet() {
 		assert.Equal(t, content, f.content(t, rel), "restored %s should match the mirror", rel)
 	}
 
+	f.requireCanonicalStub(t)
+
 	marker := f.marker(t)
 	assert.False(t, marker.Restoring, "a completed restore settles its marker")
-	assert.True(t, marker.Partial,
-		"a restored tree does not account for evicted tarball stubs, so it stays partial")
+	assert.False(t, marker.Partial,
+		"a restore that accounts for every mirrored key settles the marker complete")
 	assert.Equal(t, remote.MarkerVersion, marker.Version)
 }
 
@@ -218,10 +301,16 @@ func TestPullNeverMaterializesExcludedFiles(t *testing.T) {
 	// snapshot it would replay superseded ledger state.
 	assert.False(t, f.exists(t, ".ledger/log.ndjson"))
 	assert.False(t, f.exists(t, ".ledger/lock"))
-	assert.False(t, f.exists(t, pullWs+"/bundles/logs.gen0001.zip"))
-	assert.False(t, f.exists(t, "config-versions/cv-1.tar.gz"))
+	assert.False(t, f.exists(t, zipRel))
+	assert.False(t, f.exists(t, tarballRel))
 	assert.False(t, f.exists(t, pullWs+"/.atomicfile-999.tmp"))
 	assert.False(t, f.exists(t, "evil"))
+
+	// The tarball's bytes stay remote, but its eviction stub lands, and the
+	// junk keys keep the marker partial.
+	f.requireCanonicalStub(t)
+	assert.True(t, f.marker(t).Partial,
+		"a mirror holding unaccounted keys must not settle a complete marker")
 
 	// The marker on disk is the one pull wrote, not the mirrored object.
 	assert.NotEqual(t, "s3://elsewhere", f.marker(t).URL)
@@ -259,9 +348,11 @@ func TestPullDigestFailureHoldsEverySnapshotBack(t *testing.T) {
 		"a failed verification must leave no file")
 
 	// The ordering barrier: no snapshot lands over an unproven data layer,
-	// so the tree never holds ledger entries describing absent files.
+	// so the tree never holds ledger entries describing absent files, and
+	// the stub phase is gated on the same proof.
 	assert.False(t, f.exists(t, ".ledger/snapshot.json"))
 	assert.False(t, f.exists(t, pullWs+"/.ledger/snapshot.json"))
+	assert.False(t, f.exists(t, stubRel))
 
 	assert.True(t, f.marker(t).Restoring,
 		"an incomplete restore keeps its marker standing")
@@ -287,6 +378,7 @@ func TestPullIsIdempotent(t *testing.T) {
 
 	assert.Zero(t, sum.Restored)
 	assert.Equal(t, len(warmSet()), sum.Skipped)
+	assert.False(t, sum.Complete, "the junk keys keep the marker partial on every run")
 
 	markerAfter, err := os.ReadFile(filepath.Join(f.orgRoot, remote.MarkerName))
 	require.NoError(t, err)
@@ -310,6 +402,27 @@ func TestPullFinalizesLeftoverRestoringMarker(t *testing.T) {
 
 	assert.Zero(t, sum.Restored)
 	assert.False(t, f.marker(t).Restoring, "a proven-whole tree must settle its leftover marker")
+	assert.True(t, f.marker(t).Partial, "the junk keys keep the settled marker partial")
+}
+
+func TestPullSettlesLeftoverRestoringMarkerComplete(t *testing.T) {
+	t.Parallel()
+
+	f := newCleanPullFixture(t)
+	f.pull(t)
+
+	require.NoError(t, os.WriteFile(filepath.Join(f.orgRoot, remote.MarkerName),
+		[]byte(`{"url":"","version":2,"partial":true,"restoring":true}`), 0o600))
+
+	sum := f.pull(t)
+
+	assert.Zero(t, sum.Restored)
+	assert.True(t, sum.Complete)
+
+	marker := f.marker(t)
+	assert.False(t, marker.Restoring)
+	assert.False(t, marker.Partial,
+		"a proven-whole tree over a clean mirror settles its leftover marker complete")
 }
 
 func TestPullResumesAfterPartialLoss(t *testing.T) {
@@ -458,11 +571,13 @@ func TestPullInterruptDefersSnapshotsAndKeepsMarker(t *testing.T) {
 	assert.True(t, f.marker(t).Restoring,
 		"an interrupted restore keeps its marker standing")
 
-	// The re-run finishes what the interrupt left.
+	// The re-run finishes what the interrupt left; the junk keys keep the
+	// settled marker partial.
 	sum := f.pull(t)
 
 	assert.Zero(t, sum.Failed)
 	assert.False(t, f.marker(t).Restoring)
+	assert.True(t, f.marker(t).Partial)
 
 	for rel, content := range warmSet() {
 		assert.Equal(t, content, f.content(t, rel), "resumed restore should complete %s", rel)
@@ -508,4 +623,363 @@ func TestPullRefusesForeignOrgRoot(t *testing.T) {
 
 	_, err := f.r.Plan(t.Context(), f.orgRoot, pullOrg)
 	require.ErrorIs(t, err, restore.ErrOrgMismatch)
+}
+
+func TestPullStaysPartialAndNamesLeftovers(t *testing.T) {
+	t.Parallel()
+
+	f := newPullFixture(t)
+
+	sum := f.pull(t)
+
+	assert.Zero(t, sum.Failed)
+	assert.False(t, sum.Complete)
+	assert.Equal(t, junkLeftovers(), sum.Leftovers,
+		"every unaccounted mirror key is named, the hostile one by its raw key")
+	assert.True(t, f.marker(t).Partial)
+}
+
+func TestPlanCarriesStubAndLeftoverAccounting(t *testing.T) {
+	t.Parallel()
+
+	f := newPullFixture(t)
+
+	plan, err := f.r.Plan(t.Context(), f.orgRoot, pullOrg)
+	require.NoError(t, err)
+
+	assert.Equal(t, []restore.StubEntry{{Rel: tarballRel}}, plan.Stubs)
+	assert.Equal(t, junkLeftovers(), plan.Leftovers)
+}
+
+// demoteMarkerPartial rewrites the org marker as a bare partial one, the
+// shape an earlier build's pull left behind.
+func demoteMarkerPartial(t *testing.T, orgRoot string) {
+	t.Helper()
+
+	require.NoError(t, os.WriteFile(filepath.Join(orgRoot, remote.MarkerName),
+		[]byte(`{"url":"","version":1,"partial":true}`), 0o600))
+}
+
+func TestPullPromotesOldPullTree(t *testing.T) {
+	t.Parallel()
+
+	f := newCleanPullFixture(t)
+	f.pull(t)
+
+	// The tree an earlier build's pull restored: every file present, no
+	// stub, a partial marker.
+	require.NoError(t, os.Remove(filepath.Join(f.orgRoot, filepath.FromSlash(stubRel))))
+	demoteMarkerPartial(t, f.orgRoot)
+
+	sum := f.pull(t)
+
+	assert.Zero(t, sum.Restored)
+	assert.Equal(t, 1, sum.Stubs)
+	assert.True(t, sum.Complete)
+	f.requireCanonicalStub(t)
+	assert.False(t, f.marker(t).Partial, "a zero-transfer run still backfills and promotes")
+}
+
+func TestPullRefusesContradictingStub(t *testing.T) {
+	t.Parallel()
+
+	f := newCleanPullFixture(t)
+	f.pull(t)
+
+	// A valid stub recording a size the mirror contradicts: the stub is the
+	// only independent record of a mirror-side change, so it is reported,
+	// never silently replaced.
+	planted := `{"sha256":"deadbeef","size":999,"version":1}`
+	f.writeLocal(t, stubRel, planted)
+	demoteMarkerPartial(t, f.orgRoot)
+
+	sum := f.pull(t)
+
+	assert.Equal(t, 1, sum.StubsFailed)
+	assert.Zero(t, sum.Failed)
+	assert.False(t, sum.Complete)
+	assert.Equal(t, planted, f.content(t, stubRel), "a contradicting stub is left standing")
+	assert.True(t, f.marker(t).Partial)
+}
+
+func TestPullRepairsCorruptStub(t *testing.T) {
+	t.Parallel()
+
+	f := newCleanPullFixture(t)
+	f.pull(t)
+
+	f.writeLocal(t, stubRel, `{not json`)
+	demoteMarkerPartial(t, f.orgRoot)
+
+	sum := f.pull(t)
+
+	assert.Equal(t, 1, sum.Stubs)
+	assert.Zero(t, sum.StubsFailed)
+	assert.True(t, sum.Complete)
+	f.requireCanonicalStub(t)
+}
+
+func TestPullUpgradesDigestlessStub(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a digestless stub gains the mirror's digest", func(t *testing.T) {
+		t.Parallel()
+
+		f := newCleanPullFixture(t)
+		f.pull(t)
+
+		f.writeLocal(t, stubRel, fmt.Sprintf(`{"size":%d,"version":1}`, len(tarballContent)))
+		demoteMarkerPartial(t, f.orgRoot)
+
+		sum := f.pull(t)
+
+		assert.Zero(t, sum.StubsFailed)
+		assert.True(t, sum.Complete)
+		f.requireCanonicalStub(t)
+	})
+
+	t.Run("a digest-bearing stub survives a digestless mirror", func(t *testing.T) {
+		t.Parallel()
+
+		f := newCleanPullFixture(t)
+		f.pull(t)
+
+		// The mirror's record loses its metadata (a foreign rewrite, a
+		// stripped copy); the stub in place is the stronger record and the
+		// size still matches, so nothing is wrong.
+		f.fake.SetObject(f.cfg.Key(pullOrg, tarballRel),
+			remotetest.Object{Data: []byte(tarballContent)})
+		demoteMarkerPartial(t, f.orgRoot)
+
+		sum := f.pull(t)
+
+		assert.Zero(t, sum.StubsFailed)
+		assert.True(t, sum.Complete)
+		f.requireCanonicalStub(t)
+	})
+}
+
+func TestPullNeverClobbersNewerStub(t *testing.T) {
+	t.Parallel()
+
+	f := newCleanPullFixture(t)
+	f.pull(t)
+
+	planted := fmt.Sprintf(`{"size":%d,"version":99}`, len(tarballContent))
+	f.writeLocal(t, stubRel, planted)
+	demoteMarkerPartial(t, f.orgRoot)
+
+	sum := f.pull(t)
+
+	assert.Equal(t, 1, sum.StubsFailed)
+	assert.False(t, sum.Complete)
+	assert.Equal(t, planted, f.content(t, stubRel),
+		"a stub a newer build wrote is never overwritten")
+	assert.True(t, f.marker(t).Partial)
+}
+
+func TestPullDigestlessTarballStubPromotes(t *testing.T) {
+	t.Parallel()
+
+	f := newCleanPullFixture(t)
+
+	// A tarball whose upload recorded no digest at all: the stub is written
+	// digestless, the same shape the viewer's own synthesis produces.
+	f.fake.SetObject(f.cfg.Key(pullOrg, tarballRel),
+		remotetest.Object{Data: []byte(tarballContent)})
+
+	sum := f.pull(t)
+
+	assert.True(t, sum.Complete)
+
+	stub := f.readStub(t)
+	assert.Empty(t, stub.SHA256)
+	assert.Equal(t, int64(len(tarballContent)), stub.Size)
+}
+
+func TestPullStubHeadFailureBlocksPromotionOnly(t *testing.T) {
+	t.Parallel()
+
+	f := newCleanPullFixture(t)
+
+	plan, err := f.r.Plan(t.Context(), f.orgRoot, pullOrg)
+	require.NoError(t, err)
+
+	// The tarball vanishes between plan and execute: the stub cannot be
+	// ensured, which is a read-model gap, never a restore failure.
+	_, err = f.client.Delete(t.Context(), []string{f.cfg.Key(pullOrg, tarballRel)})
+	require.NoError(t, err)
+
+	sum, err := f.r.Pull(t.Context(), f.orgRoot, pullOrg, plan)
+	require.NoError(t, err)
+
+	assert.Zero(t, sum.Failed)
+	assert.Equal(t, 1, sum.StubsFailed)
+	assert.False(t, sum.Complete)
+	assert.True(t, f.marker(t).Partial)
+}
+
+func TestPullZipWithoutSidecarStaysPartial(t *testing.T) {
+	t.Parallel()
+
+	f := newBareFixture(t)
+
+	sidecarRel := zipRel + ".sidecar.ndjson"
+
+	for rel, content := range warmSet() {
+		if rel == sidecarRel {
+			continue
+		}
+
+		f.put(t, rel, content)
+	}
+
+	f.put(t, zipRel, "zip bytes")
+
+	plan, err := f.r.Plan(t.Context(), f.orgRoot, pullOrg)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{zipRel}, plan.Leftovers,
+		"a zip with no sidecar anywhere has no local trace to account for it")
+
+	sum, err := f.r.Pull(t.Context(), f.orgRoot, pullOrg, plan)
+	require.NoError(t, err)
+
+	assert.False(t, sum.Complete)
+	assert.True(t, f.marker(t).Partial)
+}
+
+func TestPullNeverDemotesCompleteMarker(t *testing.T) {
+	t.Parallel()
+
+	f := newCleanPullFixture(t)
+	f.pull(t)
+
+	// The mirror gains a junk key and the tree loses a file: the re-run
+	// restores the file, and the proven-complete marker is not flipped over
+	// junk the next archiver run will prune.
+	f.put(t, ".ledger/log.ndjson", "{\"seeded\":true}\n")
+	require.NoError(t, os.Remove(filepath.Join(f.orgRoot, "org.json")))
+
+	sum := f.pull(t)
+
+	assert.Equal(t, 1, sum.Restored)
+	assert.True(t, sum.Complete)
+	assert.Equal(t, []string{".ledger/log.ndjson"}, sum.Leftovers,
+		"the junk key is still named, it just cannot demote a proven tree")
+	assert.False(t, f.marker(t).Partial)
+	assert.False(t, f.exists(t, ".ledger/log.ndjson"))
+}
+
+func TestPullRepairsLostStubUnderCompleteMarker(t *testing.T) {
+	t.Parallel()
+
+	f := newCleanPullFixture(t)
+	f.pull(t)
+
+	require.NoError(t, os.Remove(filepath.Join(f.orgRoot, filepath.FromSlash(stubRel))))
+
+	// A complete marker's reads have no mirror fallback, so the lost stub
+	// would strand its tarball; the zero-transfer re-run repairs exactly it.
+	sum := f.pull(t)
+
+	assert.Zero(t, sum.Restored)
+	assert.Equal(t, 1, sum.Stubs)
+	assert.True(t, sum.Complete)
+	f.requireCanonicalStub(t)
+	assert.False(t, f.marker(t).Partial)
+}
+
+func TestPullSettleWritesNothingWithoutMarker(t *testing.T) {
+	t.Parallel()
+
+	f := newBareFixture(t)
+
+	sum := f.pull(t)
+
+	assert.Zero(t, sum.Restored)
+	assert.False(t, sum.Complete)
+	assert.False(t, f.exists(t, remote.MarkerName),
+		"a tree that never claimed the mirror stands in gains no marker from a no-op run")
+}
+
+func TestPullStubBytesMatchSweep(t *testing.T) {
+	t.Parallel()
+
+	f := newCleanPullFixture(t)
+	f.pull(t)
+
+	// The sweep skips a rewrite when the bytes already match, so pull's stub
+	// must serialize exactly as the sweep's own write does.
+	sweepDir := t.TempDir()
+
+	sum := sha256.Sum256([]byte(tarballContent))
+	_, err := store.New(sweepDir).WriteJSON(stubRel, store.RemoteStub{
+		Version: store.RemoteStubVersion,
+		Size:    int64(len(tarballContent)),
+		SHA256:  hex.EncodeToString(sum[:]),
+	})
+	require.NoError(t, err)
+
+	want, err := os.ReadFile(filepath.Join(sweepDir, filepath.FromSlash(stubRel)))
+	require.NoError(t, err)
+
+	assert.Equal(t, string(want), f.content(t, stubRel))
+}
+
+func TestPullLocalTarballNeedsNoStub(t *testing.T) {
+	t.Parallel()
+
+	f := newCleanPullFixture(t)
+
+	// The tarball's own bytes sit locally (not yet evicted): the file itself
+	// accounts for the key, and a stub beside a live tarball is the
+	// eviction's crash shape, not a state to create.
+	f.writeLocal(t, tarballRel, tarballContent)
+
+	plan, err := f.r.Plan(t.Context(), f.orgRoot, pullOrg)
+	require.NoError(t, err)
+
+	assert.Empty(t, plan.Stubs)
+
+	sum, err := f.r.Pull(t.Context(), f.orgRoot, pullOrg, plan)
+	require.NoError(t, err)
+
+	assert.True(t, sum.Complete)
+	assert.False(t, f.exists(t, stubRel))
+}
+
+func TestPullInterruptedStubPhaseResumes(t *testing.T) {
+	t.Parallel()
+
+	f := newCleanPullFixture(t)
+
+	plan, err := f.r.Plan(t.Context(), f.orgRoot, pullOrg)
+	require.NoError(t, err)
+
+	// The cancellation lands as the last snapshot settles, so the stub
+	// phase and the settlement both see a dead context.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	interrupted := restore.NewRestorer(f.client, f.cfg,
+		restore.WithConcurrency(1),
+		restore.WithProgress(func(relPath string, _ int64, _ error) {
+			if relPath == pullWs+"/.ledger/snapshot.json" {
+				cancel()
+			}
+		}),
+	)
+
+	_, err = interrupted.Pull(ctx, f.orgRoot, pullOrg, plan)
+	require.NoError(t, err)
+
+	assert.False(t, f.exists(t, stubRel), "an interrupted run lands no stub")
+	assert.True(t, f.marker(t).Restoring)
+
+	sum := f.pull(t)
+
+	assert.True(t, sum.Complete)
+	f.requireCanonicalStub(t)
+	assert.False(t, f.marker(t).Partial)
 }

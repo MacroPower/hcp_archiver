@@ -876,6 +876,19 @@ copy is really there. It logs a warning but counts no sweep failure, since no
 bytes are at risk, the mirror holds the tarball and the ledger still proves it,
 and only the listing stays short.
 
+`pull` performs the same repair without a ledger or a token: it synthesizes
+each stub from one metadata probe of the mirrored tarball, the same
+derivation the viewer's merged fallback performs on demand. The provenance is
+sound because the eviction verified the digest the probe returns before it
+released the local bytes. A corrupt or invalid local stub is rewritten (the
+write is the repair), and a valid digestless one is upgraded when the probe
+carries the digest it lacks, but a valid stub that contradicts the probe (a
+size mismatch, or two recorded digests that differ) is left standing and
+reported: the stub is the only independent record of a mirror-side change,
+and under it a fetch fails verification loudly, while a replacement would
+serve the changed bytes silently. A stub recording a schema version newer
+than the build's is never touched.
+
 The incremental gate is driven by one upfront listing inventory of the org
 prefix (~1 request per 1000 keys, instead of a metadata probe per file) and
 degrades in order: key absent -> upload; size differs -> upload; size equal ->
@@ -1090,6 +1103,26 @@ to re-record: the next open materializes what is missing and stamps the
 marker partial again. Deleting the marker outright also restores the merged
 reads, since an organization claiming nothing merges, but leaves the tree
 unmarked, so the `remote:` block is needed on every later open.
+
+`pull` can settle a complete marker of its own, and its proof differs from
+the archiver's. The archiver promotes only after a clean close: collectors
+finished, every evicted obligation verified, every unbacked key pruned or
+the prune's refusal counted, so the mirror provably holds nothing the local
+tree does not account for. `pull` neither collects nor prunes; it promotes
+on read-model completeness alone: every restorable key restored or verified,
+every evicted tarball's stub ensured against the mirror's own metadata,
+every bundle zip's sidecar present, and no other key in the listing at all.
+Any leftover (a seeded replay log, a temp, foreign junk, a zip with no
+sidecar anywhere) settles the marker partial with the keys named, since a
+complete marker forfeits the merged fallback and would strand whatever it
+cannot account for. A marker already recording complete is never demoted;
+its missing stubs are still repaired best-effort, a failure counted and
+retried by the next run, and new leftovers are the next archiver run's to
+reconcile, which it does regardless of the flag: the sweep re-verifies and
+re-prunes on every close. Both promotions share one
+assumption: the flock pins only the local tree, so a key another writer adds
+to the mirror between the listing and the marker write escapes the
+accounting. One writer per prefix is the operating model.
 
 The same trust rules as the write side apply. A configured remote that
 disagrees with the mirror an existing marker records is refused, exactly as

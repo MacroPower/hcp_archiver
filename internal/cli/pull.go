@@ -89,10 +89,15 @@ from the arguments, then the configuration file's organization filter, then
 the mirror's own listing, then the local directories carrying markers. Each
 organization restores into "<archive.path>/<org>".
 
-After a restore the marker records the tree as partial: the local stubs for
-evicted tarballs are never mirrored, so the mirror keeps standing in for
-them until the next clean archiver run backfills the stubs and promotes the
-marker complete.
+After the restore the command backfills the local stubs for evicted
+configuration-version tarballs from the mirror's own metadata, then settles
+the marker: complete when every mirrored key is accounted for locally, so
+the archive browses and extracts with no further mirror listing; partial
+when anything is not (a stub that could not be ensured, a mirrored key
+nothing local accounts for), with each blocking key named on stderr. A
+marker already recording complete is never demoted. Stub faults and
+unaccounted keys never fail the restore; the exit code reflects only the
+restored set.
 
 Per-file failures always stream to stderr, and --verbose adds a line per
 restored file. A run in which the whole set lands exits 0; any failure,
@@ -344,14 +349,27 @@ func pullOrg(
 	}
 
 	if dryRun {
+		// The prediction assumes the stub phase succeeds; a marker already
+		// recording complete is never demoted, so it predicts complete over
+		// any leftovers.
+		predicted := markerComplete(orgRoot) ||
+			(len(plan.Refusals) == 0 && len(plan.Leftovers) == 0)
+
+		// A refused run would settle nothing, so its leftovers carry no
+		// marker consequence to claim.
+		printLeftovers(errW, org, plan.Leftovers, len(plan.Refusals) == 0 && !predicted)
+
 		return writePullSummary(cc.OutOrStdout(), pullOutcome{
-			org:      org,
-			target:   orgRoot,
-			dryRun:   true,
-			restored: plan.RestoreFiles,
-			skipped:  plan.Skipped,
-			refused:  len(plan.Refusals),
-			bytes:    plan.RestoreBytes,
+			org:       org,
+			target:    orgRoot,
+			dryRun:    true,
+			restored:  plan.RestoreFiles,
+			skipped:   plan.Skipped,
+			refused:   len(plan.Refusals),
+			bytes:     plan.RestoreBytes,
+			stubs:     len(plan.Stubs),
+			complete:  predicted,
+			leftovers: plan.Leftovers,
 		}, jsonOut)
 	}
 
@@ -360,15 +378,47 @@ func pullOrg(
 		return err
 	}
 
+	markerClause, markerPartial := markerState(orgRoot, len(plan.Leftovers))
+
+	printLeftovers(errW, org, plan.Leftovers, markerPartial)
+
 	return writePullSummary(cc.OutOrStdout(), pullOutcome{
-		org:      org,
-		target:   orgRoot,
-		restored: sum.Restored,
-		skipped:  sum.Skipped,
-		failed:   sum.Failed,
-		refused:  sum.Refused,
-		bytes:    sum.Bytes,
+		org:         org,
+		target:      orgRoot,
+		restored:    sum.Restored,
+		skipped:     sum.Skipped,
+		failed:      sum.Failed,
+		refused:     sum.Refused,
+		bytes:       sum.Bytes,
+		stubs:       sum.Stubs,
+		stubsFailed: sum.StubsFailed,
+		complete:    sum.Complete,
+		leftovers:   plan.Leftovers,
+		marker:      markerClause,
 	}, jsonOut)
+}
+
+// markerComplete reports whether the org root's marker already records the
+// tree as complete, the state a settlement never demotes.
+func markerComplete(orgRoot string) bool {
+	marker, ok, err := remote.ReadMarker(orgRoot)
+
+	return err == nil && ok && !marker.Restoring && !marker.Partial && marker.URL != ""
+}
+
+// printLeftovers names each mirrored key nothing in the restored tree
+// accounts for. The "(keeps the marker partial)" suffix appears only when
+// the settled or predicted marker is in fact partial: under a marker
+// already recording complete, leftovers do not flip it.
+func printLeftovers(errW io.Writer, org string, leftovers []string, partial bool) {
+	suffix := ""
+	if partial {
+		suffix = " (keeps the marker partial)"
+	}
+
+	for _, key := range leftovers {
+		eprintf(errW, "%s: unaccounted mirror key: %s%s\n", org, key, suffix)
+	}
 }
 
 // resolveOrgRemote settles which mirror one organization restores from: the
@@ -433,26 +483,35 @@ func lockForPull(orgRoot string, dryRun bool) (func(), error) {
 // pullOutcome is one organization's reported result: a finished restore's
 // totals, or a dry run's prediction of them.
 type pullOutcome struct {
-	org      string
-	target   string
-	restored int
-	skipped  int
-	failed   int
-	refused  int
-	bytes    int64
-	dryRun   bool
+	org         string
+	target      string
+	marker      string
+	leftovers   []string
+	restored    int
+	skipped     int
+	failed      int
+	refused     int
+	stubs       int
+	stubsFailed int
+	bytes       int64
+	dryRun      bool
+	complete    bool
 }
 
 // pullReport is the wire shape of a pull summary under --json.
 type pullReport struct {
-	Org      string `json:"org"`
-	Target   string `json:"target"`
-	Restored int    `json:"restored"`
-	Skipped  int    `json:"skipped"`
-	Failed   int    `json:"failed"`
-	Refused  int    `json:"refused"`
-	Bytes    int64  `json:"bytes"`
-	DryRun   bool   `json:"dryRun,omitempty"`
+	Org         string   `json:"org"`
+	Target      string   `json:"target"`
+	Leftovers   []string `json:"leftovers,omitempty"`
+	Restored    int      `json:"restored"`
+	Skipped     int      `json:"skipped"`
+	Failed      int      `json:"failed"`
+	Refused     int      `json:"refused"`
+	Stubs       int      `json:"stubs"`
+	StubsFailed int      `json:"stubsFailed,omitempty"`
+	Bytes       int64    `json:"bytes"`
+	Complete    bool     `json:"complete"`
+	DryRun      bool     `json:"dryRun,omitempty"`
 }
 
 // writePullSummary reports one organization's outcome on out, as one human
@@ -460,14 +519,18 @@ type pullReport struct {
 func writePullSummary(out io.Writer, o pullOutcome, jsonOut bool) error {
 	if jsonOut {
 		err := json.NewEncoder(out).Encode(pullReport{
-			Org:      o.org,
-			Target:   o.target,
-			Restored: o.restored,
-			Skipped:  o.skipped,
-			Failed:   o.failed,
-			Refused:  o.refused,
-			Bytes:    o.bytes,
-			DryRun:   o.dryRun,
+			Org:         o.org,
+			Target:      o.target,
+			Restored:    o.restored,
+			Skipped:     o.skipped,
+			Failed:      o.failed,
+			Refused:     o.refused,
+			Stubs:       o.stubs,
+			StubsFailed: o.stubsFailed,
+			Bytes:       o.bytes,
+			Complete:    o.complete,
+			Leftovers:   o.leftovers,
+			DryRun:      o.dryRun,
 		})
 		if err != nil {
 			return fmt.Errorf("write pull summary: %w", err)
@@ -480,18 +543,20 @@ func writePullSummary(out io.Writer, o pullOutcome, jsonOut bool) error {
 
 	switch {
 	case o.dryRun:
-		line = fmt.Sprintf("%s: pull would restore %s (%s) into %s; %d already present; %d conflicts",
+		line = fmt.Sprintf("%s: pull would restore %s (%s) into %s; %d already present; %d conflicts; "+
+			"would ensure %s; would settle the %s",
 			o.org, theme.CountNoun(o.restored, "object", "objects"), theme.HumanBytes(o.bytes),
-			o.target, o.skipped, o.refused)
+			o.target, o.skipped, o.refused,
+			theme.CountNoun(o.stubs, "stub", "stubs"), o.markerClause())
 
 	case o.restored == 0 && o.failed == 0 && o.refused == 0:
-		line = fmt.Sprintf("%s: nothing to restore (%s verified)",
-			o.org, theme.CountNoun(o.skipped, "object", "objects"))
+		line = fmt.Sprintf("%s: nothing to restore (%s verified); %s",
+			o.org, theme.CountNoun(o.skipped, "object", "objects"), o.markerClause())
 
 	default:
-		line = fmt.Sprintf("%s: restored %s (%s) into %s; %d skipped; %d failed; %d refused",
+		line = fmt.Sprintf("%s: restored %s (%s) into %s; %d skipped; %d failed; %d refused%s; %s",
 			o.org, theme.CountNoun(o.restored, "object", "objects"), theme.HumanBytes(o.bytes),
-			o.target, o.skipped, o.failed, o.refused)
+			o.target, o.skipped, o.failed, o.refused, o.stubClause(), o.markerClause())
 	}
 
 	_, err := fmt.Fprintln(out, line)
@@ -500,6 +565,60 @@ func writePullSummary(out io.Writer, o pullOutcome, jsonOut bool) error {
 	}
 
 	return pullExitErr(o)
+}
+
+// stubClause renders the stub tally for the human summary, empty when the
+// run had no stub work at all.
+func (o pullOutcome) stubClause() string {
+	switch {
+	case o.stubsFailed > 0:
+		return fmt.Sprintf("; %d stubs (%d could not be ensured)", o.stubs+o.stubsFailed, o.stubsFailed)
+	case o.stubs > 0:
+		return fmt.Sprintf("; %d stubs", o.stubs)
+	default:
+		return ""
+	}
+}
+
+// markerClause renders the marker state for the human summary: the
+// prediction on a dry run, the file's own state on a real one, so a run
+// that left the restoring marker standing says so instead of guessing.
+func (o pullOutcome) markerClause() string {
+	if o.marker != "" {
+		return o.marker
+	}
+
+	if o.complete {
+		return "marker complete"
+	}
+
+	if n := len(o.leftovers); n > 0 {
+		return fmt.Sprintf("marker partial (%d unaccounted)", n)
+	}
+
+	return "marker partial"
+}
+
+// markerState reads the marker at orgRoot and renders its settled state for
+// the summary line, also reporting whether it stands settled at partial,
+// the one state a leftover's stderr line may claim to cause.
+func markerState(orgRoot string, leftovers int) (string, bool) {
+	marker, ok, err := remote.ReadMarker(orgRoot)
+
+	switch {
+	case err != nil:
+		return "marker unreadable", false
+	case !ok:
+		return "no marker", false
+	case marker.Restoring:
+		return "marker restoring (restore incomplete)", false
+	case marker.Partial && leftovers > 0:
+		return fmt.Sprintf("marker partial (%d unaccounted)", leftovers), true
+	case marker.Partial:
+		return "marker partial", true
+	default:
+		return "marker complete", false
+	}
 }
 
 // pullExitErr maps an outcome onto the exit contract: any failure or refused
