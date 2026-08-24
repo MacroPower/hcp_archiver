@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"io"
+	"time"
 )
 
 // DeflateMethod is [zip.Deflate], exposed so the external test package can drive
@@ -76,4 +77,11 @@ func WriteExtractedForTest(ctx context.Context, target, org, rel string, data []
 	})
 
 	return err
+}
+
+// WithListNoticeGraceForTest shortens how long a listing runs before
+// [WithListNotice]'s callback fires, so a test exercises the notice without
+// the wall-clock wait the real grace period imposes.
+func WithListNoticeGraceForTest(d time.Duration) ArchiveOption {
+	return func(o *archiveOptions) { o.noticeGrace = d }
 }

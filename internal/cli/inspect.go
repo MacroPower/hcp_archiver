@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -83,6 +84,25 @@ func warnDegraded(errW io.Writer, arc *view.Archive) {
 	}
 }
 
+// listNotice returns the callback [view.WithListNotice] takes, naming an
+// organization whose mirror listing is running long. The commands it serves
+// print nothing until they finish, so a large mirror's enumeration would
+// otherwise look like a hang.
+//
+// The callback fires on a timer goroutine while the command writes its own
+// output, so a mutex guards the writer; it lands on stderr, leaving stdout
+// clean for the bytes a caller is piping.
+func listNotice(errW io.Writer) func(org string) {
+	var mu sync.Mutex
+
+	return func(org string) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		eprintf(errW, "listing the mirror's inventory for organization %q; a large mirror takes a while\n", org)
+	}
+}
+
 // newListCmd returns a command that lists archived objects as plain text or
 // NDJSON, one line per object, transparent to sealing.
 func newListCmd() *cobra.Command {
@@ -127,7 +147,7 @@ none the whole archive is listed.`,
 			prefix = args[0]
 		}
 
-		arc, err := cfg.open(ctx)
+		arc, err := cfg.open(ctx, listNotice(cc.ErrOrStderr()))
 		if err != nil {
 			return err
 		}
@@ -190,7 +210,7 @@ backing store (extract streams such an object to disk without this limit).
 
 		archivePath := args[0]
 
-		arc, err := cfg.open(ctx)
+		arc, err := cfg.open(ctx, listNotice(cc.ErrOrStderr()))
 		if err != nil {
 			return err
 		}
@@ -289,7 +309,7 @@ sidecars) from the mirror, the one egress a dry run may cost.`,
 			return fmt.Errorf("%w (set extract.path in the configuration file)", view.ErrNoTarget)
 		}
 
-		arc, err := cfg.open(ctx)
+		arc, err := cfg.open(ctx, listNotice(cc.ErrOrStderr()))
 		if err != nil {
 			return err
 		}
@@ -629,13 +649,20 @@ func configDir(cfgPath, dir string) string {
 }
 
 // openArchive opens the archive at dir under ctx, against the supplied mirror
-// when rcfg is non-nil, and wraps its organizations in a [*view.Archive].
+// when rcfg is non-nil, and wraps its organizations in a [*view.Archive]. A
+// non-nil notify reports an organization whose mirror listing is running long.
 //
 //nolint:contextcheck // The context rides in through view.WithContext; remote reads derive from it.
-func openArchive(ctx context.Context, dir string, rcfg *remote.Config) (*view.Archive, error) {
+func openArchive(
+	ctx context.Context, dir string, rcfg *remote.Config, notify func(org string),
+) (*view.Archive, error) {
 	opts := []view.ArchiveOption{view.WithContext(ctx)}
 	if rcfg != nil {
 		opts = append(opts, view.WithRemote(*rcfg))
+	}
+
+	if notify != nil {
+		opts = append(opts, view.WithListNotice(notify))
 	}
 
 	orgs, err := view.OpenArchive(dir, opts...)

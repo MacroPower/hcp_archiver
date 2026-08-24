@@ -112,7 +112,7 @@ the markdown tree is written into the directory its export.path names.`,
 		stopReporter := reporter.RunBackground(ctx, nil)
 		defer stopReporter()
 
-		arc, err := cfg.open(runCtx)
+		arc, err := cfg.open(runCtx, nil)
 		if err != nil {
 			return err
 		}

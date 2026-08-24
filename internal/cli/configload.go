@@ -92,7 +92,9 @@ func loadCmdConfig(flagPath string) (cmdConfig, error) {
 }
 
 // open opens the archive the configuration names under ctx, against its
-// mirror when the remote section names one.
-func (c cmdConfig) open(ctx context.Context) (*view.Archive, error) {
-	return openArchive(ctx, c.archiveDir, remoteFromFile(c.file))
+// mirror when the remote section names one. A non-nil notify names an
+// organization whose mirror listing is running long, for the commands that
+// otherwise print nothing until they finish; see [view.WithListNotice].
+func (c cmdConfig) open(ctx context.Context, notify func(org string)) (*view.Archive, error) {
+	return openArchive(ctx, c.archiveDir, remoteFromFile(c.file), notify)
 }

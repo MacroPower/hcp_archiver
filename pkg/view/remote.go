@@ -32,6 +32,12 @@ import (
 // compressed span) is one request under its own timeout.
 const remoteReadTimeout = 5 * time.Minute
 
+// defaultListNoticeGrace is how long an organization's inventory listing may
+// run before [WithListNotice]'s callback names it. A mirror of ordinary size
+// answers well inside it, so a routine read never explains itself; one that
+// outlives it is enumerating enough keys that the wait needs a reason.
+const defaultListNoticeGrace = 2 * time.Second
+
 // maxMemberSize caps a single decompressed bundle member the viewer loads whole
 // into memory. A member's compressed span is already bounded by the bundle
 // object size (see [extractMember]), but DEFLATE expands up to roughly 1032:1,
@@ -89,8 +95,16 @@ type orgRemote struct {
 	// the listing's duration.
 	listBuild chan struct{}
 
+	// Names this organization when its inventory listing outlives
+	// noticeGrace, or nil to report nothing (see [WithListNotice]). It runs on
+	// a timer goroutine, so an implementation sharing a writer with the caller
+	// guards it.
+	notify func(org string)
+
 	orgName string
 	cfg     remote.Config
+
+	noticeGrace time.Duration
 
 	listed bool
 
@@ -158,13 +172,15 @@ func loadOrgRemote(root, orgName string, opts archiveOptions) (*orgRemote, error
 	}
 
 	return &orgRemote{
-		ctx:       opts.ctx,
-		newClient: opts.newClient,
-		orgName:   orgName,
-		cfg:       marker.Config(),
-		bundles:   make(map[string]*remoteBundle),
-		fetches:   make(map[string]*inflightFetch),
-		merged:    marker.Partial,
+		ctx:         opts.ctx,
+		newClient:   opts.newClient,
+		orgName:     orgName,
+		cfg:         marker.Config(),
+		bundles:     make(map[string]*remoteBundle),
+		fetches:     make(map[string]*inflightFetch),
+		notify:      opts.listNotice,
+		noticeGrace: opts.noticeGrace,
+		merged:      marker.Partial,
 	}, nil
 }
 
@@ -183,14 +199,16 @@ func newSuppliedOrgRemote(
 	merged bool, opts archiveOptions,
 ) *orgRemote {
 	return &orgRemote{
-		ctx:       opts.ctx,
-		newClient: opts.newClient,
-		client:    client,
-		orgName:   orgName,
-		cfg:       cfg,
-		bundles:   make(map[string]*remoteBundle),
-		fetches:   make(map[string]*inflightFetch),
-		merged:    merged,
+		ctx:         opts.ctx,
+		newClient:   opts.newClient,
+		client:      client,
+		orgName:     orgName,
+		cfg:         cfg,
+		bundles:     make(map[string]*remoteBundle),
+		fetches:     make(map[string]*inflightFetch),
+		notify:      opts.listNotice,
+		noticeGrace: opts.noticeGrace,
+		merged:      merged,
 	}
 }
 
@@ -333,6 +351,14 @@ func (r *orgRemote) objects() (map[string]remote.ObjectInfo, error) {
 	ready := make(chan struct{})
 	r.listBuild = ready
 	r.listMu.Unlock()
+
+	// A listing that settles inside the grace period says nothing, so ordinary
+	// use stays quiet; one that outlives it is the wait a caller printing
+	// nothing until it finishes needs explained.
+	if r.notify != nil {
+		notice := time.AfterFunc(r.noticeGrace, func() { r.notify(r.orgName) })
+		defer notice.Stop()
+	}
 
 	listing, byDir, err := r.buildListing()
 

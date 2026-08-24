@@ -110,6 +110,11 @@ type Fake struct {
 	// DeleteHook, when set, runs at the start of each delete with the call's
 	// context, serving the same mid-flight cancellation modeling as HeadHook.
 	DeleteHook func(ctx context.Context)
+	// ListHook, when set, runs at the start of each listing page with the
+	// call's context, before the fake's mutex is taken. A test blocks in it to
+	// model a mirror whose enumeration runs long, or cancels a context it
+	// controls to model a cancellation surfacing mid-listing.
+	ListHook func(ctx context.Context)
 	// CopyErr fails every server-side copy; a positive CopyErrN bounds it to
 	// the first n copies.
 	CopyErr error
@@ -495,7 +500,11 @@ const listPageSize = 1000
 // with IsDir set, the way the real drivers answer a delimited listing. Keys
 // with no delimiter past the prefix come through as themselves, interleaved in
 // key order.
-func (f *Fake) ListPaged(_ context.Context, opts *driver.ListOptions) (*driver.ListPage, error) {
+func (f *Fake) ListPaged(ctx context.Context, opts *driver.ListOptions) (*driver.ListPage, error) {
+	if f.ListHook != nil {
+		f.ListHook(ctx)
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -238,6 +240,86 @@ func TestOpenArchive_SuppliedRemoteDegradesWhenDiscoveryFails(t *testing.T) {
 		assert.NoError(t, orgs[0].RemoteWarning(),
 			"a complete tree never asked the mirror for a listing, so nothing degraded")
 	})
+}
+
+func TestOpenArchive_SlowListingNamesItsOrganization(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+	fake := remotetest.New()
+	mirrorArchive(t, root, fake)
+
+	release := make(chan struct{})
+	noticed := make(chan string, 1)
+
+	// The org-inventory listing blocks past the grace period, the shape a
+	// mirror large enough to page for minutes has. Discovery's own delimited
+	// listing runs first and must not block, or the open never returns.
+	var listings atomic.Int64
+
+	fake.ListHook = func(context.Context) {
+		if listings.Add(1) > 1 {
+			<-release
+		}
+	}
+
+	orgs, err := view.OpenArchive(root,
+		view.WithContext(t.Context()),
+		view.WithRemote(viewRemoteConfig()),
+		view.WithRemoteFactory(fakeFactory(fake)),
+		view.WithListNoticeGraceForTest(10*time.Millisecond),
+		view.WithListNotice(func(org string) {
+			select {
+			case noticed <- org:
+			default:
+			}
+		}),
+	)
+	require.NoError(t, err)
+	require.Len(t, orgs, 1)
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		//nolint:errcheck // The listing is released mid-flight; its result is not the subject.
+		orgs[0].Entries("")
+	}()
+
+	select {
+	case org := <-noticed:
+		assert.Equal(t, "my-org", org, "the notice names the organization being listed")
+	case <-time.After(10 * time.Second):
+		t.Fatal("a listing past its grace period reported nothing")
+	}
+
+	close(release)
+	<-done
+}
+
+func TestOpenArchive_PromptListingReportsNothing(t *testing.T) {
+	t.Parallel()
+
+	root := buildArchive(t)
+	fake := remotetest.New()
+	mirrorArchive(t, root, fake)
+
+	var notices atomic.Int64
+
+	orgs, err := view.OpenArchive(root,
+		view.WithContext(t.Context()),
+		view.WithRemote(viewRemoteConfig()),
+		view.WithRemoteFactory(fakeFactory(fake)),
+		view.WithListNotice(func(string) { notices.Add(1) }),
+	)
+	require.NoError(t, err)
+	require.Len(t, orgs, 1)
+
+	_, err = orgs[0].Entries("")
+	require.NoError(t, err)
+
+	assert.Zero(t, notices.Load(), "a listing that settles inside the grace period explains nothing")
 }
 
 func TestOpenArchive_PartialMarkerListsLazilyPerOrg(t *testing.T) {

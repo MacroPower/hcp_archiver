@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"go.jacobcolvin.com/hcp_archiver/pkg/atomicfile"
 	"go.jacobcolvin.com/hcp_archiver/pkg/pathkit"
@@ -91,15 +92,20 @@ type Org struct {
 //
 // Options of this type:
 //   - [WithContext]
+//   - [WithListNotice]
 //   - [WithRemote]
 //   - [WithRemoteFactory]
 type ArchiveOption func(*archiveOptions)
 
 // archiveOptions carries the resolved [OpenArchive] settings.
 type archiveOptions struct {
-	ctx       context.Context //nolint:containedctx // Plumbed into readers whose interfaces take none.
-	newClient remoteClientFactory
-	remoteCfg *remote.Config
+	ctx        context.Context //nolint:containedctx // Plumbed into readers whose interfaces take none.
+	newClient  remoteClientFactory
+	remoteCfg  *remote.Config
+	listNotice func(org string)
+	// How long a listing runs before listNotice names its organization,
+	// defaulting to defaultListNoticeGrace; tests shorten it.
+	noticeGrace time.Duration
 }
 
 // WithContext sets the context every remote bundle read of the opened
@@ -139,6 +145,23 @@ func WithRemote(cfg remote.Config) ArchiveOption {
 	}
 }
 
+// WithListNotice sets a callback naming an organization whose mirror-inventory
+// listing has outlived its grace period, so a command that prints nothing
+// until it finishes can say what it is waiting on. Only a merged organization
+// ever lists, and it lists once, so the callback fires at most once per
+// organization.
+//
+// It runs on a timer goroutine while the command writes its own output, so a
+// callback sharing a writer with the command must guard it. A nil callback
+// reports nothing, which is what an interactive browser wants: its status line
+// already covers a slow screen build, and a write from underneath it would
+// corrupt the display. It returns an [ArchiveOption].
+func WithListNotice(notify func(org string)) ArchiveOption {
+	return func(o *archiveOptions) {
+		o.listNotice = notify
+	}
+}
+
 // WithRemoteFactory overrides how an organization's remote client is built
 // from its marker, defaulting to [remote.New] over the SDK credential chain;
 // tests inject a fake-backed builder through it. A nil factory keeps the
@@ -167,7 +190,8 @@ func WithRemoteFactory(factory func(ctx context.Context, cfg remote.Config) (*re
 // mirror, persisting what it fetches.
 func OpenArchive(dir string, opts ...ArchiveOption) ([]*Org, error) {
 	options := archiveOptions{
-		ctx: context.Background(),
+		ctx:         context.Background(),
+		noticeGrace: defaultListNoticeGrace,
 		newClient: func(ctx context.Context, cfg remote.Config) (*remote.Client, error) {
 			//nolint:wrapcheck // A transparent default factory; callers wrap.
 			return remote.New(ctx, cfg)
