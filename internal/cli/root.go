@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -29,13 +30,19 @@ const appName = "hcp_archiver"
 // YAML configuration file; only per-run and operational settings are flags.
 const (
 	flagConfig           = "config"
+	flagLogFile          = "log-file"
 	flagProgress         = "progress"
 	flagProgressInterval = "progress-interval"
 	flagRetryAbsent      = "retry-absent"
 )
 
-// ErrLogHandler indicates an error occurred while creating a log handler.
-var ErrLogHandler = errors.New("create log handler")
+var (
+	// ErrLogHandler indicates an error occurred while creating a log handler.
+	ErrLogHandler = errors.New("create log handler")
+
+	// ErrLogFile indicates the --log-file destination could not be opened.
+	ErrLogFile = errors.New("open log file")
+)
 
 // archiveFlags holds the raw flag values bound onto the root command. Its
 // config method loads the YAML configuration and merges these per-run settings
@@ -169,6 +176,11 @@ archive directory in turn to accumulate the union of what each can read.`,
 
 	logCfg.RegisterFlags(cmd.PersistentFlags())
 	logCfg.MustRegisterCompletions(cmd)
+
+	var logFilePath string
+
+	cmd.PersistentFlags().StringVar(&logFilePath, flagLogFile, "",
+		"append the structured log stream to this file in addition to stderr")
 	profileCfg.RegisterFlags(cmd.PersistentFlags())
 	profileCfg.MustRegisterCompletions(cmd)
 
@@ -187,12 +199,40 @@ archive directory in turn to accumulate the union of what each can read.`,
 	cmd.PersistentPreRunE = func(cc *cobra.Command, _ []string) error {
 		logWriter = progress.NewLogWriter(cc.ErrOrStderr())
 
-		h, err := logCfg.NewHandler(logWriter)
+		w := io.Writer(logWriter)
+
+		// A file destination tees the handler's whole stream: the file gets
+		// every line stderr does, so the events recording a past run's
+		// destructive actions (each pruned remote key, discarded ledger
+		// records, stranded-source warnings) survive the terminal session
+		// instead of living only in the least durable place the process has.
+		// The file stays open for the process lifetime exactly like the
+		// stderr it mirrors, and its writes are unbuffered, so exit loses
+		// nothing.
+		if logFilePath != "" {
+			//nolint:gosec // The log destination is operator-chosen.
+			f, openErr := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+			if openErr != nil {
+				return fmt.Errorf("%w: %w", ErrLogFile, openErr)
+			}
+
+			w = io.MultiWriter(logWriter, f)
+		}
+
+		h, err := logCfg.NewHandler(w)
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrLogHandler, err)
 		}
 
 		slog.SetDefault(slog.New(h))
+
+		if logFilePath != "" {
+			// Announce the copy on the stream itself, so the file provably
+			// receives the handler's output and the stderr reader learns a
+			// durable copy exists.
+			slog.LogAttrs(cc.Context(), slog.LevelDebug, "log_file_opened",
+				slog.String("path", logFilePath))
+		}
 
 		return nil
 	}

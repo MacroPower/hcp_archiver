@@ -332,3 +332,31 @@ func TestVersionSubcommandStdoutFallback(t *testing.T) { //nolint:paralleltest /
 	require.NoError(t, execErr)
 	assert.NotEmpty(t, string(got), "version text is written to stdout")
 }
+
+func TestRootCmd_LogFileTeesTheStream(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+	logPath := filepath.Join(t.TempDir(), "run.log")
+
+	_, _, err := runCmdIn(t, root, "", "list", "--log-file", logPath, "--log-level", "debug")
+	require.NoError(t, err)
+
+	// The opening announcement rides the handler's own stream, so its
+	// presence proves the file receives what stderr receives.
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "log_file_opened",
+		"the handler's output is teed into the file")
+}
+
+func TestRootCmd_LogFileOpenRefused(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+	logPath := filepath.Join(t.TempDir(), "missing", "run.log")
+
+	_, _, err := runCmdIn(t, root, "", "list", "--log-file", logPath)
+	require.ErrorIs(t, err, cli.ErrLogFile,
+		"an unopenable destination refuses the run rather than logging to stderr alone")
+}
