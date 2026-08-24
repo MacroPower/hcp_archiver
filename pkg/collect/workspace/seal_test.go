@@ -384,6 +384,53 @@ func TestSealWorkspace_StrandedSourceWarningCarriesRemovalCause(t *testing.T) {
 	assert.True(t, f.exists(planLog), "the refused removal leaves the source for the next run")
 }
 
+func TestSealWorkspace_RefusedSourceRemovalIsReported(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory mode this test refuses the removal with")
+	}
+
+	rec := logtest.NewRecorder()
+	f := newSealFixtureLogged(t, rec)
+	st := f.store
+	project, ws := "prod", "api"
+
+	planLog := st.RunFile(project, ws, "run-1", "plan.log")
+	planSummary := st.RunFile(project, ws, "run-1", "plan-summary.json")
+
+	f.writeDone(t, planLog, []byte("plan output"))
+	f.writeDone(t, planSummary, []byte(`{"plan":"plan-1"}`))
+	f.markComplete(project, ws)
+
+	// The run directory allows the seal's reads but not the unlink, so both the
+	// bundle's and the roll-up's best-effort source removals are refused.
+	runDir := st.AbsPath(st.RunDir(project, ws, "run-1"))
+	require.NoError(t, os.Chmod(runDir, 0o500))
+
+	t.Cleanup(func() {
+		//nolint:errcheck // Restores the mode so the temp dir can be torn down.
+		_ = os.Chmod(runDir, 0o700)
+	})
+
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	// Each refusal is reported the moment it happens, named under the sealed
+	// form that met it, rather than a run later by the reconcile.
+	events := rec.Events("seal_remove_source_error")
+	require.Len(t, events, 2, "one report per refused removal")
+
+	assert.Equal(t, "logs", events[0].Attrs["prefix"])
+	assert.Equal(t, planLog, events[0].Attrs["name"])
+	assert.Contains(t, events[0].Attrs["error"], "permission denied")
+
+	assert.Equal(t, "plan-summaries.ndjson", events[1].Attrs["rollup"])
+	assert.Equal(t, planSummary, events[1].Attrs["name"])
+	assert.Contains(t, events[1].Attrs["error"], "permission denied")
+
+	assert.True(t, f.exists(planLog), "the refused removal leaves the source for the next run")
+}
+
 func TestSealWorkspace_ResealWithChangedContentSealsNewGeneration(t *testing.T) {
 	t.Parallel()
 

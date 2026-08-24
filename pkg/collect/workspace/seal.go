@@ -443,12 +443,27 @@ func (c *Collector) sealBundle(ctx context.Context, project, ws, prefix string, 
 
 	bundlePath := filepath.Join(bundlesDir, fmt.Sprintf("%s.gen%04d.zip", prefix, gen))
 
-	_, err = seal.Seal(bundlePath, fresh)
+	_, err = seal.Seal(bundlePath, fresh, c.removeFailureHandler(ctx, "prefix", prefix))
 	if err != nil {
 		return fmt.Errorf("seal %s bundle: %w", prefix, err)
 	}
 
 	return nil
+}
+
+// removeFailureHandler builds the [seal.WithRemoveFailureHandler] option the
+// seal and coalesce passes share: a refused source removal is reported the
+// moment it happens, under the sealed form it names (scopeKey/scope, a bundle
+// prefix or a roll-up file), rather than a run later by the reconcile that
+// meets the survivor.
+func (c *Collector) removeFailureHandler(ctx context.Context, scopeKey, scope string) seal.Option {
+	return seal.WithRemoveFailureHandler(func(m seal.Member, err error) {
+		c.env.Log().LogAttrs(ctx, slog.LevelWarn, "seal_remove_source_error",
+			slog.String(scopeKey, scope),
+			slog.String("name", m.Name),
+			slog.String("error", err.Error()),
+		)
+	})
 }
 
 // reconcileSealed splits members into those still to seal and those a prior,
@@ -587,7 +602,7 @@ func (c *Collector) coalesce(ctx context.Context, project, ws string, rollups ma
 		members := rollups[name]
 		sortMembers(members)
 
-		err := seal.Rollup(filepath.Join(rollupDir, name), members)
+		err := seal.Rollup(filepath.Join(rollupDir, name), members, c.removeFailureHandler(ctx, "rollup", name))
 		if err != nil {
 			return fmt.Errorf("coalesce %s: %w", name, err)
 		}

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -363,6 +364,87 @@ func TestSeal_BestEffortRemovalToleratesUnremovableSource(t *testing.T) {
 	// reconcile against the now-committed sidecar.
 	_, statErr = os.Stat(src)
 	require.NoError(t, statErr, "the source that could not be removed is kept")
+}
+
+// removeRefusal captures one refused source removal handed to the
+// [seal.WithRemoveFailureHandler] under test.
+type removeRefusal struct {
+	member seal.Member
+	err    error
+}
+
+// lockSource writes data as name inside a directory the process can search but
+// not write, so removing the file inside it fails with EACCES rather than
+// ENOENT, and restores the mode on cleanup.
+func lockSource(t *testing.T, dir, name string, data []byte) string {
+	t.Helper()
+
+	locked := filepath.Join(dir, "locked")
+	require.NoError(t, os.Mkdir(locked, 0o700))
+
+	src := writeSource(t, locked, name, data)
+	require.NoError(t, os.Chmod(locked, 0o500))
+	t.Cleanup(func() {
+		//nolint:errcheck,gosec // Restore so t.TempDir cleanup can remove the tree.
+		os.Chmod(locked, 0o700)
+	})
+
+	return src
+}
+
+func TestRemoveFailureHandler(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions, so the source removal cannot be made to fail")
+	}
+
+	tests := map[string]struct {
+		fold func(dir string, members []seal.Member, opt seal.Option) error
+	}{
+		"a seal reports the member it could not remove": {
+			fold: func(dir string, members []seal.Member, opt seal.Option) error {
+				_, err := seal.Seal(filepath.Join(dir, "bundles", "logs.gen0001.zip"), members, opt)
+
+				return err //nolint:wrapcheck // The test asserts on the raw return.
+			},
+		},
+		"a roll-up reports the member it could not remove": {
+			fold: func(dir string, members []seal.Member, opt seal.Option) error {
+				return seal.Rollup(filepath.Join(dir, "rollups", "runs.ndjson"), members, opt)
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			locked := lockSource(t, dir, "run.json", []byte(`{"id":"run-1"}`))
+			removable := writeSource(t, dir, "other.json", []byte(`{"id":"run-2"}`))
+
+			var calls []removeRefusal
+
+			opt := seal.WithRemoveFailureHandler(func(m seal.Member, err error) {
+				calls = append(calls, removeRefusal{member: m, err: err})
+			})
+
+			require.NoError(t, tc.fold(dir, []seal.Member{
+				{Name: "runs/r1/run.json", Source: locked},
+				{Name: "runs/r2/run.json", Source: removable},
+			}, opt), "a refused removal never fails the fold")
+
+			// Only the refused removal reaches the handler, carrying the member
+			// and the cause; the removable source is removed silently.
+			require.Len(t, calls, 1)
+			assert.Equal(t, "runs/r1/run.json", calls[0].member.Name)
+			require.ErrorIs(t, calls[0].err, fs.ErrPermission)
+
+			_, statErr := os.Stat(removable)
+			assert.True(t, os.IsNotExist(statErr), "the removable source is removed")
+		})
+	}
 }
 
 // rollupRecord mirrors the roll-up line shape for reading back a roll-up in tests.

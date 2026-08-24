@@ -91,6 +91,41 @@ var (
 	ErrDuplicateMember = errors.New("member names must be unique within a bundle")
 )
 
+// config holds the resolved settings for one [Seal] or [Rollup] call.
+type config struct {
+	onRemoveFailure func(m Member, err error)
+}
+
+// Option configures a [Seal] or [Rollup] call.
+//
+// The available options are:
+//   - [WithRemoveFailureHandler]
+type Option func(*config)
+
+// resolveConfig applies opts over the zero config, the shared option handling
+// of [Seal] and [Rollup].
+func resolveConfig(opts ...Option) config {
+	var cfg config
+
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	return cfg
+}
+
+// WithRemoveFailureHandler sets fn to be called once for each loose source
+// whose best-effort removal is refused after its bundle or roll-up is durable.
+// The seal stays committed and the survivor is reconciled on the next run
+// either way; the handler is what lets a caller report the refusal when it
+// happens rather than a run later, from the reconcile that meets the survivor.
+// It returns an [Option].
+func WithRemoveFailureHandler(fn func(m Member, err error)) Option {
+	return func(c *config) {
+		c.onRemoveFailure = fn
+	}
+}
+
 // ValidName checks that name is a clean archive-relative path safe to
 // reproduce under a destination directory. Writers gate member names through
 // it before packing; an extractor gates untrusted sidecar and roll-up names
@@ -155,8 +190,10 @@ func checkMemberNames(members []Member) error {
 // not a loss. The caller reconciles it on the next run (a survivor whose bytes
 // still hash to the sidecar entry is already sealed and dropped, one whose
 // bytes diverge is sealed afresh), so a removal failure is skipped rather than
-// returned, which would strand the seal with the bundle already committed.
-func Seal(bundlePath string, members []Member) ([]Entry, error) {
+// returned, which would strand the seal with the bundle already committed; a
+// caller that wants to hear about the refusal when it happens registers
+// [WithRemoveFailureHandler].
+func Seal(bundlePath string, members []Member, opts ...Option) ([]Entry, error) {
 	if len(members) == 0 {
 		return nil, nil
 	}
@@ -202,12 +239,23 @@ func Seal(bundlePath string, members []Member) ([]Entry, error) {
 		return nil, err
 	}
 
-	for i := range members {
-		//nolint:errcheck // Best-effort; a survivor is reconciled on the next run.
-		_ = os.Remove(members[i].Source)
-	}
+	removeSources(members, resolveConfig(opts...))
 
 	return entries, nil
+}
+
+// removeSources removes each member's loose source best-effort, the shared
+// tail of [Seal] and [Rollup]: the sealed copy is already durable and
+// verified, so a refused removal leaves a survivor the next run reconciles
+// rather than a loss. Each refusal is handed to the configured
+// [WithRemoveFailureHandler], when one is set.
+func removeSources(members []Member, cfg config) {
+	for i := range members {
+		err := os.Remove(members[i].Source)
+		if err != nil && cfg.onRemoveFailure != nil {
+			cfg.onRemoveFailure(members[i], err)
+		}
+	}
 }
 
 // ReadSidecar reads a bundle's sidecar index, decoding the newline-delimited
@@ -434,7 +482,11 @@ type rollupLine struct {
 // either way. An empty member set appends nothing. A source whose bytes are
 // not valid UTF-8 cannot be carried losslessly as a JSON string and is refused
 // with [ErrContentNotUTF8] rather than mangled.
-func Rollup(rollupPath string, members []Member) error {
+//
+// Removing the sources is best-effort, exactly as it is for [Seal]: a refusal
+// leaves a survivor the next run re-folds, and a caller that wants to hear
+// about it when it happens registers [WithRemoveFailureHandler].
+func Rollup(rollupPath string, members []Member, opts ...Option) error {
 	if len(members) == 0 {
 		return nil
 	}
@@ -459,14 +511,12 @@ func Rollup(rollupPath string, members []Member) error {
 		return err
 	}
 
-	for i := range members {
-		// Best-effort, mirroring Seal: the roll-up is already appended, flushed,
-		// and byte-verified, so it is durable. A source that will not remove is
-		// re-folded on the next run (readers keep the newest line per path), which
-		// is far better than returning an error that strands an already-committed
-		// roll-up.
-		_ = os.Remove(members[i].Source) //nolint:errcheck // Re-folded next run.
-	}
+	// Best-effort, mirroring Seal: the roll-up is already appended, flushed,
+	// and byte-verified, so it is durable. A source that will not remove is
+	// re-folded on the next run (readers keep the newest line per path), which
+	// is far better than returning an error that strands an already-committed
+	// roll-up.
+	removeSources(members, resolveConfig(opts...))
 
 	return nil
 }
