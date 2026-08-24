@@ -97,7 +97,7 @@ needs `-c` or `$HCP_ARCHIVER_CONFIG`:
 docker run --rm -e HCP_TOKEN \
   -v "$PWD/archive:/archive" \
   -v "$PWD/.hcp_archiver.yaml:/.hcp_archiver.yaml:ro" \
-  oci.jacobcolvin.com/hcp_archiver:latest
+  oci.jacobcolvin.com/hcp_archiver:latest run
 ```
 
 </details>
@@ -182,15 +182,15 @@ export HCP_TOKEN=...              # a user, team, or organization token
 
 printf 'archive:\n  path: ./archive\n' > .hcp_archiver.yaml
 
-hcp_archiver        # archive every organization the token sees
+hcp_archiver run    # archive every organization the token sees
 hcp_archiver view   # browse the result in the terminal
 ```
 
 Run the same command again to update the archive: re-runs are incremental,
 an interrupted run (Ctrl-C) continues on the next invocation, and runs under
 differently scoped tokens against the same directory accumulate the union of
-what each can read. `hcp_archiver --help` explains the resume model and the
-statuses in the end-of-run summary; the short version is that a non-zero
+what each can read. `hcp_archiver run --help` explains the resume model and
+the statuses in the end-of-run summary; the short version is that a non-zero
 `errored` count is the one to investigate.
 
 ## Configuration

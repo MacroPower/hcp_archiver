@@ -1,9 +1,10 @@
 // Command hcp_archiver archives an HCP Terraform (formerly Terraform Cloud)
-// organization to local disk for long-term reference. It captures state
-// history, run history, the configuration that produced each run, and the
-// surrounding org-level metadata as plain files. Read-only subcommands browse
-// an existing archive (view) and list, print, or extract its objects (list,
-// show, extract). It does not restore anything back into HCP Terraform.
+// organization to local disk for long-term reference. The run subcommand
+// captures state history, run history, the configuration that produced each
+// run, and the surrounding org-level metadata as plain files. Read-only
+// subcommands browse an existing archive (view) and list, print, or extract
+// its objects (list, show, extract). It does not restore anything back into
+// HCP Terraform.
 //
 // It is a thin entrypoint; the command-line interface lives in the internal
 // cli package.

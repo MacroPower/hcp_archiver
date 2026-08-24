@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -21,19 +22,39 @@ func TestNewRootCmd(t *testing.T) {
 	cmd := cli.NewRootCmd()
 	require.NotNil(t, cmd)
 
-	assert.True(t, cmd.Runnable())
-	assert.NotNil(t, cmd.Flags().Lookup("config"))
-	assert.Nil(t, cmd.Flags().Lookup("archive-path"), "the archive root comes from the configuration file")
-	assert.NotNil(t, cmd.Flags().Lookup("progress"))
+	assert.False(t, cmd.Runnable(), "the root command only dispatches; run performs the archive")
 
-	registered := map[string]bool{}
+	registered := map[string]*cobra.Command{}
 	for _, sub := range cmd.Commands() {
-		registered[sub.Name()] = true
+		registered[sub.Name()] = sub
 	}
 
-	for _, name := range []string{"version", "view", "list", "show", "extract"} {
-		assert.True(t, registered[name], "%s subcommand is registered", name)
+	for _, name := range []string{"run", "version", "view", "list", "show", "extract"} {
+		assert.NotNil(t, registered[name], "%s subcommand is registered", name)
 	}
+
+	run := registered["run"]
+	require.NotNil(t, run)
+	assert.NotNil(t, run.Flags().Lookup("config"))
+	assert.Nil(t, run.Flags().Lookup("archive-path"), "the archive root comes from the configuration file")
+	assert.NotNil(t, run.Flags().Lookup("progress"))
+}
+
+// TestRootBareInvocation pins the dispatch behavior: invoked without a
+// subcommand, the root prints its help, naming run, and exits clean.
+func TestRootBareInvocation(t *testing.T) {
+	t.Parallel()
+
+	cmd := cli.NewRootCmd()
+
+	out := &bytes.Buffer{}
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{})
+
+	require.NoError(t, cmd.Execute())
+	assert.Contains(t, out.String(), "Usage:", "the bare invocation prints help")
+	assert.Contains(t, out.String(), "run", "the help names the run subcommand")
 }
 
 func TestConfigFromArgs(t *testing.T) {
