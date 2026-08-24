@@ -461,7 +461,9 @@ func (c *Collector) sealBundle(ctx context.Context, project, ws, prefix string, 
 // writing the same archive-relative name into two bundles that the remote sweep
 // would both upload. A member whose name no sidecar records is fresh; a member
 // whose name is recorded and whose current bytes hash to the recorded digest is
-// already sealed (its loose source is removed best-effort and dropped); a
+// already sealed (its loose source is removed best-effort and dropped, and the
+// warning reporting it carries the removal's cause when the removal fails, so a
+// survivor that recurs every run names what is holding it); a
 // member whose bytes diverge from the recorded digest is fresh, sealed into a
 // new generation rather than dropped, so changed content is never lost. When no
 // sidecar records any name, the members pass through untouched, the common case.
@@ -502,13 +504,20 @@ func (c *Collector) reconcileSealed(
 			continue
 		}
 
-		c.env.Log().LogAttrs(ctx, slog.LevelWarn, "seal_reconcile_stranded_source",
+		// Remove before reporting, so the warning carries the removal's outcome.
+		// A refused removal is what turns one crash-strand into the same warning
+		// every run, and the cause is the only thing separating the two.
+		removeErr := os.Remove(members[i].Source)
+
+		attrs := []slog.Attr{
 			slog.String("prefix", prefix),
 			slog.String("name", members[i].Name),
-		)
+		}
+		if removeErr != nil {
+			attrs = append(attrs, slog.String("remove_error", removeErr.Error()))
+		}
 
-		//nolint:errcheck // Best-effort; a survivor is reconciled again next run.
-		_ = os.Remove(members[i].Source)
+		c.env.Log().LogAttrs(ctx, slog.LevelWarn, "seal_reconcile_stranded_source", attrs...)
 	}
 
 	return fresh, nil

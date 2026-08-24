@@ -15,6 +15,7 @@ import (
 
 	"go.jacobcolvin.com/hcp_archiver/pkg/collect"
 	"go.jacobcolvin.com/hcp_archiver/pkg/collect/workspace"
+	"go.jacobcolvin.com/hcp_archiver/pkg/logtest"
 	"go.jacobcolvin.com/hcp_archiver/pkg/manifest"
 	"go.jacobcolvin.com/hcp_archiver/pkg/seal"
 	"go.jacobcolvin.com/hcp_archiver/pkg/store"
@@ -39,6 +40,26 @@ func newSealFixture(t *testing.T) sealFixture {
 
 	return sealFixture{
 		collector: workspace.New(collect.NewEnv(nil, st, ledger), "org"),
+		store:     st,
+		ledger:    ledger,
+	}
+}
+
+// newSealFixtureLogged is [newSealFixture] with the environment's logger
+// captured by rec, for tests that assert on what the seal phase announces.
+func newSealFixtureLogged(t *testing.T, rec *logtest.Recorder) sealFixture {
+	t.Helper()
+
+	root := t.TempDir()
+	st := store.New(root)
+
+	ledger, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	env := collect.NewEnv(nil, st, ledger, collect.WithLogger(rec.Logger()))
+
+	return sealFixture{
+		collector: workspace.New(env, "org"),
 		store:     st,
 		ledger:    ledger,
 	}
@@ -319,6 +340,48 @@ func TestSealWorkspace_ResealAfterStrandedSourcesIsIdempotent(t *testing.T) {
 		"the same holds for the state bundle")
 	assert.False(t, f.exists(planLog), "the reconciled stranded source is removed")
 	assert.False(t, f.exists(stateBlob), "the reconciled stranded state blob is removed")
+}
+
+func TestSealWorkspace_StrandedSourceWarningCarriesRemovalCause(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory mode this test refuses the removal with")
+	}
+
+	rec := logtest.NewRecorder()
+	f := newSealFixtureLogged(t, rec)
+	st := f.store
+	project, ws := "prod", "api"
+
+	planLog := st.RunFile(project, ws, "run-1", "plan.log")
+
+	f.writeDone(t, planLog, []byte("plan output"))
+	f.markComplete(project, ws)
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	// Model the strand the reconcile exists for, with the removal that clears it
+	// refused: the bundle and sidecar are durable, the identical loose source is
+	// back on disk, and its parent directory allows the digest's read but not the
+	// unlink.
+	f.writeDone(t, planLog, []byte("plan output"))
+
+	runDir := st.AbsPath(st.RunDir(project, ws, "run-1"))
+	require.NoError(t, os.Chmod(runDir, 0o500))
+
+	t.Cleanup(func() {
+		//nolint:errcheck // Restores the mode so the temp dir can be torn down.
+		_ = os.Chmod(runDir, 0o700)
+	})
+
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	events := rec.Events("seal_reconcile_stranded_source")
+	require.Len(t, events, 1, "the stranded source is reported once")
+	assert.Equal(t, planLog, events[0].Attrs["name"])
+	assert.Contains(t, events[0].Attrs["remove_error"], "permission denied",
+		"a refused removal names its cause, so a warning that recurs every run is diagnosable")
+	assert.True(t, f.exists(planLog), "the refused removal leaves the source for the next run")
 }
 
 func TestSealWorkspace_ResealWithChangedContentSealsNewGeneration(t *testing.T) {
