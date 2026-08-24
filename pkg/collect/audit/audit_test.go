@@ -139,12 +139,13 @@ func (f auditFixture) watermark() time.Time {
 	return f.ledger.Collection(f.store.AuditTrailDir()).HighWaterMark()
 }
 
-// pageIDs decodes the archived page file written for the since cursor and page
-// number and returns the ids of the events it holds.
-func (f auditFixture) pageIDs(t *testing.T, since time.Time, page int) []string {
+// pageIDs decodes the archived page file written for the zero cursor and page
+// number and returns the ids of the events it holds; the single-run fixture
+// always walks from the zero cursor.
+func (f auditFixture) pageIDs(t *testing.T, page int) []string {
 	t.Helper()
 
-	return pageEventIDs(t, f.store, since, page)
+	return pageEventIDs(t, f.store, time.Time{}, page)
 }
 
 // pageEventIDs decodes the archived page file at the since cursor and page number
@@ -193,8 +194,8 @@ func TestCollectTrailsAdvancesWatermarkAfterCleanWalk(t *testing.T) {
 
 	assert.Equal(t, base.Add(5*time.Second), f.watermark(),
 		"a clean full walk advances the cursor to the newest event seen")
-	assert.Equal(t, []string{"ev-1"}, f.pageIDs(t, time.Time{}, 1))
-	assert.Equal(t, []string{"ev-2"}, f.pageIDs(t, time.Time{}, 2))
+	assert.Equal(t, []string{"ev-1"}, f.pageIDs(t, 1))
+	assert.Equal(t, []string{"ev-2"}, f.pageIDs(t, 2))
 	assert.Zero(t, f.ledger.Tally().SurfacesDropped)
 }
 
@@ -280,7 +281,7 @@ func TestCollectTrailsRepairsPageSettledAbsentByAPriorRelease(t *testing.T) {
 
 	require.NoError(t, f.collector.CollectTrails(t.Context()))
 
-	assert.Equal(t, []string{"ev-1"}, f.pageIDs(t, time.Time{}, 1),
+	assert.Equal(t, []string{"ev-1"}, f.pageIDs(t, 1),
 		"the re-listed events are written over the repaired slot")
 	assert.Equal(t, base, f.watermark(),
 		"the walk completes and advances the cursor instead of wedging")
@@ -381,7 +382,7 @@ func TestCollectTrailsHaltsOnStalledPagination(t *testing.T) {
 
 	assert.True(t, f.watermark().IsZero(),
 		"the cursor must hold: the claimed further pages were never reached")
-	assert.Equal(t, []string{"ev-1"}, f.pageIDs(t, time.Time{}, 1),
+	assert.Equal(t, []string{"ev-1"}, f.pageIDs(t, 1),
 		"the page that did list is still archived")
 	assert.Equal(t, 1, f.ledger.Tally().SurfacesDropped)
 }
@@ -394,21 +395,69 @@ func TestCollectTrailsDropsEventsAtOrBeforeSubSecondWatermark(t *testing.T) {
 	// second. Those must be dropped; only the strictly newer event is fresh.
 	mark := time.Date(2026, 7, 10, 12, 0, 0, 500_000_000, time.UTC)
 
-	f := newAuditFixture(t, map[int]trailPage{
+	f := newResumeFixture(t)
+
+	// Run 1 archives the watermark's second and advances the cursor to it, the
+	// state a re-listed at-mark event is deduplicated against.
+	f.setPages(map[int]trailPage{
+		1: {events: []*tfe.AuditTrail{
+			event("ev-at-mark", mark),
+			event("ev-old", mark.Add(-200*time.Millisecond)),
+		}, nextPage: 0},
+	})
+	f.run(t)
+
+	require.Equal(t, mark, f.watermark())
+
+	f.setPages(map[int]trailPage{
 		1: {events: []*tfe.AuditTrail{
 			event("ev-new", mark.Add(300*time.Millisecond)),
 			event("ev-at-mark", mark),
 			event("ev-old", mark.Add(-200*time.Millisecond)),
 		}, nextPage: 0},
 	})
+	f.run(t)
 
-	f.ledger.Collection(f.store.AuditTrailDir()).AdvanceHighWaterMark(mark)
-
-	require.NoError(t, f.collector.CollectTrails(t.Context()))
-
-	assert.Equal(t, []string{"ev-new"}, f.pageIDs(t, mark, 1),
-		"only the event strictly newer than the watermark is fresh")
+	assert.Equal(t, []string{"ev-new"}, pageEventIDs(t, f.store, mark, 1),
+		"only the event newer than the watermark's persisted second is fresh")
 	assert.Equal(t, mark.Add(300*time.Millisecond), f.watermark())
+}
+
+func TestCollectTrailsCapturesNewEventStampedAtWatermark(t *testing.T) {
+	t.Parallel()
+
+	// Audit timestamps cluster within a wall-clock second, so an event committed
+	// after a walk can carry exactly the stamp the walk advanced the watermark
+	// to. It must still be archived on the next run; only the persisted event
+	// that set the watermark there is a duplicate.
+	mark := time.Date(2026, 7, 10, 12, 0, 0, 500_000_000, time.UTC)
+
+	f := newResumeFixture(t)
+
+	f.setPages(map[int]trailPage{
+		1: {events: []*tfe.AuditTrail{event("ev-boundary", mark)}, nextPage: 0},
+	})
+	f.run(t)
+
+	require.Equal(t, mark, f.watermark())
+
+	f.setPages(map[int]trailPage{
+		1: {events: []*tfe.AuditTrail{
+			event("ev-new-at-mark", mark),
+			event("ev-boundary", mark),
+		}, nextPage: 0},
+	})
+	f.run(t)
+
+	assert.Equal(t, []string{"ev-new-at-mark"}, pageEventIDs(t, f.store, mark, 1),
+		"a new event sharing the watermark's stamp is captured, not lost")
+	assert.Equal(t, mark, f.watermark(), "the watermark holds at the shared stamp")
+
+	// A third run re-lists both boundary events; everything is archived, so
+	// nothing is written under a fresh name and nothing is duplicated.
+	f.run(t)
+
+	requireNoPageFile(t, f, mark, 2)
 }
 
 func TestCollectTrailsEmptyPageStopsWithoutWriting(t *testing.T) {
@@ -446,8 +495,8 @@ func TestCollectTrailsEmptyPageDoesNotEndTheWalk(t *testing.T) {
 
 	require.NoError(t, f.collector.CollectTrails(t.Context()))
 
-	assert.Equal(t, []string{"ev-new"}, f.pageIDs(t, time.Time{}, 1))
-	assert.Equal(t, []string{"ev-old"}, f.pageIDs(t, time.Time{}, 3),
+	assert.Equal(t, []string{"ev-new"}, f.pageIDs(t, 1))
+	assert.Equal(t, []string{"ev-old"}, f.pageIDs(t, 3),
 		"a page past an empty one is still walked and archived")
 	assert.Equal(t, base.Add(5*time.Second), f.watermark(),
 		"the watermark tracks the newest event across every walked page")
@@ -462,27 +511,26 @@ func TestCollectTrailsResumeAppendsOnlyNewerEvents(t *testing.T) {
 	// First run: one event. Second run: the server re-lists it along with a
 	// newer one. The runs' pages are keyed by their distinct cursors, so the
 	// second run writes a fresh page holding only the new event.
-	f := newAuditFixture(t, map[int]trailPage{
+	f := newResumeFixture(t)
+
+	f.setPages(map[int]trailPage{
 		1: {events: []*tfe.AuditTrail{event("ev-1", base)}, nextPage: 0},
 	})
+	f.run(t)
 
-	require.NoError(t, f.collector.CollectTrails(t.Context()))
 	require.Equal(t, base, f.watermark())
 
-	f2 := newAuditFixture(t, map[int]trailPage{
+	f.setPages(map[int]trailPage{
 		1: {events: []*tfe.AuditTrail{
 			event("ev-2", base.Add(time.Minute)),
 			event("ev-1", base),
 		}, nextPage: 0},
 	})
+	f.run(t)
 
-	f2.ledger.Collection(f2.store.AuditTrailDir()).AdvanceHighWaterMark(base)
-
-	require.NoError(t, f2.collector.CollectTrails(t.Context()))
-
-	assert.Equal(t, []string{"ev-2"}, f2.pageIDs(t, base, 1),
+	assert.Equal(t, []string{"ev-2"}, pageEventIDs(t, f.store, base, 1),
 		"the resumed walk archives only events past the prior watermark")
-	assert.Equal(t, base.Add(time.Minute), f2.watermark())
+	assert.Equal(t, base.Add(time.Minute), f.watermark())
 }
 
 // resumeFixture serves audit-trail pages from a swappable table over a single

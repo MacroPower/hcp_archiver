@@ -101,14 +101,27 @@ func TestEventsAfter(t *testing.T) {
 			since: base,
 			want:  []string{"ev-2", "ev-1"},
 		},
-		"events at or before the cursor are dropped": {
+		"events before the cursor are dropped": {
 			items: []*tfe.AuditTrail{
 				ev("ev-new", base.Add(time.Nanosecond)),
-				ev("ev-at-mark", base),
 				ev("ev-old", base.Add(-time.Hour)),
 			},
 			since: base,
 			want:  []string{"ev-new"},
+		},
+		"the cursor's instant admits a new event and drops the archived one": {
+			items: []*tfe.AuditTrail{
+				ev("ev-new-at-mark", base),
+				ev("ev-boundary", base),
+			},
+			archived: []*tfe.AuditTrail{ev("ev-boundary", base)},
+			since:    base,
+			want:     []string{"ev-new-at-mark"},
+		},
+		"an id-less event at the cursor is dropped": {
+			items: []*tfe.AuditTrail{ev("", base)},
+			since: base,
+			want:  []string{},
 		},
 		"a shifted page drops the events its settled sibling holds": {
 			items: []*tfe.AuditTrail{

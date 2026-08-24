@@ -34,14 +34,17 @@ func pageName(since time.Time, page int) string {
 	return fmt.Sprintf("%s-p%09d.json", stamp, page)
 }
 
-// archivedIDs holds the ids of the audit events a walk has already persisted
-// under its Since cursor, the second half of the freshness test [eventsAfter]
-// applies.
+// archivedIDs holds the ids of the audit events already persisted that the
+// current walk could re-list, the second half of the freshness test
+// [eventsAfter] applies.
 //
 // The cursor alone cannot express it: the watermark is a single instant, while
 // a resumed walk carries per-page state. That state is the settled pages'
 // stored events, which are strictly newer than the cursor and so pass the
-// timestamp test even though they are already archived.
+// timestamp test even though they are already archived. The walk also seeds
+// the set with the prior cursor group's events stamped exactly at the
+// watermark (see [Collector.seedWatermarkBoundary]), which the timestamp test
+// admits for the sake of a new event sharing their stamp.
 type archivedIDs map[string]struct{}
 
 // record folds the events persisted for one page into the set. Events without an
@@ -62,27 +65,45 @@ func (a archivedIDs) holds(id string) bool {
 	return ok
 }
 
-// eventsAfter returns the items whose timestamp is strictly newer than since and
-// that archived does not already hold, preserving the API's order.
+// eventsAfter returns the items whose timestamp is at or past since and that
+// archived does not already hold, preserving the API's order.
 //
 // The API floors the Since cursor to whole-second precision on the wire (jsonapi
 // renders a [time.Time] as RFC3339), so a walk resuming from a sub-second
 // watermark re-lists the events already archived in the watermark's second.
-// Dropping them keeps a page from duplicating a prior run's trailing second
+// The ones strictly before the watermark are dropped on their timestamp alone;
+// dropping them keeps a page from duplicating a prior run's trailing second
 // under a fresh page name.
 //
-// The archived set covers the other source of re-listed events: pagination
-// shift. Events arriving between runs push the listing back a slot, so a page
-// the walk has not settled yet lists events a settled sibling page already
-// holds. They are strictly newer than the unadvanced cursor, so only their ids
-// distinguish them from genuinely new events.
+// The watermark's own instant cannot be dropped the same way: the watermark is
+// the newest persisted timestamp, and audit timestamps cluster within a
+// wall-clock second, so a genuinely new event can share the stamp with the
+// persisted event that set the watermark there. Requiring strictly-after would
+// lose that new event forever once the cursor moves on. Only ids tell the two
+// apart, so the walk seeds the archived set with the stored boundary events
+// (see [Collector.seedWatermarkBoundary]) and admits the rest. An id-less
+// event at the watermark is indistinguishable from the persisted one and is
+// dropped, since admitting it would re-archive it on every run under an
+// unmoved cursor.
+//
+// The archived set also covers the other source of re-listed events:
+// pagination shift. Events arriving between runs push the listing back a slot,
+// so a page the walk has not settled yet lists events a settled sibling page
+// already holds. They are strictly newer than the unadvanced cursor, so only
+// their ids distinguish them from genuinely new events.
 func eventsAfter(items []*tfe.AuditTrail, since time.Time, archived archivedIDs) []*tfe.AuditTrail {
 	fresh := make([]*tfe.AuditTrail, 0, len(items))
 
 	for _, it := range items {
-		if it != nil && it.Timestamp.After(since) && !archived.holds(it.ID) {
-			fresh = append(fresh, it)
+		if it == nil || it.Timestamp.Before(since) || archived.holds(it.ID) {
+			continue
 		}
+
+		if it.ID == "" && !it.Timestamp.After(since) {
+			continue
+		}
+
+		fresh = append(fresh, it)
 	}
 
 	return fresh

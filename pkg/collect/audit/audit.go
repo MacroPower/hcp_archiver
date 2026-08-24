@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	tfe "github.com/hashicorp/go-tfe"
@@ -111,9 +112,13 @@ func (c *Collector) collectConfig(ctx context.Context) error {
 // archived and must not step the cursor past it. That page's contribution is
 // read back from its stored file; a freshly written page's is its own events.
 // Because visible audit events are ordered by creation time, a genuinely new
-// event sorts later than every persisted one, so the cursor advances only up to
-// what was persisted and the new event is captured on the following run, once
-// the advanced cursor lists it under a fresh page name.
+// event sorts at or later than every persisted one, so the cursor advances
+// only up to what was persisted and the new event is captured on the following
+// run, once the advanced cursor lists it under a fresh page name. "At" is a
+// real case, not a nicety: timestamps cluster within a wall-clock second, so a
+// new event can carry exactly the watermark's stamp, and the walk admits it,
+// telling it apart from the persisted boundary events by their seeded ids
+// (see [Collector.seedWatermarkBoundary]).
 //
 // Those same persisted events are also what a page still to be written must be
 // filtered against. Events arriving between runs shift the newest-first listing
@@ -134,6 +139,7 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 	var newest time.Time
 
 	archived := archivedIDs{}
+	c.seedWatermarkBoundary(archived, since)
 
 	for page := 1; ; {
 		list, listErr := c.listPage(ctx, since, page)
@@ -218,6 +224,75 @@ func (c *Collector) collectTrails(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// seedWatermarkBoundary folds into archived the ids of the stored events
+// stamped exactly at the watermark, so the freshness test can tell them from a
+// genuinely new event sharing the watermark's stamp.
+//
+// [eventsAfter] admits events at the watermark's instant: the watermark is the
+// newest persisted timestamp, audit timestamps cluster within a wall-clock
+// second, and dropping the instant outright would lose a new event stamped
+// there forever once the cursor moves on. The floored wire cursor re-lists the
+// already-persisted events at that instant too, though, and only ids tell the
+// two apart. Those persisted events live in exactly one cursor group: the one
+// whose walk advanced the watermark, the group with the newest stamp before
+// the current cursor's. An interrupted newer walk files its pages under the
+// current stamp, and every older group advanced the watermark to an older
+// instant, so neither can hold an event at this one.
+//
+// A page that cannot be read back seeds nothing. Its boundary events would
+// then re-archive under the current cursor, a redundant record; halting
+// instead would wedge the walk on a page it can never repair.
+func (c *Collector) seedWatermarkBoundary(archived archivedIDs, since time.Time) {
+	if since.IsZero() {
+		return
+	}
+
+	st := c.env.Store()
+
+	entries, err := os.ReadDir(st.AbsPath(st.AuditTrailDir()))
+	if err != nil {
+		// No pages stored yet: a walk inheriting a watermark over an empty
+		// directory has nothing to seed from.
+		return
+	}
+
+	cur := since.UTC().Format(pageTimeLayout) + "Z"
+
+	var boundary string
+
+	for _, e := range entries {
+		stamp, _, ok := strings.Cut(e.Name(), "-p")
+		if ok && len(stamp) == len(cur) && stamp < cur && stamp > boundary {
+			boundary = stamp
+		}
+	}
+
+	if boundary == "" {
+		return
+	}
+
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), boundary+"-p") {
+			continue
+		}
+
+		stored, err := c.readPersistedPage(st.AuditTrailFile(e.Name()))
+		if err != nil {
+			continue
+		}
+
+		var atMark []*tfe.AuditTrail
+
+		for _, it := range stored {
+			if it != nil && it.Timestamp.Equal(since) {
+				atMark = append(atMark, it)
+			}
+		}
+
+		archived.record(atMark)
+	}
 }
 
 // archiveTrailPage records one audit-trail page's fresh events and reports
