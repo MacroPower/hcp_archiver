@@ -14,3 +14,9 @@ func MkdirAllSync(dir string, mode fs.FileMode, sync func(string) error) error {
 func AppendSync(name string, data []byte, sync func(string) error, opts ...Option) (int64, error) {
 	return appendSync(name, data, sync, opts...)
 }
+
+// RemoveSync exposes removeSync to the external test package, letting a test
+// fail or record the directory flush that makes the unlink durable.
+func RemoveSync(name string, sync func(string) error) error {
+	return removeSync(name, sync)
+}

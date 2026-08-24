@@ -1843,7 +1843,12 @@ func (l *Ledger) fold(compactAll bool) error {
 		return nil
 	}
 
-	err := os.Remove(l.walPath())
+	// The unlink must be durable: Load discards a deleted subtree's records
+	// while replaying this log, and a resurrected log would replay them over
+	// the subtree a later run re-creates (see the replay notes on Load). A
+	// plain remove leaves the unlink in the page cache until the next append
+	// happens to sync the directory.
+	err := atomicfile.Remove(l.walPath())
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("truncate ledger log: %w", err)
 	}

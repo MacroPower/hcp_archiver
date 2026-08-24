@@ -570,3 +570,59 @@ func TestAppend_trimsTornTailBeforeAppending(t *testing.T) {
 		})
 	}
 }
+
+func TestRemove_unlinksAndFlushesParent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "log.ndjson")
+	require.NoError(t, os.WriteFile(target, []byte("record\n"), 0o600))
+
+	var flushed []string
+
+	err := atomicfile.RemoveSync(target, func(d string) error {
+		flushed = append(flushed, d)
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	_, err = os.Stat(target)
+	require.ErrorIs(t, err, fs.ErrNotExist)
+
+	// The parent directory is flushed so the unlink is durable.
+	assert.Equal(t, []string{dir}, flushed)
+}
+
+func TestRemove_missingFileSkipsFlush(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	var flushed []string
+
+	err := atomicfile.RemoveSync(filepath.Join(dir, "absent"), func(d string) error {
+		flushed = append(flushed, d)
+
+		return nil
+	})
+	require.ErrorIs(t, err, fs.ErrNotExist)
+	assert.Empty(t, flushed)
+}
+
+func TestRemove_flushFailureStillUnlinks(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "log.ndjson")
+	require.NoError(t, os.WriteFile(target, []byte("record\n"), 0o600))
+
+	err := atomicfile.RemoveSync(target, func(string) error {
+		return errBoom
+	})
+	require.ErrorIs(t, err, errBoom)
+
+	// The remove itself took effect; only its durability is unconfirmed.
+	_, err = os.Stat(target)
+	require.ErrorIs(t, err, fs.ErrNotExist)
+}

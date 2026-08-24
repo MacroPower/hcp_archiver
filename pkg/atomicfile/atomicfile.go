@@ -396,6 +396,39 @@ func MkdirAll(dir string, mode fs.FileMode) error {
 	return mkdirAllSynced(dir, mode)
 }
 
+// Remove removes the file at name and flushes its parent directory, so the
+// unlink is durable the way [Write]'s rename is. It is the package's durable
+// counterpart to [os.Remove], for a caller whose later work depends on the
+// file staying gone: a plain remove leaves the unlink only in the page cache,
+// and a crash can bring the file back after the caller already acted on its
+// absence.
+//
+// A remove that finds name absent returns the underlying [fs.ErrNotExist]
+// without flushing anything. A directory-flush failure reported after the
+// remove leaves name gone; only the unlink's durability across a crash is
+// unconfirmed, not its effect.
+func Remove(name string) error {
+	return removeSync(name, syncDir)
+}
+
+// removeSync is [Remove] with the directory-sync function injected, so a test
+// can fail or record the flush that makes the unlink durable.
+func removeSync(name string, sync func(string) error) error {
+	err := os.Remove(name)
+	if err != nil {
+		return fmt.Errorf("remove %q: %w", name, err)
+	}
+
+	dir := filepath.Dir(name)
+
+	err = sync(dir)
+	if err != nil {
+		return fmt.Errorf("sync parent directory %q: %w", dir, err)
+	}
+
+	return nil
+}
+
 // mkdirAllSynced creates dir and any missing ancestor, then flushes each newly
 // created directory's parent so the dentries linking the new subtree are
 // durable, not just the leaf's.
