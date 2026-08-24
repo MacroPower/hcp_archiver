@@ -457,17 +457,30 @@ func (e *Env) Reference(gateKey string, sharedPaths ...string) {
 
 // SkipGatedListing reports whether a metered child listing can be skipped:
 // its list file is settled, the reference gate over the children it derives
-// is not pending, and no recorded absence beneath subtreePrefix awaits a
-// retry-absent re-probe (see [manifest.Ledger.HasRetryableAbsentUnder]).
+// is not pending, no recorded absence beneath subtreePrefix awaits a
+// retry-absent re-probe (see [manifest.Ledger.HasRetryableAbsentUnder]), and
+// every child the settled listing stamped as derived still has a settled
+// entry of its own (see [manifest.Ledger.DerivedSettled]).
 //
-// The three clauses travel together as one named predicate because every
-// gate that composed them by hand was a place to forget one: a forgotten
-// retry-absent clause left the flag inert for exactly the absences only the
-// listing could reach, while the walk above kept re-paging on their account.
+// The clauses travel together as one named predicate because every gate that
+// composed them by hand was a place to forget one: a forgotten retry-absent
+// clause left the flag inert for exactly the absences only the listing could
+// reach, while the walk above kept re-paging on their account. The derived
+// clause covers the loss none of the others sees: a child's entry gone
+// missing while the list file stays settled and the gate stays clear, which
+// would otherwise skip the only listing that can re-reach the child, forever.
 func (e *Env) SkipGatedListing(listPath, gateKey, subtreePrefix string) bool {
 	return !e.ledger.ShouldFetch(listPath) &&
 		!e.ledger.ReferencePending(gateKey) &&
-		!e.ledger.HasRetryableAbsentUnder(subtreePrefix)
+		!e.ledger.HasRetryableAbsentUnder(subtreePrefix) &&
+		e.ledger.DerivedSettled(listPath)
+}
+
+// RecordDerived stamps the children a settled listing derived onto the
+// listing's ledger entry (see [manifest.Ledger.RecordDerived]), the manifest
+// [Env.SkipGatedListing]'s derived clause verifies.
+func (e *Env) RecordDerived(listPath string, children ...string) {
+	e.ledger.RecordDerived(listPath, children...)
 }
 
 // Entry returns the ledger entry recorded for relPath and whether one exists.

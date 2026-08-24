@@ -2107,3 +2107,105 @@ func TestLedger_ResumedUnder(t *testing.T) {
 		})
 	}
 }
+
+func TestLedger_DerivedSettled(t *testing.T) {
+	t.Parallel()
+
+	const (
+		listPath = "projects/p/workspaces/w/runs/r/policy-checks.json"
+		child    = "projects/p/workspaces/w/runs/r/policy-check-pc1.log"
+	)
+
+	tests := map[string]struct {
+		setup func(l *manifest.Ledger)
+		want  bool
+	}{
+		"a listing with no entry": {
+			setup: func(*manifest.Ledger) {},
+			want:  true,
+		},
+		"a listing with no recorded manifest": {
+			setup: func(l *manifest.Ledger) {
+				l.RecordDone(listPath, manifest.Signature{Size: 1})
+			},
+			want: true,
+		},
+		"every recorded child settled": {
+			setup: func(l *manifest.Ledger) {
+				l.RecordDone(listPath, manifest.Signature{Size: 1})
+				l.RecordDone(child, manifest.Signature{Size: 2})
+				l.RecordDerived(listPath, child)
+			},
+			want: true,
+		},
+		"a child entry gone missing": {
+			setup: func(l *manifest.Ledger) {
+				l.RecordDone(listPath, manifest.Signature{Size: 1})
+				l.RecordDerived(listPath, child)
+			},
+			want: false,
+		},
+		"a child awaiting a retry": {
+			setup: func(l *manifest.Ledger) {
+				l.RecordDone(listPath, manifest.Signature{Size: 1})
+				l.RecordErrored(child, errors.New("boom"), true)
+				l.RecordDerived(listPath, child)
+			},
+			want: false,
+		},
+		"stamping without an owner is a no-op": {
+			setup: func(l *manifest.Ledger) {
+				l.RecordDerived(listPath, child)
+				l.RecordDone(listPath, manifest.Signature{Size: 1})
+			},
+			want: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ld, err := manifest.Load(t.TempDir())
+			require.NoError(t, err)
+
+			tc.setup(ld)
+
+			assert.Equal(t, tc.want, ld.DerivedSettled(listPath))
+		})
+	}
+}
+
+func TestLedger_RecordDerivedRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	const (
+		listPath = "projects/p/workspaces/w/runs/r/policy-checks.json"
+		child    = "projects/p/workspaces/w/runs/r/policy-check-pc1.log"
+	)
+
+	root := t.TempDir()
+
+	// The workspace subtree must exist on disk, or the reload discards the
+	// shard's records as a removed subtree ("deleting .ledger forgets").
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "projects", "p", "workspaces", "w"), 0o750))
+
+	ld, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	ld.RecordDone(listPath, manifest.Signature{Size: 1})
+	ld.RecordDerived(listPath, child)
+	require.NoError(t, ld.Flush())
+	require.NoError(t, ld.Close(), "release the lock as a finished process would")
+
+	// The manifest is durable: after a reload the missing child is still
+	// provable, so the lost entry re-opens its listing across processes.
+	reloaded, err := manifest.Load(root)
+	require.NoError(t, err)
+
+	entry, ok := reloaded.Entry(listPath)
+	require.True(t, ok)
+	assert.Equal(t, []string{child}, entry.DerivedChildren)
+	assert.False(t, reloaded.DerivedSettled(listPath),
+		"the recorded child has no entry, so the listing must re-run")
+}

@@ -1,6 +1,9 @@
 package manifest
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // Entry is the per-object record keyed by an archive-relative path.
 //
@@ -25,6 +28,13 @@ type Entry struct {
 	Status Status `json:"status"`
 	// LastError is the text of the last failure, empty on success.
 	LastError string `json:"lastError,omitempty"`
+	// DerivedChildren lists the archive-relative paths of the children a
+	// settled listing derived (a log per policy check, an actor per run
+	// event), stamped by [Ledger.RecordDerived] after the listing settles. A
+	// skip gated on the listing consults it through [Ledger.DerivedSettled],
+	// so a child whose own entry was lost re-opens the listing rather than
+	// staying a silent, permanent gap.
+	DerivedChildren []string `json:"derivedChildren,omitempty"`
 	// Attempts counts how many times the object has been recorded.
 	Attempts int `json:"attempts"`
 	// Transient reports whether the last failure was transient rather than
@@ -35,15 +45,18 @@ type Entry struct {
 	counted bool
 }
 
-// cloneEntry returns a detached copy of e with its [Signature] deep-copied, so a
-// later mutation of either the copy or the original aliases neither. It is the
-// shared per-entry copy [shard.drainDirty], [shard.document], and [Ledger.Entry]
-// make before an entry leaves the ledger lock.
+// cloneEntry returns a detached copy of e with its [Signature] and
+// [Entry.DerivedChildren] deep-copied, so a later mutation of either the copy
+// or the original aliases neither. It is the shared per-entry copy
+// [shard.drainDirty], [shard.document], and [Ledger.Entry] make before an
+// entry leaves the ledger lock.
 func cloneEntry(e Entry) Entry {
 	if e.Signature != nil {
 		sig := *e.Signature
 		e.Signature = &sig
 	}
+
+	e.DerivedChildren = slices.Clone(e.DerivedChildren)
 
 	return e
 }

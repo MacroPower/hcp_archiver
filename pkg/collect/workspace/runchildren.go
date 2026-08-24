@@ -368,7 +368,18 @@ func (c *Collector) archiveRunEvents(ctx context.Context, project, ws string, ru
 	// Settle run-events.json Done last, after the actors and the gate, so the skip
 	// signal never lands ahead of them. The self-gating object still leaves an
 	// already-Done events file untouched on a pure re-read (only the gate open).
-	return c.object(ctx, eventsPath, events)
+	err = c.object(ctx, eventsPath, events)
+	if err != nil {
+		return err
+	}
+
+	// Stamp the derived actors onto the settled listing, so a later run's skip
+	// can prove each actor's entry still stands: the gate above mirrors only
+	// the settlement recorded now, while the manifest survives to catch an
+	// entry lost later (see [collect.Env.SkipGatedListing]).
+	c.env.RecordDerived(eventsPath, actorPaths...)
+
+	return nil
 }
 
 // archivePolicyChecks archives the run's Sentinel policy checks and a log per
@@ -432,7 +443,18 @@ func (c *Collector) archivePolicyChecks(ctx context.Context, project, ws string,
 
 	// Settle policy-checks.json Done last, after every log and the gate, so the
 	// skip signal above never lands ahead of the logs it stands for.
-	return c.object(ctx, relPath, checks)
+	err = c.object(ctx, relPath, checks)
+	if err != nil {
+		return err
+	}
+
+	// Stamp the derived logs onto the settled listing, so a later run's skip
+	// can prove each log's entry still stands: an entry lost while the checks
+	// file stays done and the gate stays clear re-opens this listing, the only
+	// path that can re-fetch the log (see [collect.Env.SkipGatedListing]).
+	c.env.RecordDerived(relPath, logPaths...)
+
+	return nil
 }
 
 // archiveTaskStages archives the run's task stages as listed; their task-result

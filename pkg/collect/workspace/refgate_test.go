@@ -196,6 +196,56 @@ func TestArchivePolicyChecksCleanRunLeavesNoGate(t *testing.T) {
 	assert.Equal(t, 1, listHits, "a settled run with no open gate is not re-listed")
 }
 
+func TestArchivePolicyChecksReListsWhenALogEntryIsLost(t *testing.T) {
+	t.Parallel()
+
+	// The state a partial ledger loss leaves: policy-checks.json settled Done
+	// with its derived manifest stamped, no gate entry, and no entry at all
+	// for the log the manifest names. The settled file and the clear gate
+	// would skip the metered list, stranding the log forever; the derived
+	// clause is the only signal left and must re-open the listing.
+	var listHits, logHits int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/runs/run-1/policy-checks", func(w http.ResponseWriter, _ *http.Request) {
+		listHits++
+
+		writeJSONAPI(t, w, marshalJSONAPI(t, []*tfe.PolicyCheck{{ID: "pc1", Status: tfe.PolicyPasses}}))
+	})
+	mux.HandleFunc("/api/v2/policy-checks/pc1", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONAPI(t, w, marshalJSONAPI(t, &tfe.PolicyCheck{ID: "pc1", Status: tfe.PolicyPasses}))
+	})
+	mux.HandleFunc("/api/v2/policy-checks/pc1/output", func(w http.ResponseWriter, _ *http.Request) {
+		logHits++
+
+		_, werr := io.WriteString(w, "policy log bytes")
+		if werr != nil {
+			return
+		}
+	})
+
+	f := newWSFixture(t, mux)
+	st := f.store
+	run := &tfe.Run{ID: "run-1"}
+
+	checksPath := st.RunFile("proj", "ws", "run-1", "policy-checks.json")
+	logPath := st.RunFile("proj", "ws", "run-1", "policy-check-pc1.log")
+
+	f.preSettle(checksPath)
+	f.ledger.RecordDerived(checksPath, logPath)
+
+	require.NoError(t, f.collector.ArchivePolicyChecks(t.Context(), "proj", "ws", run))
+
+	assert.Equal(t, 1, listHits, "a lost log entry re-opens the metered list")
+	assert.Equal(t, 1, logHits, "the lost log is re-fetched")
+	assert.Equal(t, manifest.StatusDone, f.status(logPath), "the recovered log is captured")
+
+	// The pass re-settled the log and re-stamped the manifest, so the metered
+	// skip is restored rather than re-listing forever.
+	require.NoError(t, f.collector.ArchivePolicyChecks(t.Context(), "proj", "ws", run))
+	assert.Equal(t, 1, listHits, "a verified manifest restores the metered skip")
+}
+
 func TestArchiveConfigurationVersionTarballStrandsAndRecovers(t *testing.T) {
 	t.Parallel()
 

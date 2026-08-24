@@ -1219,6 +1219,46 @@ func (l *Ledger) recordLocked(relPath string, status Status, mutate func(now tim
 	sh.dirtyEntries[relPath] = struct{}{}
 }
 
+// RecordDerived stamps the archive-relative paths of the children the listing
+// at listPath derived onto the listing's own entry (see
+// [Entry.DerivedChildren]), replacing any prior manifest, so
+// [Ledger.DerivedSettled] can later prove each child's entry still stands.
+// Call it after the listing settles; stamping a path with no entry is a
+// no-op, since a manifest without its owner would never be consulted.
+func (l *Ledger) RecordDerived(listPath string, children ...string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	sh, ok := l.lookupShard(listPath)
+	if !ok {
+		return
+	}
+
+	e, ok := sh.entries[listPath]
+	if !ok {
+		return
+	}
+
+	e.DerivedChildren = slices.Sorted(slices.Values(children))
+	sh.dirtyEntries[listPath] = struct{}{}
+}
+
+// DerivedSettled reports whether every child the settled listing at listPath
+// recorded (see [Ledger.RecordDerived]) still has a settled entry of its own,
+// judged by the same [Ledger.ShouldFetch] predicate the walk retries on. A
+// listing with no entry or no recorded manifest reports true, preserving the
+// skip for listings settled before manifests were stamped; a child whose
+// entry has gone missing reports false, so the gate re-opens the one listing
+// that can reach it.
+func (l *Ledger) DerivedSettled(listPath string) bool {
+	entry, ok := l.Entry(listPath)
+	if !ok {
+		return true
+	}
+
+	return !slices.ContainsFunc(entry.DerivedChildren, l.ShouldFetch)
+}
+
 // HighWaterMark returns the recorded watermark for key, or the zero time when
 // none is set.
 //
