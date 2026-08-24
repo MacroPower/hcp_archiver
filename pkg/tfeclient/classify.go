@@ -145,43 +145,36 @@ func classifyRawHTTP(err error) Kind {
 // rawHTTPStatus extracts the HTTP status code from a raw
 // [tfe.ClientRequest.DoRaw] error, whose root cause reads "error HTTP response:
 // N" with no typed sentinel, reporting the code and whether the text matched.
-// The match runs against the unwrapped root cause so an outer wrap does not hide
-// it, and a message that is not the DoRaw form, or whose code does not parse,
-// reports false.
+// The match runs against each root cause of the unwrap tree so an outer wrap,
+// a multi-wrap included, does not hide it; a message that is not the DoRaw
+// form, or whose code does not parse, reports false.
 func rawHTTPStatus(err error) (int, bool) {
-	if err == nil {
-		return 0, false
-	}
+	var code int
 
-	root := err
+	found := anyRootCause(err, func(root error) bool {
+		const prefix = "error HTTP response: "
 
-	for {
-		unwrapped := errors.Unwrap(root)
-		if unwrapped == nil {
-			break
+		msg := root.Error()
+		if !strings.HasPrefix(msg, prefix) {
+			return false
 		}
 
-		root = unwrapped
-	}
+		fields := strings.Fields(msg[len(prefix):])
+		if len(fields) == 0 {
+			return false
+		}
 
-	const prefix = "error HTTP response: "
+		parsed, convErr := strconv.Atoi(fields[0])
+		if convErr != nil {
+			return false
+		}
 
-	msg := root.Error()
-	if !strings.HasPrefix(msg, prefix) {
-		return 0, false
-	}
+		code = parsed
 
-	fields := strings.Fields(msg[len(prefix):])
-	if len(fields) == 0 {
-		return 0, false
-	}
+		return true
+	})
 
-	code, convErr := strconv.Atoi(fields[0])
-	if convErr != nil {
-		return 0, false
-	}
-
-	return code, true
+	return code, found
 }
 
 // IsTerminal reports whether err is a permanent absence, i.e. its [Kind] is
@@ -238,34 +231,53 @@ func isInterrupted(err error) bool {
 // ("forbidden", optionally with a detail on the following lines) or the raw
 // status line ("403 Forbidden"), which is the only structural signal available.
 //
-// The match runs against the unwrapped root cause, one line at a time, so an
-// archive path or an unrelated error body that merely contains the word (a path
-// segment like "forbidden-experiments", a 500 whose detail mentions it) is not
-// misclassified as an access denial.
+// The match runs against each root cause of err's unwrap tree, one line at a
+// time, so an archive path or an unrelated error body that merely contains the
+// word (a path segment like "forbidden-experiments", a 500 whose detail
+// mentions it) is not misclassified as an access denial.
 func isForbidden(err error) bool {
+	return anyRootCause(err, func(root error) bool {
+		for line := range strings.SplitSeq(root.Error(), "\n") {
+			switch strings.ToLower(strings.TrimSpace(line)) {
+			case "forbidden", "403 forbidden":
+				return true
+			}
+		}
+
+		return false
+	})
+}
+
+// anyRootCause reports whether match answers true for any root cause of err's
+// unwrap tree: the errors that unwrap no further, down every branch. A single
+// [errors.Unwrap] walk stops at a multi-wrapped error (fmt.Errorf's "%w: %w"
+// form, or [errors.Join]), whose branches it does not see, and would take that
+// wrapper's own fused text for the root cause, hiding the line-shaped signals
+// the matchers here read.
+func anyRootCause(err error, match func(error) bool) bool {
 	if err == nil {
 		return false
 	}
 
-	root := err
-
-	for {
-		unwrapped := errors.Unwrap(root)
-		if unwrapped == nil {
-			break
+	//nolint:errorlint // The walk inspects the wrap tree itself, node by node.
+	switch unwrapper := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, child := range unwrapper.Unwrap() {
+			if anyRootCause(child, match) {
+				return true
+			}
 		}
 
-		root = unwrapped
-	}
+		return false
 
-	for line := range strings.SplitSeq(root.Error(), "\n") {
-		switch strings.ToLower(strings.TrimSpace(line)) {
-		case "forbidden", "403 forbidden":
-			return true
+	case interface{ Unwrap() error }:
+		child := unwrapper.Unwrap()
+		if child != nil {
+			return anyRootCause(child, match)
 		}
 	}
 
-	return false
+	return match(err)
 }
 
 // statusError translates a raw [tfe.ClientRequest.DoRaw] HTTP error, whose text
