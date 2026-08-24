@@ -113,11 +113,25 @@ func (c *Client) runAttempt(
 	// racing the firing at worst re-arms a timer whose context is already
 	// canceled, which changes nothing.
 	err := op(wctx, func() { timer.Reset(window) })
-	if err != nil && stalled.Load() {
+
+	// The wrap requires the error to be the watchdog's own cancellation, not
+	// just the flag: a store verdict already in flight when the window elapses
+	// (a permission denial, a failed precondition at commit) can land as the
+	// watchdog fires, and wrapping it would reclassify a request fault that is
+	// promised to surface immediately into a transient the whole retry budget
+	// chases -- for an upload, re-streaming the entire body each time.
+	if err != nil && stalled.Load() && attemptCanceled(err) {
 		return fmt.Errorf("%w (no progress for %s): %w", errStalled, window, err)
 	}
 
 	return err
+}
+
+// attemptCanceled reports whether err is the cancellation of the attempt's own
+// context, in either shape it reaches here: the context error itself, or a
+// driver's translation of it into the canceled store code.
+func attemptCanceled(err error) bool {
+	return errors.Is(err, context.Canceled) || gcerrors.Code(err) == gcerrors.Canceled
 }
 
 // withRetry runs op, retrying each transient failure under the client's

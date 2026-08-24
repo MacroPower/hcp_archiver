@@ -1,10 +1,13 @@
 package remote
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWriteWindowScalesWithBodySize(t *testing.T) {
@@ -41,4 +44,40 @@ func TestWriteWindowDisabledWatchdog(t *testing.T) {
 	c := &Client{stallTimeout: 0}
 
 	assert.Zero(t, c.writeWindow(1<<30), "a disabled watchdog stays disabled at any size")
+}
+
+func TestRunAttemptWrapsOnlyTheWatchdogCancellation(t *testing.T) {
+	t.Parallel()
+
+	c := &Client{}
+
+	t.Run("a stalled attempt wraps errStalled", func(t *testing.T) {
+		t.Parallel()
+
+		err := c.runAttempt(t.Context(), 10*time.Millisecond, func(ctx context.Context, _ func()) error {
+			<-ctx.Done()
+
+			return ctx.Err()
+		})
+		require.ErrorIs(t, err, errStalled)
+	})
+
+	t.Run("a store verdict landing at the watchdog keeps its shape", func(t *testing.T) {
+		t.Parallel()
+
+		verdict := errors.New("permission denied")
+
+		// The op ignores the watchdog's cancellation and returns the store's
+		// own verdict after the window elapsed, the in-flight-response race.
+		// Wrapped in errStalled it would classify transient and be retried for
+		// the whole budget; it must surface as itself.
+		err := c.runAttempt(t.Context(), 10*time.Millisecond, func(ctx context.Context, _ func()) error {
+			<-ctx.Done()
+			time.Sleep(5 * time.Millisecond)
+
+			return verdict
+		})
+		require.ErrorIs(t, err, verdict)
+		assert.NotErrorIs(t, err, errStalled)
+	})
 }
