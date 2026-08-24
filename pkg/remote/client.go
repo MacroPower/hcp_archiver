@@ -555,57 +555,75 @@ func (c *Client) write(ctx context.Context, key string, r io.Reader, touch func(
 	return nil
 }
 
+// listPageSize is how many keys one listing page requests, matching the
+// backends' own thousand-key ceiling: S3 caps ListObjectsV2 at that, so asking
+// for more buys nothing and asking for less only multiplies round trips.
+const listPageSize = 1000
+
 // List enumerates every object under prefix, keyed by full object key, at
 // roughly one request per listing page. It is the bulk inventory the sync
 // sweep gates uploads and prunes stale keys from, replacing a Head per file.
-// A transient failure mid-walk restarts the enumeration from the beginning,
-// so the returned inventory is always one whole listing, never a splice.
+//
+// The retry unit is one page, resumed from the token the last good page
+// returned, so a blip near the end of a long enumeration costs that page
+// rather than every page before it. The pages of one call can therefore come
+// from moments apart, which is what the callers already assume: no backend
+// offers a snapshot across a paged listing, so the inventory has always been a
+// view assembled over the walk rather than an instant of the store.
 //
 // Its cost tracks how many objects the prefix holds, so a caller that wants
 // one level of the key space rather than everything beneath it wants
 // [Client.Children] instead.
 func (c *Client) List(ctx context.Context, prefix string) (map[string]ObjectInfo, error) {
-	var out map[string]ObjectInfo
+	out := make(map[string]ObjectInfo)
+	opts := &blob.ListOptions{Prefix: prefix}
 
-	err := c.withRetry(ctx, func() error {
-		return c.runAttempt(ctx, c.stallTimeout, func(ctx context.Context, touch func()) error {
-			out = make(map[string]ObjectInfo)
-			iter := c.bucket.List(&blob.ListOptions{Prefix: prefix})
+	// An empty token ends the walk; the sentinel starts it. A retried page
+	// re-sends the token it already held, which is what makes the resume exact.
+	for token := blob.FirstPageToken; len(token) > 0; {
+		var (
+			page []*blob.ListObject
+			next []byte
+		)
 
-			for {
-				obj, err := iter.Next(ctx)
-				if errors.Is(err, io.EOF) {
-					return nil
+		err := c.withRetry(ctx, func() error {
+			return c.runAttempt(ctx, c.stallTimeout, func(ctx context.Context, touch func()) error {
+				var pageErr error
+
+				page, next, pageErr = c.bucket.ListPage(ctx, token, listPageSize, opts)
+				if pageErr != nil {
+					return pageErr //nolint:wrapcheck // Wrapped uniformly below.
 				}
 
-				if err != nil {
-					return err //nolint:wrapcheck // Wrapped uniformly below.
-				}
-
-				// Each delivered object is progress: a long listing of a large
-				// mirror stays alive page after page, while a wedged page fetch
-				// stalls out and the enumeration retries whole.
+				// One page delivered is one unit of progress, so the watchdog
+				// bounds a wedged page fetch rather than the whole enumeration.
 				touch()
 
-				if obj.IsDir {
-					continue
-				}
-
-				// Listings carry only the backend attribute, never metadata, so a
-				// distrusted attribute leaves the entry digestless; the sync gate
-				// then resolves the metadata digest through one Head instead of
-				// comparing against a value that is no content MD5.
-				md5sum := obj.MD5
-				if c.attrsUntrusted.Load() {
-					md5sum = nil
-				}
-
-				out[obj.Key] = ObjectInfo{MD5: md5sum, Size: obj.Size}
-			}
+				return nil
+			})
 		})
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list %q: %w", prefix, err)
+		if err != nil {
+			return nil, fmt.Errorf("list %q: %w", prefix, err)
+		}
+
+		for _, obj := range page {
+			if obj.IsDir {
+				continue
+			}
+
+			// Listings carry only the backend attribute, never metadata, so a
+			// distrusted attribute leaves the entry digestless; the sync gate
+			// then resolves the metadata digest through one Head instead of
+			// comparing against a value that is no content MD5.
+			md5sum := obj.MD5
+			if c.attrsUntrusted.Load() {
+				md5sum = nil
+			}
+
+			out[obj.Key] = ObjectInfo{MD5: md5sum, Size: obj.Size}
+		}
+
+		token = next
 	}
 
 	return out, nil

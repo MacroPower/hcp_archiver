@@ -79,7 +79,8 @@ type Fake struct {
 	// the first n reads.
 	HeadErr error
 	// ListErr fails every listing page; a positive ListErrN bounds it to the
-	// first n pages.
+	// first n pages, and a positive ListErrAfter spares that many pages first,
+	// so a test can fault a page deep in a walk rather than its opening one.
 	ListErr error
 	// DeleteErr fails every delete; a positive DeleteErrN bounds it to the
 	// first n deletes.
@@ -131,6 +132,9 @@ type Fake struct {
 	// RangeBodyErrAfter is how many bytes a ranged read delivers before
 	// RangeBodyErr fires; zero fails the body before its first byte.
 	RangeBodyErrAfter int64
+
+	// ListErrAfter is how many listing pages ListErr spares before it fires.
+	ListErrAfter int
 
 	// PutErrN, HeadErrN, ListErrN, DeleteErrN, RangeErrN, RangeBodyErrN, and
 	// CopyErrN bound their error's blast radius to the first n calls; zero
@@ -508,11 +512,11 @@ func (f *Fake) ListPaged(ctx context.Context, opts *driver.ListOptions) (*driver
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if takeFault(f.ListErr, &f.listFails, f.ListErrN) {
+	f.listCalls++
+
+	if f.listCalls > f.ListErrAfter && takeFault(f.ListErr, &f.listFails, f.ListErrN) {
 		return nil, f.ListErr
 	}
-
-	f.listCalls++
 
 	pageSize := opts.PageSize
 	if pageSize <= 0 {

@@ -537,6 +537,29 @@ func TestList(t *testing.T) {
 	}, got, "only keys under the prefix list; a digest surfaces only when the store recorded one")
 }
 
+func TestListResumesFromTheFailedPage(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newRetryClient(t, 2)
+
+	// Two pages at the fake's thousand-key page size, so the fault lands on
+	// the second and the first must not be walked again to recover it.
+	for i := range 1500 {
+		fake.SetObject(fmt.Sprintf("p/%04d", i), remotetest.Object{Data: []byte("x")})
+	}
+
+	fake.ListErr = errors.New("injected transient failure")
+	fake.ListErrN = 1
+	fake.ListErrAfter = 1
+
+	got, err := client.List(t.Context(), "p/")
+	require.NoError(t, err)
+
+	assert.Len(t, got, 1500, "the resumed walk still surfaces every key")
+	assert.Equal(t, 3, fake.ListCalls(),
+		"the failed page retries alone: two good pages plus the one that faulted")
+}
+
 func TestChildren(t *testing.T) {
 	t.Parallel()
 
