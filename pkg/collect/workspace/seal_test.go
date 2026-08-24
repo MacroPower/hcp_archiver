@@ -627,6 +627,46 @@ func TestSealWorkspace_RunJSONIncompleteCollectionStaysLoose(t *testing.T) {
 	assert.False(t, f.exists(st.Join(st.RollupDir(project, ws), "runs.ndjson")))
 }
 
+func TestSealWorkspace_ReconcilesRematerializedRollupSource(t *testing.T) {
+	t.Parallel()
+
+	rec := logtest.NewRecorder()
+	f := newSealFixtureLogged(t, rec)
+	st := f.store
+	project, ws := "prod", "api"
+
+	runPath := st.RunFile(project, ws, "run-1", "run.json")
+	summaryPath := st.RunFile(project, ws, "run-1", "plan-summary.json")
+
+	f.writeDone(t, runPath, runJSON("applied"))
+	f.writeDone(t, summaryPath, []byte(`{"plan":"plan-1"}`))
+	f.markComplete(project, ws)
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	// The identical bytes come back settled (a reader re-materialized them from
+	// a stale mirror key, or a refused removal left them): the next seal must
+	// reconcile them away, not append a duplicate line on every pass forever.
+	f.writeDone(t, runPath, runJSON("applied"))
+	f.writeDone(t, summaryPath, []byte(`{"plan":"plan-1"}`))
+	require.NoError(t, f.collector.SealWorkspace(t.Context(), project, ws))
+
+	assert.Len(t, rollupLines(t, f.store, project, ws, "runs.ndjson", runPath), 1,
+		"an already-folded run.json gains no duplicate line")
+	assert.Len(t, rollupLines(t, f.store, project, ws, "plan-summaries.ndjson", summaryPath), 1,
+		"an already-folded immutable child gains no duplicate line")
+	assert.False(t, f.exists(runPath), "the reconciled stranded source is removed")
+	assert.False(t, f.exists(summaryPath))
+
+	// Each stranded source is reported under the roll-up that already records
+	// it, mirroring the bundle reconcile's warning.
+	events := rec.Events("seal_reconcile_stranded_source")
+	require.Len(t, events, 2)
+	assert.Equal(t, "plan-summaries.ndjson", events[0].Attrs["rollup"])
+	assert.Equal(t, summaryPath, events[0].Attrs["name"])
+	assert.Equal(t, "runs.ndjson", events[1].Attrs["rollup"])
+	assert.Equal(t, runPath, events[1].Attrs["name"])
+}
+
 func TestSealWorkspace_RunJSONResealAppendsNewerLine(t *testing.T) {
 	t.Parallel()
 

@@ -587,6 +587,12 @@ func (c *Collector) sealedDigests(bundlesDir, prefix string) (map[string]string,
 // coalesce folds each roll-up's frozen members into its NDJSON file, a no-op when
 // there is nothing to coalesce. Roll-up files are processed in a stable order so
 // the pass is deterministic.
+//
+// The members are first reconciled against the roll-up's own record, exactly
+// as [Collector.sealBundle] reconciles against the sidecars: a loose source a
+// prior pass already folded and could not remove (or one a reader
+// re-materialized from a stale mirror key) would otherwise append an
+// identical duplicate line on every seal, growing the roll-up without bound.
 func (c *Collector) coalesce(ctx context.Context, project, ws string, rollups map[string][]seal.Member) error {
 	if len(rollups) == 0 {
 		return nil
@@ -602,13 +608,91 @@ func (c *Collector) coalesce(ctx context.Context, project, ws string, rollups ma
 		members := rollups[name]
 		sortMembers(members)
 
-		err := seal.Rollup(filepath.Join(rollupDir, name), members, c.removeFailureHandler(ctx, "rollup", name))
+		rollupPath := filepath.Join(rollupDir, name)
+
+		fresh, err := c.reconcileRolledUp(ctx, rollupPath, name, members)
+		if err != nil {
+			return fmt.Errorf("reconcile %s roll-up: %w", name, err)
+		}
+
+		if len(fresh) == 0 {
+			continue
+		}
+
+		err = seal.Rollup(rollupPath, fresh, c.removeFailureHandler(ctx, "rollup", name))
 		if err != nil {
 			return fmt.Errorf("coalesce %s: %w", name, err)
 		}
 	}
 
 	return nil
+}
+
+// reconcileRolledUp splits members into those still to fold and those the
+// roll-up's newest line per path already records, the roll-up mirror of
+// [Collector.reconcileSealed].
+//
+// A member whose name no line records is fresh. A member whose current bytes
+// hash to the newest recorded digest is already folded: its loose source is
+// removed best-effort and dropped, and the same warning the bundle reconcile
+// emits reports it, carrying the removal's cause when the removal fails. A
+// member whose bytes diverge from the newest line is fresh, appended as a
+// newer line readers prefer (a terminal run.json legitimately re-frozen after
+// an update), so changed content is never dropped. When the roll-up records
+// nothing, the members pass through untouched, the common case.
+func (c *Collector) reconcileRolledUp(
+	ctx context.Context,
+	rollupPath, name string,
+	members []seal.Member,
+) ([]seal.Member, error) {
+	folded, err := seal.RollupDigests(rollupPath)
+	if err != nil {
+		return nil, fmt.Errorf("read folded digests: %w", err)
+	}
+
+	if len(folded) == 0 {
+		return members, nil
+	}
+
+	fresh := make([]seal.Member, 0, len(members))
+
+	for i := range members {
+		digest, recorded := folded[members[i].Name]
+		if !recorded {
+			fresh = append(fresh, members[i])
+
+			continue
+		}
+
+		got, digestErr := seal.SourceDigest(members[i].Source)
+		if digestErr != nil {
+			return nil, fmt.Errorf("digest %s source %q: %w", name, members[i].Name, digestErr)
+		}
+
+		// Only bytes that still hash to the newest folded line are proven
+		// already coalesced; divergent content is folded afresh, never dropped.
+		if got != digest {
+			fresh = append(fresh, members[i])
+
+			continue
+		}
+
+		// Remove before reporting, so the warning carries the removal's outcome,
+		// matching reconcileSealed.
+		removeErr := os.Remove(members[i].Source)
+
+		attrs := []slog.Attr{
+			slog.String("rollup", name),
+			slog.String("name", members[i].Name),
+		}
+		if removeErr != nil {
+			attrs = append(attrs, slog.String("remove_error", removeErr.Error()))
+		}
+
+		c.env.Log().LogAttrs(ctx, slog.LevelWarn, "seal_reconcile_stranded_source", attrs...)
+	}
+
+	return fresh, nil
 }
 
 // listNames returns the names of dir's entries that keep selects, tolerating a

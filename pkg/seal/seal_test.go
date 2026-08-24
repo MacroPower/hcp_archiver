@@ -566,6 +566,44 @@ func TestRollup_EmptyWritesNothing(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "no roll-up is written for an empty fold")
 }
 
+func TestRollupDigests_AbsentYieldsNothing(t *testing.T) {
+	t.Parallel()
+
+	digests, err := seal.RollupDigests(filepath.Join(t.TempDir(), "runs.ndjson"))
+	require.NoError(t, err)
+	assert.Empty(t, digests, "a roll-up that does not exist yields no digests and no error")
+}
+
+func TestRollupDigests_NewestLineWins(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	rollupPath := filepath.Join(dir, "runs.ndjson")
+
+	first := []byte(`{"status":"canceled"}`)
+	second := []byte(`{"status":"force_canceled"}`)
+
+	src := writeSource(t, dir, "run.json", first)
+	require.NoError(t, seal.Rollup(rollupPath, []seal.Member{{Name: "runs/r1/run.json", Source: src}}))
+
+	// The same path re-folds with newer content, and another path joins it: the
+	// newest line per path is what readers keep, so it is what the digests map
+	// must record.
+	events := writeSource(t, dir, "events.json", []byte(`[]`))
+	src = writeSource(t, dir, "run.json", second)
+	require.NoError(t, seal.Rollup(rollupPath, []seal.Member{
+		{Name: "runs/r1/events.json", Source: events},
+		{Name: "runs/r1/run.json", Source: src},
+	}))
+
+	digests, err := seal.RollupDigests(rollupPath)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"runs/r1/run.json":    sha256hex(second),
+		"runs/r1/events.json": sha256hex([]byte(`[]`)),
+	}, digests)
+}
+
 func TestRollup_BestEffortRemovalToleratesUnremovableSource(t *testing.T) {
 	t.Parallel()
 

@@ -566,6 +566,50 @@ func encodeRollup(members []Member) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// RollupDigests maps each member path recorded in the roll-up at path to the
+// SHA-256 of its newest line, the line readers keep when a path recurs (see
+// [Rollup]). It lets a caller prove a loose source is already folded before
+// appending a duplicate line, the roll-up counterpart of reconciling against
+// the sidecars [ReadSidecar] reads. A roll-up that does not exist yields no
+// digests and no error, so a caller can probe for one without a separate stat.
+func RollupDigests(path string) (map[string]string, error) {
+	//nolint:gosec // The roll-up path is composed by the caller from its archive root.
+	f, err := os.Open(path)
+
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return map[string]string{}, nil
+	case err != nil:
+		return nil, fmt.Errorf("open roll-up %q: %w", path, err)
+	}
+
+	defer func() {
+		//nolint:errcheck // Read-only handle; a close failure cannot lose data.
+		_ = f.Close()
+	}()
+
+	out := make(map[string]string)
+
+	dec := json.NewDecoder(f)
+
+	for {
+		var line rollupLine
+
+		decErr := dec.Decode(&line)
+		if errors.Is(decErr, io.EOF) {
+			break
+		}
+
+		if decErr != nil {
+			return nil, fmt.Errorf("decode roll-up %q: %w", path, decErr)
+		}
+
+		out[line.Path] = line.SHA256
+	}
+
+	return out, nil
+}
+
 // appendPayload appends payload to the roll-up, flushes it to stable storage, and
 // returns the offset the append began at so the write can be verified.
 //
