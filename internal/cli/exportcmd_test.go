@@ -154,7 +154,7 @@ func TestExportCmd_ProgressAdapter(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
-	adapter, reporter := cli.ExportProgressForTest(buf, config.ProgressModeHuman,
+	adapter, reporter := cli.CmdProgressForTest(buf, config.ProgressModeHuman,
 		progress.WithClock(func() time.Time { return base }))
 
 	adapter.SetPhase(export.PhaseExport)
@@ -185,4 +185,16 @@ func TestExportCmd_ProgressAdapter(t *testing.T) {
 	assert.Contains(t, line, "target=next-org")
 	assert.Contains(t, line, "done=3")
 	assert.Contains(t, line, "completed=3/7")
+
+	// The errored counter accumulates across phases: a new total resets the
+	// done count but keeps every failure the run has hit in view.
+	buf.Reset()
+	adapter.Errored(2)
+	adapter.SetTotal(4)
+
+	require.NoError(t, reporter.Report())
+
+	line = buf.String()
+	assert.Contains(t, line, "errored=2")
+	assert.Contains(t, line, "done=0")
 }

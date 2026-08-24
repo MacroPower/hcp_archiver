@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"go.jacobcolvin.com/hcp_archiver/pkg/config"
 	"go.jacobcolvin.com/hcp_archiver/pkg/export"
 	"go.jacobcolvin.com/hcp_archiver/pkg/progress"
 	"go.jacobcolvin.com/hcp_archiver/pkg/theme"
@@ -16,11 +16,6 @@ import (
 
 // flagForce names the export command's overwrite flag.
 const flagForce = "force"
-
-// phaseOpen names the phase covering the archive open, the one stage that runs
-// before the exporter names its own; a sealed archive fetches its offloaded
-// roll-ups back here, so it is worth labeling.
-const phaseOpen = "open"
 
 // newExportCmd returns a command that renders an archive's metadata as a
 // markdown tree a static site generator can build. The sink resolves the
@@ -66,21 +61,11 @@ the markdown tree is written into the directory its export.path names.`,
 	cfgFlag := registerConfigFlag(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, _ []string) error {
-		// The mode parses before any I/O, so a bad value fails without
-		// touching the archive or the target.
-		mode, err := config.ParseProgressMode(progressFlag)
+		run, cleanup, err := newCmdRun(cc, progressFlag, progressInterval, sink)
 		if err != nil {
-			return err //nolint:wrapcheck // The sentinel-bearing config error renders as-is.
+			return err
 		}
-
-		ctx, stop := signalContext(cc.Context())
-		defer stop()
-
-		// The run gets its own cancelable child: under the terminal UI's raw
-		// mode the kernel never raises SIGINT, so ctrl+c arrives through the
-		// reporter's interrupt callback instead.
-		runCtx, cancelRun := context.WithCancel(ctx)
-		defer cancelRun()
+		defer cleanup()
 
 		cfg, err := loadCmdConfig(*cfgFlag)
 		if err != nil {
@@ -97,25 +82,13 @@ the markdown tree is written into the directory its export.path names.`,
 		// command, so the open runs under its own named phase, with the
 		// interrupt path already live. Nothing has counted the archive yet, so
 		// the phase carries no total; the export names its own from here on.
-		prog := &exportProgress{}
-		reporter := progress.New(cc.ErrOrStderr(), mode, prog,
-			progress.WithInterval(progressInterval),
-			progress.WithInterrupt(cancelRun),
-			progress.WithLogSink(sink()),
-		)
-		prog.reporter = reporter
-		reporter.SetPhase(phaseOpen)
-
 		// Every exit past this point erases the panel first, so an error
 		// prints on a restored terminal; the success path stops it inline
 		// before the stderr warning and the stdout summary.
-		stopReporter := reporter.RunBackground(ctx, nil)
+		prog, stopReporter := run.startReporter(phaseOpen)
 		defer stopReporter()
 
-		// No slow-listing notice: the reporter above owns stderr, and a line
-		// written from a timer goroutine would corrupt whatever shape it is
-		// serving there, a panel or a stream of JSON events alike.
-		arc, err := cfg.open(runCtx, nil)
+		arc, err := cfg.open(run.runCtx)
 		if err != nil {
 			return err
 		}
@@ -140,19 +113,23 @@ the markdown tree is written into the directory its export.path names.`,
 
 		opts = append(opts, export.WithProgress(prog))
 
-		sum, err := export.New(arc, target, opts...).Run(runCtx)
+		sum, err := export.New(arc, target, opts...).Run(run.runCtx)
 
 		stopReporter()
 
-		warnDegraded(cc.ErrOrStderr(), arc)
+		logger := cmdLogger(run.runCtx)
+
+		warnDegraded(run.runCtx, logger, arc)
 
 		if err != nil {
 			// A graceful interrupt exits clean like the sibling commands,
 			// reporting the partial totals the run had written; see extract.
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				eprintf(cc.ErrOrStderr(), "export interrupted: %s for %s written into %s\n",
-					theme.CountNoun(sum.Pages, "page", "pages"),
-					theme.CountNoun(sum.Orgs, "organization", "organizations"), target)
+				logger.LogAttrs(run.runCtx, slog.LevelWarn, "export_interrupted",
+					slog.Int("pages", sum.Pages),
+					slog.Int("orgs", sum.Orgs),
+					slog.String("target", target),
+				)
 
 				return nil
 			}
@@ -168,7 +145,7 @@ the markdown tree is written into the directory its export.path names.`,
 
 		// The summary is the command's only output, so a stdout write fault
 		// surfaces rather than exiting 0 in silence, matching extract's
-		// summary; eprintf's swallowing is for best-effort stderr progress.
+		// summary.
 		_, err = fmt.Fprintf(cc.OutOrStdout(), "exported %s for %s into %s\n",
 			theme.CountNoun(sum.Pages, "page", "pages"),
 			theme.CountNoun(sum.Orgs, "organization", "organizations"), target)

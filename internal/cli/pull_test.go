@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.jacobcolvin.com/hcp_archiver/internal/cli"
+	"go.jacobcolvin.com/hcp_archiver/pkg/config"
 	"go.jacobcolvin.com/hcp_archiver/pkg/manifest"
 	"go.jacobcolvin.com/hcp_archiver/pkg/remote"
 )
@@ -149,6 +150,20 @@ func TestPullCmd_PromotesCleanMirror(t *testing.T) {
 	after, err := os.ReadFile(filepath.Join(orgRoot, remote.MarkerName))
 	require.NoError(t, err)
 	assert.Equal(t, markerBytes, after, "a converged re-run leaves the marker bytes untouched")
+}
+
+func TestPullCmd_RejectsBadProgressMode(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	remoteYAML := seedPullMirror(t, nil)
+
+	_, _, err := runCmdIn(t, root, remoteYAML, "pull", pullOrgName, "--progress", "bogus")
+	require.ErrorIs(t, err, config.ErrInvalidProgressMode)
+
+	dirents, err := os.ReadDir(root)
+	require.NoError(t, err)
+	assert.Empty(t, dirents, "a rejected flag fails before any I/O touches the root")
 }
 
 func TestPullCmd_RefusesHeldLock(t *testing.T) {

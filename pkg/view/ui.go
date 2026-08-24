@@ -59,6 +59,19 @@ func Browse(ctx context.Context, dir string, in io.Reader, out io.Writer, opts .
 		return err
 	}
 
+	return BrowseOpened(ctx, orgs, in, out)
+}
+
+// BrowseOpened drives the interactive browser over an already-opened
+// archive's organizations until the user quits or ctx is canceled. It serves
+// a caller that runs [OpenArchive] itself and needs work between the open
+// and the browse; [Browse] wraps the open and this drive into one call.
+//
+// A ctx cancellation (an external SIGINT) is returned as [context.Canceled]
+// wrapped so the command can map it to a graceful exit.
+//
+//nolint:contextcheck // The orgs' remote reads ride the context bound at open.
+func BrowseOpened(ctx context.Context, orgs []*Org, in io.Reader, out io.Writer) error {
 	program := tea.NewProgram(
 		newModel(orgs),
 		tea.WithContext(ctx),
@@ -66,7 +79,7 @@ func Browse(ctx context.Context, dir string, in io.Reader, out io.Writer, opts .
 		tea.WithOutput(out),
 	)
 
-	_, err = program.Run()
+	_, err := program.Run()
 	if err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%w: %w", ErrBrowser, ctx.Err())

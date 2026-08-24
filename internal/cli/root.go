@@ -34,6 +34,12 @@ const (
 	flagProgressInterval = "progress-interval"
 )
 
+// phaseOpen names the phase covering the archive open, the stage every
+// archive-reading command runs before it names its own: a sealed archive
+// fetches its offloaded roll-ups back here, and an empty directory
+// bootstraps from the mirror outright, so it is worth labeling.
+const phaseOpen = "open"
+
 var (
 	// ErrLogHandler indicates an error occurred while creating a log handler.
 	ErrLogHandler = errors.New("create log handler")
@@ -151,17 +157,19 @@ directory. Its one required key, archive.path, names the archive root.`,
 		return nil
 	}
 
-	// The run and export sinks close over logWriter by reference: the writer
-	// only exists once PersistentPreRunE has run, so those commands resolve it
-	// at run time rather than capturing the pre-run nil.
+	// The sinks close over logWriter by reference: the writer only exists
+	// once PersistentPreRunE has run, so the commands resolve it at run time
+	// rather than capturing the pre-run nil.
+	sink := func() progress.LogSink { return logWriter }
+
 	cmd.AddCommand(newRunCmd(profiler, func() *progress.LogWriter { return logWriter }))
 	cmd.AddCommand(newVersionCmd())
-	cmd.AddCommand(newViewCmd())
-	cmd.AddCommand(newListCmd())
-	cmd.AddCommand(newShowCmd())
-	cmd.AddCommand(newExtractCmd())
-	cmd.AddCommand(newPullCmd())
-	cmd.AddCommand(newExportCmd(func() progress.LogSink { return logWriter }))
+	cmd.AddCommand(newViewCmd(sink))
+	cmd.AddCommand(newListCmd(sink))
+	cmd.AddCommand(newShowCmd(sink))
+	cmd.AddCommand(newExtractCmd(sink))
+	cmd.AddCommand(newPullCmd(sink))
+	cmd.AddCommand(newExportCmd(sink))
 
 	return cmd
 }
@@ -170,8 +178,15 @@ directory. Its one required key, archive.path, names the archive root.`,
 // terminal UI mirroring the HCP interface: organizations open into projects,
 // workspaces, runs, and state versions. The directory comes from the
 // configuration file's archive.path and may be the archive root or a single
-// organization's directory.
-func newViewCmd() *cobra.Command {
+// organization's directory. The sink resolves the shared log writer the root
+// command builds in PersistentPreRunE, so log lines scroll above the open
+// phase's progress panel while it runs.
+func newViewCmd(sink func() progress.LogSink) *cobra.Command {
+	var (
+		progressFlag     string
+		progressInterval time.Duration
+	)
+
 	cmd := &cobra.Command{
 		Use:   "view",
 		Short: "Browse the archive in an interactive terminal UI",
@@ -187,21 +202,36 @@ archive root or a single organization's directory.
 	cfgFlag := registerConfigFlag(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, _ []string) error {
-		ctx, stop := signalContext(cc.Context())
-		defer stop()
+		run, cleanup, err := newCmdRun(cc, progressFlag, progressInterval, sink)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
 
 		cfg, err := loadCmdConfig(*cfgFlag)
 		if err != nil {
 			return err
 		}
 
-		var opts []view.ArchiveOption
+		// Only the open runs under the reporter: a bootstrap from the mirror
+		// can be the slow part of the command, and the browser paints nothing
+		// until the archive is open. The reporter stops before the browser
+		// starts, so the panel has fully released the terminal the browser
+		// takes over.
+		_, stopReporter := run.startReporter(phaseOpen)
+		defer stopReporter()
 
-		if rcfg := remoteFromFile(cfg.file); rcfg != nil {
-			opts = append(opts, view.WithRemote(*rcfg))
+		arc, err := cfg.open(run.runCtx)
+
+		stopReporter()
+
+		if err == nil {
+			// The browser rides the signal context: the reporter's interrupt
+			// callback is gone once it stops, and the UI handles ctrl+c
+			// itself, so only an external SIGINT needs to cancel it.
+			err = view.BrowseOpened(run.ctx, arc.Orgs(), cc.InOrStdin(), cc.OutOrStdout())
 		}
 
-		err = view.Browse(ctx, cfg.archiveDir, cc.InOrStdin(), cc.OutOrStdout(), opts...)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil
@@ -212,6 +242,13 @@ archive root or a single organization's directory.
 
 		return nil
 	}
+
+	flags := cmd.Flags()
+	registerProgressFlags(flags, &progressFlag, &progressInterval)
+
+	// Completion registration panics on a missing flag, so it follows the
+	// --progress registration above.
+	registerProgressCompletion(cmd)
 
 	return cmd
 }

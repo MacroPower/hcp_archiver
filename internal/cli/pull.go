@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/pkg/archiver"
 	"go.jacobcolvin.com/hcp_archiver/pkg/config"
 	"go.jacobcolvin.com/hcp_archiver/pkg/manifest"
+	"go.jacobcolvin.com/hcp_archiver/pkg/progress"
 	"go.jacobcolvin.com/hcp_archiver/pkg/remote"
 	"go.jacobcolvin.com/hcp_archiver/pkg/restore"
 	"go.jacobcolvin.com/hcp_archiver/pkg/theme"
@@ -38,18 +40,25 @@ var (
 	ErrNoPullOrgs = errors.New("no organizations to restore")
 )
 
-// pullListNoticeDelay is how long an organization's mirror listing runs
-// before the command says so on stderr; a pull prints nothing else until the
-// plan is sized.
-const pullListNoticeDelay = 3 * time.Second
+// Phase names for the pull command's reporter before the restorer names its
+// own: discovering the organizations to restore, then sizing each plan
+// against the mirror's listing.
+const (
+	phaseDiscover = "discover"
+	phasePlan     = "plan"
+)
 
 // newPullCmd returns a command that restores organizations' warm layers from
-// their mirrors.
-func newPullCmd() *cobra.Command {
+// their mirrors. The sink resolves the shared log writer the root command
+// builds in PersistentPreRunE, so log lines scroll above the progress panel
+// while it runs.
+func newPullCmd(sink func() progress.LogSink) *cobra.Command {
 	var (
-		dryRun  bool
-		verbose bool
-		jsonOut bool
+		dryRun           bool
+		verbose          bool
+		jsonOut          bool
+		progressFlag     string
+		progressInterval time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -94,13 +103,14 @@ configuration-version tarballs from the mirror's own metadata, then settles
 the marker: complete when every mirrored key is accounted for locally, so
 the archive browses and extracts with no further mirror listing; partial
 when anything is not (a stub that could not be ensured, a mirrored key
-nothing local accounts for), with each blocking key named on stderr. A
-marker already recording complete is never demoted. Stub faults and
-unaccounted keys never fail the restore; the exit code reflects only the
+nothing local accounts for), with each blocking key named in the log stream
+on stderr. A marker already recording complete is never demoted. Stub faults
+and unaccounted keys never fail the restore; the exit code reflects only the
 restored set.
 
-Per-file failures always stream to stderr, and --verbose adds a line per
-restored file. A run in which the whole set lands exits 0; any failure,
+Per-file failures always land in the log stream on stderr, and --verbose
+adds a log line per restored file. A run in which the whole set lands exits
+0; any failure,
 refused conflict, or interrupt leaves the in-progress marker in place, names
 what is missing, and exits 1. With --dry-run the command reports what it
 would restore, the bytes it would transfer, and the conflicts it would hit,
@@ -111,61 +121,98 @@ and writes nothing; sizing the plan still costs mirror metadata reads.`,
 	cfgFlag := registerConfigFlag(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, args []string) error {
-		ctx, stop := signalContext(cc.Context())
-		defer stop()
+		run, cleanup, err := newCmdRun(cc, progressFlag, progressInterval, sink)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
 
 		cfg, err := loadCmdConfig(*cfgFlag)
 		if err != nil {
 			return err
 		}
 
-		return runPull(ctx, cc, cfg, args, dryRun, verbose, jsonOut)
+		// One reporter serves the whole command, discovery through the last
+		// organization's settle. Every exit past this point erases the panel
+		// first; the summaries buffer until it stops.
+		prog, stopReporter := run.startReporter(phaseDiscover)
+		defer stopReporter()
+
+		return runPull(run.runCtx, cc, cfg, prog, stopReporter, args, dryRun, verbose, jsonOut)
 	}
 
 	flags := cmd.Flags()
 	flags.BoolVar(&dryRun, flagDryRun, false, "report what would be restored without writing")
-	flags.BoolVarP(&verbose, flagVerbose, "v", false, "stream one line per restored file to stderr")
+	flags.BoolVarP(&verbose, flagVerbose, "v", false, "log one line per restored file")
 	flags.BoolVar(&jsonOut, flagJSON, false, "emit each organization's summary as JSON")
+	registerProgressFlags(flags, &progressFlag, &progressInterval)
+
+	// Completion registration panics on a missing flag, so it follows the
+	// --progress registration above.
+	registerProgressCompletion(cmd)
 
 	return cmd
 }
 
 // runPull resolves the organizations to restore and pulls each in turn. A
 // per-organization fault (a held lock, a mismatched marker, a refused
-// conflict) is named on stderr and the remaining organizations still
-// restore; any incompleteness exits through [ErrPullIncomplete].
+// conflict) is logged and the remaining organizations still restore; any
+// incompleteness exits through [ErrPullIncomplete]. The per-organization
+// summaries buffer until the reporter stops, so stdout carries them on a
+// restored terminal rather than interleaved with the panel.
 func runPull(
-	ctx context.Context, cc *cobra.Command, cfg cmdConfig, args []string,
-	dryRun, verbose, jsonOut bool,
+	ctx context.Context, cc *cobra.Command, cfg cmdConfig, prog *cmdProgress, stopReporter func(),
+	args []string, dryRun, verbose, jsonOut bool,
 ) error {
-	errW := cc.ErrOrStderr()
+	logger := cmdLogger(ctx)
 	fileRemote := remoteFromFile(cfg.file)
 
-	orgs, err := resolvePullOrgs(ctx, cfg, fileRemote, args, errW)
+	orgs, err := resolvePullOrgs(ctx, cfg, fileRemote, args, logger)
 	if err != nil {
 		return err
 	}
 
 	incomplete := false
+	outcomes := make([]pullOutcome, 0, len(orgs))
 
 	for _, org := range orgs {
-		err := pullOrg(ctx, cc, cfg, fileRemote, org, dryRun, verbose, jsonOut)
+		outcome, err := pullOrg(ctx, cfg, prog, logger, fileRemote, org, dryRun, verbose)
+		if err != nil {
+			// A precondition fault stops this organization alone; the others
+			// still restore, and the named fault carries into the exit code.
+			logger.LogAttrs(ctx, slog.LevelError, "pull_org_failed",
+				slog.String("org", org),
+				slog.String("error", err.Error()),
+			)
+
+			incomplete = true
+
+			continue
+		}
+
+		outcomes = append(outcomes, outcome)
+	}
+
+	interrupted := ctx.Err() != nil
+
+	stopReporter()
+
+	for i := range outcomes {
+		err := writePullSummary(cc.OutOrStdout(), outcomes[i], jsonOut)
 
 		switch {
 		case err == nil:
 		case errors.Is(err, ErrPullIncomplete):
 			incomplete = true
 		default:
-			// A precondition fault stops this organization alone; the others
-			// still restore, and the named fault carries into the exit code.
-			eprintf(errW, "organization %q: %v\n", org, err)
-
-			incomplete = true
+			return err
 		}
 	}
 
-	if ctx.Err() != nil {
-		eprintf(errW, "pull interrupted; the in-progress marker stays until a re-run finishes the restore\n")
+	if interrupted {
+		logger.LogAttrs(ctx, slog.LevelWarn, "pull_interrupted",
+			slog.String("detail", "the in-progress marker stays until a re-run finishes the restore"),
+		)
 
 		incomplete = true
 	}
@@ -183,7 +230,7 @@ func runPull(
 // [config.ValidateOrganizationName], the boundary that keeps a name from
 // addressing a path outside its own root.
 func resolvePullOrgs(
-	ctx context.Context, cfg cmdConfig, fileRemote *remote.Config, args []string, errW io.Writer,
+	ctx context.Context, cfg cmdConfig, fileRemote *remote.Config, args []string, logger *slog.Logger,
 ) ([]string, error) {
 	orgs := args
 
@@ -201,7 +248,7 @@ func resolvePullOrgs(
 	}
 
 	if len(orgs) == 0 {
-		local, err := discoverLocalOrgs(cfg.archiveDir, errW)
+		local, err := discoverLocalOrgs(ctx, cfg.archiveDir, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -254,10 +301,10 @@ func discoverMirrorOrgs(ctx context.Context, rcfg remote.Config) ([]string, erro
 // discoverLocalOrgs lists the archive directory's immediate subdirectories
 // that record a remote marker, the organizations restorable with no
 // configured remote. A directory whose marker cannot be read is skipped with
-// a note on errW rather than silently, so an operator can tell a skip from
+// a logged warning rather than silently, so an operator can tell a skip from
 // an absence; naming that organization explicitly still surfaces the fault
 // in full.
-func discoverLocalOrgs(archiveDir string, errW io.Writer) ([]string, error) {
+func discoverLocalOrgs(ctx context.Context, archiveDir string, logger *slog.Logger) ([]string, error) {
 	dirents, err := os.ReadDir(archiveDir)
 
 	switch {
@@ -278,8 +325,11 @@ func discoverLocalOrgs(archiveDir string, errW io.Writer) ([]string, error) {
 
 		switch {
 		case merr != nil:
-			eprintf(errW, "warning: organization %q: omitted from discovery; its marker cannot be read (%v)\n",
-				d.Name(), merr)
+			logger.LogAttrs(ctx, slog.LevelWarn, "pull_discovery_skipped",
+				slog.String("org", d.Name()),
+				slog.String("detail", "omitted from discovery; its marker cannot be read"),
+				slog.String("error", merr.Error()),
+			)
 
 		case ok:
 			orgs = append(orgs, d.Name())
@@ -290,29 +340,29 @@ func discoverLocalOrgs(archiveDir string, errW io.Writer) ([]string, error) {
 }
 
 // pullOrg restores one organization: it settles the preconditions (marker
-// agreement, the archive lock), plans against the mirror, and either reports
-// the plan (--dry-run) or executes it.
+// agreement, the archive lock), plans against the mirror, and either predicts
+// the plan's outcome (--dry-run) or executes it. The returned outcome is the
+// summary the caller writes once the reporter has stopped.
 func pullOrg(
-	ctx context.Context, cc *cobra.Command, cfg cmdConfig, fileRemote *remote.Config,
-	org string, dryRun, verbose, jsonOut bool,
-) error {
-	errW := cc.ErrOrStderr()
+	ctx context.Context, cfg cmdConfig, prog *cmdProgress, logger *slog.Logger,
+	fileRemote *remote.Config, org string, dryRun, verbose bool,
+) (pullOutcome, error) {
 	orgRoot := filepath.Join(cfg.archiveDir, org)
 
 	rcfg, err := resolveOrgRemote(orgRoot, fileRemote)
 	if err != nil {
-		return err
+		return pullOutcome{}, err
 	}
 
 	unlock, err := lockForPull(orgRoot, dryRun)
 	if err != nil {
-		return err
+		return pullOutcome{}, err
 	}
 	defer unlock()
 
 	client, err := remote.New(ctx, rcfg)
 	if err != nil {
-		return fmt.Errorf("open mirror: %w", err)
+		return pullOutcome{}, fmt.Errorf("open mirror: %w", err)
 	}
 
 	defer func() {
@@ -320,35 +370,56 @@ func pullOrg(
 		_ = client.Close()
 	}()
 
-	restorer := restore.NewRestorer(client, rcfg,
-		restore.WithLogger(cmdLogger(ctx)),
-		restore.WithProgress(func(relPath string, bytes int64, perr error) {
-			switch {
-			case perr != nil:
-				eprintf(errW, "%s/%s: %v\n", org, relPath, perr)
-			case verbose:
-				eprintf(errW, "%s/%s (%s)\n", org, relPath, theme.HumanBytes(bytes))
-			}
-		}),
-	)
-
-	// The plan sizes itself from the mirror's listing, which on a mirror of
-	// millions of objects runs minutes; say so rather than sit silent.
-	notice := time.AfterFunc(pullListNoticeDelay, func() { listNotice(errW)(org) })
-
-	plan, err := restorer.Plan(ctx, orgRoot, org)
-
-	notice.Stop()
-
-	if err != nil {
-		return err
+	// The sink carries the phases and the live counters, failures included;
+	// the per-file callback exists only for the verbose stream, so a run
+	// without -v registers none.
+	restorerOpts := []restore.Option{
+		restore.WithLogger(logger),
+		restore.WithProgressSink(prog),
 	}
 
-	for _, e := range plan.Refusals {
-		eprintf(errW, "%s/%s: refused: %s\n", org, e.Rel, e.Reason)
+	if verbose {
+		restorerOpts = append(restorerOpts,
+			restore.WithProgress(func(relPath string, bytes int64, perr error) {
+				// The restorer's own pull_error event names a fault; only
+				// the successes need a line here.
+				if perr != nil {
+					return
+				}
+
+				logger.LogAttrs(ctx, slog.LevelInfo, "restored",
+					slog.String("org", org),
+					slog.String("path", relPath),
+					slog.Int64("bytes", bytes),
+				)
+			}))
+	}
+
+	restorer := restore.NewRestorer(client, rcfg, restorerOpts...)
+
+	// The plan sizes itself from the mirror's listing, which on a mirror of
+	// millions of objects runs minutes; the phase's spinner is what says the
+	// command is still working through it.
+	prog.SetTarget(org)
+	prog.SetPhase(phasePlan)
+	prog.SetTotal(0)
+
+	plan, err := restorer.Plan(ctx, orgRoot, org)
+	if err != nil {
+		return pullOutcome{}, err
 	}
 
 	if dryRun {
+		// A real run's restorer logs each refusal itself; the prediction has
+		// no restorer run, so it names them here.
+		for _, e := range plan.Refusals {
+			logger.LogAttrs(ctx, slog.LevelWarn, "pull_refused",
+				slog.String("org", org),
+				slog.String("path", e.Rel),
+				slog.String("reason", e.Reason),
+			)
+		}
+
 		// The prediction assumes the stub phase succeeds; a marker already
 		// recording complete is never demoted, so it predicts complete over
 		// any leftovers.
@@ -357,9 +428,9 @@ func pullOrg(
 
 		// A refused run would settle nothing, so its leftovers carry no
 		// marker consequence to claim.
-		printLeftovers(errW, org, plan.Leftovers, len(plan.Refusals) == 0 && !predicted)
+		logLeftovers(ctx, logger, org, plan.Leftovers, len(plan.Refusals) == 0 && !predicted)
 
-		return writePullSummary(cc.OutOrStdout(), pullOutcome{
+		return pullOutcome{
 			org:       org,
 			target:    orgRoot,
 			dryRun:    true,
@@ -370,19 +441,19 @@ func pullOrg(
 			stubs:     len(plan.Stubs),
 			complete:  predicted,
 			leftovers: plan.Leftovers,
-		}, jsonOut)
+		}, nil
 	}
 
 	sum, err := restorer.Pull(ctx, orgRoot, org, plan)
 	if err != nil {
-		return err
+		return pullOutcome{}, err
 	}
 
 	markerClause, markerPartial := markerState(orgRoot, len(plan.Leftovers))
 
-	printLeftovers(errW, org, plan.Leftovers, markerPartial)
+	logLeftovers(ctx, logger, org, plan.Leftovers, markerPartial)
 
-	return writePullSummary(cc.OutOrStdout(), pullOutcome{
+	return pullOutcome{
 		org:         org,
 		target:      orgRoot,
 		restored:    sum.Restored,
@@ -395,7 +466,7 @@ func pullOrg(
 		complete:    sum.Complete,
 		leftovers:   plan.Leftovers,
 		marker:      markerClause,
-	}, jsonOut)
+	}, nil
 }
 
 // markerComplete reports whether the org root's marker already records the
@@ -406,18 +477,17 @@ func markerComplete(orgRoot string) bool {
 	return err == nil && ok && !marker.Restoring && !marker.Partial && marker.URL != ""
 }
 
-// printLeftovers names each mirrored key nothing in the restored tree
-// accounts for. The "(keeps the marker partial)" suffix appears only when
-// the settled or predicted marker is in fact partial: under a marker
-// already recording complete, leftovers do not flip it.
-func printLeftovers(errW io.Writer, org string, leftovers []string, partial bool) {
-	suffix := ""
-	if partial {
-		suffix = " (keeps the marker partial)"
-	}
-
+// logLeftovers names each mirrored key nothing in the restored tree accounts
+// for. The keeps_marker_partial attribute is true only when the settled or
+// predicted marker is in fact partial: under a marker already recording
+// complete, leftovers do not flip it.
+func logLeftovers(ctx context.Context, logger *slog.Logger, org string, leftovers []string, partial bool) {
 	for _, key := range leftovers {
-		eprintf(errW, "%s: unaccounted mirror key: %s%s\n", org, key, suffix)
+		logger.LogAttrs(ctx, slog.LevelWarn, "pull_leftover",
+			slog.String("org", org),
+			slog.String("key", key),
+			slog.Bool("keeps_marker_partial", partial),
+		)
 	}
 }
 

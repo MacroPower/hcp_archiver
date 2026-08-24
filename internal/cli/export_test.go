@@ -10,15 +10,25 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/pkg/progress"
 )
 
-// ExportProgressForTest builds the export command's progress adapter over a
-// reporter rendering to w in mode, returning the adapter and its reporter. It
-// exposes the command's wiring for offline tests.
-func ExportProgressForTest(
+// CmdProgress exposes the commands' shared progress adapter for offline
+// tests: the export-facing hook plus the errored counter the other commands
+// feed. See [cmdProgress] for the implementation.
+type CmdProgress interface {
+	export.Progress
+
+	// Errored counts n more failed units.
+	Errored(n int)
+}
+
+// CmdProgressForTest builds a command's progress adapter over a reporter
+// rendering to w in mode, returning the adapter and its reporter. It exposes
+// the commands' shared wiring for offline tests.
+func CmdProgressForTest(
 	w io.Writer,
 	mode config.ProgressMode,
 	opts ...progress.Option,
-) (export.Progress, *progress.Reporter) {
-	p := &exportProgress{}
+) (CmdProgress, *progress.Reporter) {
+	p := &cmdProgress{}
 	r := progress.New(w, mode, p, opts...)
 	p.reporter = r
 

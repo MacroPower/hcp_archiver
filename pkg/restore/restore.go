@@ -39,6 +39,7 @@ type Restorer struct {
 	client      *remote.Client
 	logger      *slog.Logger
 	progress    func(relPath string, bytes int64, err error)
+	sink        ProgressSink
 	cfg         remote.Config
 	concurrency int
 }
@@ -49,6 +50,7 @@ type Restorer struct {
 //   - [WithLogger]
 //   - [WithConcurrency]
 //   - [WithProgress]
+//   - [WithProgressSink]
 type Option func(*Restorer)
 
 // WithLogger is an [Option] that sets the logger the restorer emits its
@@ -90,6 +92,7 @@ func NewRestorer(client *remote.Client, cfg remote.Config, opts ...Option) *Rest
 		cfg:         cfg,
 		logger:      slog.New(slog.DiscardHandler),
 		progress:    func(string, int64, error) {},
+		sink:        nopSink{},
 		concurrency: collect.DefaultConcurrency,
 	}
 
@@ -203,6 +206,9 @@ func (r *Restorer) Pull(ctx context.Context, orgRoot, org string, plan Plan) (Su
 
 	data, snapshots := splitEntries(plan.Entries)
 
+	r.sink.SetPhase(PhaseRestore)
+	r.sink.SetTotal(len(data) + len(snapshots))
+
 	r.restoreAll(ctx, orgRoot, org, data, &sum)
 
 	// The barrier: snapshots land only over a fully proven data layer. A
@@ -304,12 +310,19 @@ func (r *Restorer) restoreOne(ctx context.Context, orgRoot, org string, e PlanEn
 }
 
 // tally records one settled transfer into sum, emits its event, and reports
-// it to the progress callback. The caller serializes access to sum.
+// it to the progress callback and the sink. The caller serializes access to
+// sum.
 func (r *Restorer) tally(ctx context.Context, org string, e PlanEntry, n int64, err error, sum *Summary) {
+	// A failed transfer still advances the phase: the unit is settled either
+	// way, and the failure carries through the callback and the summary.
+	r.sink.Advance(1)
+
 	if err != nil {
 		// An interrupt surfacing through a transfer is the wind-down, not a
 		// per-file fault, but it still counts: the set is not on disk, the
 		// marker stays, and the exit must say so.
+		r.sink.Errored(1)
+
 		sum.Failed++
 		sum.Failures = append(sum.Failures, Failure{Path: e.Rel, Err: err})
 
@@ -326,7 +339,7 @@ func (r *Restorer) tally(ctx context.Context, org string, e PlanEntry, n int64, 
 	sum.Restored++
 	sum.Bytes += n
 
-	r.logger.LogAttrs(ctx, slog.LevelInfo, "pull_restored",
+	r.logger.LogAttrs(ctx, slog.LevelDebug, "pull_restored",
 		slog.String("org", org),
 		slog.String("path", e.Rel),
 		slog.Int64("bytes", n),
@@ -463,6 +476,9 @@ func (r *Restorer) settleMarker(
 		return nil
 	}
 
+	r.sink.SetPhase(PhaseSettle)
+	r.sink.SetTotal(0)
+
 	sum.Leftovers = plan.Leftovers
 
 	proven := sum.StubsFailed == 0 && len(plan.Leftovers) == 0
@@ -507,6 +523,13 @@ func (r *Restorer) settleMarker(
 // warns, counts it, holds a marker not already complete at partial, and
 // never fails.
 func (r *Restorer) ensureStubs(ctx context.Context, orgRoot, org string, stubs []StubEntry, sum *Summary) {
+	if len(stubs) == 0 {
+		return
+	}
+
+	r.sink.SetPhase(PhaseStubs)
+	r.sink.SetTotal(len(stubs))
+
 	var (
 		mu sync.Mutex
 		g  errgroup.Group
@@ -524,6 +547,10 @@ func (r *Restorer) ensureStubs(ctx context.Context, orgRoot, org string, stubs [
 
 			mu.Lock()
 			defer mu.Unlock()
+
+			// A stub that could not be ensured still advances the phase: the
+			// unit is settled either way, and the tally carries the failure.
+			r.sink.Advance(1)
 
 			if err != nil {
 				sum.StubsFailed++

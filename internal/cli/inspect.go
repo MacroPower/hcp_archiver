@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -18,6 +18,7 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/pkg/archiver"
 	"go.jacobcolvin.com/hcp_archiver/pkg/config"
 	"go.jacobcolvin.com/hcp_archiver/pkg/pathkit"
+	"go.jacobcolvin.com/hcp_archiver/pkg/progress"
 	"go.jacobcolvin.com/hcp_archiver/pkg/remote"
 	"go.jacobcolvin.com/hcp_archiver/pkg/theme"
 	"go.jacobcolvin.com/hcp_archiver/pkg/view"
@@ -28,6 +29,14 @@ const (
 	flagJSON    = "json"
 	flagDryRun  = "dry-run"
 	flagVerbose = "verbose"
+)
+
+// Phase names for the inspect commands' reporters, past the shared
+// [phaseOpen]: the listing, the single-object read, and the extract itself.
+const (
+	phaseList    = "list"
+	phaseRead    = "read"
+	phaseExtract = "extract"
 )
 
 var (
@@ -75,42 +84,30 @@ func remoteFromFile(file *config.File) *remote.Config {
 
 // warnDegraded reports each organization whose mirror listing failed, so a
 // result covering local content only never passes silently for the whole
-// archive. It writes at most one line per organization per run.
-func warnDegraded(errW io.Writer, arc *view.Archive) {
+// archive. It emits at most one event per organization per run.
+func warnDegraded(ctx context.Context, logger *slog.Logger, arc *view.Archive) {
 	for _, org := range arc.Orgs() {
 		err := org.RemoteWarning()
 		if err != nil {
-			eprintf(errW, "warning: organization %q: mirror unreachable; results cover local content only (%v)\n",
-				org.Name, err)
+			logger.LogAttrs(ctx, slog.LevelWarn, "mirror_unreachable",
+				slog.String("org", org.Name),
+				slog.String("detail", "results cover local content only"),
+				slog.String("error", err.Error()),
+			)
 		}
 	}
 }
 
-// listNotice returns the callback [view.WithListNotice] takes, naming an
-// organization whose mirror listing is running long. The commands it serves
-// print nothing until they finish, so a large mirror's enumeration would
-// otherwise look like a hang.
-//
-// Each organization's notice fires on its own timer goroutine, so a mutex
-// serializes them against each other. They land on stderr, leaving stdout
-// clean for the bytes a caller is piping, and follow the
-// "<level>: organization %q: ..." shape [warnDegraded] uses.
-func listNotice(errW io.Writer) func(org string) {
-	var mu sync.Mutex
-
-	return func(org string) {
-		mu.Lock()
-		defer mu.Unlock()
-
-		eprintf(errW, "notice: organization %q: listing the mirror's inventory; "+
-			"on a mirror of millions of objects this takes minutes\n", org)
-	}
-}
-
 // newListCmd returns a command that lists archived objects as plain text or
-// NDJSON, one line per object, transparent to sealing.
-func newListCmd() *cobra.Command {
-	var jsonOut bool
+// NDJSON, one line per object, transparent to sealing. The sink resolves the
+// shared log writer the root command builds in PersistentPreRunE, so log
+// lines scroll above the progress panel while it runs.
+func newListCmd(sink func() progress.LogSink) *cobra.Command {
+	var (
+		jsonOut          bool
+		progressFlag     string
+		progressInterval time.Duration
+	)
 
 	cmd := &cobra.Command{
 		Use:   "list [path]",
@@ -137,8 +134,11 @@ none the whole archive is listed.`,
 	cfgFlag := registerConfigFlag(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, args []string) error {
-		ctx, stop := signalContext(cc.Context())
-		defer stop()
+		run, cleanup, err := newCmdRun(cc, progressFlag, progressInterval, sink)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
 
 		cfg, err := loadCmdConfig(*cfgFlag)
 		if err != nil {
@@ -151,18 +151,30 @@ none the whole archive is listed.`,
 			prefix = args[0]
 		}
 
-		arc, err := cfg.open(ctx, listNotice(cc.ErrOrStderr()))
+		// The reporter starts before the archive opens: a large mirror's
+		// enumeration during the open can be the slow part of the command,
+		// and its spinner is what says the listing is still working. Every
+		// exit past this point erases the panel first; the success path
+		// stops it inline before the stdout listing.
+		prog, stopReporter := run.startReporter(phaseOpen)
+		defer stopReporter()
+
+		arc, err := cfg.open(run.runCtx)
 		if err != nil {
 			return err
 		}
 
+		prog.SetPhase(phaseList)
+
 		entries, err := arc.List(prefix)
+
+		stopReporter()
 
 		// Whatever the listing answered, a degraded mirror is context the
 		// reader needs: an unknown organization may exist only in the mirror
 		// the session could not list, and a clean listing still covered local
 		// content alone.
-		warnDegraded(cc.ErrOrStderr(), arc)
+		warnDegraded(run.runCtx, cmdLogger(run.runCtx), arc)
 
 		if err != nil {
 			return hintDirArg(describeNoOrg(err, arc), args)
@@ -175,14 +187,27 @@ none the whole archive is listed.`,
 		return writeEntriesText(cc.OutOrStdout(), entries)
 	}
 
-	cmd.Flags().BoolVar(&jsonOut, flagJSON, false, "emit NDJSON, one object per line")
+	flags := cmd.Flags()
+	flags.BoolVar(&jsonOut, flagJSON, false, "emit NDJSON, one object per line")
+	registerProgressFlags(flags, &progressFlag, &progressInterval)
+
+	// Completion registration panics on a missing flag, so it follows the
+	// --progress registration above.
+	registerProgressCompletion(cmd)
 
 	return cmd
 }
 
 // newShowCmd returns a command that prints one archived object's exact bytes
-// to stdout, whichever physical form holds it.
-func newShowCmd() *cobra.Command {
+// to stdout, whichever physical form holds it. The sink resolves the shared
+// log writer the root command builds in PersistentPreRunE, so log lines
+// scroll above the progress panel while it runs.
+func newShowCmd(sink func() progress.LogSink) *cobra.Command {
+	var (
+		progressFlag     string
+		progressInterval time.Duration
+	)
+
 	cmd := &cobra.Command{
 		Use:   "show <path>",
 		Short: "Print one archived object's bytes to stdout",
@@ -204,8 +229,11 @@ backing store (extract streams such an object to disk without this limit).
 	cfgFlag := registerConfigFlag(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, args []string) error {
-		ctx, stop := signalContext(cc.Context())
-		defer stop()
+		run, cleanup, err := newCmdRun(cc, progressFlag, progressInterval, sink)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
 
 		cfg, err := loadCmdConfig(*cfgFlag)
 		if err != nil {
@@ -214,16 +242,27 @@ backing store (extract streams such an object to disk without this limit).
 
 		archivePath := args[0]
 
-		arc, err := cfg.open(ctx, listNotice(cc.ErrOrStderr()))
+		// The reporter starts before the archive opens: a large mirror's
+		// enumeration during the open can be the slow part of the command.
+		// Every exit past this point erases the panel first; the success
+		// path stops it inline before the object's bytes hit stdout.
+		prog, stopReporter := run.startReporter(phaseOpen)
+		defer stopReporter()
+
+		arc, err := cfg.open(run.runCtx)
 		if err != nil {
 			return err
 		}
 
+		prog.SetPhase(phaseRead)
+
 		data, err := arc.Read(archivePath)
+
+		stopReporter()
 
 		// Whatever the read answered, a degraded mirror is context the reader
 		// needs: a miss may be explained by it, and a hit does not disprove it.
-		warnDegraded(cc.ErrOrStderr(), arc)
+		warnDegraded(run.runCtx, cmdLogger(run.runCtx), arc)
 
 		if err != nil {
 			if errors.Is(err, view.ErrNotFile) {
@@ -241,16 +280,27 @@ backing store (extract streams such an object to disk without this limit).
 		return nil
 	}
 
+	registerProgressFlags(cmd.Flags(), &progressFlag, &progressInterval)
+
+	// Completion registration panics on a missing flag, so it follows the
+	// --progress registration above.
+	registerProgressCompletion(cmd)
+
 	return cmd
 }
 
 // newExtractCmd returns a command that extracts archived objects into a plain
-// directory tree, expanding sealed forms back into loose files.
-func newExtractCmd() *cobra.Command {
+// directory tree, expanding sealed forms back into loose files. The sink
+// resolves the shared log writer the root command builds in
+// PersistentPreRunE, so log lines scroll above the progress panel while it
+// runs.
+func newExtractCmd(sink func() progress.LogSink) *cobra.Command {
 	var (
-		dryRun  bool
-		verbose bool
-		jsonOut bool
+		dryRun           bool
+		verbose          bool
+		jsonOut          bool
+		progressFlag     string
+		progressInterval time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -268,12 +318,12 @@ chain. An organization whose archive root records no mirror leaves one
 unrecoverable before the run starts, counted and named among the run's
 failures; a fetch can still fail against a mirror that is configured.
 
-Per-file failures always stream to stderr, and --verbose adds a line per
-recovered file. A run in which every object recovers exits 0; when any
-object fails, the failures are counted and reported and the command exits 1,
-and a dry run whose plan already holds an unrecoverable object exits the
-same way. An interrupted run reports its partial totals to stderr and exits
-0; a fetch cut off mid-object leaves no partial file behind.
+Per-file failures always land in the log stream on stderr, and --verbose
+adds a log line per recovered file. A run in which every object recovers
+exits 0; when any object fails, the failures are counted and reported and
+the command exits 1, and a dry run whose plan already holds an unrecoverable
+object exits the same way. An interrupted run reports its partial totals and
+exits 0; a fetch cut off mid-object leaves no partial file behind.
 
 ` + inspectLong + `
 
@@ -291,8 +341,11 @@ sidecars) from the mirror, the one egress a dry run may cost.`,
 	cfgFlag := registerConfigFlag(cmd)
 
 	cmd.RunE = func(cc *cobra.Command, args []string) error {
-		ctx, stop := signalContext(cc.Context())
-		defer stop()
+		run, cleanup, err := newCmdRun(cc, progressFlag, progressInterval, sink)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
 
 		cfg, err := loadCmdConfig(*cfgFlag)
 		if err != nil {
@@ -313,7 +366,14 @@ sidecars) from the mirror, the one egress a dry run may cost.`,
 			return fmt.Errorf("%w (set extract.path in the configuration file)", view.ErrNoTarget)
 		}
 
-		arc, err := cfg.open(ctx, listNotice(cc.ErrOrStderr()))
+		// The reporter starts before the archive opens: a large mirror's
+		// enumeration during the open can be the slow part of the command.
+		// Every exit past this point erases the panel first; the success
+		// paths stop it inline before the stdout summary.
+		prog, stopReporter := run.startReporter(phaseOpen)
+		defer stopReporter()
+
+		arc, err := cfg.open(run.runCtx)
 		if err != nil {
 			return err
 		}
@@ -328,48 +388,106 @@ sidecars) from the mirror, the one egress a dry run may cost.`,
 			}
 		}
 
+		logger := cmdLogger(run.runCtx)
+
 		if dryRun {
+			// The listing is the dry run's one potentially slow step past the
+			// open: sizing it can fetch a workspace's absent sealed indexes
+			// from the mirror.
+			prog.SetPhase(phaseList)
+
+			entries, lerr := arc.List(prefix)
+
+			stopReporter()
+
+			// The warning precedes the error check for the same reason
+			// show's does: a listing miss may be explained by the degraded
+			// mirror, and going quiet about it would report a local-only
+			// plan as the whole archive.
+			warnDegraded(run.runCtx, logger, arc)
+
+			if lerr != nil {
+				return hintDirArg(describeNoOrg(lerr, arc), args)
+			}
+
 			return hintDirArg(
-				extractDryRun(cc.OutOrStdout(), cc.ErrOrStderr(), arc, prefix, target, jsonOut), args)
+				extractDryRun(run.runCtx, cc.OutOrStdout(), logger, arc, entries, target, jsonOut), args)
 		}
 
-		return hintDirArg(runExtractCmd(ctx, cc, arc, prefix, target, verbose, jsonOut), args)
+		return hintDirArg(
+			runExtractCmd(run.runCtx, cc, prog, stopReporter, arc, prefix, target, verbose, jsonOut), args)
 	}
 
 	flags := cmd.Flags()
 	flags.BoolVar(&dryRun, flagDryRun, false, "summarize what would be extracted without writing")
-	flags.BoolVarP(&verbose, flagVerbose, "v", false, "stream one line per recovered file to stderr")
+	flags.BoolVarP(&verbose, flagVerbose, "v", false, "log one line per recovered file")
 	flags.BoolVar(&jsonOut, flagJSON, false, "emit the summary as JSON")
+	registerProgressFlags(flags, &progressFlag, &progressInterval)
+
+	// Completion registration panics on a missing flag, so it follows the
+	// --progress registration above.
+	registerProgressCompletion(cmd)
 
 	return cmd
 }
 
 // runExtractCmd drives one extract run and reports its summary. Per-file
-// failures always stream to stderr; verbose adds a line per recovered file.
-// An interrupt reports the partial totals to stderr and exits cleanly,
+// failures are always logged as they land; verbose adds a log line per
+// recovered file. An interrupt reports the partial totals and exits cleanly,
 // matching the archive command's signal semantics.
-func runExtractCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
-	prefix, target string, verbose, jsonOut bool,
+func runExtractCmd(ctx context.Context, cc *cobra.Command, prog *cmdProgress, stopReporter func(),
+	arc *view.Archive, prefix, target string, verbose, jsonOut bool,
 ) error {
-	errW := cc.ErrOrStderr()
+	logger := cmdLogger(ctx)
 
-	progress := func(archivePath string, bytes int64, err error) {
+	prog.SetPhase(phaseExtract)
+
+	// The listing sizes the phase bar. It may itself fetch a workspace's
+	// absent sealed indexes from the mirror, which is fine: it runs under the
+	// reporter, and the fetched indexes persist, so the extract's own pass
+	// repeats none of the cost. A listing fault leaves the phase
+	// indeterminate and the extract itself reports the real failure.
+	//
+	//nolint:contextcheck // The archive's remote reads ride the context bound at open.
+	entries, lerr := arc.List(prefix)
+	if lerr == nil {
+		prog.SetTotal(len(entries))
+	}
+
+	report := func(archivePath string, bytes int64, err error) {
+		// A failed object still advances the phase: the unit is settled
+		// either way, and the errored figure carries the distinction.
+		prog.Advance(1)
+
 		switch {
 		case err != nil:
-			eprintf(errW, "%s: %v\n", archivePath, err)
+			prog.Errored(1)
+			logger.LogAttrs(ctx, slog.LevelError, "extract_error",
+				slog.String("path", archivePath),
+				slog.String("error", err.Error()),
+			)
+
 		case verbose:
-			eprintf(errW, "%s (%s)\n", archivePath, theme.HumanBytes(bytes))
+			logger.LogAttrs(ctx, slog.LevelInfo, "extracted",
+				slog.String("path", archivePath),
+				slog.Int64("bytes", bytes),
+			)
 		}
 	}
 
-	sum, err := arc.Extract(ctx, target, prefix, progress)
+	sum, err := arc.Extract(ctx, target, prefix, report)
 
-	warnDegraded(errW, arc)
+	stopReporter()
+
+	warnDegraded(ctx, logger, arc)
 
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			eprintf(errW, "extract interrupted: %s (%s) written into %s\n",
-				theme.CountNoun(sum.Files, "object", "objects"), theme.HumanBytes(sum.Bytes), target)
+			logger.LogAttrs(ctx, slog.LevelWarn, "extract_interrupted",
+				slog.Int("files", sum.Files),
+				slog.Int64("bytes", sum.Bytes),
+				slog.String("target", target),
+			)
 
 			return nil
 		}
@@ -389,15 +507,17 @@ func runExtractCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
 	return nil
 }
 
-// extractDryRun summarizes an extract from the listing without writing: the
-// listing carries the same entries in the same order as the plan the real run
-// executes, so the totals predict it.
+// extractDryRun summarizes an extract from the already-fetched listing
+// without writing: the listing carries the same entries in the same order as
+// the plan the real run executes, so the totals predict it. The caller lists
+// under its reporter and stops it first, so the summary lands on a restored
+// terminal.
 //
 // An evicted object in an organization whose root records no mirror counts as
 // errored rather than as a file to write, because nothing can fetch its bytes
 // back, and when the plan holds any the dry run exits 1 the way the run would.
-// Each is named on stderr, where the real run streams its per-file failures, so
-// the answer to "which ones" does not need a second command.
+// Each is named in the log, where the real run reports its per-file failures,
+// so the answer to "which ones" does not need a second command.
 //
 // Everything else evicted is counted as recoverable and reported separately as
 // the volume the run will pull down, since a run with no opt-out flag fetches
@@ -411,18 +531,9 @@ func runExtractCmd(ctx context.Context, cc *cobra.Command, arc *view.Archive,
 // run. The one egress a dry run may cost is the listing's own machinery: a
 // workspace whose sealed indexes (roll-ups, sidecars) are not on disk has them
 // fetched from the mirror so the plan covers its sealed objects at all.
-func extractDryRun(out, errW io.Writer, arc *view.Archive, prefix, target string, jsonOut bool) error {
-	entries, err := arc.List(prefix)
-
-	// The warning precedes the error check for the same reason show's does: a
-	// listing miss may be explained by the degraded mirror, and going quiet
-	// about it would report a local-only plan as the whole archive.
-	warnDegraded(errW, arc)
-
-	if err != nil {
-		return describeNoOrg(err, arc)
-	}
-
+func extractDryRun(ctx context.Context, out io.Writer, logger *slog.Logger,
+	arc *view.Archive, entries []view.Entry, target string, jsonOut bool,
+) error {
 	mirrored := make(map[string]bool, len(arc.Orgs()))
 	for _, org := range arc.Orgs() {
 		mirrored[org.Name] = org.HasRemote()
@@ -434,8 +545,11 @@ func extractDryRun(out, errW io.Writer, arc *view.Archive, prefix, target string
 		if e.Offloaded && !mirrored[e.Org] {
 			outcome.summary.Errored++
 
-			eprintf(errW, "%s: cannot be extracted; its bytes are in the remote store "+
-				"and the organization records no mirror to fetch them from\n", e.ArchivePath())
+			logger.LogAttrs(ctx, slog.LevelWarn, "extract_unrecoverable",
+				slog.String("path", e.ArchivePath()),
+				slog.String("detail", "its bytes are in the remote store and the organization "+
+					"records no mirror to fetch them from"),
+			)
 
 			continue
 		}
@@ -449,7 +563,7 @@ func extractDryRun(out, errW io.Writer, arc *view.Archive, prefix, target string
 		outcome.summary.Bytes += e.Size
 	}
 
-	err = writeExtractSummary(out, outcome, jsonOut)
+	err := writeExtractSummary(out, outcome, jsonOut)
 	if err != nil {
 		return err
 	}
@@ -653,20 +767,13 @@ func configDir(cfgPath, dir string) string {
 }
 
 // openArchive opens the archive at dir under ctx, against the supplied mirror
-// when rcfg is non-nil, and wraps its organizations in a [*view.Archive]. A
-// non-nil notify reports an organization whose mirror listing is running long.
+// when rcfg is non-nil, and wraps its organizations in a [*view.Archive].
 //
 //nolint:contextcheck // The context rides in through view.WithContext; remote reads derive from it.
-func openArchive(
-	ctx context.Context, dir string, rcfg *remote.Config, notify func(org string),
-) (*view.Archive, error) {
+func openArchive(ctx context.Context, dir string, rcfg *remote.Config) (*view.Archive, error) {
 	opts := []view.ArchiveOption{view.WithContext(ctx)}
 	if rcfg != nil {
 		opts = append(opts, view.WithRemote(*rcfg))
-	}
-
-	if notify != nil {
-		opts = append(opts, view.WithListNotice(notify))
 	}
 
 	orgs, err := view.OpenArchive(dir, opts...)
@@ -750,11 +857,4 @@ func orgNames(arc *view.Archive) []string {
 	}
 
 	return names
-}
-
-// eprintf writes best-effort progress to w; a stderr write fault mid-run has
-// no recovery path.
-func eprintf(w io.Writer, format string, args ...any) {
-	//nolint:errcheck // Best-effort progress output.
-	_, _ = fmt.Fprintf(w, format, args...)
 }

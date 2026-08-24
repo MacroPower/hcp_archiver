@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.jacobcolvin.com/hcp_archiver/internal/cli"
+	"go.jacobcolvin.com/hcp_archiver/pkg/config"
 	"go.jacobcolvin.com/hcp_archiver/pkg/remote"
 	"go.jacobcolvin.com/hcp_archiver/pkg/seal"
 	"go.jacobcolvin.com/hcp_archiver/pkg/store"
@@ -772,4 +773,46 @@ func TestExtractCmd_Verbose(t *testing.T) {
 	_, stderr, err := runCmdIn(t, root, sectionYAML("extract", target), "extract", "-v")
 	require.NoError(t, err)
 	assert.Contains(t, stderr, miniPlanPath, "verbose streams one line per file to stderr")
+}
+
+func TestInspectCmds_RejectBadProgressMode(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+
+	tests := map[string][]string{
+		"list":    {"list", "--progress", "bogus"},
+		"show":    {"show", "mini-org/org.json", "--progress", "bogus"},
+		"extract": {"extract", "--dry-run", "--progress", "bogus"},
+		"view":    {"view", "--progress", "bogus"},
+	}
+
+	for name, args := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, _, err := runCmdIn(t, root, "", args...)
+			require.ErrorIs(t, err, config.ErrInvalidProgressMode)
+		})
+	}
+}
+
+func TestExtractCmd_QuietProgressKeepsFailures(t *testing.T) {
+	t.Parallel()
+
+	// The same unrecoverable-member setup as the exit-code test, run with
+	// progress silenced: the per-file failure still reaches stderr because
+	// logging is orthogonal to the progress mode, while no progress lines
+	// appear.
+	root := buildMiniArchive(t)
+	require.NoError(t, os.Remove(filepath.Join(root, "mini-org",
+		filepath.FromSlash(miniWs), "bundles", "logs.gen0001.zip")))
+
+	target := t.TempDir()
+
+	_, stderr, err := runCmdIn(t, root, sectionYAML("extract", target),
+		"extract", "--progress", "quiet")
+	require.ErrorIs(t, err, cli.ErrExtractIncomplete)
+	assert.Contains(t, stderr, miniPlanPath, "the failure log line survives quiet progress")
+	assert.NotContains(t, stderr, "progress phase=", "quiet emits no progress lines")
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -982,4 +983,90 @@ func TestPullInterruptedStubPhaseResumes(t *testing.T) {
 	assert.True(t, sum.Complete)
 	f.requireCanonicalStub(t)
 	assert.False(t, f.marker(t).Partial)
+}
+
+// sinkRecord is a [restore.ProgressSink] recording every call: the phases in
+// the order they were named, the totals in the order they were seeded, the
+// advances tallied under the phase current when each landed, and the failed
+// transfers.
+type sinkRecord struct {
+	advances map[string]int
+	current  string
+	phases   []string
+	totals   []int
+	errored  int
+	mu       sync.Mutex
+}
+
+func (s *sinkRecord) SetPhase(phase string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.phases = append(s.phases, phase)
+	s.current = phase
+}
+
+func (s *sinkRecord) SetTotal(total int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.totals = append(s.totals, total)
+}
+
+func (s *sinkRecord) Advance(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.advances == nil {
+		s.advances = map[string]int{}
+	}
+
+	s.advances[s.current] += n
+}
+
+func (s *sinkRecord) Errored(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.errored += n
+}
+
+func TestPullReportsPhasesThroughSink(t *testing.T) {
+	t.Parallel()
+
+	sink := &sinkRecord{}
+
+	f := newCleanPullFixture(t)
+	f.r = restore.NewRestorer(f.client, f.cfg, restore.WithProgressSink(sink))
+
+	sum := f.pull(t)
+	require.True(t, sum.Complete)
+
+	assert.Equal(t, []string{restore.PhaseRestore, restore.PhaseStubs, restore.PhaseSettle},
+		sink.phases, "the phases run restore, then stubs, then settle")
+	assert.Equal(t, []int{len(warmSet()), 1, 0}, sink.totals,
+		"restore counts every planned file, stubs count the tarball's, settle is indeterminate")
+	assert.Equal(t, map[string]int{
+		restore.PhaseRestore: len(warmSet()),
+		restore.PhaseStubs:   1,
+	}, sink.advances, "every unit settles under the phase that owns it")
+	assert.Zero(t, sink.errored, "a clean restore errors nothing")
+}
+
+func TestPullSettleOnlyReportsPhasesThroughSink(t *testing.T) {
+	t.Parallel()
+
+	f := newPullFixture(t)
+	f.pull(t)
+
+	// A converged re-run transfers nothing, but the stub verification and
+	// the marker settlement still report, so a settle-only pass over
+	// thousands of stubs is not a silent hang.
+	sink := &sinkRecord{}
+	f.r = restore.NewRestorer(f.client, f.cfg, restore.WithProgressSink(sink))
+
+	f.pull(t)
+
+	assert.Equal(t, []string{restore.PhaseStubs, restore.PhaseSettle}, sink.phases)
+	assert.Equal(t, map[string]int{restore.PhaseStubs: 1}, sink.advances)
 }
