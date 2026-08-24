@@ -278,9 +278,11 @@ archival tier (S3 Glacier, Azure Archive); there is no restore workflow.
 The read commands work against the mirror too: pointed at an empty directory
 by a configuration whose `remote` section names the mirror, they bootstrap a
 local tree from the bucket and fetch objects on demand, so restoring is
-either one bulk download of the org prefix or just browsing in place. The
-full semantics, verification layers, and failure modes are in
-[DESIGN.md](DESIGN.md).
+either one bulk download of the org prefix or just browsing in place.
+Configuring the section costs nothing on an organization the archiver wrote:
+its reads stay local and enumerate no bucket, reaching the mirror only for
+the cold artifacts eviction moved there. The full semantics, verification
+layers, and failure modes are in [DESIGN.md](DESIGN.md).
 
 ## Output layout
 

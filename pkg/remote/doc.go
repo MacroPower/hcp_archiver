@@ -14,6 +14,14 @@
 // streams a whole object into a writer, for the surfaces whose bytes are the
 // object itself rather than a span of one (a configuration tarball).
 //
+// Enumeration comes in two shapes, and the difference is what a caller pays.
+// [Client.List] walks every object under a prefix, the bulk inventory the sync
+// sweep compares the local tree against; its cost tracks how many objects the
+// prefix holds. [Client.Children] resolves one level instead, naming the
+// distinct next key segments from a single delimited listing, which is what a
+// reader wants when it needs to know which organizations a mirror holds
+// without enumerating what is inside them.
+//
 // [Client.Preflight] round-trips a small probe object through the write,
 // head, list, ranged-read, and delete motions at startup: the metadata
 // digests must read back exactly (the mirror's digest comparisons depend on

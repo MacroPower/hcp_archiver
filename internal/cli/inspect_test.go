@@ -430,6 +430,57 @@ func mirrorMiniTarball(t *testing.T, root, content string) string {
 	return "mini-org/" + rel
 }
 
+// mirrorMiniArchive mirrors the whole mini archive into a file:// bucket and
+// records a complete marker at the org root, the shape an archiver run leaves
+// behind. It returns the configuration snippet naming that mirror, so a
+// command runs the way a mirroring operator's configuration drives it: through
+// [view.WithRemote] rather than the marker alone.
+func mirrorMiniArchive(t *testing.T, root string) string {
+	t.Helper()
+
+	const prefix = "hcp"
+
+	org := filepath.Join(root, "mini-org")
+	mirror := t.TempDir()
+
+	err := filepath.WalkDir(org, func(p string, d os.DirEntry, walkErr error) error {
+		require.NoError(t, walkErr)
+
+		if d.IsDir() {
+			return nil
+		}
+
+		rel, relErr := filepath.Rel(org, p)
+		require.NoError(t, relErr)
+
+		data, readErr := os.ReadFile(p)
+		require.NoError(t, readErr)
+
+		writeMini(t, mirror, path.Join(prefix, "mini-org", filepath.ToSlash(rel)), string(data))
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	bucket := (&url.URL{Scheme: "file", Path: mirror}).String()
+	writeMini(t, org, remote.MarkerName, `{"version":1,"url":"`+bucket+`","prefix":"`+prefix+`"}`)
+
+	return "remote:\n  url: '" + bucket + "'\n  prefix: '" + prefix + "'\n"
+}
+
+func TestShowCmd_CompleteMirroredArchiveReadsLocally(t *testing.T) {
+	t.Parallel()
+
+	root := buildMiniArchive(t)
+	remoteYAML := mirrorMiniArchive(t, root)
+
+	out, errOut, err := runCmdIn(t, root, remoteYAML, "show", "mini-org/org.json")
+	require.NoError(t, err)
+
+	assert.JSONEq(t, miniOrgContent, out)
+	assert.Empty(t, errOut, "a complete organization needed nothing from the mirror to report")
+}
+
 func TestExtractCmd_FetchesEvictedTarballFromMirror(t *testing.T) {
 	t.Parallel()
 

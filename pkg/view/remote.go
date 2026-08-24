@@ -54,13 +54,13 @@ type remoteClientFactory func(ctx context.Context, cfg remote.Config) (*remote.C
 //
 // It is built when the org root carries a [remote.MarkerName] marker or when
 // [OpenArchive] was handed a remote through [WithRemote], so a local-only
-// archive never touches a client or a credential chain. The client and each
-// bundle's parsed central directory are built lazily on first use and cached
-// for the session; reads run on Bubble Tea command goroutines, so the caches
-// are mutex-guarded. A bundle build (a Head and a central-directory parse over
-// ranged GETs) runs outside the mutex behind a per-key readiness signal, so a
-// read of one cached bundle never waits on another's in-flight build and one
-// key is built at most once.
+// archive never touches a client or a credential chain. The client, the
+// inventory, and each bundle's parsed central directory are built lazily on
+// first use and cached for the session; reads run on Bubble Tea command
+// goroutines, so the caches are mutex-guarded. A bundle build (a Head and a
+// central-directory parse over ranged GETs) runs outside the mutex behind a
+// per-key readiness signal, so a read of one cached bundle never waits on
+// another's in-flight build and one key is built at most once.
 type orgRemote struct {
 	ctx       context.Context //nolint:containedctx // Reads run inside io.ReaderAt calls, which take none.
 	newClient remoteClientFactory
@@ -71,13 +71,14 @@ type orgRemote struct {
 
 	// The org's mirror inventory keyed by archive-relative path, listed once
 	// per session under listMu (its own lock, so a long listing never blocks a
-	// bundle read's map access). Both the listing and a listing failure are
-	// cached: the merged listing helpers consult the inventory per keystroke,
-	// and re-listing an unreachable mirror on each would hammer the bucket
-	// while the browser degrades to local content anyway. A pre-seeded listing
-	// (the bootstrap's root listing, sliced per org) is stored with listed set.
-	// The byDir field is the listing's per-directory child index (see
-	// [indexListing]), built and replaced together with it.
+	// bundle read's map access). It is built on first use rather than at the
+	// open, and only by a merged remote, so an organization nothing reads
+	// through never enumerates its prefix. Both the listing and a listing
+	// failure are cached: the merged listing helpers consult the inventory per
+	// keystroke, and re-listing an unreachable mirror on each would hammer the
+	// bucket while the browser degrades to local content anyway. The byDir
+	// field is the listing's per-directory child index (see [indexListing]),
+	// built and replaced together with it.
 	listing map[string]remote.ObjectInfo
 	byDir   map[string]map[string]remoteChild
 	listErr error
@@ -95,10 +96,10 @@ type orgRemote struct {
 
 	// Whether the remote stands in for the whole tree rather than only the
 	// evicted surfaces: listings union in the mirror's inventory and an
-	// ordinary miss fetches through. It is set when the remote was supplied
-	// explicitly ([WithRemote]) and when the marker records a partial tree
-	// (one a bootstrap materialized, see [writeMarker]); an archive the
-	// archiver wrote is complete locally, so its marker keeps every local
+	// ordinary miss fetches through. The marker decides it, whether the remote
+	// arrived through [WithRemote] or through the marker alone: a partial tree
+	// (one a bootstrap materialized, see [writeMarker]) merges, and an archive
+	// the archiver wrote is complete locally, so its marker keeps every local
 	// read local.
 	merged bool
 
@@ -167,16 +168,19 @@ func loadOrgRemote(root, orgName string, opts archiveOptions) (*orgRemote, error
 	}, nil
 }
 
-// newSeededOrgRemote builds an [*orgRemote] around the shared client and the
-// per-org slice of the root inventory the bootstrap already holds, so opening
-// an archive against a supplied remote costs one client build and one listing
-// for every organization together. A nil listing leaves the inventory to be
-// listed lazily on first use (the bootstrap's root listing was unavailable).
-// An explicitly supplied remote is always merged: the caller asked for the
-// mirror to stand in for whatever is absent.
-func newSeededOrgRemote(
+// newSuppliedOrgRemote builds an [*orgRemote] around the shared client for an
+// archive opened against a remote supplied through [WithRemote]. The inventory
+// is left to [orgRemote.objects] to list lazily from the organization's own
+// prefix on first merged use, so an organization nothing reads through costs
+// no listing at all, and one that does costs its own prefix rather than the
+// whole mirror's.
+//
+// Merged-ness comes from the caller (see [mergedFromMarker]) rather than from
+// the fact that a remote was supplied: configuring a remote says where the
+// mirror is, not that the tree beside it is incomplete.
+func newSuppliedOrgRemote(
 	orgName string, cfg remote.Config, client *remote.Client,
-	listing map[string]remote.ObjectInfo, opts archiveOptions,
+	merged bool, opts archiveOptions,
 ) *orgRemote {
 	return &orgRemote{
 		ctx:       opts.ctx,
@@ -186,11 +190,26 @@ func newSeededOrgRemote(
 		cfg:       cfg,
 		bundles:   make(map[string]*remoteBundle),
 		fetches:   make(map[string]*inflightFetch),
-		listing:   listing,
-		byDir:     indexListing(listing),
-		listed:    listing != nil,
-		merged:    true,
+		merged:    merged,
 	}
+}
+
+// mergedFromMarker reports whether a supplied remote must stand in for the
+// whole local tree rather than for its evicted surfaces alone.
+//
+// The marker is the archive's own record of completeness
+// ([remote.Marker.Partial]), written only over a close sweep that proved the
+// mirror holds nothing the local tree does not account for, and it is the same
+// field [loadOrgRemote] reads when no remote was supplied. An organization
+// carrying no marker has never made that claim, so the mirror stands in; a
+// marker with its url cleared is the operator's consent to re-record, and this
+// open is about to stamp it partial.
+//
+// Only [remoteOrg] may call this. The same inputs mean the opposite in
+// [loadOrgRemote], where an absent marker means no remote at all and a cleared
+// url is a refusal, so the two must not be folded together.
+func mergedFromMarker(marker remote.Marker, hasMarker bool) bool {
+	return !hasMarker || marker.URL == "" || marker.Partial
 }
 
 // readMember extracts one member from an evicted bundle at its

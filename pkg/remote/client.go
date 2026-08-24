@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -70,7 +72,9 @@ const (
 // Client reads and writes an organization's mirrored archive objects in one
 // object-store bucket: evicted cold surfaces through [Client.Upload] and the
 // synced search layer through [Client.Put], with [Client.List] and
-// [Client.Delete] serving the sync sweep's inventory and prune.
+// [Client.Delete] serving the sync sweep's inventory and prune, and
+// [Client.Children] serving a reader that needs one level of the key space
+// rather than everything beneath it.
 //
 // Every operation retries a transient store failure under a bounded doubling
 // backoff (see [DefaultRetries]), mirroring the persistence the API transport
@@ -556,6 +560,10 @@ func (c *Client) write(ctx context.Context, key string, r io.Reader, touch func(
 // sweep gates uploads and prunes stale keys from, replacing a Head per file.
 // A transient failure mid-walk restarts the enumeration from the beginning,
 // so the returned inventory is always one whole listing, never a splice.
+//
+// Its cost tracks how many objects the prefix holds, so a caller that wants
+// one level of the key space rather than everything beneath it wants
+// [Client.Children] instead.
 func (c *Client) List(ctx context.Context, prefix string) (map[string]ObjectInfo, error) {
 	var out map[string]ObjectInfo
 
@@ -599,6 +607,58 @@ func (c *Client) List(ctx context.Context, prefix string) (map[string]ObjectInfo
 	if err != nil {
 		return nil, fmt.Errorf("list %q: %w", prefix, err)
 	}
+
+	return out, nil
+}
+
+// Children lists the immediate child prefixes under prefix: the distinct next
+// key segments the store holds beneath it, resolved from one delimited listing
+// rather than an enumeration of every object under them. Names come back
+// sorted, with the prefix and the trailing delimiter stripped, and an object
+// lying at the prefix itself contributes none.
+//
+// It answers what a reader asks for when it needs the store's next level and
+// nothing beneath it, which organizations a mirror holds being the case that
+// matters: [Client.List] would walk every key of every one of them to report
+// the same names.
+func (c *Client) Children(ctx context.Context, prefix string) ([]string, error) {
+	var out []string
+
+	err := c.withRetry(ctx, func() error {
+		return c.runAttempt(ctx, c.stallTimeout, func(ctx context.Context, touch func()) error {
+			// The reset belongs inside the attempt, not outside the retry: a
+			// second attempt re-walks the listing whole, and a slice carried
+			// over from the first would come back with every name twice.
+			out = nil
+			iter := c.bucket.List(&blob.ListOptions{Prefix: prefix, Delimiter: "/"})
+
+			for {
+				obj, err := iter.Next(ctx)
+				if errors.Is(err, io.EOF) {
+					return nil
+				}
+
+				if err != nil {
+					return err //nolint:wrapcheck // Wrapped uniformly below.
+				}
+
+				// Each delivered entry is progress, the same bound the bulk
+				// listing paces its watchdog by.
+				touch()
+
+				if !obj.IsDir {
+					continue
+				}
+
+				out = append(out, strings.TrimSuffix(strings.TrimPrefix(obj.Key, prefix), "/"))
+			}
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list children of %q: %w", prefix, err)
+	}
+
+	slices.Sort(out)
 
 	return out, nil
 }

@@ -489,6 +489,12 @@ const listPageSize = 1000
 // ListPaged serves one sorted page of the keys under the requested prefix,
 // honoring the page size and continuation token (an opaque start-after key),
 // the same scheme gocloud's own memblob driver pages by.
+//
+// A non-empty delimiter folds every key that carries one past the prefix into
+// the common prefix it shares with its siblings, delivered once as an entry
+// with IsDir set, the way the real drivers answer a delimited listing. Keys
+// with no delimiter past the prefix come through as themselves, interleaved in
+// key order.
 func (f *Fake) ListPaged(_ context.Context, opts *driver.ListOptions) (*driver.ListPage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -506,10 +512,18 @@ func (f *Fake) ListPaged(_ context.Context, opts *driver.ListOptions) (*driver.L
 
 	after := string(opts.PageToken)
 
-	var keys []string
+	// Folding runs before the page is cut, so the continuation token is a
+	// folded key and the resume comparison below skips exactly the entries
+	// already served: a token of "<prefix>orgA/" excludes itself and admits
+	// "<prefix>orgB/". Folding a page that was already cut would repeat a
+	// common prefix straddling the boundary and leave pages of wildly
+	// different sizes.
+	entries := f.foldedEntries(opts.Prefix, opts.Delimiter)
 
-	for _, key := range slices.Sorted(maps.Keys(f.objects)) {
-		if strings.HasPrefix(key, opts.Prefix) && key > after {
+	keys := make([]string, 0, len(entries))
+
+	for _, key := range slices.Sorted(maps.Keys(entries)) {
+		if key > after {
 			keys = append(keys, key)
 		}
 	}
@@ -523,6 +537,12 @@ func (f *Fake) ListPaged(_ context.Context, opts *driver.ListOptions) (*driver.L
 	}
 
 	for _, key := range keys {
+		if entries[key] {
+			page.Objects = append(page.Objects, &driver.ListObject{Key: key, IsDir: true})
+
+			continue
+		}
+
 		obj := f.objects[key]
 		page.Objects = append(page.Objects, &driver.ListObject{
 			Key:  key,
@@ -532,6 +552,39 @@ func (f *Fake) ListPaged(_ context.Context, opts *driver.ListOptions) (*driver.L
 	}
 
 	return page, nil
+}
+
+// foldedEntries maps every listing entry the prefix and delimiter select to
+// whether it is a common prefix rather than an object. An empty delimiter
+// selects the objects themselves, so the recursive listing folds nothing.
+// Call this while holding the fake's mutex.
+func (f *Fake) foldedEntries(prefix, delim string) map[string]bool {
+	entries := make(map[string]bool, len(f.objects))
+
+	for key := range f.objects {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+
+		if delim == "" {
+			entries[key] = false
+
+			continue
+		}
+
+		rest := strings.TrimPrefix(key, prefix)
+
+		segment, _, folds := strings.Cut(rest, delim)
+		if !folds {
+			entries[key] = false
+
+			continue
+		}
+
+		entries[prefix+segment+delim] = true
+	}
+
+	return entries
 }
 
 // Delete removes the object at key, recording it; an absent key reports

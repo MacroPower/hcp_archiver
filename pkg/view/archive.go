@@ -118,8 +118,15 @@ func WithContext(ctx context.Context) ArchiveOption {
 // be partly or wholly absent. [OpenArchive] then unions the organizations it
 // finds on disk with those the mirror holds, materializing a mirror-only
 // organization's org.json and [remote.MarkerName] marker locally so later
-// opens need no supplied remote, and every organization's reads fall through
-// to the mirror, persisting what they fetch at its local archive path.
+// opens need no supplied remote.
+//
+// Supplying a remote says where the mirror is, not that the tree beside it is
+// incomplete. Whether an organization's reads fall through to the mirror comes
+// from its marker (see [mergedFromMarker]): an organization the archiver wrote
+// records a complete tree and reads exactly as it would with no remote
+// supplied at all, reaching the mirror only for its evicted surfaces, while a
+// bootstrapped or unmarked one unions the mirror's inventory into every
+// listing and persists what it fetches at the local archive path.
 //
 // The directory is treated as the archive root unless it already carries an
 // org.json, in which case it is one organization's root and the mirror is
@@ -155,9 +162,9 @@ func WithRemoteFactory(factory func(ctx context.Context, cfg remote.Config) (*re
 // offloaded) reads those bundles on demand from its remote store; without the
 // marker every read is local and no client is ever constructed. A remote
 // supplied through [WithRemote] goes further: the mirror's organizations are
-// unioned with the local ones and every read falls through to the mirror,
-// persisting what it fetches, so the archive opens even over an empty
-// directory.
+// unioned with the local ones, so the archive opens even over an empty
+// directory, and an organization whose tree is incomplete reads through to the
+// mirror, persisting what it fetches.
 func OpenArchive(dir string, opts ...ArchiveOption) ([]*Org, error) {
 	options := archiveOptions{
 		ctx: context.Background(),
@@ -259,8 +266,9 @@ func localOrgNames(abs, dir string) ([]string, error) {
 // supplied mirror: mirror-only organizations are materialized (directory,
 // org.json, marker), local organizations the mirror also holds get its remote
 // attached, and purely local organizations open as plain local organizations.
-// The mirror is listed once here; each organization's [orgRemote] is seeded
-// with its slice of that inventory.
+// The mirror is asked here only which organizations it holds (see
+// [discoverMirrorOrgs]); each organization's inventory is listed by its own
+// [orgRemote], lazily, and only if a read needs it.
 //
 // A mirror that cannot be listed degrades rather than failing the open, as
 // long as something local exists to browse: every local organization still
@@ -297,14 +305,19 @@ func openWithRemote(abs, dir string, options archiveOptions) ([]*Org, error) {
 		}
 	}
 
-	client, mirror, invErr := listMirrorOrgs(cfg, options)
+	var (
+		client *remote.Client
+		mirror map[string]bool
+		invErr error
+	)
 
+	// The directory naming one organization puts every other one the mirror
+	// holds out of scope, so the probe spends one request rather than a
+	// listing of the archive prefix it would immediately discard.
 	if singleOrg {
-		// The directory names one organization; every other mirror org is out
-		// of scope.
-		maps.DeleteFunc(mirror, func(name string, _ map[string]remote.ObjectInfo) bool {
-			return name != filepath.Base(abs)
-		})
+		client, mirror, invErr = probeMirrorOrg(filepath.Base(abs), cfg, options)
+	} else {
+		client, mirror, invErr = discoverMirrorOrgs(cfg, options)
 	}
 
 	names := slices.Collect(maps.Keys(local))
@@ -351,15 +364,25 @@ func openWithRemote(abs, dir string, options archiveOptions) ([]*Org, error) {
 	return orgs, nil
 }
 
-// listMirrorOrgs builds the shared client and lists the mirror's whole
-// inventory once, sliced per organization by the first key segment under the
-// configured prefix. An organization counts only when its slice holds an
-// org.json, the same marker that identifies a local org root. A client build
-// or listing failure comes back as the error alongside a nil map; the caller
-// degrades.
-func listMirrorOrgs(
+// discoverMirrorOrgs builds the shared client and resolves which organizations
+// the mirror holds: one delimited listing of the configured prefix names the
+// candidate segments, and one org.json probe confirms each, the same file that
+// identifies a local org root. Nothing beneath an organization is enumerated,
+// so the cost tracks how many organizations the mirror holds rather than how
+// many objects. Each organization's inventory is listed lazily by its own
+// [orgRemote], and only if something reads through it.
+//
+// A client build or a listing failure comes back as the error alongside a nil
+// set, and the caller degrades. One organization's failing probe degrades only
+// that organization: a listing is a single answer about the whole prefix,
+// while a probe is one of many, and a single unreadable org.json must not
+// blank the mirror for every other organization beside it.
+//
+// The client comes back even on failure, so the caller can attach it to the
+// local organizations whose own lazy reads will retry.
+func discoverMirrorOrgs(
 	cfg remote.Config, options archiveOptions,
-) (*remote.Client, map[string]map[string]remote.ObjectInfo, error) {
+) (*remote.Client, map[string]bool, error) {
 	buildCtx, cancel := context.WithTimeout(options.ctx, remoteReadTimeout)
 	defer cancel()
 
@@ -373,35 +396,91 @@ func listMirrorOrgs(
 		root += "/"
 	}
 
-	// The listing runs under the browse context alone: a large mirror is many
-	// pages, and the client's stall watchdog already bounds a wedged one.
-	inventory, err := client.List(options.ctx, root)
+	// The listing runs under the browse context alone, the way the inventory
+	// it replaced did: the client's stall watchdog already bounds a wedged one.
+	names, err := client.Children(options.ctx, root)
 	if err != nil {
-		return client, nil, fmt.Errorf("list mirror inventory: %w", err)
+		return client, nil, fmt.Errorf("list mirror organizations: %w", err)
 	}
 
-	byOrg := make(map[string]map[string]remote.ObjectInfo)
+	orgs := make(map[string]bool)
 
-	for rel, info := range relativeListing(inventory, root) {
-		name, orgRel, ok := strings.Cut(rel, "/")
-		if !ok || orgRel == "" || !orgSegment(name) {
+	for _, name := range names {
+		// A bucket key is arbitrary bytes, so the name is refused before a
+		// request is spent on it. This is the confinement [relativeListing]'s
+		// filter used to give the inventory, applied one level earlier and one
+		// step stronger: see [orgSegment].
+		if !orgSegment(name) {
 			continue
 		}
 
-		if byOrg[name] == nil {
-			byOrg[name] = make(map[string]remote.ObjectInfo)
+		held, probeErr := mirrorHoldsOrg(client, name, cfg, options)
+		if probeErr != nil {
+			continue
 		}
 
-		byOrg[name][orgRel] = info
+		if held {
+			orgs[name] = true
+		}
 	}
 
-	maps.DeleteFunc(byOrg, func(_ string, listing map[string]remote.ObjectInfo) bool {
-		_, ok := listing[orgFile]
+	return client, orgs, nil
+}
 
-		return !ok
-	})
+// probeMirrorOrg is [discoverMirrorOrgs] scoped to the one organization an
+// archive opened on an organization's own root can use. Every other
+// organization the mirror holds is out of scope before a request is spent, so
+// the whole probe is one org.json head rather than a listing of the archive
+// prefix.
+func probeMirrorOrg(
+	name string, cfg remote.Config, options archiveOptions,
+) (*remote.Client, map[string]bool, error) {
+	buildCtx, cancel := context.WithTimeout(options.ctx, remoteReadTimeout)
+	defer cancel()
 
-	return client, byOrg, nil
+	client, err := options.newClient(buildCtx, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build remote client: %w", err)
+	}
+
+	if !orgSegment(name) {
+		return client, nil, nil
+	}
+
+	held, err := mirrorHoldsOrg(client, name, cfg, options)
+	if err != nil {
+		return client, nil, fmt.Errorf("probe mirror organization %q: %w", name, err)
+	}
+
+	orgs := make(map[string]bool)
+	if held {
+		orgs[name] = true
+	}
+
+	return client, orgs, nil
+}
+
+// mirrorHoldsOrg reports whether the mirror holds one organization, proven by
+// its org.json. A proven absence answers false with no error, which is what
+// tells the caller the organization is purely local rather than unreachable;
+// any other fault comes back as the error, since an org.json that cannot be
+// read proves nothing either way.
+func mirrorHoldsOrg(
+	client *remote.Client, name string, cfg remote.Config, options archiveOptions,
+) (bool, error) {
+	ctx, cancel := context.WithTimeout(options.ctx, remoteReadTimeout)
+	defer cancel()
+
+	_, err := client.Head(ctx, cfg.Key(name, orgFile))
+
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, remote.ErrNotFound):
+		return false, nil
+	default:
+		return false, err //nolint:wrapcheck // The client names the key and the fault.
+	}
 }
 
 // orgSegment reports whether name is usable as one organization's directory
@@ -429,14 +508,15 @@ func orgSegment(name string) bool {
 	return !strings.ContainsAny(name, `/\`) && !strings.ContainsFunc(name, control)
 }
 
-// remoteOrg builds one organization handle under a supplied remote: the
-// marker conflict check, the mirror-only materialization, and the seeded
-// remote all happen here. A local organization the mirror does not hold (and
-// whose absence is proven by a successful listing) opens as a plain local
-// org, honoring whatever marker it carries.
+// remoteOrg builds one organization handle under a supplied remote: the marker
+// conflict check, the mirror-only materialization, and the remote itself all
+// happen here, with the marker deciding whether that remote stands in for the
+// whole tree (see [mergedFromMarker]). A local organization the mirror does not
+// hold (and whose absence the discovery proved) opens as a plain local org,
+// honoring whatever marker it carries.
 func remoteOrg(
 	name, root string, cfg remote.Config, client *remote.Client,
-	listing map[string]remote.ObjectInfo, degraded bool, options archiveOptions,
+	inMirror, degraded bool, options archiveOptions,
 ) (*Org, error) {
 	marker, hasMarker, err := remote.ReadMarker(root)
 	if err != nil {
@@ -451,13 +531,13 @@ func remoteOrg(
 
 	// A proven miss: the mirror answered and holds no such organization, so
 	// this one is purely local and gets no remote it could never use.
-	if listing == nil && !degraded {
+	if !inMirror && !degraded {
 		return newOrg(name, root, options)
 	}
 
-	rem := newSeededOrgRemote(name, cfg, client, listing, options)
+	rem := newSuppliedOrgRemote(name, cfg, client, mergedFromMarker(marker, hasMarker), options)
 
-	if listing != nil {
+	if inMirror {
 		err = materializeOrgRoot(rem, root, cfg, marker, hasMarker)
 		if err != nil {
 			return nil, fmt.Errorf("materialize organization %q: %w", name, err)
@@ -479,8 +559,8 @@ func remoteOrg(
 // local organization that merely lacks a marker is left unmarked: stamping it
 // partial would flip every later marker-only open into merged network mode, a
 // mutation a read-only command has no business making. The current session
-// still reads through either way, since the seeded remote is merged
-// regardless of what the marker records.
+// still reads through, since an organization carrying no marker has never
+// claimed its tree is complete (see [mergedFromMarker]).
 //
 // Absence is the only stat outcome that stands in for "not yet materialized":
 // any other fault reading that org.json (a permission or I/O fault, a symlink

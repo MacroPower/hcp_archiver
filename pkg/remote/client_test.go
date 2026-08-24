@@ -537,6 +537,73 @@ func TestList(t *testing.T) {
 	}, got, "only keys under the prefix list; a digest surfaces only when the store recorded one")
 }
 
+func TestChildren(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		prefix string
+		keys   []string
+		want   []string
+	}{
+		"immediate names only": {
+			keys: []string{
+				"hcp/acme/org.json",
+				"hcp/acme/workspaces/w1/runs/r1/plan.json",
+				"hcp/other/org.json",
+			},
+			prefix: "hcp/",
+			want:   []string{"acme", "other"},
+		},
+		"empty prefix": {
+			keys:   []string{"acme/org.json", "other/org.json"},
+			prefix: "",
+			want:   []string{"acme", "other"},
+		},
+		"objects at the level contribute no name": {
+			keys:   []string{"hcp/loose.json", "hcp/acme/org.json"},
+			prefix: "hcp/",
+			want:   []string{"acme"},
+		},
+		"no children": {
+			keys:   []string{"elsewhere/org.json"},
+			prefix: "hcp/",
+			want:   nil,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			client, fake := newClient(t, remote.Config{})
+			for _, key := range tc.keys {
+				fake.SetObject(key, remotetest.Object{Data: []byte("x")})
+			}
+
+			got, err := client.Children(t.Context(), tc.prefix)
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, 1, fake.ListCalls(),
+				"a delimited listing costs one page however deep the keys beneath it run")
+		})
+	}
+}
+
+func TestChildrenRetriesTransientFailure(t *testing.T) {
+	t.Parallel()
+
+	client, fake := newRetryClient(t, 2)
+	fake.SetObject("p/a/org.json", remotetest.Object{Data: []byte("x")})
+
+	fake.ListErr = errors.New("injected transient failure")
+	fake.ListErrN = 1
+
+	got, err := client.Children(t.Context(), "p/")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a"}, got, "the retried listing names each child once")
+}
+
 func TestListPaginates(t *testing.T) {
 	t.Parallel()
 

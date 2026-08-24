@@ -1043,19 +1043,24 @@ restore workflow: an object an operator has tiered into a non-readable
 archival class (S3 Glacier, Azure Archive) fails its reads with the
 backend's error until restored by hand, which is why the mirror should not
 be lifecycled into such tiers. A local-only archive has no marker and never
-constructs a client.
+constructs a client. A marker recording a complete tree keeps every local
+read local, whether or not a `remote:` block is configured: the mirror
+serves the evicted bundles and nothing else.
 
 ### Reading an archive back from its mirror (bootstrap)
 
 The read commands (`view`, `list`, `show`, `extract`, `export`) work even
 when the local tree is partly or completely absent, as long as the mirror
-holds it. The mirror's location arrives from the configuration file's
-`remote:` block, in the file `--config` or `$HCP_ARCHIVER_CONFIG` names or
-the default `.hcp_archiver.yaml`. Pointed at an empty directory, an open
-bootstraps it: one listing discovers the mirror's organizations, and each
-gets its `org.json` and a `.remote.json` marker materialized locally, so the
-block is needed only once; later invocations find the mirror through the
-marker alone.
+holds it and the tree's marker says the mirror must stand in for it. The
+mirror's location arrives from the configuration file's `remote:` block, in
+the file `--config` or `$HCP_ARCHIVER_CONFIG` names or the default
+`.hcp_archiver.yaml`. Pointed at an empty directory, an open bootstraps it:
+one **delimited** listing names the organizations the mirror holds, one
+`org.json` probe confirms each, and each gets its `org.json` and a
+`.remote.json` marker materialized locally, so the block is needed only
+once; later invocations find the mirror through the marker alone. Nothing
+beneath an organization is enumerated at the open, so the cost tracks how
+many organizations the mirror holds rather than how many objects.
 
 A bootstrapped tree is a browse cache, not a canonical archive, and its
 marker says so: it records `"partial": true`, which is what tells later
@@ -1063,11 +1068,27 @@ opens to keep merging the mirror's inventory into every listing and to fall
 through to the mirror for any object not on disk. Local files always win
 when present; anything fetched is verified against the digest its upload
 recorded, then persisted at its archive path, so everything read once is
-local from then on. The partial flag is written only by the open that
-materialized the marker: stamping an archiver-written tree partial would
-flip every later marker-only open into merged network mode. Running the
-archiver against a bootstrapped directory collects and mirrors it properly,
-rewriting the marker and returning the tree to fully-local reads.
+local from then on. The merged organization's inventory is listed lazily,
+from its own prefix and only once a read needs it, so an organization the
+session never opens costs nothing.
+
+The `partial` flag governs both shapes, not only a marker-only open. A
+configured `remote:` block says where the mirror is; it does not say the
+tree beside it is incomplete. So an organization the archiver wrote reads
+exactly the same with or without the block: local reads stay local, and the
+mirror is reached only for the evicted surfaces its stubs and sidecars name.
+The flag is written only by the open that materialized the marker, since
+stamping an archiver-written tree partial would flip every later open into
+merged network mode. Running the archiver against a bootstrapped directory
+collects and mirrors it properly, rewriting the marker and returning the
+tree to fully-local reads.
+
+That makes the marker a claim worth keeping honest. A tree restored in part
+from a complete-marked backup, with its `.remote.json` copied along, reads
+local-only and will not quietly fetch what the restore left out. Clearing
+the marker's `url` (or deleting the file) is the operator's consent to
+re-record: the next open materializes what is missing and stamps the marker
+partial again.
 
 The same trust rules as the write side apply. A configured remote that
 disagrees with the mirror an existing marker records is refused, exactly as
@@ -1076,10 +1097,14 @@ listed (offline, missing credentials) degrades the commands to local
 content with a warning on stderr (or the browser's status line), at most
 one line per organization per run, rather than failing: an unknown
 organization may exist only in the mirror the session could not list, so
-the degradation is context the reader needs, never silent. Reads need the
-same object-store credentials as any evicted-bundle access, from the
-backend provider's default chain; a read-only identity scoped to the
-archive prefix is the right shape for browsing.
+the degradation is context the reader needs, never silent. A complete
+organization reports nothing, having asked the mirror for no listing at
+all. One organization's unreadable `org.json` degrades that organization
+alone, since a probe is one answer among many where a listing is one answer
+about the whole prefix. Reads need the same object-store credentials as any
+evicted-bundle access, from the backend provider's default chain; a
+read-only identity scoped to the archive prefix is the right shape for
+browsing.
 
 ### Container format and compression
 
