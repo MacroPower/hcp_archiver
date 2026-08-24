@@ -329,20 +329,16 @@ func openWithRemote(abs, dir string, options archiveOptions) ([]*Org, error) {
 		}
 	}
 
-	var (
-		client *remote.Client
-		mirror map[string]bool
-		invErr error
-	)
-
 	// The directory naming one organization puts every other one the mirror
-	// holds out of scope, so the probe spends one request rather than a
-	// listing of the archive prefix it would immediately discard.
+	// holds out of scope, so discovery is handed the name rather than spending
+	// a listing it would immediately discard.
+	var only string
+
 	if singleOrg {
-		client, mirror, invErr = probeMirrorOrg(filepath.Base(abs), cfg, options)
-	} else {
-		client, mirror, invErr = discoverMirrorOrgs(cfg, options)
+		only = filepath.Base(abs)
 	}
+
+	client, mirror, invErr := discoverMirrorOrgs(only, cfg, options)
 
 	names := slices.Collect(maps.Keys(local))
 	for name := range mirror {
@@ -396,16 +392,22 @@ func openWithRemote(abs, dir string, options archiveOptions) ([]*Org, error) {
 // many objects. Each organization's inventory is listed lazily by its own
 // [orgRemote], and only if something reads through it.
 //
+// A non-empty only confines the answer to that one organization, for an
+// archive opened on an organization's own root: the candidate is already
+// named, so no listing is spent finding it.
+//
 // A client build or a listing failure comes back as the error alongside a nil
-// set, and the caller degrades. One organization's failing probe degrades only
-// that organization: a listing is a single answer about the whole prefix,
-// while a probe is one of many, and a single unreadable org.json must not
-// blank the mirror for every other organization beside it.
+// set, and the caller degrades. Among many candidates, one failing probe
+// degrades only that candidate: a listing is a single answer about the whole
+// prefix, while a probe is one of many, and a single unreadable org.json must
+// not blank the mirror for every other organization beside it. A named
+// candidate's failure is the whole discovery's failure, since there are no
+// others for it to spare.
 //
 // The client comes back even on failure, so the caller can attach it to the
 // local organizations whose own lazy reads will retry.
 func discoverMirrorOrgs(
-	cfg remote.Config, options archiveOptions,
+	only string, cfg remote.Config, options archiveOptions,
 ) (*remote.Client, map[string]bool, error) {
 	buildCtx, cancel := context.WithTimeout(options.ctx, remoteReadTimeout)
 	defer cancel()
@@ -415,19 +417,53 @@ func discoverMirrorOrgs(
 		return nil, nil, fmt.Errorf("build remote client: %w", err)
 	}
 
-	root := cfg.Key("", "")
-	if root != "" {
-		root += "/"
+	names := []string{only}
+
+	if only == "" {
+		root := cfg.Key("", "")
+		if root != "" {
+			root += "/"
+		}
+
+		// The listing runs under the browse context alone, the way the
+		// inventory it replaced did: the client's stall watchdog already
+		// bounds a wedged one.
+		names, err = client.Children(options.ctx, root)
+		if err != nil {
+			return client, nil, fmt.Errorf("list mirror organizations: %w", err)
+		}
 	}
 
-	// The listing runs under the browse context alone, the way the inventory
-	// it replaced did: the client's stall watchdog already bounds a wedged one.
-	names, err := client.Children(options.ctx, root)
-	if err != nil {
-		return client, nil, fmt.Errorf("list mirror organizations: %w", err)
+	orgs, probeErr := confirmMirrorOrgs(client, names, cfg, options)
+	if only != "" && probeErr != nil {
+		return client, nil, fmt.Errorf("probe mirror organization %q: %w", only, probeErr)
 	}
 
-	orgs := make(map[string]bool)
+	return client, orgs, nil
+}
+
+// probeConcurrency bounds how many org.json probes fly at once. Each candidate
+// costs one round trip, so an archive root holding hundreds of organizations
+// must not serialize its whole discovery one head at a time.
+const probeConcurrency = 16
+
+// confirmMirrorOrgs keeps the candidates whose org.json the mirror holds,
+// probing them concurrently, and reports one of the probe failures it passed
+// over (nil when none failed) for a caller that treats a single candidate's
+// failure as its own.
+func confirmMirrorOrgs(
+	client *remote.Client, names []string, cfg remote.Config, options archiveOptions,
+) (map[string]bool, error) {
+	var (
+		mu       sync.Mutex
+		orgs     = make(map[string]bool, len(names))
+		probeErr error
+		wg       sync.WaitGroup
+	)
+
+	// A slot is held for one probe's round trip, so the fan-out runs
+	// probeConcurrency requests wide however many candidates there are.
+	slots := make(chan struct{}, probeConcurrency)
 
 	for _, name := range names {
 		// A bucket key is arbitrary bytes, so the name is refused before a
@@ -438,50 +474,30 @@ func discoverMirrorOrgs(
 			continue
 		}
 
-		held, probeErr := mirrorHoldsOrg(client, name, cfg, options)
-		if probeErr != nil {
-			continue
-		}
+		wg.Go(func() {
+			slots <- struct{}{}
+			defer func() { <-slots }()
 
-		if held {
-			orgs[name] = true
-		}
+			held, err := mirrorHoldsOrg(client, name, cfg, options.ctx)
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			// A failing candidate is recorded and passed over rather than
+			// propagated, so one bad org.json cannot blank the probes running
+			// beside it.
+			switch {
+			case err != nil:
+				probeErr = err
+			case held:
+				orgs[name] = true
+			}
+		})
 	}
 
-	return client, orgs, nil
-}
+	wg.Wait()
 
-// probeMirrorOrg is [discoverMirrorOrgs] scoped to the one organization an
-// archive opened on an organization's own root can use. Every other
-// organization the mirror holds is out of scope before a request is spent, so
-// the whole probe is one org.json head rather than a listing of the archive
-// prefix.
-func probeMirrorOrg(
-	name string, cfg remote.Config, options archiveOptions,
-) (*remote.Client, map[string]bool, error) {
-	buildCtx, cancel := context.WithTimeout(options.ctx, remoteReadTimeout)
-	defer cancel()
-
-	client, err := options.newClient(buildCtx, cfg)
-	if err != nil {
-		return nil, nil, fmt.Errorf("build remote client: %w", err)
-	}
-
-	if !orgSegment(name) {
-		return client, nil, nil
-	}
-
-	held, err := mirrorHoldsOrg(client, name, cfg, options)
-	if err != nil {
-		return client, nil, fmt.Errorf("probe mirror organization %q: %w", name, err)
-	}
-
-	orgs := make(map[string]bool)
-	if held {
-		orgs[name] = true
-	}
-
-	return client, orgs, nil
+	return orgs, probeErr
 }
 
 // mirrorHoldsOrg reports whether the mirror holds one organization, proven by
@@ -490,9 +506,9 @@ func probeMirrorOrg(
 // any other fault comes back as the error, since an org.json that cannot be
 // read proves nothing either way.
 func mirrorHoldsOrg(
-	client *remote.Client, name string, cfg remote.Config, options archiveOptions,
+	client *remote.Client, name string, cfg remote.Config, ctx context.Context,
 ) (bool, error) {
-	ctx, cancel := context.WithTimeout(options.ctx, remoteReadTimeout)
+	ctx, cancel := context.WithTimeout(ctx, remoteReadTimeout)
 	defer cancel()
 
 	_, err := client.Head(ctx, cfg.Key(name, orgFile))

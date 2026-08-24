@@ -575,7 +575,9 @@ const listPageSize = 1000
 // one level of the key space rather than everything beneath it wants
 // [Client.Children] instead.
 func (c *Client) List(ctx context.Context, prefix string) (map[string]ObjectInfo, error) {
-	out := make(map[string]ObjectInfo)
+	// One page's worth of headroom, the only estimate available: the store
+	// reports no total up front, so a larger inventory still grows from here.
+	out := make(map[string]ObjectInfo, listPageSize)
 	opts := &blob.ListOptions{Prefix: prefix}
 
 	// An empty token ends the walk; the sentinel starts it. A retried page

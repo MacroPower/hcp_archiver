@@ -707,8 +707,8 @@ func (r *orgRemote) buildBundle(relBundle string) (*zip.Reader, io.ReaderAt, int
 //nolint:contextcheck // See above; there is no caller context to pass.
 func (r *orgRemote) clientBuild() (*remote.Client, error) {
 	r.clientOnce.Do(func() {
-		// A pre-built shared client (the bootstrap's, injected through
-		// newSeededOrgRemote) is already in place; the Do still runs so every
+		// A pre-built shared client (the one discovery built, injected through
+		// newSuppliedOrgRemote) is already in place; the Do still runs so every
 		// later read of the field sits behind the Once's memory barrier.
 		if r.client != nil {
 			return

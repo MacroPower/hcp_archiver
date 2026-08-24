@@ -123,6 +123,11 @@ type Fake struct {
 	// budget) to the named keys, so a test can fail some of a fan-out's keys
 	// while the rest settle.
 	DeleteErrKeys []string
+	// HeadErrKeys, when non-empty, confines HeadErr (and HeadErrN's budget) to
+	// the named keys, the head counterpart of DeleteErrKeys: a probe fan-out
+	// settles in no fixed order, so a test that must fail one key's probe
+	// names it rather than counting on which ran first.
+	HeadErrKeys []string
 
 	ranges  []Range
 	deleted []string
@@ -319,7 +324,8 @@ func (f *Fake) Attributes(ctx context.Context, key string) (*driver.Attributes, 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if takeFault(f.HeadErr, &f.headFails, f.HeadErrN) {
+	if (len(f.HeadErrKeys) == 0 || slices.Contains(f.HeadErrKeys, key)) &&
+		takeFault(f.HeadErr, &f.headFails, f.HeadErrN) {
 		return nil, f.HeadErr
 	}
 

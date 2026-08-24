@@ -157,11 +157,11 @@ func TestOpenArchive_MirrorOrgHeadFaultDegradesOnlyThatOrg(t *testing.T) {
 	fake := remotetest.New()
 	mirrorArchive(t, root, fake)
 	fake.SetObject(viewPrefix+"/other-org/org.json", remotetest.Object{Data: []byte("{}")})
+	fake.SetObject(viewPrefix+"/third-org/org.json", remotetest.Object{Data: []byte("{}")})
 
-	// The fake heads keys in sorted order, so the first probe is my-org's and
-	// the fault lands on it, leaving other-org to answer for itself.
+	// The probes fan out, so the failing one is named rather than ordered.
 	fake.HeadErr = errors.New("injected probe failure")
-	fake.HeadErrN = 1
+	fake.HeadErrKeys = []string{viewPrefix + "/other-org/" + "org.json"}
 
 	orgs := openSupplied(t, root, fake)
 
@@ -170,7 +170,7 @@ func TestOpenArchive_MirrorOrgHeadFaultDegradesOnlyThatOrg(t *testing.T) {
 		got = append(got, org.Name)
 	}
 
-	assert.Equal(t, []string{"my-org", "other-org"}, got,
+	assert.Equal(t, []string{"my-org", "third-org"}, got,
 		"one organization's unreadable org.json must not blank the mirror for the rest")
 }
 

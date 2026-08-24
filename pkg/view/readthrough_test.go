@@ -95,14 +95,7 @@ func openBootstrap(t *testing.T, fake *remotetest.Fake) ([]*view.Org, string) {
 
 	dir := t.TempDir()
 
-	orgs, err := view.OpenArchive(dir,
-		view.WithContext(t.Context()),
-		view.WithRemote(viewRemoteConfig()),
-		view.WithRemoteFactory(fakeFactory(fake)),
-	)
-	require.NoError(t, err)
-
-	return orgs, dir
+	return openSupplied(t, dir, fake), dir
 }
 
 func TestOpenArchive_BootstrapFromEmptyDir(t *testing.T) {

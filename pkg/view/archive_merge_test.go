@@ -51,12 +51,7 @@ func openMerged(t *testing.T, local, mirror []string) *view.Org {
 		fake.SetObject(viewPrefix+"/my-org/"+key, remotetest.Object{Data: []byte(mergeBody)})
 	}
 
-	orgs, err := view.OpenArchive(root,
-		view.WithContext(t.Context()),
-		view.WithRemote(viewRemoteConfig()),
-		view.WithRemoteFactory(fakeFactory(fake)),
-	)
-	require.NoError(t, err)
+	orgs := openSupplied(t, root, fake)
 	require.Len(t, orgs, 1)
 
 	return orgs[0]
