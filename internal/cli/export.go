@@ -147,6 +147,16 @@ the markdown tree is written into the directory its export.path names.`,
 		warnDegraded(cc.ErrOrStderr(), arc)
 
 		if err != nil {
+			// A graceful interrupt exits clean like the sibling commands,
+			// reporting the partial totals the run had written; see extract.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				eprintf(cc.ErrOrStderr(), "export interrupted: %s for %s written into %s\n",
+					theme.CountNoun(sum.Pages, "page", "pages"),
+					theme.CountNoun(sum.Orgs, "organization", "organizations"), target)
+
+				return nil
+			}
+
 			// The library sentinel is flag-agnostic; the flag hint belongs to
 			// this consumer.
 			if errors.Is(err, export.ErrTargetNotEmpty) {
