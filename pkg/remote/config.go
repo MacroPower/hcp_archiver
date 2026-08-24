@@ -15,11 +15,21 @@ import (
 // the organization's archive is mirrored, written beside org.json.
 const MarkerName = ".remote.json"
 
-// MarkerVersion is the marker schema version this build writes and the newest
-// it understands. A marker is read by binaries built long after the archive
-// was written, so the version is the one escape hatch for changing its shape:
-// a reader rejects a marker whose recorded version is greater than this.
+// MarkerVersion is the schema version a settled marker carries. A marker is
+// read by binaries built long after the archive was written, so the version
+// is the one escape hatch for changing its shape: a reader rejects a marker
+// whose recorded version is greater than its ceiling, which is
+// [MarkerVersionRestoring], the version a restore stamps mid-flight.
 const MarkerVersion = 1
+
+// MarkerVersionRestoring is the marker schema version a restore stamps while
+// it holds the tree mid-restore, and the newest version this build reads. The
+// bump is deliberate: a build predating restores rejects the marker outright
+// at [ReadMarker]'s version ceiling, so no older binary can archive, prune,
+// or browse a tree whose data a restore has only partially landed. The
+// restore rewrites the marker back to [MarkerVersion] once every file is
+// present and verified.
+const MarkerVersionRestoring = 2
 
 // Config describes how to reach the object-store backend the archive is
 // mirrored to: the bucket URL plus transfer tuning.
@@ -74,6 +84,16 @@ type Marker struct {
 	// only at a fully clean close, once the sweep has proven the local tree
 	// accounts for everything the mirror holds.
 	Partial bool `json:"partial,omitempty"`
+	// Restoring records that a bulk restore from the mirror is in progress or
+	// was interrupted: the tree may hold any subset of the restored set, and
+	// its ledger state must not be read as evidence of local deletion. While
+	// the flag is set the prune refuses to run and the archiver refuses the
+	// tree outright; the restore clears it, rewriting the marker at
+	// [MarkerVersion], only after every file in the restored set is present
+	// and verified. It rides only on markers stamped
+	// [MarkerVersionRestoring], so builds that predate it refuse the marker
+	// by version instead of ignoring the flag.
+	Restoring bool `json:"restoring,omitempty"`
 }
 
 // ReadMarker reads and validates the remote marker at an organization's
@@ -98,9 +118,9 @@ func ReadMarker(root string) (Marker, bool, error) {
 		return Marker{}, false, fmt.Errorf("parse remote marker %q: %w", MarkerName, err)
 	}
 
-	if marker.Version > MarkerVersion {
+	if marker.Version > MarkerVersionRestoring {
 		return Marker{}, false, fmt.Errorf("remote marker %q is version %d, newer than this build reads (%d)",
-			MarkerName, marker.Version, MarkerVersion)
+			MarkerName, marker.Version, MarkerVersionRestoring)
 	}
 
 	return marker, true, nil
@@ -119,6 +139,20 @@ func (cfg Config) Marker() Marker {
 		Version: MarkerVersion,
 		URL:     cfg.URL,
 		Prefix:  cfg.Prefix,
+	}
+}
+
+// RestoringMarker builds the marker a restore stamps before its first write:
+// [Marker.Restoring] under [MarkerVersionRestoring], with [Marker.Partial]
+// set because a mid-restore tree holds an arbitrary subset of the mirror and
+// a reader that does open it must union the mirror into its listings.
+func (cfg Config) RestoringMarker() Marker {
+	return Marker{
+		Version:   MarkerVersionRestoring,
+		URL:       cfg.URL,
+		Prefix:    cfg.Prefix,
+		Partial:   true,
+		Restoring: true,
 	}
 }
 

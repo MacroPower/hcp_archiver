@@ -22,6 +22,46 @@ const LockFileName = "lock"
 // fail fast rather than silently interleave.
 var ErrLedgerLocked = errors.New("ledger is locked by another process")
 
+// ArchiveLock is the archive's cross-process exclusion held without a loaded
+// ledger: the same flock [Load] takes, for operations (a bulk restore) that
+// must keep every other writer out while they rewrite the snapshot files a
+// live [Ledger] would own. Create instances with [LockArchive].
+type ArchiveLock struct {
+	f *os.File
+}
+
+// LockArchive takes the archive's exclusive lock at root, the org root whose
+// [LedgerDirName] directory holds the flock target, without loading the
+// ledger. It excludes, and is excluded by, [Load] on the same root, and
+// reports [ErrLedgerLocked] when another process holds the lock. As with any
+// flock, the kernel releases it when the holder exits, so a crash leaves no
+// stale lock.
+func LockArchive(root string) (*ArchiveLock, error) {
+	f, err := acquireLock(filepath.Join(root, LedgerDirName))
+	if err != nil {
+		return nil, err
+	}
+
+	return &ArchiveLock{f: f}, nil
+}
+
+// Close releases the lock. It is idempotent; only the first call releases.
+func (l *ArchiveLock) Close() error {
+	if l.f == nil {
+		return nil
+	}
+
+	f := l.f
+	l.f = nil
+
+	err := f.Close()
+	if err != nil {
+		return fmt.Errorf("release archive lock: %w", err)
+	}
+
+	return nil
+}
+
 // acquireLock takes an exclusive, non-blocking flock on the lock file under
 // dir, creating both as needed, and returns the held file.
 //

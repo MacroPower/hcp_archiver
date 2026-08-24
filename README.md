@@ -273,12 +273,26 @@ Credentials never appear in the file: the URL's scheme selects the backend
 (`s3://` including MinIO/R2/Ceph, `azblob://`, `file://`), and each
 authenticates through its provider's default chain. Enable bucket versioning
 as a backstop, and do not lifecycle mirrored objects into a non-readable
-archival tier (S3 Glacier, Azure Archive); there is no restore workflow.
+archival tier (S3 Glacier, Azure Archive); nothing here issues tier-restore
+requests.
+
+`pull` is the direction back: it reconstructs a lost or partial local
+archive from its mirror in one verified bulk run, restoring the search
+layer, the metadata, and the ledger while leaving the evicted bundles and
+tarballs in the bucket. It contacts no HCP API, verifies every file against
+the digest the mirror records, is safe to interrupt and re-run, and
+`--dry-run` reports the files and bytes it would transfer; `pull --help`
+documents the full contract.
+
+```bash
+hcp_archiver pull                    # restore every mirrored org locally
+hcp_archiver pull my-org --dry-run   # predict one org's restore
+```
 
 The read commands work against the mirror too: pointed at an empty directory
 by a configuration whose `remote:` block names the mirror, they bootstrap a
-local tree from the bucket and fetch objects on demand, so restoring is
-either one bulk download of the org prefix or just browsing in place.
+local tree from the bucket and fetch objects on demand, so a one-off answer
+needs no bulk restore at all.
 Configuring the block costs nothing on an organization the archiver wrote:
 its reads stay local and enumerate no bucket; it reaches the mirror only for
 the evicted bundles and tarballs. The full semantics, verification layers,

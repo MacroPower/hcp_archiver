@@ -1,9 +1,14 @@
 package remote
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5" //nolint:gosec // Content MD5 is the stores' integrity currency, not a security control.
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"time"
 )
@@ -205,6 +210,58 @@ func (c *Client) Download(ctx context.Context, key string, size int64, w io.Writ
 		}
 
 		return n, fmt.Errorf("download %q: %w", key, err)
+	}
+
+	return n, nil
+}
+
+// DownloadVerified streams the whole object at key into w and returns how
+// many bytes it delivered, proving the body against info before reporting
+// success: the byte count must match [ObjectInfo.Size], and the content must
+// hash to the recorded SHA-256 when one is present, else to the recorded MD5
+// when one is present. An info carrying no digest at all verifies on length
+// alone, since there is nothing else to compare and refusing would strand an
+// object the mirror holds; note that listings never carry digests, so info
+// should come from [Client.Head] (or the write that recorded it), not from
+// [Client.List], or the check silently weakens to the length. A mismatch of
+// either kind reports [ErrDigestMismatch] or a length error after the bytes
+// have already reached w, so callers restoring files must stage the stream
+// through an atomic write and let the failure discard it.
+func (c *Client) DownloadVerified(ctx context.Context, key string, info ObjectInfo, w io.Writer) (int64, error) {
+	var sum hash.Hash
+
+	dst := w
+
+	switch {
+	case info.SHA256 != "":
+		sum = sha256.New()
+	case len(info.MD5) > 0:
+		sum = md5.New() //nolint:gosec // Content MD5 is the stores' integrity currency, not a security control.
+	}
+
+	if sum != nil {
+		dst = io.MultiWriter(w, sum)
+	}
+
+	n, err := c.Download(ctx, key, info.Size, dst)
+	if err != nil {
+		return n, err
+	}
+
+	if n != info.Size {
+		return n, fmt.Errorf("remote object %q served %d of the %d bytes its upload recorded", key, n, info.Size)
+	}
+
+	switch {
+	case info.SHA256 != "":
+		if hex.EncodeToString(sum.Sum(nil)) != info.SHA256 {
+			return n, fmt.Errorf("%w: %s (sha256)", ErrDigestMismatch, key)
+		}
+
+	case len(info.MD5) > 0:
+		if !bytes.Equal(sum.Sum(nil), info.MD5) {
+			return n, fmt.Errorf("%w: %s (md5)", ErrDigestMismatch, key)
+		}
 	}
 
 	return n, nil

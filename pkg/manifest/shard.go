@@ -18,8 +18,9 @@ import (
 // holds a shard's snapshot; the org root's additionally holds the ledger's log.
 const LedgerDirName = ".ledger"
 
-// snapshotFileName is a shard's compacted state.
-const snapshotFileName = "snapshot.json"
+// SnapshotFileName is the file inside a shard's [LedgerDirName] directory
+// holding the shard's compacted state.
+const SnapshotFileName = "snapshot.json"
 
 // LogFileName is the ledger's append-only log of changes since the snapshots,
 // kept in the org-root shard's directory.
@@ -47,6 +48,13 @@ func shardKey(key string) string {
 	default:
 		return ""
 	}
+}
+
+// IsSnapshotPath reports whether an archive-relative path names a shard's
+// compacted snapshot: [SnapshotFileName] directly inside a [LedgerDirName]
+// directory. It is the shape a restore keys its ordering on.
+func IsSnapshotPath(relPath string) bool {
+	return path.Base(relPath) == SnapshotFileName && path.Base(path.Dir(relPath)) == LedgerDirName
 }
 
 // ShardScope returns the archive-relative directory of the shard that owns
@@ -113,7 +121,7 @@ func newShard(dir string) *shard {
 
 // snapshotPath returns the path of the shard's compacted snapshot.
 func (s *shard) snapshotPath() string {
-	return filepath.Join(s.dir, snapshotFileName)
+	return filepath.Join(s.dir, SnapshotFileName)
 }
 
 // logPath returns the path of the shard's append-only log.

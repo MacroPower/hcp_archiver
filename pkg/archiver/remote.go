@@ -13,11 +13,19 @@ import (
 	"go.jacobcolvin.com/hcp_archiver/pkg/store"
 )
 
-// ErrRemoteRelocated reports a configured remote that does not match the
-// mirror location the archive's marker records. Evicted surfaces live only
-// at the recorded location, so a re-point must be an explicit migration, not
-// a config edit the run silently follows.
-var ErrRemoteRelocated = errors.New("configured remote does not match the archive's recorded mirror")
+var (
+	// ErrRemoteRelocated reports a configured remote that does not match the
+	// mirror location the archive's marker records. Evicted surfaces live only
+	// at the recorded location, so a re-point must be an explicit migration,
+	// not a config edit the run silently follows.
+	ErrRemoteRelocated = errors.New("configured remote does not match the archive's recorded mirror")
+
+	// ErrRestoreInProgress reports an archive whose remote marker records an
+	// unfinished restore. The local tree holds an arbitrary subset of the
+	// restored set, so an archive run reading it would take everything missing
+	// for deleted; the run refuses outright until the restore completes.
+	ErrRestoreInProgress = errors.New("a restore of this archive has not completed")
+)
 
 // RemoteConfig maps the validated configuration surface onto the remote
 // client's transport configuration: the one place the two shapes meet, so
@@ -171,6 +179,17 @@ func checkExistingMarker(root string, marker remote.Marker) (remote.Marker, bool
 	existing, ok, err := remote.ReadMarker(root)
 	if err != nil || !ok {
 		return remote.Marker{}, false, err //nolint:wrapcheck // The marker reader names the file and the fault.
+	}
+
+	// The restoring flag refuses ahead of everything else, and in particular
+	// ahead of the rewrite that carries Partial forward: a rewrite here would
+	// silently drop the flag and mirror the dropped copy, erasing the one
+	// durable record that the local tree is a subset of the mirror.
+	if existing.Restoring {
+		return remote.Marker{}, false, fmt.Errorf(
+			"%w: %s records a restore that has not completed; run `pull` to finish it, or delete "+
+				"the marker to consent to archiving over a partially restored tree",
+			ErrRestoreInProgress, remote.MarkerName)
 	}
 
 	if existing.Conflicts(marker) {

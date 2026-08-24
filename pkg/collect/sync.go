@@ -1387,6 +1387,17 @@ func syncEligible(relPath string) bool {
 	return true
 }
 
+// Restorable reports whether a mirrored archive-relative path belongs to the
+// set a restore materializes locally: everything the sweep mirrors and keeps
+// local ([syncEligible]) minus the evicted surfaces ([evictedSurface]), which
+// live remotely by design. It is the restore set's single owner, composed of
+// the same predicates the sweep's classification and the prune's exemptions
+// use, so a restore can never bring back a file the next sweep prunes
+// (a mirrored log.ndjson above all) nor skip one the sweep expects.
+func Restorable(relPath string) bool {
+	return syncEligible(relPath) && !evictedSurface(relPath)
+}
+
 // classifyFile applies the sweep's classification ladder to one eligible file.
 func (e *Env) classifyFile(ctx context.Context, relPath string) syncAction {
 	if isBundleZip(relPath) {
@@ -2096,6 +2107,33 @@ func (e *Env) pruneRemote(
 	}
 
 	if len(staleReshaped)+len(staleUnbacked)+len(staleIneligible)+len(staleFresh) == 0 {
+		return
+	}
+
+	// A restore mid-flight is the one state whose local tree is known to be a
+	// subset of the mirror, so nothing it is missing may be read as deleted.
+	// The marker is that state's durable record, and it overrules every other
+	// reading, the ledger's resume state included: an interrupted restore may
+	// have landed data and snapshots in any subset, and only the marker's
+	// removal (the restore's last act, after every file verified) says the
+	// tree speaks for itself again. A marker that cannot be read refuses too,
+	// since doubt must not delete; either way the run counts a failure rather
+	// than exiting clean over a prune it skipped.
+	marker, hasMarker, markerErr := remote.ReadMarker(e.store.Root())
+	if markerErr != nil || (hasMarker && marker.Restoring) {
+		detail := "the archive's remote marker records an interrupted restore; nothing missing " +
+			"locally may be read as deleted until the restore completes. Finish `pull` before " +
+			"the next archive run"
+		if markerErr != nil {
+			detail = "the archive's remote marker could not be read: " + markerErr.Error()
+		}
+
+		e.logger.LogAttrs(ctx, slog.LevelError, "sync_prune_refused",
+			slog.Int("keys", len(staleReshaped)+len(staleUnbacked)+len(staleIneligible)+len(staleFresh)),
+			slog.String("detail", detail),
+		)
+		counters.failed.Add(1)
+
 		return
 	}
 

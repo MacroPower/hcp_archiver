@@ -51,6 +51,11 @@ var (
 	// destination nor the object now at the key: the recovery is to discard
 	// the partial stream and download the settled object afresh.
 	ErrObjectChanged = errors.New("object changed during download")
+
+	// ErrDigestMismatch indicates a downloaded body that hashed to something
+	// other than the digest the store records for the object; reported by
+	// [Client.DownloadVerified].
+	ErrDigestMismatch = errors.New("remote object does not match its recorded digest")
 )
 
 // maxUploadParts is the smallest part-count ceiling among the backends that

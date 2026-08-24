@@ -224,13 +224,23 @@ archive directory in turn to accumulate the union of what each can read.`,
 			return fmt.Errorf("%w: %w", ErrLogHandler, err)
 		}
 
-		slog.SetDefault(slog.New(h))
+		logger := slog.New(h)
+		slog.SetDefault(logger)
+
+		// The logger also rides the invocation's context (see cmdLogger):
+		// the process global serves the archiver's deep call tree, but a
+		// command that logs from its own machinery must reach the logger
+		// built for *its* stderr, not whichever invocation last replaced the
+		// global.
+		cc.SetContext(context.WithValue(cc.Context(), loggerKey{}, logger))
 
 		if logFilePath != "" {
 			// Announce the copy on the stream itself, so the file provably
 			// receives the handler's output and the stderr reader learns a
-			// durable copy exists.
-			slog.LogAttrs(cc.Context(), slog.LevelDebug, "log_file_opened",
+			// durable copy exists. The announcement goes through this
+			// invocation's logger, not the process default, which another
+			// concurrent invocation (a parallel test) may have replaced.
+			logger.LogAttrs(cc.Context(), slog.LevelDebug, "log_file_opened",
 				slog.String("path", logFilePath))
 		}
 
@@ -251,6 +261,7 @@ archive directory in turn to accumulate the union of what each can read.`,
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newShowCmd())
 	cmd.AddCommand(newExtractCmd())
+	cmd.AddCommand(newPullCmd())
 	// The sink closes over logWriter by reference: the writer only exists once
 	// PersistentPreRunE has run, so the export command resolves it at run time
 	// rather than capturing the pre-run nil.
@@ -307,6 +318,21 @@ archive root or a single organization's directory.
 	}
 
 	return cmd
+}
+
+// loggerKey keys the invocation's logger in the command context, bound by
+// the root command's PersistentPreRunE.
+type loggerKey struct{}
+
+// cmdLogger returns the logger built for this invocation's stderr, falling
+// back to the process default when none was bound (a command run outside the
+// root's pre-run, as in a direct test of a subcommand).
+func cmdLogger(ctx context.Context) *slog.Logger {
+	if logger, ok := ctx.Value(loggerKey{}).(*slog.Logger); ok {
+		return logger
+	}
+
+	return slog.Default()
 }
 
 // signalContext returns a context canceled on the first SIGINT or SIGTERM and
