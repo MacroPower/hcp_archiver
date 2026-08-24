@@ -49,6 +49,15 @@ func shardKey(key string) string {
 	}
 }
 
+// ShardScope returns the archive-relative directory of the shard that owns
+// relPath: a workspace or stack subtree, the configuration-versions
+// directory, or "" for the org root. It is the scope [Ledger.ResumedUnder]
+// answers for, exported so a caller can pair a shard's resume state with the
+// on-disk presence of the subtree it indexes.
+func ShardScope(relPath string) string {
+	return shardKey(relPath)
+}
+
 // shard is one slice of the ledger (a workspace, a stack, the org-wide
 // configuration versions, or the org root) persisted as a compacted snapshot
 // in a co-located [LedgerDirName] directory. Changes since the snapshot live
@@ -78,6 +87,11 @@ type shard struct {
 	loadedVersion   int
 	runDirty        bool
 	stale           bool
+	// Whether the shard held any entry when the current run started (see
+	// [Ledger.StartRun]), the shard-scoped reading behind
+	// [Ledger.ResumedUnder]: an organization-wide resume proves nothing about
+	// one subtree whose own ledger directory was lost.
+	resumed bool
 }
 
 // newShard creates an empty shard rooted at dir.

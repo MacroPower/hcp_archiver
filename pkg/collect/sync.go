@@ -1886,6 +1886,27 @@ func (e *Env) uploadNeeded(
 	return false, info.Size(), nil
 }
 
+// shardLostLocally reports the fingerprint of a subtree that lost its ledger
+// rather than being deleted: the shard owning relPath held no entry when the
+// run started ([manifest.Ledger.ResumedUnder]), while the subtree it indexes
+// is still on disk. A deletion takes the files and their .ledger together, so
+// surviving files under an empty shard mean the local records are gone, not
+// the archive's interest in the subtree, and pruning would delete the
+// mirrored copy of exactly the state a recovery needs (the shard's own
+// mirrored snapshot above all). A key outside any scoped shard reports false:
+// the org root's resume state gates the whole prune already. A presence probe
+// that itself fails reports true, since doubt must not delete.
+func (e *Env) shardLostLocally(relPath string) bool {
+	scope := manifest.ShardScope(relPath)
+	if scope == "" || e.ledger.ResumedUnder(relPath) {
+		return false
+	}
+
+	present, err := e.store.Exists(scope)
+
+	return err != nil || present
+}
+
 // md5File streams the file at relPath through an MD5 digest, the currency
 // the store's recorded content digests compare in.
 func (e *Env) md5File(relPath string) ([]byte, error) {
@@ -1955,6 +1976,13 @@ const pruneGuardFloor = 100
 //     outnumbers the keys the walk matched means most of the mirror has no
 //     local trace at all: loss, or a deliberate mass deletion that must be
 //     an explicit act. This refuses only the unbacked keys.
+//   - a key under a subtree whose own ledger shard opened empty while the
+//     subtree's directory is still on disk (see [Env.shardLostLocally]) is a
+//     partial ledger loss, not a deletion: deleting a subtree takes its files
+//     and its .ledger together, while a lost .ledger leaves the files behind.
+//     Such keys, the shard's own mirrored snapshot above all, are exactly
+//     what a recovery needs, so they are refused key by key at any scale
+//     while the rest of the prune proceeds.
 //
 // Provenance splits the stale set for that second guard, and clearing it
 // takes both halves: a ledger entry for the key's relpath (the archive did
@@ -1982,6 +2010,7 @@ func (e *Env) pruneRemote(
 		staleReshaped   []string
 		staleUnbacked   []string
 		staleIneligible []string
+		staleFresh      []string
 		matched         int
 	)
 
@@ -2030,20 +2059,25 @@ func (e *Env) pruneRemote(
 			continue
 		}
 
-		if _, known := e.ledger.Entry(relPath); known && sweep.reshaped(relPath) {
+		_, known := e.ledger.Entry(relPath)
+
+		switch {
+		case known && sweep.reshaped(relPath):
 			staleReshaped = append(staleReshaped, key)
-		} else {
+		case e.shardLostLocally(relPath):
+			staleFresh = append(staleFresh, key)
+		default:
 			staleUnbacked = append(staleUnbacked, key)
 		}
 	}
 
-	if len(staleReshaped)+len(staleUnbacked)+len(staleIneligible) == 0 {
+	if len(staleReshaped)+len(staleUnbacked)+len(staleIneligible)+len(staleFresh) == 0 {
 		return
 	}
 
 	if !e.ledger.Tally().Resumed {
 		e.logger.LogAttrs(ctx, slog.LevelError, "sync_prune_refused",
-			slog.Int("keys", len(staleReshaped)+len(staleUnbacked)+len(staleIneligible)),
+			slog.Int("keys", len(staleReshaped)+len(staleUnbacked)+len(staleIneligible)+len(staleFresh)),
 			slog.String("detail", "this run opened an empty ledger against a non-empty mirror; "+
 				"a fresh archive.path must not prune an existing mirror's history. Restore the whole "+
 				"remote prefix locally, data files and ledger together, before re-rooting the "+
@@ -2052,6 +2086,17 @@ func (e *Env) pruneRemote(
 		counters.failed.Add(1)
 
 		return
+	}
+
+	if len(staleFresh) > 0 {
+		e.logger.LogAttrs(ctx, slog.LevelError, "sync_prune_refused",
+			slog.Int("keys", len(staleFresh)),
+			slog.String("detail", "these keys live under subtrees whose ledger shards opened empty "+
+				"while the subtrees are still on disk: a lost .ledger, not a deletion. Pruning would "+
+				"delete the mirrored copy of exactly the state a recovery needs, so the keys are "+
+				"kept. Restore each subtree's remote prefix locally, data files and ledger together"),
+		)
+		counters.failed.Add(1)
 	}
 
 	stale := slices.Concat(staleReshaped, staleIneligible)

@@ -2056,3 +2056,54 @@ func TestLoad_AliasTaggedRecordsSurviveTheLinkRemoval(t *testing.T) {
 	assert.Zero(t, reloaded.Tally().RecordsDiscarded,
 		"nothing was deleted, so nothing discards")
 }
+
+func TestShardScope(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		relPath string
+		want    string
+	}{
+		"a workspace object":  {relPath: "projects/p/workspaces/w/runs/r/run.json", want: "projects/p/workspaces/w"},
+		"a stack object":      {relPath: "projects/p/stacks/s/stack.json", want: "projects/p/stacks/s"},
+		"a config version":    {relPath: "config-versions/cv-1.tar.gz", want: "config-versions"},
+		"an org-level object": {relPath: "org.json", want: ""},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, manifest.ShardScope(tc.relPath))
+		})
+	}
+}
+
+func TestLedger_ResumedUnder(t *testing.T) {
+	t.Parallel()
+
+	ld, err := manifest.Load(t.TempDir())
+	require.NoError(t, err)
+
+	ld.RecordSkipped("projects/p/workspaces/a/runs/r1/run.json")
+	ld.StartRun()
+	ld.RecordSkipped("projects/p/workspaces/b/runs/r1/run.json")
+
+	tests := map[string]struct {
+		relPath string
+		want    bool
+	}{
+		"a shard holding an entry at run start": {relPath: "projects/p/workspaces/a/runs/r2/other.json", want: true},
+		"a shard first recorded into mid-run":   {relPath: "projects/p/workspaces/b/runs/r1/run.json", want: false},
+		"a shard that does not exist":           {relPath: "projects/p/workspaces/c/runs/r1/run.json", want: false},
+		"the org root with only scoped entries": {relPath: "org.json", want: false},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, ld.ResumedUnder(tc.relPath))
+		})
+	}
+}

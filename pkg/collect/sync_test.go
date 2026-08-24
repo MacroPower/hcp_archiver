@@ -103,6 +103,19 @@ func (f syncFixture) resume() {
 	f.ledger.StartRun()
 }
 
+// resumeUnder is [syncFixture.resume] with the shards owning relPaths also
+// holding a prior entry when the run opens. Prune tests over workspace-scoped
+// keys model a healthy resumed workspace this way: a workspace shard that
+// opens empty while its subtree survives on disk reads as a partial ledger
+// loss and refuses the prune instead.
+func (f syncFixture) resumeUnder(relPaths ...string) {
+	for _, p := range relPaths {
+		f.ledger.RecordSkipped(manifest.ShardScope(p) + "/.fixture-prior-entry")
+	}
+
+	f.resume()
+}
+
 func (f syncFixture) exists(t *testing.T, relPath string) bool {
 	t.Helper()
 
@@ -1198,7 +1211,7 @@ func TestSyncArchivePrunesStaleRemoteKeys(t *testing.T) {
 	const stale = "projects/prod/workspaces/api/runs/run-1/run.json"
 
 	f := newSyncFixture(t)
-	f.resume()
+	f.resumeUnder(stale)
 
 	// The mirror holds a loose run.json from before the seal coalesced it; the
 	// local walk no longer sees it, so it must be pruned or a later restore
@@ -1400,6 +1413,72 @@ func TestSyncArchivePruneRefusalIsScopedToTheUnbackedWorkspace(t *testing.T) {
 	assert.Equal(t, 1, stats.Pruned)
 	assert.Equal(t, []string{f.key(sealed)}, f.fake.Deleted())
 	assert.Equal(t, 1, stats.Failed, "a refused prune must mark the run incomplete")
+}
+
+func TestSyncArchivePruneRefusesPartialLedgerLoss(t *testing.T) {
+	t.Parallel()
+
+	const (
+		snapshot = "projects/p/workspaces/lost/.ledger/snapshot.json"
+		dataKey  = "projects/p/workspaces/lost/runs/run-1/run.json"
+		sealed   = "projects/p/workspaces/sealed/runs/run-1/run.json"
+	)
+
+	f := newSyncFixture(t)
+	f.resumeUnder(sealed)
+
+	// One workspace lost its .ledger directory while its files survive: its
+	// shard opens empty, so nothing local explains its mirrored keys, and the
+	// mirrored snapshot is exactly the state a recovery needs. The prune must
+	// keep those keys and mark the run incomplete, while the healthy resumed
+	// workspace beside it still converges.
+	f.fake.SetObject(f.key(snapshot), remotetest.Object{Data: []byte(`{"entries":{}}`)})
+	f.fake.SetObject(f.key(dataKey), remotetest.Object{Data: []byte("history")})
+	f.write(t, "projects/p/workspaces/lost/workspace.json", []byte(`{"ws":"lost"}`))
+
+	f.fake.SetObject(f.key(sealed), remotetest.Object{Data: []byte("loose copy")})
+	f.ledger.RecordDone(sealed, manifest.SignatureOf([]byte("loose copy")))
+	f.write(t, "projects/p/workspaces/sealed/rollups/runs.ndjson", []byte(`{"path":"x"}`))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Equal(t, 1, stats.Pruned, "the healthy workspace's stale key still prunes")
+	assert.Equal(t, []string{f.key(sealed)}, f.fake.Deleted())
+	assert.Equal(t, 1, stats.Failed, "a refused prune must mark the run incomplete")
+
+	for _, relPath := range []string{snapshot, dataKey} {
+		_, present := f.fake.Object(f.key(relPath))
+		assert.True(t, present, "the lost shard's mirrored state survives: %s", relPath)
+	}
+}
+
+func TestSyncArchivePrunesDeletedWorkspaceSubtree(t *testing.T) {
+	t.Parallel()
+
+	const (
+		wsJSON   = "projects/p/workspaces/gone/workspace.json"
+		snapshot = "projects/p/workspaces/gone/.ledger/snapshot.json"
+	)
+
+	f := newSyncFixture(t)
+	f.resume()
+
+	// The operator deleted the workspace subtree whole, files and .ledger
+	// together, the "deleting .ledger forgets" stance: nothing local remains
+	// under the prefix, so the mirror forgets too, snapshot included.
+	f.fake.SetObject(f.key(wsJSON), remotetest.Object{Data: []byte(`{"ws":"gone"}`)})
+	f.fake.SetObject(f.key(snapshot), remotetest.Object{Data: []byte(`{"entries":{}}`)})
+	f.write(t, "org.json", []byte(`{"org":"acme"}`))
+
+	stats := f.env.SyncArchive(t.Context())
+
+	assert.Equal(t, 2, stats.Pruned, "a deleted subtree is forgotten remotely")
+	assert.Zero(t, stats.Failed)
+
+	for _, relPath := range []string{wsJSON, snapshot} {
+		_, present := f.fake.Object(f.key(relPath))
+		assert.False(t, present, "nothing of the deleted workspace remains mirrored: %s", relPath)
+	}
 }
 
 func TestSyncArchivePrunesUnderARenameAlias(t *testing.T) {

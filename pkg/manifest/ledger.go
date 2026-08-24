@@ -1611,6 +1611,13 @@ func (l *Ledger) StartRun() {
 	l.rootShard.runDirty = true
 	l.runStartedAt = now
 	l.resumed = l.totalEntries() > 0
+
+	// The same reading per shard: a shard created later in the run keeps its
+	// zero, so [Ledger.ResumedUnder] answers for the state the run opened with.
+	for _, sh := range l.physShards {
+		sh.resumed = len(sh.entries) > 0
+	}
+
 	l.counts = make(map[Status]int)
 	l.dropped = make(map[string]string)
 	l.bytes = 0
@@ -1622,6 +1629,22 @@ func (l *Ledger) StartRun() {
 			e.counted = false
 		}
 	}
+}
+
+// ResumedUnder reports whether the shard owning relPath held any entry when
+// the current run started (see [Ledger.StartRun]). It is the shard-scoped
+// reading of [Tally]'s Resumed: one surviving entry anywhere in the
+// organization proves nothing about a subtree whose own ledger directory was
+// lost, so a caller weighing a destructive act against one subtree's records
+// asks its shard rather than the organization. A path whose shard does not
+// exist reports false.
+func (l *Ledger) ResumedUnder(relPath string) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	sh, ok := l.lookupShard(relPath)
+
+	return ok && sh.resumed
 }
 
 // FinishRun closes the current run, writing its summary into the org-root shard
