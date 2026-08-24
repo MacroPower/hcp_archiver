@@ -1,8 +1,10 @@
 package view_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -163,6 +165,69 @@ func TestOrgList(t *testing.T) {
 				assert.Equal(t, tt.want, entryPaths(entries))
 			}
 		})
+	}
+}
+
+// TestOrgList_MidWalkRemovalKeepsTheRest separates the walk root reporting
+// absent, which is an empty scope, from a directory vanishing inside the walk,
+// which is not. An archiver coalescing a workspace prunes emptied run
+// directories under a listing that is already running, so a listing that
+// reports success must still hold every file the removal did not touch;
+// answering empty would send a recovery extract home with nothing.
+func TestOrgList_MidWalkRemovalKeepsTheRest(t *testing.T) {
+	t.Parallel()
+
+	const (
+		attempts = 12
+		runs     = 40
+		perRun   = 8
+
+		// Lexically last, so the walk reads the runs/ directory and reports
+		// files from it before reaching the entry that vanishes.
+		doomed = "run-zzz"
+	)
+
+	for range attempts {
+		root := t.TempDir()
+		orgDir := filepath.Join(root, "my-org")
+
+		writeFile(t, orgDir, "org.json",
+			`{"data":{"id":"org-1","type":"organizations","attributes":{"name":"my-org"}}}`)
+
+		survivors := []string{"org.json"}
+
+		for r := range runs {
+			for f := range perRun {
+				rel := fmt.Sprintf("%s/runs/run-%03d/artifact-%d.json", wsDir, r, f)
+				writeFile(t, orgDir, rel, `{}`)
+
+				survivors = append(survivors, rel)
+			}
+		}
+
+		for f := range perRun {
+			writeFile(t, orgDir, fmt.Sprintf("%s/runs/%s/artifact-%d.json", wsDir, doomed, f), `{}`)
+		}
+
+		org := openOrg(t, root)
+
+		var wg sync.WaitGroup
+
+		wg.Go(func() {
+			_ = os.RemoveAll(filepath.Join(orgDir, filepath.FromSlash(wsDir), "runs", doomed))
+		})
+
+		entries, err := org.List("")
+
+		wg.Wait()
+
+		// Failing the call is the honest outcome when the tree changes under
+		// the walk; reporting success is only right when nothing was lost.
+		if err != nil {
+			continue
+		}
+
+		require.Subset(t, entryPaths(entries), survivors)
 	}
 }
 

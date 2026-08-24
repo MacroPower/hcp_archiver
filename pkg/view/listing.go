@@ -668,13 +668,36 @@ func (o *Org) looseFiles(relDir string) ([]string, []string, error) {
 	// may also be an evicted object addressed directly, which is the natural
 	// thing to type after a read reports it remote-only, so its stub is looked
 	// for before the scope is called empty.
-	case errors.Is(err, fs.ErrNotExist):
+	//
+	// Only the walk root itself reporting absent means that. An absence raised
+	// deeper in the traversal is an archiver pruning a directory the walk had
+	// already entered, and reading that as an empty scope would discard every
+	// path collected so far and call the truncated listing complete, so it
+	// fails the call like any other mid-walk fault.
+	case o.rootAbsent(err, relDir):
 		return nil, o.rootStub(relDir), nil
 	case err != nil:
 		return nil, nil, fmt.Errorf("walk %q: %w", relDir, err)
 	}
 
 	return rels, stubs, nil
+}
+
+// rootAbsent reports whether err is the walk root at relDir reporting absent,
+// rather than an absence raised somewhere inside the traversal.
+//
+// [fsid.WalkFiles] returns one error for the whole walk and tags each fault
+// with the path that raised it, so the path is what tells the two apart. The
+// walk runs over the root's physical location, which is where a fault against
+// the root names it.
+func (o *Org) rootAbsent(err error, relDir string) bool {
+	var perr *fs.PathError
+
+	if !errors.Is(err, fs.ErrNotExist) || !errors.As(err, &perr) {
+		return false
+	}
+
+	return perr.Path == fsid.Canonical(o.AbsPath(relDir))
 }
 
 // rootStub returns the eviction stub standing in for relDir itself, for a walk
