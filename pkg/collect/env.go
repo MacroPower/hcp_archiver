@@ -343,6 +343,24 @@ func (e *Env) NotApplicable(relPath string) {
 	e.ledger.RecordNotApplicable(relPath)
 }
 
+// NotApplicableUnlessDone records the object at relPath as not applicable
+// unless a prior capture already archived real content there.
+//
+// It is the settle for a surface whose absence is reported by a single
+// response that could be under-hydrated: an include the server silently
+// dropped, an optional field it blanked. A genuine absence settles the gap the
+// way [Env.NotApplicable] does, while a flaky re-read of an object the walk
+// revisits cannot regress a done entry into a denial of content the archive
+// actually holds (content that may since have been sealed, leaving nothing
+// loose to re-fetch).
+func (e *Env) NotApplicableUnlessDone(relPath string) {
+	if entry, ok := e.Entry(relPath); ok && entry.Status == manifest.StatusDone {
+		return
+	}
+
+	e.ledger.RecordNotApplicable(relPath)
+}
+
 // Absent settles the object at relPath as a confirmed permanent absence,
 // keeping the cause as the entry's documentation of why the gap exists (see
 // [manifest.Ledger.RecordAbsent]). The caller vouches that the object is gone

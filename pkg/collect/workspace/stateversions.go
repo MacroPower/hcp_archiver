@@ -90,9 +90,11 @@ func (c *Collector) archiveStateVersion(ctx context.Context, project, ws string,
 		// A pending state version's URL is only transiently empty; recording it
 		// settled would permanently lose the state once it finalizes. Record
 		// nothing so a later pass re-fetches once the URL populates. A finalized or
-		// discarded version's empty URL is a genuine, permanent absence.
+		// discarded version's empty URL is a genuine, permanent absence -- unless
+		// the blob is already archived, in which case one list response blanking
+		// the field must not regress the done entry into denying it.
 		if tfeclient.StateVersionTerminal(sv.Status) {
-			c.env.NotApplicable(rawPath)
+			c.env.NotApplicableUnlessDone(rawPath)
 		}
 	} else {
 		downloadURL := sv.DownloadURL
@@ -109,7 +111,7 @@ func (c *Collector) archiveStateVersion(ctx context.Context, project, ws string,
 
 	if sv.JSONDownloadURL == "" {
 		if tfeclient.StateVersionTerminal(sv.Status) {
-			c.env.NotApplicable(jsonPath)
+			c.env.NotApplicableUnlessDone(jsonPath)
 		}
 	} else {
 		jsonURL := sv.JSONDownloadURL

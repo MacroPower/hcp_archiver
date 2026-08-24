@@ -6,6 +6,8 @@ import (
 	"io"
 
 	"github.com/hashicorp/go-tfe"
+
+	"go.jacobcolvin.com/hcp_archiver/pkg/manifest"
 )
 
 // archiveRunChildren archives every child of a terminal run: its configuration
@@ -162,7 +164,10 @@ func (c *Collector) archiveConfigVersionIngress(
 	cv *tfe.ConfigurationVersion,
 ) error {
 	if cv.IngressAttributes == nil {
-		c.env.NotApplicable(ingPath)
+		// A re-read triggered by an unsettled sibling can come back with the
+		// include silently unhydrated; an already-archived ingress record must
+		// not regress into a settled gap on that response's word.
+		c.env.NotApplicableUnlessDone(ingPath)
 
 		return nil
 	}
@@ -471,6 +476,15 @@ func (c *Collector) archiveTFPolicyOutcomes(ctx context.Context, project, ws str
 	}
 
 	if len(evaluated.TFPolicyEvaluations) == 0 {
+		// A re-read triggered by an unsettled sibling can come back with the
+		// evaluation include silently unhydrated. Already-archived evaluations
+		// are the archive's own evidence that outcomes exist, so such a
+		// response settles neither path: the evaluations keep their done entry
+		// and the outcomes stay unsettled for a later re-read to repair.
+		if entry, ok := c.env.Entry(evalPath); ok && entry.Status == manifest.StatusDone {
+			return nil
+		}
+
 		c.env.NotApplicable(evalPath)
 		c.env.NotApplicable(outPath)
 
