@@ -230,7 +230,10 @@ func stage(f *os.File, tmpName, name string, mode fs.FileMode, fn func(io.Writer
 // from several processes, serializes the calls itself. Nothing Append does on an
 // error path unlinks or truncates a committed record, so a violation of this
 // contract costs interleaved writes, never the destruction of a batch already
-// reported durable.
+// reported durable. A batch whose write or flush failed is its own matter:
+// Append trims it back off, best-effort, before reporting the failure, so a
+// retry of the batch does not duplicate whatever prefix the failure left
+// half-landed as committed-looking lines.
 func Append(name string, data []byte, opts ...Option) (int64, error) {
 	return appendSync(name, data, syncDir, opts...)
 }
@@ -333,11 +336,27 @@ func appendCommitted(f *os.File, size int64, data []byte) (int64, error) {
 	}
 
 	if opErr == nil {
-		_, opErr = f.WriteAt(data, start)
-	}
+		_, wErr := f.WriteAt(data, start)
+		if wErr == nil {
+			wErr = f.Sync()
+		}
 
-	if opErr == nil {
-		opErr = f.Sync()
+		if wErr != nil {
+			// A batch left behind by a reported failure would read as committed
+			// records up to its last landed newline: the caller retries the
+			// whole batch, and the retry's boundary trim would keep that prefix,
+			// duplicating it. Trim this call's own bytes back off while the
+			// descriptor is open. Records before start are untouched, so the
+			// no-truncate promise, which covers committed records, holds; the
+			// trim runs only for a write or flush failure, never for a boundary
+			// scan that failed and left start meaningless. Best-effort: a medium
+			// that failed the write may refuse the trim too, and a crash between
+			// the write and the trim leaves the same shape either way.
+			//nolint:errcheck,gosec // Best-effort trim of this call's own uncommitted write.
+			_ = f.Truncate(start)
+		}
+
+		opErr = wErr
 	}
 
 	closeErr := f.Close()
