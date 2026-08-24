@@ -1481,6 +1481,74 @@ func TestSyncArchivePrunesDeletedWorkspaceSubtree(t *testing.T) {
 	}
 }
 
+func TestSyncArchiveRefusesSidecarOverwrite(t *testing.T) {
+	t.Parallel()
+
+	const sidecar = "projects/prod/workspaces/api/bundles/logs.gen0001.zip.sidecar.ndjson"
+
+	tests := map[string]struct {
+		remote       []byte // nil seeds no remote copy
+		local        []byte
+		want         []byte // the mirrored bytes after the sweep
+		wantUploaded int
+		wantFailed   int
+	}{
+		"a differing remote sidecar is never overwritten": {
+			// After eviction the mirrored sidecar may be the only index of a
+			// remote-only zip (a lost bundles/ dir restarts numbering at
+			// gen0001, resealing fresh content under the same key), so the
+			// sweep must refuse and report rather than destroy the proof.
+			remote:       []byte(`{"name":"old","bundle":"logs.gen0001.zip"}` + "\n"),
+			local:        []byte(`{"name":"new"}` + "\n"),
+			want:         []byte(`{"name":"old","bundle":"logs.gen0001.zip"}` + "\n"),
+			wantUploaded: 0,
+			wantFailed:   1,
+		},
+		"an absent key still uploads": {
+			local:        []byte(`{"name":"new"}` + "\n"),
+			want:         []byte(`{"name":"new"}` + "\n"),
+			wantUploaded: 1,
+			wantFailed:   0,
+		},
+		"an identical mirrored copy skips": {
+			remote:       []byte(`{"name":"same"}` + "\n"),
+			local:        []byte(`{"name":"same"}` + "\n"),
+			want:         []byte(`{"name":"same"}` + "\n"),
+			wantUploaded: 0,
+			wantFailed:   0,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSyncFixture(t)
+
+			// The evicted zip the sidecar indexes: remote-only, satisfying the
+			// sweep's presence obligation so the sidecar itself is the only
+			// variable under test.
+			f.fake.SetObject(f.key("projects/prod/workspaces/api/bundles/logs.gen0001.zip"),
+				remotetest.Object{Data: []byte("zip bytes")})
+
+			if tc.remote != nil {
+				f.fake.SetObject(f.key(sidecar), remotetest.Object{Data: tc.remote})
+			}
+
+			f.write(t, sidecar, tc.local)
+
+			stats := f.env.SyncArchive(t.Context())
+
+			assert.Equal(t, tc.wantUploaded, stats.Uploaded)
+			assert.Equal(t, tc.wantFailed, stats.Failed)
+
+			obj, ok := f.fake.Object(f.key(sidecar))
+			require.True(t, ok)
+			assert.Equal(t, tc.want, obj.Data)
+		})
+	}
+}
+
 func TestSyncArchivePrunesUnderARenameAlias(t *testing.T) {
 	t.Parallel()
 

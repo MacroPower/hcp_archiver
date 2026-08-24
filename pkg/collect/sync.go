@@ -134,6 +134,14 @@ var (
 	// to overwrite remote history at the key, so every run re-reports it.
 	ErrRemoteCopyMismatch = errors.New("remote copy differs from the proven local file")
 
+	// ErrSidecarConflict indicates a local bundle sidecar differing from the
+	// mirrored copy at its key. After eviction the mirrored sidecar may be the
+	// only index proving what a remote-only zip contains, so the sweep never
+	// overwrites it (a sidecar is written once per generation and never
+	// legitimately rewritten); the conflict needs manual inspection, and every
+	// run re-reports it.
+	ErrSidecarConflict = errors.New("local sidecar differs from the mirrored index it would overwrite")
+
 	// The rename heal reports errHealUnconfirmable for a copy nothing
 	// available can prove: neither object records a digest to compare and the
 	// surface's record carries no signature to read it back against. Reporting
@@ -1740,6 +1748,15 @@ func (e *Env) syncFiles(
 // copy is absent or differs, skip when it matches. It reports whether the
 // file reached an outcome, false only on the wind-down path, where nothing
 // settled and nothing may count.
+//
+// One class of needed upload is refused instead: a bundle sidecar whose key
+// the mirror already holds with different content. Eviction honors the
+// sidecar as the only proof of a remote-only zip's members and never deletes
+// or overwrites it; the upload path must honor the same custody, or a
+// workspace that lost its bundles/ directory (restarting generation
+// numbering at gen0001) would sweep a fresh sidecar over the sole index of
+// bytes only the bucket still holds. The refusal counts as a failure, so the
+// run exits incomplete and re-reports until an operator reconciles the keys.
 func (e *Env) syncFile(
 	ctx context.Context,
 	relPath string,
@@ -1747,6 +1764,13 @@ func (e *Env) syncFile(
 	counters *syncCounters,
 ) bool {
 	needed, size, err := e.uploadNeeded(ctx, relPath, inventory)
+
+	if err == nil && needed && isBundleSidecar(relPath) {
+		if _, held := inventory[e.RemoteKey(relPath)]; held {
+			err = fmt.Errorf("%w: %q", ErrSidecarConflict, relPath)
+		}
+	}
+
 	if err == nil && needed {
 		err = e.putFile(ctx, relPath, size)
 	}
