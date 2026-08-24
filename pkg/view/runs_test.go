@@ -155,13 +155,11 @@ func TestAllRunArtifactsMatchesPerRun(t *testing.T) {
 	// come from the sealed range alone. A nested key rides along, since the
 	// two sides derive its leaf name by different routes.
 	//
-	// Both flatten that nested key onto its base name, so the artifact asserted
-	// for it ("deep.json") names no object a read can open. The flattening is
-	// what is under test here, not the path: run keys the collector writes are
-	// flat, so only a hand-built or corrupt roll-up record nests one, and the
-	// two routes agreeing matters more than either being right about a record
-	// that should not exist. Anyone who makes the leaf names carry the nesting
-	// should expect this assertion to fail and update it.
+	// Both keep that nested key's run-relative path, so the artifact asserted
+	// for it ("policies/deep.json") is the physical key an open can serve.
+	// Flattening it onto a base name would surface a row present in no
+	// physical form, disagreeing with the true nested path Org.List
+	// enumerates.
 	appendRollupLine(t, root, rollupRecord(t, wsDir+"/runs/run-swept/plan.json", `{"planned":true}`))
 	appendRollupLine(t, root, rollupRecord(t, wsDir+"/runs/run-swept/run.json",
 		runJSON("run-swept", "applied", "2024-01-03T10:00:00Z")))
@@ -179,7 +177,7 @@ func TestAllRunArtifactsMatchesPerRun(t *testing.T) {
 
 	assert.Equal(t, []string{
 		wsDir + "/runs/run-swept/plan.json",
-		wsDir + "/runs/run-swept/deep.json",
+		wsDir + "/runs/run-swept/policies/deep.json",
 	}, all["run-swept"], "a run surviving only as sealed keys keeps its leaves")
 
 	for _, run := range runs {

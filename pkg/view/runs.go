@@ -210,7 +210,7 @@ func (w *Workspace) indexRuns() (runIndex, error) {
 		// run id as the first remaining segment.
 		rest := strings.TrimPrefix(relPath, runsDir+"/")
 
-		id, _, hasLeaf := strings.Cut(rest, "/")
+		id, leaf, hasLeaf := strings.Cut(rest, "/")
 		if id == "" {
 			continue
 		}
@@ -218,9 +218,12 @@ func (w *Workspace) indexRuns() (runIndex, error) {
 		ids = append(ids, id)
 
 		// A key naming the run directory itself (a corrupt record) keeps the
-		// run visible but contributes no leaf inside it.
-		if hasLeaf {
-			idx.sealed[id] = append(idx.sealed[id], path.Base(relPath))
+		// run visible but contributes no leaf inside it. The leaf keeps its
+		// full run-relative path: flattening a nested key to its base name
+		// would surface it at a path no physical form holds, a row whose open
+		// can only miss while Org.List enumerates the true nested path.
+		if hasLeaf && leaf != "" {
+			idx.sealed[id] = append(idx.sealed[id], leaf)
 		}
 	}
 
@@ -476,9 +479,10 @@ func (w *Workspace) mergedLeafNames(relDir string) ([]string, error) {
 
 // leafForms records a directory's leaves by the form each was named in:
 // listed holds what the merged listing answered (the clean merged tree,
-// machinery hidden, a local file or a mirror record alike), sealed the base
-// name of every sealed key there. A name in both is a loose survivor of an
-// interrupted seal, which the loose-wins rule keeps canonical.
+// machinery hidden, a local file or a mirror record alike), sealed the
+// directory-relative path of every sealed key there. A name in both is a
+// loose survivor of an interrupted seal, which the loose-wins rule keeps
+// canonical.
 //
 // Instances are produced by [*Workspace.mergedLeafForms] and die with the call:
 // the browser re-reads a directory on every screen push by design, and nothing
@@ -508,9 +512,10 @@ func (f leafForms) names() []string {
 	return dedupe(names)
 }
 
-// mergedLeafForms returns the leaf names directly under a workspace-scoped
-// directory across both physical forms: the leaves the merged listing names
-// (see [*Org.looseNames]) and the base name of every sealed key there.
+// mergedLeafForms returns the leaf names under a workspace-scoped directory
+// across both physical forms: the leaves the merged listing names (see
+// [*Org.looseNames]) and the directory-relative path of every sealed key
+// there.
 func (w *Workspace) mergedLeafForms(relDir string) (leafForms, error) {
 	names, err := w.org.looseNames(relDir)
 	if err != nil {
@@ -532,7 +537,12 @@ func (w *Workspace) mergedLeafForms(relDir string) (leafForms, error) {
 	}
 
 	for _, relPath := range sealed {
-		forms.sealed[path.Base(relPath)] = true
+		// The name keeps its full directory-relative path: flattening a nested
+		// key to its base name would project it onto a sibling path no
+		// physical form holds.
+		if name := strings.TrimPrefix(relPath, relDir+"/"); name != "" {
+			forms.sealed[name] = true
+		}
 	}
 
 	return forms, nil
