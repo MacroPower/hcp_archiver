@@ -3,7 +3,7 @@ module go.jacobcolvin.com/hcp_archiver
 go 1.26.4
 
 require (
-	charm.land/bubbles/v2 v2.1.1
+	charm.land/bubbles/v2 v2.2.0
 	charm.land/bubbletea/v2 v2.0.9
 	charm.land/fang/v2 v2.0.1
 	charm.land/lipgloss/v2 v2.0.6
@@ -83,7 +83,7 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
-	github.com/mattn/go-runewidth v0.0.24 // indirect
+	github.com/mattn/go-runewidth v0.0.27 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/mango v0.1.0 // indirect
 	github.com/muesli/mango-cobra v1.2.0 // indirect
