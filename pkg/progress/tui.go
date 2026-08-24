@@ -41,6 +41,25 @@ const (
 	// instead of waiting forever for a real measurement.
 	fallbackWidth = 80
 
+	// The height assumed when the terminal reports none: the log chunk budget
+	// (see [tuiModel.logRowBudget]) needs a height, and without a fallback an
+	// unsized run would print unbounded blocks straight into the corruption
+	// the budget exists to prevent. Only the budget uses it; the model's
+	// height stays zero, so [tuiModel.taskLineBudget] keeps treating an
+	// unknown height as unbounded.
+	fallbackHeight = 24
+)
+
+// logTabSpaces is the spaces substituted for each tab before a log line is
+// wrapped: the wrap arithmetic ([ansi.Hardwrap], [ansi.StringWidth]) does not
+// model tab stops, but terminals advance a tab to the next 8-column stop, so
+// a tab left in place can wrap onto rows the inline renderer never accounted
+// for, drifting the panel's origin. A fixed substitution keeps the width
+// arithmetic exact; matching real tab stops is not a goal.
+const logTabSpaces = "    "
+
+const (
+
 	// Digit reserves for the per-status counts; the numbers left-align into
 	// invisible trailing pad, so the next column never moves until a count
 	// exceeds its reserve (rare, and then only once as it gains a digit). Done
@@ -132,13 +151,19 @@ type tuiModel struct {
 	// erases and resizes on a shrinking frame, which corrupts the panel when a
 	// log line is inserted above it at the same moment. Shorter content pads
 	// with trailing blank lines up to this height (see [tuiModel.composeFrame]).
+	// While a log batch is in flight the ratchet also holds against growth:
+	// the batch's chunks were cut against this height (see
+	// [tuiModel.logRowBudget]), and a frame growing under them would shrink
+	// the bound their safety depends on.
 	frame    int
 	quitting bool
 	sampled  bool
 	// Whether a log batch is in flight: emitted but not yet acknowledged by its
 	// [logFlushedMsg]. The next batch waits for the ack, so batches print in
-	// order. The cursor identifies the in-flight batch's lines, committed out
-	// of the feed only once the ack confirms they printed.
+	// order, and the frame ratchet holds while the flag is set so the batch's
+	// chunk budget stays valid (see [tuiModel.composeFrame]). The cursor
+	// identifies the in-flight batch's lines, committed out of the feed only
+	// once the ack confirms they printed.
 	logsInFlight bool
 	logCursor    uint64
 }
@@ -274,18 +299,34 @@ func (m *tuiModel) quit() tea.Cmd {
 
 // flushLogs peeks the feed's queued log lines and returns a command printing
 // them above the panel, or nil when there is nothing to print, a batch is
-// already in flight, or the terminal size is still unknown (unwrapped lines
+// already in flight, the terminal size is still unknown (unwrapped lines
 // would corrupt the renderer's row accounting; the queue holds until the
-// first size message). Each line is hard-wrapped to the terminal width: the
-// inline renderer estimates a printed line's height from its width to scroll
-// the panel out of the way, and a line left wider than the terminal makes
-// that estimate wrong, shifting the panel's origin so every later repaint
-// draws misaligned; pre-wrapped lines make the estimate exact. The print is
-// sequenced with a [logFlushedMsg] ack, so the next batch waits until this
-// one has landed (batches can never print out of order) and the lines commit
-// out of the feed only once confirmed printed.
+// first size message), or the panel has not painted yet (the chunk budget
+// below is measured against the frame, and no frame exists before the first
+// paint; a quit before then leaves the queue to the reporter's deactivation
+// flush, like a quit before the first size message).
+//
+// The batch prints as a sequence of chunks, each at most a screenful of rows
+// minus the panel frame (see [tuiModel.logRowBudget] and [logChunks]): the
+// inline renderer scrolls the panel out of the way of each printed block by
+// exactly the block's row count, which stays within the screen only while
+// the block and the frame fit it together. A taller block scrolls live panel
+// rows into scrollback and desyncs the renderer's tracked position, so every
+// later repaint draws misaligned; the cap makes that overshoot impossible.
+// Chunking also relies on the rows being pre-wrapped: the renderer estimates
+// a block's height from its width, and a line left wider than the terminal
+// (or carrying a tab the wrap arithmetic cannot see) breaks that estimate
+// the same way, so each line has its tabs expanded and is hard-wrapped to
+// the terminal width first.
+//
+// A single [logFlushedMsg] ack trails the last chunk, so the next batch
+// waits until this one has fully landed (batches can never print out of
+// order) and the lines commit out of the feed only once confirmed printed.
+// The whole-batch commit means a long batch widens the uncommitted window by
+// the wall-clock time of its sequence; delivery stays at-least-once, as
+// [LogWriter] documents.
 func (m *tuiModel) flushLogs() tea.Cmd {
-	if m.logs == nil || m.logsInFlight || m.width <= 0 {
+	if m.logs == nil || m.logsInFlight || m.width <= 0 || m.frame == 0 {
 		return nil
 	}
 
@@ -294,17 +335,48 @@ func (m *tuiModel) flushLogs() tea.Cmd {
 		return nil
 	}
 
-	for i, line := range lines {
-		lines[i] = ansi.Hardwrap(line, m.width, true)
-	}
+	chunks := logChunks(lines, m.width, m.logRowBudget())
 
 	m.logsInFlight = true
 	m.logCursor = cursor
 
-	return tea.Sequence(
-		tea.Println(strings.Join(lines, "\n")),
-		func() tea.Msg { return logFlushedMsg{} },
-	)
+	cmds := make([]tea.Cmd, 0, len(chunks)+1)
+	for _, chunk := range chunks {
+		cmds = append(cmds, tea.Println(chunk))
+	}
+
+	cmds = append(cmds, func() tea.Msg { return logFlushedMsg{} })
+
+	return tea.Sequence(cmds...)
+}
+
+// logChunks wraps the peeked log lines for printing above the panel and
+// groups the resulting physical rows into chunks of at most budget rows,
+// each ready for its own [tea.Println]. Each line has its tabs expanded to
+// [logTabSpaces] and is hard-wrapped to width first, so a chunk's row count
+// equals the rows the terminal will actually draw it on. A chunk boundary
+// may fall inside a wrapped source line; that is harmless, since the rows
+// are independent once wrapped. The budget clamps to at least one row, so
+// the helper is total over its inputs. Expansion and wrapping mutate only
+// the peeked copy, never the sink's queue, which stays byte-faithful for the
+// deactivation fallback flush.
+func logChunks(lines []string, width, budget int) []string {
+	budget = max(1, budget)
+
+	wrapped := make([]string, len(lines))
+	for i, line := range lines {
+		wrapped[i] = ansi.Hardwrap(strings.ReplaceAll(line, "\t", logTabSpaces), width, true)
+	}
+
+	rows := strings.Split(strings.Join(wrapped, "\n"), "\n")
+
+	chunks := make([]string, 0, (len(rows)+budget-1)/budget)
+	for start := 0; start < len(rows); start += budget {
+		end := min(start+budget, len(rows))
+		chunks = append(chunks, strings.Join(rows[start:end], "\n"))
+	}
+
+	return chunks
 }
 
 // View renders the current snapshot into an inline (non-alt-screen) view, so log
@@ -507,10 +579,23 @@ func (m *tuiModel) render(snap snapshot) string {
 // model reports and the rows the screen holds stay in agreement rather than
 // leaving the renderer to reconcile a view taller than the terminal on every
 // repaint.
+//
+// While a log batch is in flight the ratchet also refuses to grow: the
+// batch's chunks were cut to fit beside the frame as it stood when the flush
+// budgeted them (see [tuiModel.logRowBudget]), and spinner ticks interleave
+// with the chunk sequence, so a frame growing mid-batch would shrink the
+// bound the in-flight chunks were cut for and let them overflow the screen.
+// A frame whose natural content outgrows the hold is cut to its topmost rows
+// by the same tail truncation the too-short-terminal case uses; the growth
+// lands on the batch's ack, one Update later. Shrinking under the hold is
+// fine, since a smaller frame only loosens the bound.
 func (m *tuiModel) composeFrame(body, footer []string) []string {
 	natural := len(body) + len(footer)
 
-	m.frame = max(m.frame, natural)
+	if !m.logsInFlight {
+		m.frame = max(m.frame, natural)
+	}
+
 	if m.height > 0 {
 		m.frame = min(m.frame, m.height)
 	}
@@ -544,6 +629,21 @@ func chromeLines(hasRemote bool) int {
 	}
 
 	return 4
+}
+
+// logRowBudget is how many physical rows one printed log chunk may hold: the
+// terminal height minus the panel's held frame, the exact bound the inline
+// renderer's insert stays within, less one row of margin. An unknown height
+// falls back to the conventional 24 rows, and the budget floors at one row
+// so logging never stalls on a terminal shorter than the frame
+// ([tuiModel.composeFrame] already clamps the frame to the height).
+func (m *tuiModel) logRowBudget() int {
+	height := m.height
+	if height <= 0 {
+		height = fallbackHeight
+	}
+
+	return max(1, height-m.frame-1)
 }
 
 // taskLineBudget is how many task lines the panel may show: one per in-flight
