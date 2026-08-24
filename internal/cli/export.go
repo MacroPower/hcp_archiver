@@ -112,6 +112,9 @@ the markdown tree is written into the directory its export.path names.`,
 		stopReporter := reporter.RunBackground(ctx, nil)
 		defer stopReporter()
 
+		// No slow-listing notice: the reporter above owns stderr, and a line
+		// written from a timer goroutine would corrupt whatever shape it is
+		// serving there, a panel or a stream of JSON events alike.
 		arc, err := cfg.open(runCtx, nil)
 		if err != nil {
 			return err

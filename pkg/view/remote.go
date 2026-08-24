@@ -77,14 +77,14 @@ type orgRemote struct {
 
 	// The org's mirror inventory keyed by archive-relative path, listed once
 	// per session under listMu (its own lock, so a long listing never blocks a
-	// bundle read's map access). It is built on first use rather than at the
-	// open, and only by a merged remote, so an organization nothing reads
-	// through never enumerates its prefix. Both the listing and a listing
-	// failure are cached: the merged listing helpers consult the inventory per
-	// keystroke, and re-listing an unreachable mirror on each would hammer the
-	// bucket while the browser degrades to local content anyway. The byDir
-	// field is the listing's per-directory child index (see [indexListing]),
-	// built and replaced together with it.
+	// bundle read's map access). It is built on first use, and only by a
+	// merged remote, so an organization nothing reads through never enumerates
+	// its prefix. Both the listing and a listing failure are cached: the merged
+	// listing helpers consult the inventory per keystroke, and re-listing an
+	// unreachable mirror on each would hammer the bucket while the browser
+	// degrades to local content anyway. The byDir field is the listing's
+	// per-directory child index (see [indexListing]), built and replaced
+	// together with it.
 	listing map[string]remote.ObjectInfo
 	byDir   map[string]map[string]remoteChild
 	listErr error
@@ -104,6 +104,8 @@ type orgRemote struct {
 	orgName string
 	cfg     remote.Config
 
+	// How long the inventory listing may run before notify names this
+	// organization.
 	noticeGrace time.Duration
 
 	listed bool
@@ -111,10 +113,11 @@ type orgRemote struct {
 	// Whether the remote stands in for the whole tree rather than only the
 	// evicted surfaces: listings union in the mirror's inventory and an
 	// ordinary miss fetches through. The marker decides it, whether the remote
-	// arrived through [WithRemote] or through the marker alone: a partial tree
-	// (one a bootstrap materialized, see [writeMarker]) merges, and an archive
-	// the archiver wrote is complete locally, so its marker keeps every local
-	// read local.
+	// arrived through [WithRemote] or through the marker alone. A partial tree
+	// (one a bootstrap materialized, see [writeMarker]) merges. An
+	// organization carrying no marker has never claimed completeness, so it
+	// merges too. An archive the archiver wrote is complete locally, so its
+	// marker keeps every local read local.
 	merged bool
 
 	listMu sync.Mutex
@@ -191,9 +194,9 @@ func loadOrgRemote(root, orgName string, opts archiveOptions) (*orgRemote, error
 // no listing at all, and one that does costs its own prefix rather than the
 // whole mirror's.
 //
-// Merged-ness comes from the caller (see [mergedFromMarker]) rather than from
-// the fact that a remote was supplied: configuring a remote says where the
-// mirror is, not that the tree beside it is incomplete.
+// Merged-ness comes from the caller (see [mergedFromMarker]), not from the
+// remote having been supplied: configuring a remote says where the mirror is,
+// not that the tree beside it is incomplete.
 func newSuppliedOrgRemote(
 	orgName string, cfg remote.Config, client *remote.Client,
 	merged bool, opts archiveOptions,
@@ -220,8 +223,8 @@ func newSuppliedOrgRemote(
 // mirror holds nothing the local tree does not account for, and it is the same
 // field [loadOrgRemote] reads when no remote was supplied. An organization
 // carrying no marker has never made that claim, so the mirror stands in; a
-// marker with its url cleared is the operator's consent to re-record, and this
-// open is about to stamp it partial.
+// marker with its url cleared is the operator's consent to re-record, and the
+// open that materializes the organization stamps the marker partial again.
 //
 // Only [remoteOrg] may call this. The same inputs mean the opposite in
 // [loadOrgRemote], where an absent marker means no remote at all and a cleared
@@ -353,14 +356,38 @@ func (r *orgRemote) objects() (map[string]remote.ObjectInfo, error) {
 	r.listMu.Unlock()
 
 	// A listing that settles inside the grace period says nothing, so ordinary
-	// use stays quiet; one that outlives it is the wait a caller printing
-	// nothing until it finishes needs explained.
+	// use stays quiet; one that outlives it names the organization, so a
+	// caller that prints nothing until it finishes can say what it waits on.
+	//
+	// Stop alone does not settle it: a callback already inside the timer's
+	// body runs to completion, so the notice could still be writing while a
+	// caller moves on to its own output. The settle below joins it.
+	settleNotice := func() {}
+
 	if r.notify != nil {
-		notice := time.AfterFunc(r.noticeGrace, func() { r.notify(r.orgName) })
-		defer notice.Stop()
+		var notified sync.WaitGroup
+
+		notified.Add(1)
+
+		notice := time.AfterFunc(r.noticeGrace, func() {
+			defer notified.Done()
+
+			r.notify(r.orgName)
+		})
+
+		settleNotice = func() {
+			if !notice.Stop() {
+				notified.Wait()
+			}
+		}
 	}
 
 	listing, byDir, err := r.buildListing()
+
+	// The notice settles before the result is published, not on the way out:
+	// closing ready below releases every waiter at once, and any of them may
+	// start writing the moment it wakes.
+	settleNotice()
 
 	r.listMu.Lock()
 

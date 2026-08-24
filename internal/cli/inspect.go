@@ -49,9 +49,11 @@ archive directory is the archive root or a single organization's directory.`
 // remoteLong is the mirror read-through contract the browse and inspect
 // commands share.
 const remoteLong = `The archive's object-store mirror can stand in for absent local files: the
-configuration file's remote section names it. Anything read that is not on
-disk is fetched from the mirror and persisted at its local archive path, so
-later reads need no network; a directory holding nothing at all is
+configuration file's remote section names it. A tree the archiver wrote reads
+local-only, and the mirror serves its evicted bundles and tarballs alone. A
+tree recording that it holds only part of the archive reads through: anything
+not on disk is fetched from the mirror and persisted at its local archive
+path, so later reads need no network. A directory holding nothing at all is
 bootstrapped from the mirror outright, and the recorded marker means the
 remote section is only needed once. A configured remote that disagrees with
 the mirror an organization's marker records is refused. Object-store
@@ -89,9 +91,10 @@ func warnDegraded(errW io.Writer, arc *view.Archive) {
 // print nothing until they finish, so a large mirror's enumeration would
 // otherwise look like a hang.
 //
-// The callback fires on a timer goroutine while the command writes its own
-// output, so a mutex guards the writer; it lands on stderr, leaving stdout
-// clean for the bytes a caller is piping.
+// Each organization's notice fires on its own timer goroutine, so a mutex
+// serializes them against each other. They land on stderr, leaving stdout
+// clean for the bytes a caller is piping, and follow the
+// "<level>: organization %q: ..." shape [warnDegraded] uses.
 func listNotice(errW io.Writer) func(org string) {
 	var mu sync.Mutex
 
@@ -99,7 +102,8 @@ func listNotice(errW io.Writer) func(org string) {
 		mu.Lock()
 		defer mu.Unlock()
 
-		eprintf(errW, "listing the mirror's inventory for organization %q; a large mirror takes a while\n", org)
+		eprintf(errW, "notice: organization %q: listing the mirror's inventory; "+
+			"on a mirror of millions of objects this takes minutes\n", org)
 	}
 }
 

@@ -65,10 +65,11 @@ var errNotFound = errors.New("object does not exist")
 // Fake is an in-memory bucket driver with fault injection and call
 // recording.
 //
-// It records the calls it serves so tests can assert how the client drove
-// it, and its error fields inject faults. Wrap it for a client with
-// [Fake.Bucket]. Create instances with [New]. A Fake is safe for concurrent
-// use; the sync sweep settles files in parallel.
+// It records the calls it serves, so tests can assert how the client drove it,
+// and its error fields inject faults. It answers recursive and delimited
+// listings alike. Wrap it for a client with [Fake.Bucket]. Create instances
+// with [New]. A Fake is safe for concurrent use; the sync sweep settles files
+// in parallel.
 type Fake struct {
 	objects map[string]Object
 
@@ -124,9 +125,9 @@ type Fake struct {
 	// while the rest settle.
 	DeleteErrKeys []string
 	// HeadErrKeys, when non-empty, confines HeadErr (and HeadErrN's budget) to
-	// the named keys, the head counterpart of DeleteErrKeys: a probe fan-out
-	// settles in no fixed order, so a test that must fail one key's probe
-	// names it rather than counting on which ran first.
+	// the named keys, the head counterpart of DeleteErrKeys: concurrent heads
+	// settle in no fixed order, so a test that must fail one key names it
+	// rather than counting on which ran first.
 	HeadErrKeys []string
 
 	ranges  []Range
@@ -245,7 +246,9 @@ func (f *Fake) PutCalls() int {
 	return f.putCalls
 }
 
-// HeadCalls returns how many attributes reads were served.
+// HeadCalls returns how many attributes reads were served. A read an injected
+// fault turned back is not one of them, which is where it differs from
+// [Fake.ListCalls].
 func (f *Fake) HeadCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -253,7 +256,9 @@ func (f *Fake) HeadCalls() int {
 	return f.headCalls
 }
 
-// ListCalls returns how many listing pages were served.
+// ListCalls returns how many listing pages were requested, a page an injected
+// fault turned back included: a test that counts what a retry re-fetched needs
+// the request, not the answer.
 func (f *Fake) ListCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

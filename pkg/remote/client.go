@@ -556,8 +556,9 @@ func (c *Client) write(ctx context.Context, key string, r io.Reader, touch func(
 }
 
 // listPageSize is how many keys one listing page requests, matching the
-// backends' own thousand-key ceiling: S3 caps ListObjectsV2 at that, so asking
-// for more buys nothing and asking for less only multiplies round trips.
+// thousand-key ceiling the backends impose: S3 caps ListObjectsV2 there, so
+// asking for more buys nothing and asking for fewer only multiplies round
+// trips.
 const listPageSize = 1000
 
 // List enumerates every object under prefix, keyed by full object key, at
@@ -633,14 +634,13 @@ func (c *Client) List(ctx context.Context, prefix string) (map[string]ObjectInfo
 
 // Children lists the immediate child prefixes under prefix: the distinct next
 // key segments the store holds beneath it, resolved from one delimited listing
-// rather than an enumeration of every object under them. Names come back
-// sorted, with the prefix and the trailing delimiter stripped, and an object
-// lying at the prefix itself contributes none.
+// rather than an enumeration of every object under it. Children returns the
+// names sorted, with the prefix and the trailing delimiter stripped, and an
+// object lying at the prefix itself contributes none.
 //
-// It answers what a reader asks for when it needs the store's next level and
-// nothing beneath it, which organizations a mirror holds being the case that
-// matters: [Client.List] would walk every key of every one of them to report
-// the same names.
+// Discovering which organizations a mirror holds is the case that matters:
+// [Client.List] would walk every key of every organization to report the same
+// names.
 func (c *Client) Children(ctx context.Context, prefix string) ([]string, error) {
 	var out []string
 
@@ -662,8 +662,8 @@ func (c *Client) Children(ctx context.Context, prefix string) ([]string, error) 
 					return err //nolint:wrapcheck // Wrapped uniformly below.
 				}
 
-				// Each delivered entry is progress, the same bound the bulk
-				// listing paces its watchdog by.
+				// Each delivered entry is progress, the same pacing
+				// [Client.List] gives the watchdog per page.
 				touch()
 
 				if !obj.IsDir {

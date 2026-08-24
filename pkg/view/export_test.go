@@ -79,7 +79,7 @@ func WriteExtractedForTest(ctx context.Context, target, org, rel string, data []
 	return err
 }
 
-// WithListNoticeGraceForTest shortens how long a listing runs before
+// WithListNoticeGraceForTest shortens how long a listing may run before
 // [WithListNotice]'s callback fires, so a test exercises the notice without
 // the wall-clock wait the real grace period imposes.
 func WithListNoticeGraceForTest(d time.Duration) ArchiveOption {

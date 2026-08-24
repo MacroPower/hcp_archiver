@@ -28,7 +28,7 @@ func entryNames(entries []view.TreeEntry) []string {
 }
 
 // openSupplied opens the archive at root against the fake's mirror through a
-// supplied remote, the shape a configuration file's remote block produces.
+// supplied remote, the shape a configuration file's remote section produces.
 func openSupplied(t *testing.T, root string, fake *remotetest.Fake) []*view.Org {
 	t.Helper()
 
@@ -52,7 +52,7 @@ func TestOpenArchive_CompleteMarkerUnderSuppliedRemoteNeverLists(t *testing.T) {
 
 	// A key the mirror holds and the local tree does not. A complete marker
 	// asserts the sweep proved no such key exists, so a reader that surfaces
-	// it is one that enumerated the mirror it was entitled to trust.
+	// it has enumerated a mirror the marker said it could trust.
 	fake.SetObject(viewPrefix+"/my-org/ghost.json", remotetest.Object{Data: []byte("{}")})
 
 	orgs := openSupplied(t, root, fake)
@@ -60,8 +60,6 @@ func TestOpenArchive_CompleteMarkerUnderSuppliedRemoteNeverLists(t *testing.T) {
 
 	assert.Equal(t, 1, fake.ListCalls(),
 		"discovery costs one delimited listing, never an inventory of the mirror")
-
-	listed := fake.ListCalls()
 
 	data, err := orgs[0].Read("org.json")
 	require.NoError(t, err)
@@ -80,7 +78,7 @@ func TestOpenArchive_CompleteMarkerUnderSuppliedRemoteNeverLists(t *testing.T) {
 	_, err = orgs[0].Projects()
 	require.NoError(t, err)
 
-	assert.Equal(t, listed, fake.ListCalls(),
+	assert.Equal(t, 1, fake.ListCalls(),
 		"a complete organization's reads stay local, so none of them lists the mirror")
 	assert.Empty(t, fake.Ranges(), "nothing local was fetched through the mirror")
 }
@@ -150,7 +148,7 @@ func TestOpenArchive_MirrorOrgConfirmedByOrgJSON(t *testing.T) {
 	}
 }
 
-func TestOpenArchive_MirrorOrgHeadFaultDegradesOnlyThatOrg(t *testing.T) {
+func TestOpenArchive_MirrorOrgProbeFaultConfinesItselfToThatOrg(t *testing.T) {
 	t.Parallel()
 
 	root := buildArchive(t)
@@ -172,6 +170,32 @@ func TestOpenArchive_MirrorOrgHeadFaultDegradesOnlyThatOrg(t *testing.T) {
 
 	assert.Equal(t, []string{"my-org", "third-org"}, got,
 		"one organization's unreadable org.json must not blank the mirror for the rest")
+
+	// A local organization whose probe never answered degrades rather than
+	// opening as though the mirror had denied it: the remote stays attached
+	// and its content still merges.
+	local := buildArchive(t)
+	writeFile(t, filepath.Join(local, "other-org"), "org.json", `{"data":{"id":"org-2"}}`)
+
+	localFake := remotetest.New()
+	mirrorArchive(t, local, localFake)
+	localFake.SetObject(viewPrefix+"/other-org/org.json", remotetest.Object{Data: []byte("{}")})
+	localFake.SetObject(viewPrefix+"/other-org/only-remote.json", remotetest.Object{Data: []byte("{}")})
+
+	localFake.HeadErr = errors.New("injected probe failure")
+	localFake.HeadErrKeys = []string{viewPrefix + "/other-org/" + "org.json"}
+
+	degraded := openSupplied(t, local, localFake)
+	require.Len(t, degraded, 2)
+
+	other := degraded[1]
+	require.Equal(t, "other-org", other.Name)
+	assert.True(t, other.HasRemote(), "an unproven organization keeps its remote")
+
+	entries, err := other.Entries("")
+	require.NoError(t, err)
+	assert.Contains(t, entryNames(entries), "only-remote.json",
+		"an unproven organization still reads through, rather than falling back to local content alone")
 }
 
 func TestOpenArchive_SuppliedRemoteDegradesWhenDiscoveryFails(t *testing.T) {
@@ -200,6 +224,26 @@ func TestOpenArchive_SuppliedRemoteDegradesWhenDiscoveryFails(t *testing.T) {
 		require.Error(t, orgs[0].RemoteWarning())
 	})
 
+	t.Run("a bootstrap whose every probe fails reports the fault", func(t *testing.T) {
+		t.Parallel()
+
+		fake := buildMirroredArchive(t)
+
+		// A credential that lists but cannot head, the shape a prefix-scoped
+		// read-only policy gets wrong. Reporting an empty mirror here would
+		// assert the opposite of what the fault said.
+		fake.HeadErr = errors.New("injected probe failure")
+
+		_, err := view.OpenArchive(t.TempDir(),
+			view.WithContext(t.Context()),
+			view.WithRemote(viewRemoteConfig()),
+			view.WithRemoteFactory(fakeFactory(fake)),
+		)
+		require.ErrorIs(t, err, view.ErrNotArchive)
+		assert.ErrorContains(t, err, "injected probe failure",
+			"a discovery that confirmed nothing names why, rather than reporting an empty mirror")
+	})
+
 	t.Run("a failing client build keeps local content readable", func(t *testing.T) {
 		t.Parallel()
 
@@ -218,9 +262,13 @@ func TestOpenArchive_SuppliedRemoteDegradesWhenDiscoveryFails(t *testing.T) {
 		entries, entriesErr := orgs[0].Entries("")
 		require.NoError(t, entriesErr)
 		assert.NotEmpty(t, entries)
+
+		assert.True(t, orgs[0].HasRemote(), "the remote stays attached so later reads retry")
+		require.Error(t, orgs[0].RemoteWarning(),
+			"the build that failed is reported once a merged read has asked for it")
 	})
 
-	t.Run("a complete organization reports nothing, having needed nothing", func(t *testing.T) {
+	t.Run("a complete organization needs no listing, so it reports nothing", func(t *testing.T) {
 		t.Parallel()
 
 		root := buildArchive(t)
