@@ -117,6 +117,31 @@ func TestOpenArchive_BootstrapFromEmptyDir(t *testing.T) {
 	assert.Contains(t, string(marker), `"partial": true`)
 }
 
+func TestOpenArchive_BootstrapResumesFromMarkerWithoutOrgJSON(t *testing.T) {
+	t.Parallel()
+
+	// The bootstrap writes the marker before it fetches org.json, so an
+	// interruption between the two leaves a marker beside an absent org.json.
+	// That state must resume: the next remote open re-fetches org.json and
+	// keeps the marker. (The reverse ordering would leave org.json with no
+	// marker, a tree every later open would read as an established local
+	// organization and present as complete.)
+	fake := buildMirroredArchive(t)
+	_, dir := openBootstrap(t, fake)
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "my-org", "org.json")))
+
+	orgs := openSupplied(t, dir, fake)
+	require.Len(t, orgs, 1)
+
+	assert.FileExists(t, filepath.Join(dir, "my-org", "org.json"),
+		"the resumed open re-fetches the org.json the interruption lost")
+
+	marker, err := os.ReadFile(filepath.Join(dir, "my-org", remote.MarkerName))
+	require.NoError(t, err)
+	assert.Contains(t, string(marker), `"partial": true`)
+}
+
 func TestOpenArchive_EstablishedOrgStaysUnmarked(t *testing.T) {
 	t.Parallel()
 

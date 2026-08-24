@@ -646,13 +646,26 @@ func materializeOrgRoot(rem *orgRemote, root string, cfg remote.Config, marker r
 	}
 
 	if orgAbsent {
+		// The marker lands before the org.json fetch. Fetched first, a crash
+		// between the two would leave org.json present with no marker, a state
+		// no later open repairs: the tree then reads as an established local
+		// organization and the near-empty browse cache silently presents as
+		// the whole archive. The reverse interruption leaves a marker beside
+		// an absent org.json, which the next remote open resumes right here.
+		if !hasMarker {
+			err := writeMarker(root, cfg)
+			if err != nil {
+				return err
+			}
+		}
+
 		err := rem.ensureLocal(root, orgFile)
 		if err != nil {
 			return err
 		}
 	}
 
-	if (hasMarker && marker.URL == "") || (!hasMarker && orgAbsent) {
+	if hasMarker && marker.URL == "" {
 		return writeMarker(root, cfg)
 	}
 
