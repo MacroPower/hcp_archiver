@@ -46,12 +46,22 @@ func (c *Collector) archiveRunChildren(ctx context.Context, project, ws string, 
 		return err
 	}
 
-	if run.CreatedBy == nil {
-		return nil
+	st := c.env.Store()
+
+	// The gate is maintained even when the relation is not hydrated (the user
+	// deleted upstream, or an include the server dropped): a pending gate a
+	// prior pass's failed write opened would otherwise stay open forever, since
+	// nothing else clears it, holding the whole runs walk out of its early stop
+	// on an object no revisit can ever capture. With no shared paths the call
+	// clears such a gate and records nothing otherwise, the same always-call
+	// shape archiveRunEvents uses for its actor set.
+	var userPaths []string
+
+	if run.CreatedBy != nil {
+		userPaths = append(userPaths, st.User(run.CreatedBy.ID))
 	}
 
-	st := c.env.Store()
-	c.env.Reference(st.RunFile(project, ws, run.ID, "created-by.ref"), st.User(run.CreatedBy.ID))
+	c.env.Reference(st.RunFile(project, ws, run.ID, "created-by.ref"), userPaths...)
 
 	return nil
 }

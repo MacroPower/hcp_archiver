@@ -277,6 +277,40 @@ func TestArchiveRunChildrenCreatedByStrandsAndRecovers(t *testing.T) {
 	assert.False(t, f.ledger.Collection(runsKey).HasUnsettled(), "the run has no outstanding work once captured")
 }
 
+func TestArchiveRunChildrenCreatedByGateClearsWhenRelationDehydrates(t *testing.T) {
+	t.Parallel()
+
+	// Pass 1 opens the gate behind a failed user write. Before pass 2 the
+	// created-by relation stops hydrating (the user deleted upstream, or the
+	// include dropped), so the user can never be captured through this run
+	// again. The revisit must still maintain the gate: left pending it would
+	// hold the whole runs walk out of its early stop forever.
+	mux := http.NewServeMux()
+	serveEmptyRunChildren(t, mux, "run-1")
+
+	f := newWSFixture(t, mux)
+	st := f.store
+
+	const runsKey = "projects/proj/workspaces/ws/runs"
+
+	gate := st.RunFile("proj", "ws", "run-1", "created-by.ref")
+
+	require.NoError(t, os.WriteFile(st.AbsPath("users"), []byte("x"), 0o600))
+	require.NoError(t, f.collector.ArchiveRunChildren(t.Context(), "proj", "ws",
+		&tfe.Run{ID: "run-1", CreatedBy: &tfe.User{ID: "user-1", Username: "alice"}}))
+
+	require.Equal(t, manifest.StatusPending, f.status(gate))
+	require.NoError(t, os.Remove(st.AbsPath("users")))
+
+	require.NoError(t, f.collector.ArchiveRunChildren(t.Context(), "proj", "ws",
+		&tfe.Run{ID: "run-1"}))
+
+	assert.Equal(t, manifest.StatusReferenceCleared, f.status(gate),
+		"the gate clears rather than stranding open on a relation no revisit can hydrate")
+	assert.False(t, f.ledger.Collection(runsKey).HasUnsettled(),
+		"the run holds no outstanding work, so the walk's early stop can re-arm")
+}
+
 func TestCollectRunsStrandsAndRecoversCreatedByAcrossWalk(t *testing.T) {
 	t.Parallel()
 
