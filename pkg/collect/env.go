@@ -343,6 +343,21 @@ func (e *Env) NotApplicable(relPath string) {
 	e.ledger.RecordNotApplicable(relPath)
 }
 
+// Absent settles the object at relPath as a confirmed permanent absence,
+// keeping the cause as the entry's documentation of why the gap exists (see
+// [manifest.Ledger.RecordAbsent]). The caller vouches that the object is gone
+// upstream, not merely unread; a transient blip settled here would deny a
+// re-run its retry.
+func (e *Env) Absent(relPath string, cause error) {
+	e.ledger.RecordAbsent(relPath, cause)
+}
+
+// ErroredUnder returns the relative paths of the errored entries under prefix,
+// sorted (see [manifest.Ledger.ErroredUnder]).
+func (e *Env) ErroredUnder(prefix string) []string {
+	return e.ledger.ErroredUnder(prefix)
+}
+
 // Obligation returns the ledger marker at relPath for work whose outcome no
 // object entry carries (see [manifest.Obligation]): a child enumeration
 // beneath a walk-frozen element, or a nested walk whose settlement the

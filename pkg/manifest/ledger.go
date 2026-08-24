@@ -1573,6 +1573,30 @@ func (l *Ledger) DoneEntriesUnder(prefix string) map[string]Entry {
 	return out
 }
 
+// ErroredUnder returns the relative paths of the errored entries under prefix,
+// sorted so a caller's sweep is deterministic. It answers a collector asking
+// which of a family of derived names still awaits a retry, so it can settle
+// the ones whose upstream source no longer exists (see [Ledger.RecordAbsent]).
+func (l *Ledger) ErroredUnder(prefix string) []string {
+	l.mu.RLock()
+
+	var out []string
+
+	for _, sh := range l.physShards {
+		for relPath, e := range sh.entries {
+			if e.Status == StatusErrored && strings.HasPrefix(relPath, prefix) {
+				out = append(out, relPath)
+			}
+		}
+	}
+
+	l.mu.RUnlock()
+
+	slices.Sort(out)
+
+	return out
+}
+
 // StartRun opens a new run: it advances the run count and start time and resets
 // the per-run tally so counts and bytes reflect only the new run. It records
 // whether the run resumed prior work, and leaves the cumulative tally intact so

@@ -276,6 +276,58 @@ func TestCollectPolicySourceRetriesFailedStampedCapture(t *testing.T) {
 	assert.Equal(t, manifest.StatusDone, entry.Status, "the retry lands on the stamped entry")
 }
 
+func TestCollectPolicySourceSettlesSupersededFailedCapture(t *testing.T) {
+	t.Parallel()
+
+	// A stamped capture that failed is retried under its own name only while the
+	// listing still reports that revision. Once another upload moves the
+	// updated-at again, the failed revision's bytes are unreachable (the
+	// download endpoint serves only the current revision), so its errored entry
+	// must settle as a documented absence rather than report an unfixable
+	// failure on every later run.
+	src := &policySource{content: beforeUpload}
+	f := newPolicyFixture(t, src)
+
+	captured := fetchedAt.Add(-time.Hour)
+
+	require.NoError(t, f.collector.CollectPolicySource(t.Context(),
+		&tfe.Policy{ID: "pol-1", Kind: tfe.Sentinel, UpdatedAt: captured}))
+
+	// The second revision's capture fails, stranding its stamped name errored.
+	src.replace(afterUpload)
+
+	src.status = http.StatusInternalServerError
+
+	require.NoError(t, f.collector.CollectPolicySource(t.Context(),
+		&tfe.Policy{ID: "pol-1", Kind: tfe.Sentinel, UpdatedAt: fetchedAt.Add(-30 * time.Minute)}))
+
+	stranded := "policies/pol-1.20260814T094500Z.sentinel"
+	entry, ok := f.ledger.Entry(stranded)
+	require.True(t, ok)
+	require.Equal(t, manifest.StatusErrored, entry.Status)
+
+	// A third upload replaces the source again before any retry could land, so
+	// the second revision is gone upstream for good.
+	src.replace("main = rule { 1 > 0 }")
+
+	require.NoError(t, f.collector.CollectPolicySource(t.Context(),
+		&tfe.Policy{ID: "pol-1", Kind: tfe.Sentinel, UpdatedAt: fetchedAt.Add(time.Hour)}))
+
+	entry, ok = f.ledger.Entry(stranded)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusAbsent, entry.Status,
+		"the superseded revision settles as a documented absence")
+	assert.NotEmpty(t, entry.LastError, "the entry documents why the gap exists")
+
+	current := "policies/pol-1.20260814T111500Z.sentinel"
+	entry, ok = f.ledger.Entry(current)
+	require.True(t, ok)
+	assert.Equal(t, manifest.StatusDone, entry.Status, "the current revision is captured")
+
+	assert.Empty(t, f.ledger.Failures(),
+		"no run reports the unreachable revision as a failure")
+}
+
 func TestCollectPolicySourceRetriesFailedCapture(t *testing.T) {
 	t.Parallel()
 

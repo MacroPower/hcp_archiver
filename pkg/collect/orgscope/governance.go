@@ -3,6 +3,7 @@ package orgscope
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/go-tfe"
@@ -189,6 +190,8 @@ func (c *Collector) archivePolicy(ctx context.Context, policy *tfe.Policy) error
 func (c *Collector) collectPolicySource(ctx context.Context, policy *tfe.Policy) error {
 	relPath := c.policySourcePath(policy)
 
+	c.settleSupersededRevisions(policy, relPath)
+
 	err := c.env.Bytes(ctx, relPath, func(ctx context.Context) ([]byte, error) {
 		var src []byte
 
@@ -246,6 +249,60 @@ func (c *Collector) policySourcePath(policy *tfe.Policy) string {
 		st.Policy(policy.ID, policyRevision(policy.UpdatedAt)+"."+ext),
 		policy.UpdatedAt,
 	)
+}
+
+// settleSupersededRevisions settles as gone every errored capture of a policy
+// source revision that an upload has since replaced.
+//
+// A failed capture normally keeps its name so the retry lands on the entry the
+// ledger is waiting for (see [collect.Env.RevisionPath]). The download
+// endpoint serves only the current revision, though, so once the policy's
+// updated-at moves past a still-errored stamped capture, no fetch is ever
+// offered that name again, and without this sweep its entry would report an
+// unfixable failure on every later run. The stamps embedded in the names sort
+// lexically with the revisions they identify, so the stranded names are
+// exactly the errored ones whose stamp sorts before the current revision's;
+// the active name and the plain name are excluded, since [collect.Env.RevisionPath]
+// still offers those to a retry.
+func (c *Collector) settleSupersededRevisions(policy *tfe.Policy, activePath string) {
+	if policy.UpdatedAt.IsZero() {
+		return
+	}
+
+	ext := policyExt(policy.Kind)
+	plainPath := c.env.Store().Policy(policy.ID, ext)
+	prefix := strings.TrimSuffix(plainPath, ext)
+	current := policyRevision(policy.UpdatedAt)
+
+	for _, relPath := range c.env.ErroredUnder(prefix) {
+		if relPath == activePath || relPath == plainPath {
+			continue
+		}
+
+		stamp := strings.TrimSuffix(strings.TrimPrefix(relPath, prefix), "."+ext)
+		if !isPolicyRevisionStamp(stamp) || stamp >= current {
+			continue
+		}
+
+		c.env.Absent(relPath, fmt.Errorf(
+			"policy source revision %s was replaced upstream before it was captured; the download endpoint serves only the current revision",
+			stamp,
+		))
+	}
+}
+
+// isPolicyRevisionStamp reports whether s is a stamp [policyRevision]
+// produces, distinguishing a stamped source name from the metadata file and
+// any other artifact sharing the policy's name prefix.
+func isPolicyRevisionStamp(s string) bool {
+	bare, ok := strings.CutSuffix(s, "Z")
+	if !ok {
+		return false
+	}
+
+	_, err := time.Parse(policyRevisionLayout, bare)
+
+	return err == nil
 }
 
 // policyRevisionLayout formats a policy's updated-at into the stamp naming one
