@@ -1662,8 +1662,13 @@ func (e *Env) SyncSubtree(ctx context.Context, relPrefix string) SyncStats {
 	})
 	if err != nil {
 		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			// A subtree that never materialized has nothing to mirror.
+		case errors.Is(err, fs.ErrNotExist) && subtreeAbsent(e.store.AbsPath(relPrefix)):
+			// A subtree that never materialized (or was removed whole) has
+			// nothing to mirror. The root's own absence is required: a mid-walk
+			// ENOENT under a still-present root is a directory removed after
+			// being listed, and swallowing it would silently truncate the sync
+			// of every file the walk had not yet reached, so it falls through
+			// to the counted warning below.
 		case ctx.Err() != nil:
 			// As above: a cancellation surfacing from the walk is the wind-down.
 		default:
@@ -1677,6 +1682,16 @@ func (e *Env) SyncSubtree(ctx context.Context, relPrefix string) SyncStats {
 	}
 
 	return counters.stats()
+}
+
+// subtreeAbsent reports whether nothing exists at absPath, the reading that
+// lets [Env.SyncSubtree] tell a subtree that never materialized from a
+// directory that vanished mid-walk. Any other stat outcome, a fault included,
+// counts as present, so an unreadable root is surfaced rather than swallowed.
+func subtreeAbsent(absPath string) bool {
+	_, err := os.Stat(absPath)
+
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // syncFiles settles each search-layer file against the inventory, fanned out
