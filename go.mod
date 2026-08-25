@@ -11,7 +11,7 @@ require (
 	github.com/charmbracelet/x/exp/golden v0.0.0-20260813141921-f091cedeaf78
 	github.com/goccy/go-yaml v1.19.2
 	github.com/hashicorp/go-cleanhttp v0.5.2
-	github.com/hashicorp/go-tfe v1.110.0
+	github.com/hashicorp/go-tfe v1.111.0
 	github.com/hashicorp/go-version v1.9.0
 	github.com/hashicorp/jsonapi v1.5.0
 	github.com/spf13/cobra v1.10.2
