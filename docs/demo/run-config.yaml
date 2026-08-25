@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=../../pkg/config/config.schema.json
+#
+# The configuration the `hcp_archiver run` recording archives with. It reads a
+# second, much smaller stand-in organization than docs/demo/config.yaml does:
+# four workspaces with a few runs each, which is about ten seconds of archiving,
+# short enough to watch end to end and long enough for the panel to show the
+# rate governor adapting.
+#
+# Paths are relative to this file.
+
+address: http://127.0.0.1:8930
+organizations:
+  - jacobcolvin-com
+workspaces:
+  - network-prod
+  - warehouse-prod
+  - cdn-prod
+  - dns
+
+# Roughly double the rate the run's arithmetic wants, because the server's
+# injected rate-limit response halves the governor's ceiling early and it
+# recovers at only one request per second every two seconds.
+rateLimit: 90
+
+archive:
+  path: ../../.tmp/demo/run-archive
+extract:
+  path: ../../.tmp/demo/extract

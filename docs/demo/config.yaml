@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=../../pkg/config/config.schema.json
+#
+# The configuration the browsing recordings run against. It archives the
+# fictional organization `internal/demoapi` serves on loopback, never a real
+# one, so recording a tape needs no HCP token and publishes nobody's
+# infrastructure. `task demo:archive` starts that server on the address below,
+# collects this archive from it, and stops it again.
+#
+# Paths are relative to this file.
+
+address: http://127.0.0.1:8929
+organizations:
+  - jacobcolvin-com
+
+# The stand-in server meters nothing, so the ceiling sits well above the
+# default: what actually paces the run is the runs-list bucket, which the client
+# holds to thirty requests a minute whatever this says.
+rateLimit: 400
+
+archive:
+  path: ../../.tmp/demo/archive
+extract:
+  path: ../../.tmp/demo/extract

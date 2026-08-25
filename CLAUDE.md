@@ -13,6 +13,13 @@ task check:all # Everything CI runs (adds security + GitHub config + releaser, v
 task build     # Cross-compile snapshot binaries + runtime images via Dagger
 ```
 
+The README's gifs are recorded with vhs from `docs/tapes/*.tape`. They archive
+from `internal/demoapi`, a stand-in HCP Terraform API serving a fictional
+organization on loopback, so the archive the recordings browse is the product
+of a real `hcp_archiver run`. `task demo:record` re-collects that archive and
+re-records every tape, and `task demo:view` opens it interactively. Recording
+needs vhs and a terminal, so it stays out of the Dagger gate.
+
 ## Code Style
 
 ### Go Conventions

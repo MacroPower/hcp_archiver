@@ -1,0 +1,144 @@
+version: "3"
+
+set: [errexit, nounset, pipefail]
+shopt: [globstar]
+
+# The README's recordings archive from a stand-in API rather than HCP Terraform:
+# internal/demoapi serves a fictional organization on loopback, so recording
+# needs no token and publishes nobody's infrastructure, and everything the
+# recordings then browse is the product of a real `hcp_archiver run`.
+# Everything a recording reads or writes lives under .tmp/demo, which is
+# disposable; only the tapes, the server, and the recorded gifs are tracked.
+vars:
+  DEMO_DIR: .tmp/demo
+  DEMO_BIN: .tmp/demo/bin
+  DEMO_CONFIG: docs/demo/config.yaml
+  # The addresses the two stand-in servers bind. They are fixed because the
+  # configurations under docs/demo name them: the browse server holds the whole
+  # organization the four browsing tapes read, and the run server holds the
+  # small slice the run tape archives live.
+  DEMO_ADDR: 127.0.0.1:8929
+  DEMO_RUN_ADDR: 127.0.0.1:8930
+  # The seed every generated identifier derives from. Changing it changes every
+  # workspace id, which an existing archive refuses to adopt, so remove
+  # .tmp/demo/archive whenever it moves.
+  DEMO_SEED: demo
+
+tasks:
+  record:
+    desc: Records the README demo gifs with vhs
+    summary: |
+      Collects the demo archive, builds hcp_archiver into .tmp/demo/bin, starts
+      the stand-in API the run tape archives from, then records every
+      docs/tapes/*.tape into docs/assets.
+
+      Needs vhs and a terminal, so it stays out of the Dagger gate; devbox
+      provides vhs on PATH. A fixed seed and one fixed clock generate the
+      organization, and the server injects the failures the run recording shows
+      from that same seed, so an unrelated change re-records to the same
+      frames.
+
+      Args:
+        TAPE: Record only this tape (default: every tape)
+
+      Examples:
+        task demo:record TAPE=view
+    deps: [archive, api, build]
+    vars:
+      TAPES:
+        sh: cd docs/tapes && ls {{.TAPE | default "*"}}.tape | sed 's/\.tape//' | tr '\n' ' '
+    env:
+      HCP_ARCHIVER_CONFIG: "{{.DEMO_CONFIG}}"
+    cmds:
+      - rm -rf {{.DEMO_DIR}}/extract
+      # The server, the recordings, and the shutdown live in one entry, because
+      # a trap fires at the end of the entry that set it rather than at the end
+      # of the task. The stop goes through pkill: task's shell implements no
+      # kill builtin, and the pid file is what a signal has to reach. PATH is
+      # exported here rather than declared above because task's env block does
+      # not reach the shell's own lookup, and the tapes call hcp_archiver by
+      # name.
+      - |
+        export PATH="{{.ROOT_DIR}}/{{.DEMO_BIN}}:$PATH"
+        trap 'pkill -F {{.DEMO_DIR}}/run-api.pid 2>/dev/null || true' EXIT
+        ./{{.DEMO_BIN}}/demoapi -addr {{.DEMO_RUN_ADDR}} -seed {{.DEMO_SEED}} \
+          -runs=6 -states=6 -pidfile {{.DEMO_DIR}}/run-api.pid \
+          > {{.DEMO_DIR}}/run-api.log 2>&1 &
+        n=0
+        until curl -fs -o /dev/null -H 'Authorization: Bearer demo' http://{{.DEMO_RUN_ADDR}}/api/v2/ping; do
+          n=$((n + 1))
+          if [ "$n" -gt 100 ]; then echo "demoapi did not answer its ping" >&2; exit 1; fi
+          sleep 0.1
+        done
+        for tape in {{.TAPES}}; do
+          vhs docs/tapes/$tape.tape
+        done
+
+  archive:
+    desc: Collects the demo archive the browsing recordings read
+    summary: |
+      Starts the stand-in API, archives the whole organization it serves into
+      .tmp/demo/archive, and stops it again. The archive is a real collection,
+      so it carries a ledger, sealed bundles, and roll-ups exactly as an archive
+      of a real organization does.
+    deps: [api, build]
+    # The archive is the product of a real run against a real server, so the two
+    # binaries are what it is a function of. Both are built from every Go file
+    # in the module, so any change that could move the archive moves one of
+    # them, and a change that could not leaves both byte-identical.
+    sources:
+      - "{{.DEMO_BIN}}/hcp_archiver"
+      - "{{.DEMO_BIN}}/demoapi"
+      - "{{.DEMO_CONFIG}}"
+    generates:
+      - "{{.DEMO_DIR}}/archive/**/*"
+    env:
+      HCP_ARCHIVER_CONFIG: "{{.DEMO_CONFIG}}"
+      HCP_TOKEN: demo
+    cmds:
+      - rm -rf {{.DEMO_DIR}}/archive
+      # Start, archive, and stop in one entry, for the reason the record task
+      # above gives.
+      - |
+        trap 'pkill -F {{.DEMO_DIR}}/api.pid 2>/dev/null || true' EXIT
+        ./{{.DEMO_BIN}}/demoapi -addr {{.DEMO_ADDR}} -seed {{.DEMO_SEED}} \
+          -runs=28 -states=40 -chaos=false -pidfile {{.DEMO_DIR}}/api.pid \
+          > {{.DEMO_DIR}}/api.log 2>&1 &
+        n=0
+        until curl -fs -o /dev/null -H 'Authorization: Bearer demo' http://{{.DEMO_ADDR}}/api/v2/ping; do
+          n=$((n + 1))
+          if [ "$n" -gt 100 ]; then echo "demoapi did not answer its ping" >&2; exit 1; fi
+          sleep 0.1
+        done
+        ./{{.DEMO_BIN}}/hcp_archiver run
+
+  api:
+    desc: Builds the stand-in HCP Terraform API the recordings archive from
+    sources:
+      - internal/demoapi/**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - "{{.DEMO_BIN}}/demoapi"
+    cmd: go build -o {{.DEMO_BIN}}/demoapi ./internal/demoapi/cmd/demoapi
+
+  build:
+    desc: Builds hcp_archiver for the recordings
+    sources:
+      - "**/*.go"
+      - go.mod
+      - go.sum
+    generates:
+      - "{{.DEMO_BIN}}/hcp_archiver"
+    cmd: go build -o {{.DEMO_BIN}}/hcp_archiver ./cmd/hcp_archiver
+
+  view:
+    desc: Browses the demo archive interactively
+    summary: |
+      Opens the demo archive in the terminal UI, which is the quickest way to
+      see what a tape will record before recording it.
+    deps: [archive, build]
+    interactive: true
+    env:
+      HCP_ARCHIVER_CONFIG: "{{.DEMO_CONFIG}}"
+    cmd: ./{{.DEMO_BIN}}/hcp_archiver view

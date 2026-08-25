@@ -7,6 +7,7 @@ shopt: [globstar]
 # only thin Dagger wrappers; do not flatten it into this file.
 includes:
   dagger: ./.taskfiles/dagger/Taskfile.yaml
+  demo: ./.taskfiles/demo/Taskfile.yaml
   dev: ./.taskfiles/dev/Taskfile.yaml
   fmt: ./.taskfiles/fmt/Taskfile.yaml
   gh: ./.taskfiles/gh/Taskfile.yaml

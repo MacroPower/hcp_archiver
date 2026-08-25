@@ -9,6 +9,8 @@ It captures everything the API will still return: state history, run history,
 plan and apply logs, configuration versions, and the surrounding org-level
 metadata. It is not a restore tool; nothing goes back into HCP Terraform.
 
+![Archiving an organization with hcp_archiver run](docs/assets/run.gif)
+
 ## Install
 
 <details>
@@ -244,10 +246,18 @@ hcp_archiver export                  # markdown tree for mkdocs, into export.pat
 workspaces, runs, and state versions, with any archived document readable in
 a scrolling viewer (`enter` descends, `esc` returns, `/` filters, `q` quits).
 
+![Browsing an archived run's plan output](docs/assets/view.gif)
+
+Every list filters, and the organization's workspace list spans its projects:
+
+![Filtering every workspace in the organization](docs/assets/filter.gif)
+
 `list`, `show`, and `extract` are the scriptable equivalents: objects are
 addressed by org-prefixed archive paths (`<org>/<path>`), `--json` switches
 to machine-readable output, and `extract --dry-run` predicts a run without
 writing.
+
+![Listing, showing, and extracting archived objects](docs/assets/cli.gif)
 
 `export` renders the archive's metadata as markdown that a static site
 generator with directory-based navigation (mkdocs and its kin) builds
@@ -258,7 +268,10 @@ through the configuration's `export.templates.path` key.
 
 All of these read the archive's physical forms transparently: a freshly
 collected tree and one whose cold artifacts have been sealed into bundles or
-evicted to a mirror answer identically.
+evicted to a mirror answer identically. The state history below is sealed,
+and reads the same as a loose one:
+
+![Reading a workspace's archived state history](docs/assets/states.gif)
 
 ## Mirroring to object storage
 
@@ -363,5 +376,20 @@ task check:all      # everything CI runs (adds the Dagger-backed gates)
 This is a self-contained Go module so the `go-tfe` dependency tree stays
 isolated. CI runs through a local Dagger toolchain (`dagger call ci <task>`),
 composing shared toolchains from [go.jacobcolvin.com/x][x].
+
+The gifs above come from the tapes in `docs/tapes`, recorded with
+[vhs](https://github.com/charmbracelet/vhs). They archive from
+`internal/demoapi`, which serves a fictional organization over the slice of the
+HCP Terraform API a run reads, so recording needs no token and publishes
+nobody's infrastructure. That organization comes from a fixed seed and one
+fixed clock, and its server injects the rate limiting and the retryable
+failures the `run` recording shows deterministically, so re-recording an
+unchanged tape produces the same frames:
+
+```bash
+task demo:record            # collect the archive, re-record every tape
+task demo:record TAPE=view  # re-record one of them
+task demo:view              # browse the same archive by hand
+```
 
 [x]: https://git.jacobcolvin.com/x
