@@ -8,7 +8,7 @@ require (
 	charm.land/fang/v2 v2.0.1
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/charmbracelet/x/ansi v0.11.8
-	github.com/charmbracelet/x/exp/golden v0.0.0-20260813141921-f091cedeaf78
+	github.com/charmbracelet/x/exp/golden v0.0.0-20260906004030-3986e9119cf9
 	github.com/goccy/go-yaml v1.19.2
 	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/go-tfe v1.111.0
