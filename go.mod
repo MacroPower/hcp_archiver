@@ -1,6 +1,6 @@
 module go.jacobcolvin.com/hcp_archiver
 
-go 1.26.4
+go 1.27.0
 
 require (
 	charm.land/bubbles/v2 v2.2.1
@@ -19,7 +19,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	go.jacobcolvin.com/niceyaml v0.0.0-20260710133523-9ad36ecf8e1c
 	go.jacobcolvin.com/x/cobras v0.1.0
-	go.jacobcolvin.com/x/jsonschema v0.2.0
+	go.jacobcolvin.com/x/jsonschema v0.3.0
 	go.jacobcolvin.com/x/version v0.2.0
 	gocloud.dev v0.46.0
 	golang.org/x/sync v0.22.0
