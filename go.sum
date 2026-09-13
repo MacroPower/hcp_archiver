@@ -224,8 +224,8 @@ go.jacobcolvin.com/niceyaml v0.0.0-20260710133523-9ad36ecf8e1c h1:Vk/xPGxlwRzGLk
 go.jacobcolvin.com/niceyaml v0.0.0-20260710133523-9ad36ecf8e1c/go.mod h1:u5Bb2Qd0R0DIjP6TG9fptk6oCJfxv6r9LE0Xzo+Zqzc=
 go.jacobcolvin.com/x/cobras v0.1.0 h1:oSyOR1Hpx7gGaCPCma7Y2bqngfhvbuYAbEocGVwkuqU=
 go.jacobcolvin.com/x/cobras v0.1.0/go.mod h1:6y8CxzhC4ces5/tLVRRy02sb//SXfevkrc7Ijxl0Xcg=
-go.jacobcolvin.com/x/jsonschema v0.2.0 h1:KBUWlozr061n90xVtZG+r6T3QuZsBDRqiYwkE+pV1oM=
-go.jacobcolvin.com/x/jsonschema v0.2.0/go.mod h1:gXpRl1CgL6gvIXY3bIPWEDm6HMdCjAi11EbHxo5QZ6g=
+go.jacobcolvin.com/x/jsonschema v0.3.0 h1:KtNMtb1l2dImee1YtXC6quqjzlJyPJU11qhcsiHWozU=
+go.jacobcolvin.com/x/jsonschema v0.3.0/go.mod h1:Tzkn5fSaTkg6Yqrjd5tZY22J4/VQGd2myXoTyLyZ3Ps=
 go.jacobcolvin.com/x/stringtest v0.2.0 h1:GoZXZrDlKqDIqpxbQm3EQXlhxmZCqb+I38p99fBng/c=
 go.jacobcolvin.com/x/stringtest v0.2.0/go.mod h1:UrXpCrus1kkRqd+qk1RGMWZ14lukttnvtsGVhmk5a0U=
 go.jacobcolvin.com/x/version v0.2.0 h1:9C4+4OQwJTY4DCuYihivoMAovNUnxVJ5vAUsVK0op38=
